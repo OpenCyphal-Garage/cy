@@ -1,4 +1,5 @@
 #include "cy_udp.h"
+#include <rapidhash.h>
 #include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,16 +17,9 @@ static uint64_t random_uid(void)
     return (((uint64_t)vid) << 48U) | (((uint64_t)pid) << 32U) | iid;
 }
 
-/// FNV1A 64-bit
 static uint64_t arg_kv_hash(const char* s)
 {
-    static const uint64_t prime = 1099511628211ULL;
-    uint64_t              h     = 14695981039346656037ULL;
-    for (unsigned char c; (c = (unsigned char)*s++);) {
-        h ^= c;
-        h *= prime;
-    }
-    return h;
+    return rapidhash(s, strlen(s));
 }
 
 /// The pointed strings have a static lifetime.
@@ -155,6 +149,7 @@ static void on_msg_trace(struct cy_subscription_t* const subscription,
         sprintf(hex + i * 2, "%02x", ((const uint8_t*)payload.data)[i]);
     }
     hex[sizeof(hex) - 1] = '\0';
+
     // Convert payload to ASCII.
     char ascii[payload.size + 1];
     for (size_t i = 0; i < payload.size; i++) {
@@ -162,6 +157,7 @@ static void on_msg_trace(struct cy_subscription_t* const subscription,
         ascii[i]      = isprint(ch) ? ch : '.';
     }
     ascii[payload.size] = '\0';
+
     // Log the message.
     CY_TRACE(subscription->topic->cy,
              "💬 [sid=%04x nid=%04x tid=%016llx sz=%06zu ts=%09llu] @ %s [age=%llu]:\n%s\n%s",
@@ -174,6 +170,17 @@ static void on_msg_trace(struct cy_subscription_t* const subscription,
              (unsigned long long)subscription->topic->age,
              hex,
              ascii);
+
+    // Optionally, send a direct p2p response to the publisher of this message.
+    if (cy_has_node_id(subscription->topic->cy)) {
+        const cy_err_t err = cy_respond(subscription->topic, //
+                                        timestamp_us + 1000000,
+                                        metadata,
+                                        (struct cy_payload_t){ .data = ":3", .size = 2 });
+        if (err < 0) {
+            fprintf(stderr, "cy_respond: %d\n", err);
+        }
+    }
 }
 
 int main(const int argc, char* argv[])
