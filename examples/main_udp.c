@@ -2,6 +2,7 @@
 #include <rapidhash.h>
 #include <time.h>
 #include <stdio.h>
+#include <assert.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdarg.h>
@@ -172,7 +173,7 @@ static void on_msg_trace(struct cy_subscription_t* const subscription,
              ascii);
 
     // Optionally, send a direct p2p response to the publisher of this message.
-    if (cy_has_node_id(subscription->topic->cy)) {
+    if (cy_has_node_id(subscription->topic->cy) && ((rand() % 2) == 0)) {
         const cy_err_t err = cy_respond(subscription->topic, //
                                         timestamp_us + 1000000,
                                         metadata,
@@ -180,6 +181,49 @@ static void on_msg_trace(struct cy_subscription_t* const subscription,
         if (err < 0) {
             fprintf(stderr, "cy_respond: %d\n", err);
         }
+    }
+}
+
+static void on_response_trace(struct cy_response_future_t* const future)
+{
+    struct cy_topic_t* topic = future->topic;
+    if (future->state == cy_future_success) {
+        const struct cy_payload_t payload = future->response_payload;
+
+        // Convert payload to hex.
+        char hex[payload.size * 2 + 1];
+        for (size_t i = 0; i < payload.size; i++) {
+            sprintf(hex + i * 2, "%02x", ((const uint8_t*)payload.data)[i]);
+        }
+        hex[sizeof(hex) - 1] = '\0';
+
+        // Convert payload to ASCII.
+        char ascii[payload.size + 1];
+        for (size_t i = 0; i < payload.size; i++) {
+            const char ch = ((const char*)payload.data)[i];
+            ascii[i]      = isprint(ch) ? ch : '.';
+        }
+        ascii[payload.size] = '\0';
+
+        // Log the response.
+        CY_TRACE(topic->cy,
+                 "↩️ [sid=%04x nid=%04x tid=%016llx sz=%06zu ts=%09llu] @ %s [age=%llu]:\n%s\n%s",
+                 cy_topic_get_subject_id(topic),
+                 future->response_metadata.remote_node_id,
+                 (unsigned long long)future->response_metadata.transfer_id,
+                 payload.size,
+                 (unsigned long long)future->response_timestamp,
+                 topic->name,
+                 (unsigned long long)topic->age,
+                 hex,
+                 ascii);
+    } else if (future->state == cy_future_failure) {
+        CY_TRACE(topic->cy,
+                 "↩️⌛ Response to %s tid %llu has timed out",
+                 future->topic->name,
+                 (unsigned long long)future->transfer_id);
+    } else {
+        assert(false);
     }
 }
 
@@ -220,6 +264,11 @@ int main(const int argc, char* argv[])
             }
         }
     }
+    struct cy_response_future_t* futures = calloc(cfg.topic_count, sizeof(struct cy_response_future_t));
+    for (size_t i = 0; i < cfg.topic_count; i++) {
+        futures->state    = cy_future_success;
+        futures->callback = on_response_trace;
+    }
 
     // Spin the event loop and publish the topics.
     cy_us_t next_publish_at = cy_udp_now() + 1000000;
@@ -237,7 +286,7 @@ int main(const int argc, char* argv[])
         if (now >= next_publish_at) {
             if (cy_has_node_id(&cy_udp.base)) {
                 for (size_t i = 0; i < cfg.topic_count; i++) {
-                    if (!cfg.topics[i].pub) {
+                    if ((!cfg.topics[i].pub) || (futures[i].state == cy_future_pending)) {
                         continue;
                     }
                     char msg[256];
@@ -245,8 +294,11 @@ int main(const int argc, char* argv[])
                             "Hello from %016llx! The current time is %lld us.",
                             (unsigned long long)cy_udp.base.uid,
                             (long long)now);
-                    const struct cy_payload_t payload = { .data = msg, .size = strlen(msg) };
-                    const cy_err_t            pub_res = cy_udp_publish1(&topics[i], now + 100000, payload);
+                    const cy_err_t pub_res = cy_udp_publish(&topics[i], //
+                                                            now + 100000,
+                                                            (struct cy_payload_t){ .data = msg, .size = strlen(msg) },
+                                                            now + 1000000,
+                                                            &futures[i]);
                     if (pub_res < 0) {
                         fprintf(stderr, "cy_udp_publish: %d\n", pub_res);
                         break;

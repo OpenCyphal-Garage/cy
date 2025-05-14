@@ -384,10 +384,10 @@ static struct cy_transfer_meta_t make_metadata(const struct UdpardRxTransfer* co
                                         .transfer_id    = tr->transfer_id };
 }
 
-static void ingest_topic_frame(struct cy_udp_topic_t* const topic,
-                               const cy_us_t                ts,
-                               const uint_fast8_t           iface_index,
-                               struct UdpardMutablePayload  dgram)
+static void ingest_topic_frame(struct cy_udp_topic_t* const      topic,
+                               const cy_us_t                     ts,
+                               const uint_fast8_t                iface_index,
+                               const struct UdpardMutablePayload dgram)
 {
     struct cy_udp_t* const cy_udp = (struct cy_udp_t*)topic->base.cy;
     if (cy_topic_has_local_subscribers(&topic->base)) {
@@ -416,10 +416,10 @@ static void ingest_topic_frame(struct cy_udp_topic_t* const topic,
     }
 }
 
-static void ingest_rpc_frame(struct cy_udp_t* const      cy_udp,
-                             const cy_us_t               ts,
-                             const uint_fast8_t          iface_index,
-                             struct UdpardMutablePayload dgram)
+static void ingest_rpc_frame(struct cy_udp_t* const            cy_udp,
+                             const cy_us_t                     ts,
+                             const uint_fast8_t                iface_index,
+                             const struct UdpardMutablePayload dgram)
 {
     struct UdpardRxRPCTransfer transfer = { 0 }; // udpard takes ownership of the dgram payload buffer.
     struct UdpardRxRPCPort*    port     = NULL;
