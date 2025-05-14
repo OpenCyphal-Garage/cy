@@ -145,6 +145,7 @@ typedef cy_us_t (*cy_now_t)(struct cy_t*);
 /// This is invoked either immediately from cy_new() if an explicit node-ID is given,
 /// or after some time from cy_heartbeat() when one is allocated automatically.
 /// When this function is invoked, cy_t contains a valid node-ID.
+/// Cy guarantees that this function will not be invoked unless the node-ID is currently unset.
 /// TODO: this is part of the node-ID autoconfiguration protocol and it should be moved to lib*ards.
 typedef cy_err_t (*cy_transport_set_node_id_t)(struct cy_t*);
 
@@ -153,6 +154,7 @@ typedef cy_err_t (*cy_transport_set_node_id_t)(struct cy_t*);
 /// If the transport does not support reconfiguration or it is deemed too complicated to support,
 /// one solution is to simply restart the node.
 /// It is recommended to purge the tx queue to avoid further collisions.
+/// Cy guarantees that this function will not be invoked unless the node-ID is currently set.
 /// TODO: this is part of the node-ID autoconfiguration protocol and it should be moved to lib*ards.
 typedef void (*cy_transport_clear_node_id_t)(struct cy_t*);
 

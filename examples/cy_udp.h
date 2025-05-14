@@ -9,6 +9,11 @@
 #define CY_UDP_IFACE_COUNT_MAX           UDPARD_NETWORK_INTERFACE_COUNT_MAX
 #define CY_UDP_NODE_ID_BLOOM_64BIT_WORDS 128
 
+/// Responses to all topics that are addressed to our node are delivered using the same RPC port, which needs an extent.
+/// In LibUDPard, the extent does not really affect memory allocation, because libudpard does not defragment received
+/// transfers; meaning that the extent value can be arbitrarily large.
+#define CY_UDP_TOPIC_RESPONSE_EXTENT (1024ULL * 1024ULL * 1024ULL)
+
 struct cy_udp_topic_t
 {
     struct cy_topic_t           base;
@@ -33,27 +38,40 @@ struct cy_udp_t
     struct UdpardMemoryResource    mem;
     struct UdpardRxMemoryResources rx_mem;
 
-    struct UdpardRxRPCDispatcher rpc_dispatcher;
+    struct UdpardRxRPCDispatcher rpc_rx_dispatcher;
+    struct UdpardRxRPCPort       rpc_rx_port_topic_response;
+
+    uint32_t local_iface_address[CY_UDP_IFACE_COUNT_MAX];
 
     struct
     {
-        struct UdpardTx tx;
-        struct udp_tx_t tx_sock;
-        uint16_t        tx_local_port;
-        uint32_t        local_iface_address;
+        struct UdpardTx udpard_tx;
+        struct udp_tx_t sock;
+        uint16_t        local_port;
+        uint64_t        frames_expired; ///< Number of tx frames that have timed out while waiting in the queue.
+    } tx[CY_UDP_IFACE_COUNT_MAX];
 
-        /// Number of tx frames that have timed out while waiting in the queue.
-        uint64_t tx_timeout_count;
-    } io[CY_UDP_IFACE_COUNT_MAX];
+    struct
+    {
+        struct udp_rx_t sock;
+        /// The count of out-of-memory errors that occurred while reading from this socket.
+        /// Every OOM implies that either a frame or a full transfer were lost.
+        uint64_t oom_count;
+    } rpc_rx[CY_UDP_IFACE_COUNT_MAX];
 
     /// Handler for errors occurring while writing into a tx socket on the specified iface.
     /// These are platform-specific.
     /// The default handler is provided which will use CY_TRACE() to report the error.
     void (*tx_sock_err_handler)(struct cy_udp_t* cy_udp, uint_fast8_t iface_index, int16_t error);
 
-    size_t mem_allocated_fragments;
-    size_t mem_allocated_bytes;
-    size_t mem_oom_count;
+    /// Handler for errors occurring while reading from an RPC RX socket on the specified iface.
+    /// These are platform-specific.
+    /// The default handler is provided which will use CY_TRACE() to report the error.
+    void (*rpc_rx_sock_err_handler)(struct cy_udp_t* topic, uint_fast8_t iface_index, int16_t error);
+
+    size_t   mem_allocated_fragments;
+    size_t   mem_allocated_bytes;
+    uint64_t mem_oom_count;
 };
 
 /// A convenience wrapper over clock_gettime(CLOCK_MONOTIC).
