@@ -443,39 +443,41 @@ static void allocate_topic(struct cy_topic_t* const topic, const uint64_t new_ev
 
 // ----------------------------------------  HEARTBEAT IO  ----------------------------------------
 
-struct topic_gossip_t
-{
-    uint64_t value[3];
-    uint64_t hash;
-    uint8_t  name_length;
-    char     name[CY_TOPIC_NAME_MAX];
-};
-static_assert(sizeof(struct topic_gossip_t) == 8 * 3 + 8 + 1 + CY_TOPIC_NAME_MAX, "bad layout");
+#define TOPIC_FLAG_PUBLISHING 1U
+#define TOPIC_FLAG_SUBSCRIBED 2U
 
 /// We could have used Nunavut, but we only need a single message and it's very simple, so we do it manually.
 struct heartbeat_t
 {
-    uint32_t              uptime;
-    uint32_t              user_word;
-    uint64_t              uid;
-    struct topic_gossip_t topic_gossip;
+    uint32_t uptime;
+    uint8_t  user_word[3]; ///< Used to be: health, mode, vendor-specific status code. Now opaque user-defined 24 bits.
+    uint8_t  version;      ///< Union tag; Cyphal v1.0 -- 0; Cyphal v1.1 -- 1.
+    // The following fields are conditional on version=1.
+    uint64_t uid;
+    uint64_t topic_hash;
+    uint64_t topic_flags8_age56;
+    uint64_t topic_name_length8_reserved16_evictions40;
+    char     topic_name[CY_TOPIC_NAME_MAX];
 };
-static_assert(sizeof(struct heartbeat_t) == 144, "bad layout");
+static_assert(sizeof(struct heartbeat_t) == 136, "bad layout");
 
 static struct heartbeat_t make_heartbeat(const cy_us_t     uptime,
                                          const uint64_t    uid,
-                                         const uint64_t    value[3],
+                                         const uint8_t     flags,
+                                         const uint64_t    evictions,
+                                         const uint64_t    age,
                                          const uint64_t    hash,
                                          const size_t      name_len,
                                          const char* const name)
 {
     assert(name_len <= CY_TOPIC_NAME_MAX);
-    struct heartbeat_t obj = {
-        .uptime       = (uint32_t)(uptime / MEGA),
-        .uid          = uid,
-        .topic_gossip = { .hash = hash, .value = { value[0], value[1], value[2] }, .name_length = (uint8_t)name_len },
-    };
-    memcpy(obj.topic_gossip.name, name, name_len);
+    struct heartbeat_t obj = { .uptime                                    = (uint32_t)(uptime / MEGA),
+                               .version                                   = 1,
+                               .uid                                       = uid,
+                               .topic_hash                                = hash,
+                               .topic_flags8_age56                        = (((uint64_t)flags) << 56U) | age,
+                               .topic_name_length8_reserved16_evictions40 = (((uint64_t)name_len) << 56U) | evictions };
+    memcpy(obj.topic_name, name, name_len);
     return obj;
 }
 
@@ -487,15 +489,19 @@ static cy_err_t publish_heartbeat(struct cy_topic_t* const topic, const cy_us_t 
     // Construct the heartbeat message.
     // TODO: communicate how the topic is used: in/out, some other metadata?
     topic->age++;
-    const struct heartbeat_t msg = make_heartbeat(now - cy->started_at,
+    const uint8_t flags = (cy_topic_has_local_publishers(topic) ? TOPIC_FLAG_PUBLISHING : 0U) |
+                          (cy_topic_has_local_subscribers(topic) ? TOPIC_FLAG_SUBSCRIBED : 0U);
+    const struct heartbeat_t msg = make_heartbeat(now - cy->started_at, //
                                                   cy->uid,
-                                                  (uint64_t[3]){ topic->evictions, topic->age, 0 },
+                                                  flags,
+                                                  topic->evictions,
+                                                  topic->age,
                                                   topic->hash,
                                                   topic->name_length,
                                                   topic->name);
     const size_t             msz = sizeof(msg) - (CY_TOPIC_NAME_MAX - topic->name_length);
     assert(msz <= sizeof(msg));
-    assert(msg.topic_gossip.name_length <= CY_TOPIC_NAME_MAX);
+    assert((msg.topic_name_length8_reserved16_evictions40 >> 56U) <= CY_TOPIC_NAME_MAX);
     const struct cy_payload_t payload = { .data = &msg, .size = msz }; // FIXME serialization
 
     // Publish the message.
@@ -525,17 +531,12 @@ static void on_heartbeat(struct cy_subscription_t* const sub,
     // Deserialize the message. TODO: deserialize properly.
     struct heartbeat_t heartbeat = { 0 };
     memcpy(&heartbeat, payload.data, smaller(payload.size, sizeof(heartbeat)));
-    const struct topic_gossip_t* const gossip = &heartbeat.topic_gossip;
-
-    // Identify the kind of the named resource.
-    const bool is_topic = (gossip->name_length > 0) && (gossip->name[0] == '/') &&
-                          is_identifier_char(gossip->name[gossip->name_length - 1]);
-    if (!is_topic) {
+    if (heartbeat.version != 1) {
         return;
     }
-    const uint64_t other_hash      = gossip->hash;
-    const uint64_t other_evictions = gossip->value[0];
-    const uint64_t other_age       = gossip->value[1];
+    const uint64_t other_hash      = heartbeat.topic_hash;
+    const uint64_t other_evictions = heartbeat.topic_name_length8_reserved16_evictions40 & ((1ULL << 40U) - 1U);
+    const uint64_t other_age       = heartbeat.topic_flags8_age56 & ((1ULL << 56U) - 1U);
 
     // Find the topic in our local database.
     struct cy_t* const cy   = sub->topic->cy;
@@ -564,7 +565,7 @@ static void on_heartbeat(struct cy_subscription_t* const sub,
                  (unsigned long long)other_evictions,
                  (unsigned long long)other_age,
                  log2_floor(other_age),
-                 gossip->name);
+                 heartbeat.topic_name);
         // We don't need to do anything if we won, but we need to announce to the network (in particular to the
         // infringing node) that we are using this subject-ID, so that the loser knows that it has to move.
         // If we lost, we need to gossip this topic ASAP as well because every other participant on this topic
@@ -683,7 +684,7 @@ cy_err_t cy_new(struct cy_t* const             cy,
     // and to claim the address; if it's already taken, we will want to cause a collision to move the other node,
     // because manually assigned addresses take precedence over auto-assigned ones.
     // If we are not given a node-ID, we need to first listen to the network.
-    cy->heartbeat_period_max                   = 100 * KILO;
+    cy->heartbeat_period_max                   = MEGA;
     cy->heartbeat_full_gossip_cycle_period_max = 10 * MEGA;
     cy->heartbeat_next                         = cy->started_at;
     cy_err_t res                               = 0;
@@ -1019,7 +1020,31 @@ cy_err_t cy_publish(struct cy_topic_t* const topic, const cy_us_t tx_deadline, c
     assert(topic != NULL);
     assert((payload.data != NULL) || (payload.size == 0));
     assert((topic->name_length > 0) && (topic->name[0] != '\0'));
+    topic->publishing  = true;
     const cy_err_t res = topic->cy->transport.publish(topic, tx_deadline, payload);
     topic->pub_transfer_id++;
     return res;
+}
+
+cy_err_t cy_respond(struct cy_topic_t* const        topic,
+                    const cy_us_t                   tx_deadline,
+                    const struct cy_transfer_meta_t metadata,
+                    const struct cy_payload_t       payload)
+{
+    assert(topic != NULL);
+    assert((payload.data != NULL) || (payload.size == 0));
+    assert((topic->name_length > 0) && (topic->name[0] != '\0'));
+
+    // TODO: allow the transport to accept scattered payload so we can avoid this nonsense here.
+    uint8_t pld[payload.size + 8U];
+    memcpy(pld, &topic->hash, 8U);
+    memcpy(pld + 8U, payload.data, payload.size);
+
+    /// Yes, we send the response using a request transfer. In the future we may leverage this for reliable delivery.
+    /// All responses are sent to the same RPC service-ID; they are discriminated by the topic hash.
+    return topic->cy->transport.request(topic->cy,
+                                        CY_RESPONSE_RPC_SERVICE_ID,
+                                        metadata,
+                                        tx_deadline,
+                                        (struct cy_payload_t){ .size = payload.size + 8U, .data = pld });
 }

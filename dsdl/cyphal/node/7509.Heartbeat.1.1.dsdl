@@ -1,0 +1,75 @@
+# Abstract node status information and CRDT gossip carrier.
+# This is the only high-level function that shall be implemented by all nodes.
+#
+# This Heartbeat v1.1 is wire-compatible with the original uavcan.node.Heartbeat.1, but adds more data,
+# while obsoleting the mode and health fields as they do not belong to its scope. New nodes should use
+# application-specific means of status reporting instead; Cyphal does not define the application layer.
+
+uint16 PUBLICATION_PERIOD_MAX_ms = 1000
+# The message shall not be published less frequently than once per second.
+# Any higher rate is acceptable.
+
+uint16 OFFLINE_TIMEOUT_ms = 3000
+# If the last message from the node was received more than this amount of time ago, it should be considered offline.
+
+uint32 uptime  # [second]
+# One may detect that a remote node has restarted when this value leaps backward.
+
+uint24 user_word
+# An arbitrary number with application-defined semantics. If not used, set to zero.
+#
+# In the v1 Heartbeat, this place used to contain the health, mode, and vendor-specific status code fields.
+# These have been removed because they pertain to the application layer and are thus outside of the scope of
+# the heartbeat message. Subscribers using the old v1.0 Heartbeat type will interpret the bytes of this field as
+# health (byte 0), mode (byte 1), and the vendor-specific status code (byte 2).
+# If the 16 least significant bits of the user word are set to zero, old subscribers will interpret it as
+# nominal health and operational mode.
+
+uint8 version
+# Shall be 1 in this specification revision. This number may change in a future revision of the heartbeat message,
+# in which case we may replace this and all following fields with a union, and this field will become the uninon tag.
+# Publishers of Heartbeat v1.0 will not populate this field, meaning that it will read as zero.
+
+UID.0.1 uid
+# This 64-bit value completely and uniquely identifies the node: its vendor, product type, and specific instance.
+
+# ----------------------------------------  TOPIC ALLOCATION CRDT GOSSIP  ----------------------------------------
+
+uint64 topic_hash
+# The topic hash is computed as:
+#
+# - If the key names a pinned topic, which means it matches `^/([1-9][0-9]{0,4})$`, where the capture group
+#   is the pinned subject-ID, then the hash is simply the pinned subject-ID. Pinned topic names always have the
+#   canonical form, which can be seen from the pattern, meaning that for any subject-ID there is exactly one
+#   pinned topic name encoding it.
+#
+# - Otherwise, key_hash=rapidhash(key).
+#
+# The reason the hash is here is that its computation is expensive, and we want to avoid recomputing it for every
+# received gossip message, since there is necessarily a large number of them. We still need to transmit the full
+# key because it is necessary for wildcard matching, and also for monitoring purposes.
+
+@assert _offset_ == {24 * 8}
+uint56 topic_age
+# The approximate logical age of the topic.
+# The logical age increases when the topic is gossiped, and when a valid transfer is received on it.
+# Topics with greater age win arbitration, thus ensuring stability of the network when new topics/nodes appear.
+
+bool topic_flag_publishing      # The sender is publishing on this topic.
+bool topic_flag_subscribed      # The sender is subscribed to this topic.
+void6
+
+@assert _offset_ == {32 * 8}
+uint40 topic_evictions
+# The number of times the topic had to be moved due to subject-ID collisions.
+# The allocated subject-ID for a topic is (hash+evictions)%6144,
+# unless it is a pinned topic, in which case the allocated subject-ID equals its hash.
+
+void16
+
+@assert _offset_ == {39 * 8}  # Name length prefix brings the name offset to 40 bytes.
+uint8 TOPIC_NAME_MAX = 96
+utf8[<=TOPIC_NAME_MAX] topic_name
+# On CAN FD, topic names should not be longer than 23 bytes to avoid multi-frame heartbeats.
+
+@extent 300 * 8

@@ -18,6 +18,7 @@
 /// Makes all non-pinned topics prefer the same subject-ID that equals the value of this macro,
 /// which maximizes topic allocation collisions. Pinned topics are unaffected.
 /// This can be used to stress-test the consensus algorithm.
+/// This value shall be identical for all nodes in the network; otherwise, divergent allocations will occur.
 #ifndef CY_CONFIG_PREFERRED_TOPIC_OVERRIDE
 // Not defined by default; the normal subject expression is used instead: subject_id=(hash+evictions)%6144
 #endif
@@ -44,7 +45,7 @@ extern "C"
 ///
 /// Max name length is chosen such that together with the 1-byte length prefix the result is a multiple of 8 bytes,
 /// because it helps with memory-aliased C structures for quick serialization.
-#define CY_TOPIC_NAME_MAX 95
+#define CY_TOPIC_NAME_MAX 96
 
 /// The max namespace length should also provide space for at least one separator and the one-character topic name.
 #define CY_NAMESPACE_NAME_MAX (CY_TOPIC_NAME_MAX - 2)
@@ -81,6 +82,15 @@ extern "C"
 #define CY_SUBJECT_ID_INVALID 0xFFFFU
 #define CY_NODE_ID_INVALID    0xFFFFU
 
+/// When a response to a received message is sent, it is delivered as an RPC request (sic) transfer to this service-ID.
+/// The response user data is prefixed with 8 bytes of the full topic hash to which we are responding.
+/// The receiver of the response will be able to match the response with a specific request using the transfer-ID.
+///
+/// We are using RPC request transfers to deliver responses because in the future we may want to use the unused
+/// response transfer as a confirmation for reliable transport.
+#define CY_RESPONSE_RPC_SERVICE_ID 510
+
+/// TODO: unified error codes: argument, memory, capacity, anonymous, name.
 typedef int32_t cy_err_t;
 typedef int64_t cy_us_t; ///< Monotonic microsecond timestamp. Signed to permit arithmetics in the past.
 
@@ -149,6 +159,13 @@ typedef void (*cy_transport_clear_node_id_t)(struct cy_t*);
 /// The function shall not increment the transfer-ID counter; Cy will do it.
 typedef cy_err_t (*cy_transport_publish_t)(struct cy_topic_t*, cy_us_t, struct cy_payload_t);
 
+/// Instructs the underlying transport layer to send an RPC request transfer.
+typedef cy_err_t (*cy_transport_request_t)(struct cy_t*,
+                                           uint16_t                        service_id,
+                                           const struct cy_transfer_meta_t metadata,
+                                           cy_us_t                         tx_deadline,
+                                           struct cy_payload_t             payload);
+
 /// Instructs the underlying transport layer to create a new subscription on the topic.
 typedef cy_err_t (*cy_transport_subscribe_t)(struct cy_topic_t*);
 
@@ -178,6 +195,7 @@ struct cy_transport_io_t
     cy_transport_set_node_id_t               set_node_id;
     cy_transport_clear_node_id_t             clear_node_id;
     cy_transport_publish_t                   publish;
+    cy_transport_request_t                   request;
     cy_transport_subscribe_t                 subscribe;
     cy_transport_unsubscribe_t               unsubscribe;
     cy_transport_handle_resubscription_err_t handle_resubscription_err;
@@ -286,8 +304,13 @@ struct cy_topic_t
 
     /// Only used if the application publishes data on this topic.
     /// The priority can be adjusted as needed by the user.
+    ///
+    /// The publishing flag will be set automatically on first publish(). The application can also set it manually.
+    /// The purpose of this flag is to inform other network participants whether we intend to publish on this topic.
+    /// If the application is no longer planning to continue publishing, the flag should be zeroed (or topic destroyed).
     uint64_t       pub_transfer_id;
     enum cy_prio_t pub_priority;
+    bool           publishing;
 
     /// Only used if the application subscribes on this topic.
     struct cy_subscription_t* sub_list;
@@ -344,7 +367,7 @@ struct cy_t
     /// The user can use this field for arbitrary purposes.
     void* user;
 
-    /// Namespace is prefix added to all topics created on this instance, unless the topic name starts with "/".
+    /// Namespace is a prefix added to all topics created on this instance, unless the topic name starts with "/".
     /// Local node name is prefixed to the topic name if it starts with `~`.
     char namespace_[CY_NAMESPACE_NAME_MAX + 1];
     char name[CY_NAMESPACE_NAME_MAX + 1];
@@ -533,7 +556,7 @@ uint16_t cy_topic_get_subject_id(const struct cy_topic_t* const topic);
 
 static inline bool cy_topic_has_local_publishers(const struct cy_topic_t* const topic)
 {
-    return topic->pub_transfer_id > 0;
+    return topic->publishing;
 }
 
 static inline bool cy_topic_has_local_subscribers(const struct cy_topic_t* const topic)
@@ -576,11 +599,25 @@ cy_err_t cy_subscribe(struct cy_topic_t* const         topic,
 void     cy_unsubscribe(struct cy_topic_t* const topic, struct cy_subscription_t* const sub);
 
 /// The transfer-ID is always incremented, even on failure, to signal lost messages.
-/// Therefore, the transfer-ID is effectively the number of times this function was called on the topic.
 /// This function always publishes only one transfer as requested; no auxiliary traffic is generated.
 /// If the local node-ID is not allocated, the function may fail depending on the capabilities of the transport library;
 /// to avoid this, it is possible to check cy_has_node_id() before calling this function.
 cy_err_t cy_publish(struct cy_topic_t* const topic, const cy_us_t tx_deadline, const struct cy_payload_t payload);
+
+/// Send a response to a message received from a topic subscription. The response will be sent directly to the
+/// publisher using peer-to-peer transport, not affecting other nodes on this topic. The payload may be arbitrary
+/// and the metadata shall be taken from the original message. The transfer-ID will not be incremented since it's
+/// not a publication.
+///
+/// This can be invoked either from a subscription callback or at any later point. The topic may even get reallocated
+/// in the process but it doesn't matter.
+///
+/// The response is be sent using an RPC request (sic) transfer to the publisher with the specified priority and
+/// the original transfer-ID.
+cy_err_t cy_respond(struct cy_topic_t* const        topic,
+                    const cy_us_t                   tx_deadline,
+                    const struct cy_transfer_meta_t metadata,
+                    const struct cy_payload_t       payload);
 
 /// For diagnostics and logging only. Do not use in embedded and real-time applications.
 /// This function is only required if CY_CONFIG_TRACE is defined and is nonzero; otherwise it should be left undefined.

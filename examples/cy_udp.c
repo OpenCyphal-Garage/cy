@@ -134,6 +134,31 @@ static cy_err_t transport_publish(struct cy_topic_t* const  topic,
     return res;
 }
 
+static cy_err_t transport_request(struct cy_t* const              cy,
+                                  const uint16_t                  service_id,
+                                  const struct cy_transfer_meta_t metadata,
+                                  cy_us_t                         tx_deadline,
+                                  struct cy_payload_t             payload)
+{
+    struct cy_udp_t* const cy_udp = (struct cy_udp_t*)cy;
+    cy_err_t               res    = 0;
+    for (uint_fast8_t i = 0; i < CY_UDP_IFACE_COUNT_MAX; i++) {
+        if (cy_udp->io[i].tx.queue_capacity > 0) {
+            const int32_t e = udpardTxRequest(&cy_udp->io[i].tx,
+                                              (UdpardMicrosecond)tx_deadline,
+                                              (enum UdpardPriority)metadata.priority,
+                                              service_id,
+                                              metadata.remote_node_id,
+                                              metadata.transfer_id,
+                                              (struct UdpardPayload){ .size = payload.size, .data = payload.data },
+                                              NULL);
+            // NOLINTNEXTLINE(*-narrowing-conversions, *-avoid-nested-conditional-operator)
+            res = (e < 0) ? (cy_err_t)e : ((res < 0) ? res : (cy_err_t)e);
+        }
+    }
+    return res;
+}
+
 static bool is_valid_ip(const uint32_t ip)
 {
     return (ip > 0) && (ip < UINT32_MAX);
@@ -245,6 +270,7 @@ cy_err_t cy_udp_new(struct cy_udp_t* const cy_udp,
                      (struct cy_transport_io_t){ .set_node_id               = transport_set_node_id,
                                                  .clear_node_id             = transport_clear_node_id,
                                                  .publish                   = transport_publish,
+                                                 .request                   = transport_request,
                                                  .subscribe                 = transport_subscribe,
                                                  .unsubscribe               = transport_unsubscribe,
                                                  .handle_resubscription_err = transport_handle_resubscription_error });
