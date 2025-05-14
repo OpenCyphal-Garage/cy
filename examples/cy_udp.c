@@ -339,12 +339,12 @@ static void ingest_topic(struct cy_udp_topic_t* const topic, const struct Udpard
         }
     }
 
-    cy_ingest_topic(&topic->base,
-                    (cy_us_t)transfer->timestamp_usec,
-                    (struct cy_transfer_meta_t){ .priority       = (enum cy_prio_t)transfer->priority,
-                                                 .remote_node_id = transfer->source_node_id,
-                                                 .transfer_id    = transfer->transfer_id },
-                    (struct cy_payload_t){ .size = transfer->payload_size, .data = data });
+    cy_ingest_topic_transfer(&topic->base,
+                             (cy_us_t)transfer->timestamp_usec,
+                             (struct cy_transfer_meta_t){ .priority       = (enum cy_prio_t)transfer->priority,
+                                                          .remote_node_id = transfer->source_node_id,
+                                                          .transfer_id    = transfer->transfer_id },
+                             (struct cy_payload_t){ .size = transfer->payload_size, .data = data });
 
 hell:
     // TODO: the user should invoke this via a cy proxy function.

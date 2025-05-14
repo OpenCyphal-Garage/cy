@@ -88,7 +88,7 @@ extern "C"
 ///
 /// We are using RPC request transfers to deliver responses because in the future we may want to use the unused
 /// response transfer as a confirmation for reliable transport.
-#define CY_RESPONSE_RPC_SERVICE_ID 510
+#define CY_RPC_SERVICE_ID_TOPIC_RESPONSE 510
 
 /// TODO: unified error codes: argument, memory, capacity, anonymous, name.
 typedef int32_t cy_err_t;
@@ -465,18 +465,23 @@ void     cy_destroy(struct cy_t* const cy);
 ///
 /// If this is invoked together with cy_heartbeat(), then cy_ingest() must be invoked BEFORE cy_heartbeat()
 /// to ensure that the latest state updates are reflected in the next heartbeat message.
-void cy_ingest_topic(struct cy_topic_t* const        topic,
-                     const cy_us_t                   ts,
-                     const struct cy_transfer_meta_t metadata,
-                     const struct cy_payload_t       payload);
+void cy_ingest_topic_transfer(struct cy_topic_t* const        topic,
+                              const cy_us_t                   ts,
+                              const struct cy_transfer_meta_t metadata,
+                              const struct cy_payload_t       payload);
 
-/// Invoked whenever a new RPC service transfer is received.
-void cy_ingest_rpc(struct cy_t* const              cy,
-                   const uint16_t                  service_id,
-                   const bool                      request_not_response,
-                   const cy_us_t                   ts,
-                   const struct cy_transfer_meta_t metadata,
-                   const struct cy_payload_t       payload);
+/// Cy does not manage RPC endpoints explicitly; it is the responsibility of the transport-specific glue logic.
+/// Currently, the following RPC endpoints must be implemented in the glue logic:
+///
+///     - CY_RPC_SERVICE_ID_TOPIC_RESPONSE request (sic!) handler.
+///       Delivers the optional response to a message published on a topic.
+///       The first 8 bytes of the transfer payload are the topic hash to which the response is sent.
+///       Note that we send a topic response as an RPC request transfer; the reasoning is that a higher-level
+///       response is carried by a lower-level request transfer.
+void cy_ingest_topic_response_transfer(struct cy_t* const              cy,
+                                       const cy_us_t                   ts,
+                                       const struct cy_transfer_meta_t metadata,
+                                       const struct cy_payload_t       payload);
 
 /// This function must be invoked periodically to let the library publish heartbeats.
 /// The invocation period MUST NOT EXCEED the heartbeat period configured in cy_t; there is no lower limit.

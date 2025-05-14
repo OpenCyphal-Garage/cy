@@ -659,47 +659,6 @@ static void on_heartbeat(struct cy_subscription_t* const sub,
 
 // ----------------------------------------  RESPONSE FUTURES  ----------------------------------------
 
-static void ingest_topic_response(struct cy_t*                    cy,
-                                  const cy_us_t                   ts,
-                                  const struct cy_transfer_meta_t metadata,
-                                  const struct cy_payload_t       raw_payload)
-{
-    if (raw_payload.size < 8U) {
-        return; // Malformed response. The first 8 bytes shall contain the full topic hash.
-    }
-
-    // Deserialize the topic hash. The rest of the payload is for the user.
-    uint64_t topic_hash = 0;
-    memcpy(&topic_hash, raw_payload.data, sizeof(topic_hash));
-    struct cy_payload_t pld = { .data = ((char*)raw_payload.data) + 8U, .size = raw_payload.size - 8U };
-
-    // Find the topic -- log(N) lookup.
-    struct cy_topic_t* const topic = cy_topic_find_by_hash(cy, topic_hash);
-    if (topic == NULL) {
-        return; // We don't know this topic, ignore it.
-    }
-
-    // Find the matching pending response future -- log(N) lookup.
-    struct cy_tree_t* const tr =
-      cavl2_find(topic->response_futures_by_transfer_id, &metadata.transfer_id, &cavl_comp_response_future_transfer_id);
-    if (tr == NULL) {
-        return; // Unexpected or duplicate response. TODO: Linger completed futures for multiple responses?
-    }
-    struct cy_response_future_t* const fut = CAVL2_TO_OWNER(tr, struct cy_response_future_t, index_transfer_id);
-    assert(fut->state == cy_future_pending); // TODO Linger completed futures for multiple responses?
-
-    // Finalize and retire the future.
-    fut->state              = cy_future_success;
-    fut->response_timestamp = ts;
-    fut->response_metadata  = metadata;
-    fut->response_payload   = pld;
-    cavl2_remove(&cy->response_futures_by_deadline, &fut->index_deadline);
-    cavl2_remove(&topic->response_futures_by_transfer_id, &fut->index_transfer_id);
-    if (fut->callback != NULL) {
-        fut->callback(fut);
-    }
-}
-
 static void retire_timed_out_response_futures(struct cy_t* cy, const cy_us_t now)
 {
     struct cy_response_future_t* fut = (struct cy_response_future_t*)cavl2_min(cy->response_futures_by_deadline);
@@ -814,10 +773,10 @@ cy_err_t cy_new(struct cy_t* const             cy,
     return res;
 }
 
-void cy_ingest_topic(struct cy_topic_t* const        topic,
-                     const cy_us_t                   ts,
-                     const struct cy_transfer_meta_t metadata,
-                     const struct cy_payload_t       payload)
+void cy_ingest_topic_transfer(struct cy_topic_t* const        topic,
+                              const cy_us_t                   ts,
+                              const struct cy_transfer_meta_t metadata,
+                              const struct cy_payload_t       payload)
 {
     assert(topic != NULL);
     struct cy_t* const cy = topic->cy;
@@ -852,62 +811,88 @@ void cy_ingest_topic(struct cy_topic_t* const        topic,
     }
 }
 
-void cy_ingest_rpc(struct cy_t* const              cy,
-                   const uint16_t                  service_id,
-                   const bool                      request_not_response,
-                   const cy_us_t                   ts,
-                   const struct cy_transfer_meta_t metadata,
-                   const struct cy_payload_t       payload)
+void cy_ingest_topic_response_transfer(struct cy_t* const              cy,
+                                       const cy_us_t                   ts,
+                                       const struct cy_transfer_meta_t metadata,
+                                       const struct cy_payload_t       payload)
 {
     assert(cy != NULL);
-    if ((service_id == CY_RESPONSE_RPC_SERVICE_ID) && request_not_response) {
-        ingest_topic_response(cy, ts, metadata, payload);
+    if (payload.size < 8U) {
+        return; // Malformed response. The first 8 bytes shall contain the full topic hash.
+    }
+
+    // Deserialize the topic hash. The rest of the payload is for the application.
+    uint64_t topic_hash = 0;
+    memcpy(&topic_hash, payload.data, sizeof(topic_hash));
+    struct cy_payload_t app_pld = { .data = ((char*)payload.data) + 8U, .size = payload.size - 8U };
+
+    // Find the topic -- log(N) lookup.
+    struct cy_topic_t* const topic = cy_topic_find_by_hash(cy, topic_hash);
+    if (topic == NULL) {
+        return; // We don't know this topic, ignore it.
+    }
+
+    // Find the matching pending response future -- log(N) lookup.
+    struct cy_tree_t* const tr =
+      cavl2_find(topic->response_futures_by_transfer_id, &metadata.transfer_id, &cavl_comp_response_future_transfer_id);
+    if (tr == NULL) {
+        return; // Unexpected or duplicate response. TODO: Linger completed futures for multiple responses?
+    }
+    struct cy_response_future_t* const fut = CAVL2_TO_OWNER(tr, struct cy_response_future_t, index_transfer_id);
+    assert(fut->state == cy_future_pending); // TODO Linger completed futures for multiple responses?
+
+    // Finalize and retire the future.
+    fut->state              = cy_future_success;
+    fut->response_timestamp = ts;
+    fut->response_metadata  = metadata;
+    fut->response_payload   = app_pld;
+    cavl2_remove(&cy->response_futures_by_deadline, &fut->index_deadline);
+    cavl2_remove(&topic->response_futures_by_transfer_id, &fut->index_transfer_id);
+    if (fut->callback != NULL) {
+        fut->callback(fut);
     }
 }
 
 cy_err_t cy_heartbeat(struct cy_t* const cy)
 {
+    cy_err_t      res = 0;
     const cy_us_t now = cy->now(cy);
 
     retire_timed_out_response_futures(cy, now);
 
-    if (now < cy->heartbeat_next) {
-        return 0;
-    }
-
-    // If it is time to publish a heartbeat but we still don't have a node-ID, it means that it is time to allocate!
-    cy_err_t res = 0;
-    if (cy->node_id >= cy->node_id_max) {
-        cy->node_id = pick_node_id(&cy->node_id_bloom, cy->node_id_max);
+    if (now >= cy->heartbeat_next) {
+        // If it is time to publish a heartbeat but we still don't have a node-ID, it means that it is time to allocate!
+        if (cy->node_id >= cy->node_id_max) {
+            cy->node_id = pick_node_id(&cy->node_id_bloom, cy->node_id_max);
+            assert(cy->node_id <= cy->node_id_max);
+            res = cy->transport.set_node_id(cy);
+            CY_TRACE(cy,
+                     "Picked own node-ID %04x; Bloom popcount %zu; set_node_id()->%d",
+                     cy->node_id,
+                     popcount_all(cy->node_id_bloom.n_bits, cy->node_id_bloom.storage),
+                     res);
+        }
         assert(cy->node_id <= cy->node_id_max);
-        res = cy->transport.set_node_id(cy);
-        CY_TRACE(cy,
-                 "Picked own node-ID %04x; Bloom popcount %zu; set_node_id()->%d",
-                 cy->node_id,
-                 popcount_all(cy->node_id_bloom.n_bits, cy->node_id_bloom.storage),
-                 res);
+        if (res < 0) {
+            return res; // Failed to set node-ID, bail out. Will try again next time.
+        }
+
+        // Find the next topic to gossip.
+        const struct cy_tree_t* const t = cavl2_min(cy->topics_by_gossip_time);
+        assert(t != NULL); // We always have at least the heartbeat topic.
+        struct cy_topic_t* const tp = CAVL2_TO_OWNER(t, struct cy_topic_t, index_gossip_time);
+        assert(tp->cy == cy);
+
+        // Publish the heartbeat.
+        res = publish_heartbeat(tp, now);
+
+        // Schedule the next one.
+        // If this heartbeat failed to publish, we simply give up and move on to try again in the next period.
+        assert(cy->topic_count > 0); // we always have at least the heartbeat topic
+        const cy_us_t period = min_i64(cy->heartbeat_full_gossip_cycle_period_max / (cy_us_t)cy->topic_count, //
+                                       cy->heartbeat_period_max);
+        cy->heartbeat_next += period; // Do not accumulate heartbeat phase slip!
     }
-    assert(cy->node_id <= cy->node_id_max);
-    if (res < 0) {
-        return res; // Failed to set node-ID, bail out. Will try again next time.
-    }
-
-    // Find the next topic to gossip.
-    const struct cy_tree_t* const t = cavl2_min(cy->topics_by_gossip_time);
-    assert(t != NULL); // We always have at least the heartbeat topic.
-    struct cy_topic_t* const tp = CAVL2_TO_OWNER(t, struct cy_topic_t, index_gossip_time);
-    assert(tp->cy == cy);
-
-    // Publish the heartbeat.
-    res = publish_heartbeat(tp, now);
-
-    // Schedule the next one.
-    // If this heartbeat failed to publish, we simply give up and move on to try again in the next period.
-    assert(cy->topic_count > 0); // we always have at least the heartbeat topic
-    const cy_us_t period = min_i64(cy->heartbeat_full_gossip_cycle_period_max / (cy_us_t)cy->topic_count, //
-                                   cy->heartbeat_period_max);
-    cy->heartbeat_next += period; // Do not accumulate heartbeat phase slip!
-
     return res;
 }
 
@@ -1202,7 +1187,7 @@ cy_err_t cy_respond(struct cy_topic_t* const        topic,
     /// Yes, we send the response using a request transfer. In the future we may leverage this for reliable delivery.
     /// All responses are sent to the same RPC service-ID; they are discriminated by the topic hash.
     return topic->cy->transport.request(topic->cy,
-                                        CY_RESPONSE_RPC_SERVICE_ID,
+                                        CY_RPC_SERVICE_ID_TOPIC_RESPONSE,
                                         metadata,
                                         tx_deadline,
                                         (struct cy_payload_t){ .size = payload.size + 8U, .data = pld });
