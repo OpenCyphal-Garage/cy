@@ -248,11 +248,11 @@ struct cy_topic_t
     /// Remember that the subject-ID is (for non-pinned topics): (hash+evictions)%topic_count.
     uint64_t evictions;
 
-    /// Currently, the age is increased when:
+    /// Currently, the age is increased locally as follows:
     ///
-    /// 1. The topic is gossiped, but not more often than once per second.
+    /// 1. When the topic is gossiped, but not more often than once per second.
     ///
-    /// 2. Experimental and optional: A transfer is received on the topic.
+    /// 2. Experimental and optional: When a transfer is received on the topic.
     ///    Not transmitted, though, to prevent unconnected publishers from inflating their own age.
     ///    Subscription-driven ageing is a robust choice because it implies that the topic is actually used.
     ///    All nodes except the publishers will locally adjust the age; the publisher will eventually learn
@@ -265,6 +265,9 @@ struct cy_topic_t
     /// We use max(x,y) for CRDT merge, which is commutative [max(x,y)==max(y,x)], associative
     /// [max(x,max(y,z))==max(max(x,y),z)], and idempotent [max(x,x)==x], making it a valid merge operation.
     uint64_t age;
+
+    /// This is used to implement the once-per-second age increment rule.
+    cy_us_t aged_at;
 
     /// Updated whenever the topic is gossiped.
     ///

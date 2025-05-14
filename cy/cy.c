@@ -397,8 +397,6 @@ static void allocate_topic(struct cy_topic_t* const topic, const uint64_t new_ev
             // This is our slot now! The other topic has to move.
             // This can trigger a chain reaction that in the worst case can leave no topic unturned.
             // One issue is that the worst-case recursive call depth equals the number of topics in the system.
-            // The age of the moving topic is being reset to zero, meaning that it will not disturb any other non-new
-            // topic, which ensures that the total impact on the network is minimized.
             allocate_topic(other, other->evictions + 1U, false);
             // Remember that we're still out of tree at the moment. We pushed the other topic out of its slot,
             // but it is possible that there was a chain reaction that caused someone else to occupy this slot.
@@ -441,6 +439,16 @@ static void allocate_topic(struct cy_topic_t* const topic, const uint64_t new_ev
     call_depth--;
 }
 
+static void age_topic(struct cy_topic_t* const topic, const cy_us_t now)
+{
+    const int32_t sec = (int32_t)((now - topic->aged_at) / MEGA);
+    assert(sec >= 0);
+    if (sec > 0) {
+        topic->age++; // We increment it at most once because we want to avoid large leaps.
+    }
+    topic->aged_at += sec * MEGA;
+}
+
 // ----------------------------------------  HEARTBEAT IO  ----------------------------------------
 
 #define TOPIC_FLAG_PUBLISHING 1U
@@ -471,12 +479,14 @@ static struct heartbeat_t make_heartbeat(const cy_us_t     uptime,
                                          const char* const name)
 {
     assert(name_len <= CY_TOPIC_NAME_MAX);
-    struct heartbeat_t obj = { .uptime                                    = (uint32_t)(uptime / MEGA),
-                               .version                                   = 1,
-                               .uid                                       = uid,
-                               .topic_hash                                = hash,
-                               .topic_flags8_age56                        = (((uint64_t)flags) << 56U) | age,
-                               .topic_name_length8_reserved16_evictions40 = (((uint64_t)name_len) << 56U) | evictions };
+    struct heartbeat_t obj = {
+        .uptime                                    = (uint32_t)(uptime / MEGA),
+        .version                                   = 1,
+        .uid                                       = uid,
+        .topic_hash                                = hash,
+        .topic_flags8_age56                        = (((uint64_t)flags) << 56U) | age,
+        .topic_name_length8_reserved16_evictions40 = (((uint64_t)name_len) << 56U) | evictions,
+    };
     memcpy(obj.topic_name, name, name_len);
     return obj;
 }
@@ -486,9 +496,9 @@ static cy_err_t publish_heartbeat(struct cy_topic_t* const topic, const cy_us_t 
     assert(topic != NULL);
     const struct cy_t* const cy = topic->cy;
 
+    age_topic(topic, now);
+
     // Construct the heartbeat message.
-    // TODO: communicate how the topic is used: in/out, some other metadata?
-    topic->age++;
     const uint8_t flags = (cy_topic_has_local_publishers(topic) ? TOPIC_FLAG_PUBLISHING : 0U) |
                           (cy_topic_has_local_subscribers(topic) ? TOPIC_FLAG_SUBSCRIBED : 0U);
     const struct heartbeat_t msg = make_heartbeat(now - cy->started_at, //
@@ -848,6 +858,7 @@ bool cy_topic_new(struct cy_t* const                  cy,
     topic->hash      = topic_hash(topic->name_length, topic->name);
     topic->evictions = 0; // starting from the preferred subject-ID.
     topic->age       = 0;
+    topic->aged_at   = cy->now(cy);
 
     topic->user            = NULL;
     topic->pub_transfer_id = 0;

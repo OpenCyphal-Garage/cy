@@ -128,38 +128,8 @@ A new 64-bit globally unique node-ID is defined that replaces both the old 128-b
 
 The named topic protocol somewhat lifts the level of abstraction presented to the application. Considering that, it does no longer appear useful to include the application-specific fields `health` and `mode` in the heartbeat message. Instead, applications should choose more specialized means of status reporting. In this proposal, these two fields along with the vendor-specific status code are consumed by the new `uint32 user_word`. Applications that seek full compatibility with the old nodes will set the two least significant bytes to the health and mode values. Eventually, it is expected that this field will become a simple general-purpose status reporting word with fully application-defined semantics.
 
-```python
-# 7509.cyphal.node.Heartbeat.2
-uint32    uptime          # [second] like in Heartbeat v1
-uint32    user_word       # Replaces health, mode, vendor-specific status code
-UID.0.1   uid             # New field: 64-bit unique node ID composed of VID/PID/IID
-@assert _offset_ == {128}
-Gossip.0.1 gossip         # CRDT gossip data
-@assert _offset_.max == 144 * 8
-@sealed
-```
-
-```python
-# Gossip
-uint64[3] value           # Contains: eviction counter, raw age (not log), reserved
-uint64    key_hash        # Because it is expensive to compute
-uint8 KEY_CAPACITY = 95
-utf8[<=KEY_CAPACITY] key
-@assert _offset_.max == 128 * 8
-@sealed
-```
-
-```python
-# UID
-uint32 instance_id
-uint16 product_id
-uint16 vendor_id
-@assert _offset_ == {64}
-uint16 VENDOR_ID_INVALID    = 0
-uint16 VENDOR_ID_OPENCYPHAL = 1
-uint16 VENDOR_ID_PUBLIC     = 0xFFFF
-@sealed
-```
+- [`7509.cyphal.node.Heartbeat.1.1`](dsdl/cyphal/node/7509.Heartbeat.1.1.dsdl)
+- [`cyphal.node.UID`](dsdl/cyphal/node/UID.0.1.dsdl)
 
 ## Application API
 
