@@ -146,6 +146,36 @@ static int32_t cavl_comp_topic_gossip_time(const void* const user, const struct 
     return ((*(cy_us_t*)user) >= inner->last_gossip) ? +1 : -1;
 }
 
+static int32_t cavl_comp_response_future_transfer_id(const void* const user, const struct cy_tree_t* const node)
+{
+    assert((user != NULL) && (node != NULL));
+    const uint64_t                           outer = *(uint64_t*)user;
+    const struct cy_response_future_t* const inner =
+      CAVL2_TO_OWNER(node, struct cy_response_future_t, index_transfer_id);
+    if (outer == inner->transfer_id) {
+        return 0;
+    }
+    return (outer >= inner->transfer_id) ? +1 : -1;
+}
+
+/// Deadlines are not unique, so this comparator never returns 0.
+static int32_t cavl_comp_response_future_deadline(const void* const user, const struct cy_tree_t* const node)
+{
+    assert((user != NULL) && (node != NULL));
+    const struct cy_response_future_t* const inner = CAVL2_TO_OWNER(node, struct cy_response_future_t, index_deadline);
+    return ((*(cy_us_t*)user) >= inner->deadline) ? +1 : -1;
+}
+
+static struct cy_tree_t* cavl_factory_response_future_transfer_id(void* const user)
+{
+    return &((struct cy_response_future_t*)user)->index_transfer_id;
+}
+
+static struct cy_tree_t* cavl_factory_response_future_deadline(void* const user)
+{
+    return &((struct cy_response_future_t*)user)->index_deadline;
+}
+
 static struct cy_tree_t* cavl_factory_topic_subject_id(void* const user)
 {
     return &((struct cy_topic_t*)user)->index_subject_id;
@@ -627,6 +657,69 @@ static void on_heartbeat(struct cy_subscription_t* const sub,
     }
 }
 
+// ----------------------------------------  RESPONSE FUTURES  ----------------------------------------
+
+static void ingest_topic_response(struct cy_t*                    cy,
+                                  const cy_us_t                   ts,
+                                  const struct cy_transfer_meta_t metadata,
+                                  const struct cy_payload_t       raw_payload)
+{
+    if (raw_payload.size < 8U) {
+        return; // Malformed response. The first 8 bytes shall contain the full topic hash.
+    }
+
+    // Deserialize the topic hash. The rest of the payload is for the user.
+    uint64_t topic_hash = 0;
+    memcpy(&topic_hash, raw_payload.data, sizeof(topic_hash));
+    struct cy_payload_t pld = { .data = ((char*)raw_payload.data) + 8U, .size = raw_payload.size - 8U };
+
+    // Find the topic -- log(N) lookup.
+    struct cy_topic_t* const topic = cy_topic_find_by_hash(cy, topic_hash);
+    if (topic == NULL) {
+        return; // We don't know this topic, ignore it.
+    }
+
+    // Find the matching pending response future -- log(N) lookup.
+    struct cy_tree_t* const tr =
+      cavl2_find(topic->response_futures_by_transfer_id, &metadata.transfer_id, &cavl_comp_response_future_transfer_id);
+    if (tr == NULL) {
+        return; // Unexpected or duplicate response. TODO: Linger completed futures for multiple responses?
+    }
+    struct cy_response_future_t* const fut = CAVL2_TO_OWNER(tr, struct cy_response_future_t, index_transfer_id);
+    assert(fut->state == cy_future_pending); // TODO Linger completed futures for multiple responses?
+
+    // Finalize and retire the future.
+    fut->state              = cy_future_success;
+    fut->response_timestamp = ts;
+    fut->response_metadata  = metadata;
+    fut->response_payload   = pld;
+    cavl2_remove(&cy->response_futures_by_deadline, &fut->index_deadline);
+    cavl2_remove(&topic->response_futures_by_transfer_id, &fut->index_transfer_id);
+    if (fut->callback != NULL) {
+        fut->callback(fut);
+    }
+}
+
+static void retire_timed_out_response_futures(struct cy_t* cy, const cy_us_t now)
+{
+    struct cy_response_future_t* fut = (struct cy_response_future_t*)cavl2_min(cy->response_futures_by_deadline);
+    while ((fut != NULL) && (fut->deadline < now)) {
+        assert(fut->state == cy_future_pending);
+
+        cavl2_remove(&cy->response_futures_by_deadline, &fut->index_deadline);
+        cavl2_remove(&fut->topic->response_futures_by_transfer_id, &fut->index_transfer_id);
+        fut->state = cy_future_failure;
+        if (fut->callback != NULL) {
+            fut->callback(fut);
+        }
+        // We could have trivially avoided having to search the tree again by replacing this with a
+        // cavl2_next_greater(), which is very efficient, but the problem here is that the user callback may modify
+        // the tree unpredictably, and we don't want to put constraints on the callback behavior.
+        // A more sophisticated solution is to mark the tree as modified, but it's not worth the effort.
+        fut = (struct cy_response_future_t*)cavl2_min(cy->response_futures_by_deadline);
+    }
+}
+
 // ----------------------------------------  PUBLIC API  ----------------------------------------
 
 cy_err_t cy_new(struct cy_t* const             cy,
@@ -721,10 +814,10 @@ cy_err_t cy_new(struct cy_t* const             cy,
     return res;
 }
 
-void cy_ingest(struct cy_topic_t* const        topic,
-               const cy_us_t                   timestamp,
-               const struct cy_transfer_meta_t metadata,
-               const struct cy_payload_t       payload)
+void cy_ingest_topic(struct cy_topic_t* const        topic,
+                     const cy_us_t                   ts,
+                     const struct cy_transfer_meta_t metadata,
+                     const struct cy_payload_t       payload)
 {
     assert(topic != NULL);
     struct cy_t* const cy = topic->cy;
@@ -753,15 +846,31 @@ void cy_ingest(struct cy_topic_t* const        topic,
         assert(sub->topic == topic);
         struct cy_subscription_t* const next = sub->next; // In case the callback deletes this subscription.
         if (sub->callback != NULL) {
-            sub->callback(sub, timestamp, metadata, payload);
+            sub->callback(sub, ts, metadata, payload);
         }
         sub = next;
+    }
+}
+
+void cy_ingest_rpc(struct cy_t* const              cy,
+                   const uint16_t                  service_id,
+                   const bool                      request_not_response,
+                   const cy_us_t                   ts,
+                   const struct cy_transfer_meta_t metadata,
+                   const struct cy_payload_t       payload)
+{
+    assert(cy != NULL);
+    if ((service_id == CY_RESPONSE_RPC_SERVICE_ID) && request_not_response) {
+        ingest_topic_response(cy, ts, metadata, payload);
     }
 }
 
 cy_err_t cy_heartbeat(struct cy_t* const cy)
 {
     const cy_us_t now = cy->now(cy);
+
+    retire_timed_out_response_futures(cy, now);
+
     if (now < cy->heartbeat_next) {
         return 0;
     }
@@ -1026,13 +1135,52 @@ cy_err_t cy_subscribe(struct cy_topic_t* const         topic,
     return err;
 }
 
-cy_err_t cy_publish(struct cy_topic_t* const topic, const cy_us_t tx_deadline, const struct cy_payload_t payload)
+cy_err_t cy_publish(struct cy_topic_t* const           topic,
+                    const cy_us_t                      tx_deadline,
+                    const struct cy_payload_t          payload,
+                    const cy_us_t                      response_deadline,
+                    struct cy_response_future_t* const response_future)
 {
     assert(topic != NULL);
     assert((payload.data != NULL) || (payload.size == 0));
     assert((topic->name_length > 0) && (topic->name[0] != '\0'));
-    topic->publishing  = true;
+
+    topic->publishing = true;
+
+    // Set up the response future first. If publication fails, we will have to undo it later.
+    // The reason we can't do it afterward is that if the transport has a cyclic transfer-ID, insertion may fail if
+    // we have exhausted the transfer-ID set.
+    if (response_future != NULL) {
+        response_future->topic       = topic;
+        response_future->state       = cy_future_pending;
+        response_future->transfer_id = topic->pub_transfer_id;
+        response_future->deadline    = response_deadline;
+
+        const struct cy_tree_t* const tr = cavl2_find_or_insert(&topic->response_futures_by_transfer_id,
+                                                                &topic->pub_transfer_id,
+                                                                &cavl_comp_response_future_transfer_id,
+                                                                response_future,
+                                                                &cavl_factory_response_future_transfer_id);
+        if (tr != &response_future->index_transfer_id) {
+            return -12345; // TODO error codes that abstract away the specific error codes of the transport library.
+        }
+    }
+
     const cy_err_t res = topic->cy->transport.publish(topic, tx_deadline, payload);
+
+    if (response_future != NULL) {
+        if (res >= 0) {
+            const struct cy_tree_t* const tr = cavl2_find_or_insert(&topic->cy->response_futures_by_deadline,
+                                                                    &response_deadline,
+                                                                    &cavl_comp_response_future_deadline,
+                                                                    response_future,
+                                                                    &cavl_factory_response_future_deadline);
+            assert(tr == &response_future->index_deadline);
+        } else {
+            cavl2_remove(&topic->response_futures_by_transfer_id, &response_future->index_transfer_id);
+        }
+    }
+
     topic->pub_transfer_id++;
     return res;
 }

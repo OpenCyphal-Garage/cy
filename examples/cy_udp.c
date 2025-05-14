@@ -137,8 +137,8 @@ static cy_err_t transport_publish(struct cy_topic_t* const  topic,
 static cy_err_t transport_request(struct cy_t* const              cy,
                                   const uint16_t                  service_id,
                                   const struct cy_transfer_meta_t metadata,
-                                  cy_us_t                         tx_deadline,
-                                  struct cy_payload_t             payload)
+                                  const cy_us_t                   tx_deadline,
+                                  const struct cy_payload_t       payload)
 {
     struct cy_udp_t* const cy_udp = (struct cy_udp_t*)cy;
     cy_err_t               res    = 0;
@@ -339,14 +339,15 @@ static void ingest_topic(struct cy_udp_topic_t* const topic, const struct Udpard
         }
     }
 
-    cy_ingest(&topic->base,
-              (cy_us_t)transfer->timestamp_usec,
-              (struct cy_transfer_meta_t){ .priority       = (enum cy_prio_t)transfer->priority,
-                                           .remote_node_id = transfer->source_node_id,
-                                           .transfer_id    = transfer->transfer_id },
-              (struct cy_payload_t){ .size = transfer->payload_size, .data = data });
+    cy_ingest_topic(&topic->base,
+                    (cy_us_t)transfer->timestamp_usec,
+                    (struct cy_transfer_meta_t){ .priority       = (enum cy_prio_t)transfer->priority,
+                                                 .remote_node_id = transfer->source_node_id,
+                                                 .transfer_id    = transfer->transfer_id },
+                    (struct cy_payload_t){ .size = transfer->payload_size, .data = data });
 
 hell:
+    // TODO: the user should invoke this via a cy proxy function.
     if (!payload_freed) {
         udpardRxFragmentFree(transfer->payload, topic->sub.memory.fragment, topic->sub.memory.payload);
     }

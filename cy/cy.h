@@ -96,6 +96,7 @@ typedef int64_t cy_us_t; ///< Monotonic microsecond timestamp. Signed to permit 
 
 struct cy_t;
 struct cy_topic_t;
+struct cy_response_future_t;
 
 enum cy_prio_t
 {
@@ -305,6 +306,9 @@ struct cy_topic_t
     /// The user can use this field for arbitrary purposes.
     void* user;
 
+    /// Used for matching futures against received responses.
+    struct cy_tree_t* response_futures_by_transfer_id;
+
     /// Only used if the application publishes data on this topic.
     /// The priority can be adjusted as needed by the user.
     ///
@@ -414,6 +418,9 @@ struct cy_t
     struct cy_tree_t* topics_by_subject_id;
     struct cy_tree_t* topics_by_gossip_time;
 
+    /// For detecting timed out futures. This index spans all topics.
+    struct cy_tree_t* response_futures_by_deadline;
+
     /// This is to ensure we don't exhaust the subject-ID space.
     size_t topic_count;
 };
@@ -458,10 +465,18 @@ void     cy_destroy(struct cy_t* const cy);
 ///
 /// If this is invoked together with cy_heartbeat(), then cy_ingest() must be invoked BEFORE cy_heartbeat()
 /// to ensure that the latest state updates are reflected in the next heartbeat message.
-void cy_ingest(struct cy_topic_t* const        topic,
-               const cy_us_t                   timestamp,
-               const struct cy_transfer_meta_t metadata,
-               const struct cy_payload_t       payload);
+void cy_ingest_topic(struct cy_topic_t* const        topic,
+                     const cy_us_t                   ts,
+                     const struct cy_transfer_meta_t metadata,
+                     const struct cy_payload_t       payload);
+
+/// Invoked whenever a new RPC service transfer is received.
+void cy_ingest_rpc(struct cy_t* const              cy,
+                   const uint16_t                  service_id,
+                   const bool                      request_not_response,
+                   const cy_us_t                   ts,
+                   const struct cy_transfer_meta_t metadata,
+                   const struct cy_payload_t       payload);
 
 /// This function must be invoked periodically to let the library publish heartbeats.
 /// The invocation period MUST NOT EXCEED the heartbeat period configured in cy_t; there is no lower limit.
@@ -601,11 +616,67 @@ cy_err_t cy_subscribe(struct cy_topic_t* const         topic,
                       const cy_subscription_callback_t callback);
 void     cy_unsubscribe(struct cy_topic_t* const topic, struct cy_subscription_t* const sub);
 
+enum cy_future_state_t
+{
+    cy_future_pending = 0,
+    cy_future_success = 1,
+    cy_future_failure = 2,
+};
+
+typedef void (*cy_response_callback_t)(struct cy_response_future_t* future);
+
+/// Register an expectation for a response to a message sent to the topic.
+/// The future shall not be moved or altered in anyway except for the user and callback fields until its state is
+/// no longer pending. Once it is not pending, it can be reused for another request.
+/// The future will enter the failure state to indicate that the response was not received before the deadline.
+struct cy_response_future_t
+{
+    struct cy_tree_t index_deadline;
+    struct cy_tree_t index_transfer_id;
+
+    struct cy_topic_t*     topic;
+    enum cy_future_state_t state;
+    uint64_t               transfer_id; ///< TODO: needs modulus from the transport layer.
+    cy_us_t                deadline;    ///< We're indexing on this so it shall not be changed after insertion.
+
+    /// These fields are populated once the response is received.
+    cy_us_t                   response_timestamp;
+    struct cy_transfer_meta_t response_metadata;
+    struct cy_payload_t       response_payload; ///< TODO add free function.
+
+    /// Only these fields can be altered by the user while the future is pending.
+    cy_response_callback_t callback;
+    void*                  user;
+};
+
 /// The transfer-ID is always incremented, even on failure, to signal lost messages.
 /// This function always publishes only one transfer as requested; no auxiliary traffic is generated.
 /// If the local node-ID is not allocated, the function may fail depending on the capabilities of the transport library;
 /// to avoid this, it is possible to check cy_has_node_id() before calling this function.
-cy_err_t cy_publish(struct cy_topic_t* const topic, const cy_us_t tx_deadline, const struct cy_payload_t payload);
+///
+/// If no response is needed/expected, the response_future must be NULL and the response_deadline is ignored.
+/// Otherwise, response_future must point to an uninitialized cy_response_future_t instance.
+///
+/// The response future will not be registered unless the result is non-negative.
+///
+/// If the response deadline is in the past, the message will be sent anyway but it will time out immediately.
+cy_err_t cy_publish(struct cy_topic_t* const           topic,
+                    const cy_us_t                      tx_deadline,
+                    const struct cy_payload_t          payload,
+                    const cy_us_t                      response_deadline,
+                    struct cy_response_future_t* const response_future);
+
+/// A simpler wrapper over cy_publish() when no response is needed/expected. 1 means one way.
+static inline cy_err_t cy_publish1(struct cy_topic_t* const  topic,
+                                   const cy_us_t             tx_deadline,
+                                   const struct cy_payload_t payload)
+{
+    return cy_publish(topic, tx_deadline, payload, 0, NULL);
+}
+
+/// This needs not be done after a future completes normally. It is only needed if the future needs to be
+/// destroyed before it completes. Calling this on a non-pending future has no effect.
+void cy_response_future_cancel(struct cy_response_future_t* const future);
 
 /// Send a response to a message received from a topic subscription. The response will be sent directly to the
 /// publisher using peer-to-peer transport, not affecting other nodes on this topic. The payload may be arbitrary

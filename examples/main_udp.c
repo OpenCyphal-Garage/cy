@@ -246,7 +246,7 @@ int main(const int argc, char* argv[])
                             (unsigned long long)cy_udp.base.uid,
                             (long long)now);
                     const struct cy_payload_t payload = { .data = msg, .size = strlen(msg) };
-                    const cy_err_t            pub_res = cy_udp_publish(&topics[i], now + 100000, payload);
+                    const cy_err_t            pub_res = cy_udp_publish1(&topics[i], now + 100000, payload);
                     if (pub_res < 0) {
                         fprintf(stderr, "cy_udp_publish: %d\n", pub_res);
                         break;

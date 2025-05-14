@@ -33,6 +33,8 @@ struct cy_udp_t
     struct UdpardMemoryResource    mem;
     struct UdpardRxMemoryResources rx_mem;
 
+    struct UdpardRxRPCDispatcher rpc_dispatcher;
+
     struct
     {
         struct UdpardTx tx;
@@ -96,10 +98,19 @@ static inline cy_err_t cy_udp_subscribe(struct cy_udp_topic_t* const     topic,
     return cy_subscribe(&topic->base, sub, extent, transfer_id_timeout, callback);
 }
 
-/// Trivial convenience wrapper over cy_publish().
-static inline cy_err_t cy_udp_publish(struct cy_udp_topic_t* const topic,
-                                      const cy_us_t                tx_deadline,
-                                      const struct cy_payload_t    payload)
+static inline cy_err_t cy_udp_publish(struct cy_udp_topic_t* const       topic,
+                                      const cy_us_t                      tx_deadline,
+                                      const struct cy_payload_t          payload,
+                                      const cy_us_t                      response_deadline,
+                                      struct cy_response_future_t* const response_future)
 {
-    return cy_publish(&topic->base, tx_deadline, payload);
+    return cy_publish(&topic->base, tx_deadline, payload, response_deadline, response_future);
+}
+
+/// Trivial convenience wrapper over cy_publish1().
+static inline cy_err_t cy_udp_publish1(struct cy_udp_topic_t* const topic,
+                                       const cy_us_t                tx_deadline,
+                                       const struct cy_payload_t    payload)
+{
+    return cy_publish1(&topic->base, tx_deadline, payload);
 }
