@@ -65,7 +65,7 @@ while (true) {
         char msg[256];
         sprintf(msg, "I am %016llx. time=%lld us", (unsigned long long)cy_udp.base.uid, (long long)now);
         const struct cy_payload_t payload = { .data = msg, .size = strlen(msg) };
-        const cy_err_t            pub_res = cy_udp_publish(&my_topic, now + 100000, payload);
+        const cy_err_t            pub_res = cy_udp_publish1(&my_topic, now + 100000, payload);
         if (pub_res < 0) { ... }
     }
 }
@@ -95,7 +95,6 @@ This method is stateless and quite simple (~100 LoC to implement), and ensures t
 
 In the spirit of RFC 4429, I call this solution *Pessimistic DAD*, because each participant defers picking an address until it has been observed to be unoccipied.
 
-
 ### Subject-ID autoconfiguration
 
 A kind of CRDT is used to build distributed consensus between nodes on how to allocate subject-IDs to topics. Each node is only aware of its own topics; nobody keeps the full set. Any node can offer a new allocation; at any time during or after the offering, another node may object, in which case arbitration is performed, and the loser is evicted from the current subject-ID assignment and has to offer a new allocation. If a divergent allocation is discovered (same topic maps to different subject-IDs), another arbitration is performed to detect which allocation needs to be repaired. Allocations that have been around longer OR those that are being used more often aways win arbitration, which ensures that a newcomer cannot override existing network configuration; thus, existing topics and nodes are not affected when new nodes or topics join the network.
@@ -118,7 +117,7 @@ CRDTs only guarantee convergence when the system has been quiescent for a while,
 
 Some networks will not tolerate the initial configuration stage while the protocol is working toward consensus, as this delay may be several seconds long in larger networks. To avoid this, nodes should ideally store the last stable subject-ID assignments in the non-volatile memory, such that they are able to resume normal operation immediately at next power-on without the need to wait for the network to converge again. Shall that configuration become obsolete (e.g., firmware update changes network configuration in other nodes), no issues are expected because the protocol will address divergences and collisions using its normal algorithm.
 
-The protocol used for subject-ID autoconfiguration can eventually be used to disseminate other information through the network, which may or may not use another consensus protocol. One example are the named RPC endpoints -- while named, they do not require consensus since each node can maintain its own local allocation table. It is proposed to discriminate between topics and other resources by the key name conventions. For topics, the convention is that the name must begin with a slash `/` and end with `[a-zA-Z0-9_]`.
+The protocol itself does not put any constraints on the topic name syntax. For the protocol, a topic name is just an arbitrary byte string, with one exception made for pinned topics for reasons of backward compatibility: `/[1-9][0-9]{0,4}`.
 
 ### Heartbeat extension
 
@@ -131,6 +130,37 @@ The named topic protocol somewhat lifts the level of abstraction presented to th
 - [`7509.cyphal.node.Heartbeat.1.1`](dsdl/cyphal/node/7509.Heartbeat.1.1.dsdl)
 - [`cyphal.node.UID`](dsdl/cyphal/node/UID.0.1.dsdl)
 
+### RPC
+
+A named RPC endpoint has one crucial difference compared to the old RPCs that changes everything in how it's used: a named RPC endpoint is no longer associated with a particular node. Such association was recognized as a design deficiency and discussed in the Cyphal Guide:
+
+>An attentive reader here might notice that \[RPCs\] are inherently bound to node-IDs and as such their ability to participate in well-architected network services is limited. This is a correct observation. This design is one manifestation of Cyphal’s commitment to providing powerful abstractions at zero cost – occasionally, certain trade-offs have to be made. Many practical services will be designed based on subjects alone without relying on \[RPCs\] at all.
+
+We assume here that an RPC endpoint is a first-class named entity similar to named topics in conventional pub/sub systems; for example, ROS services are designed in this way. This implies that each participant always has a bounded, compact set of RPC endpoints it serves or invokes. There is another approach that can be found, for example, in REST APIs, where the set of names is, generally speaking, unbounded, as names themselves may contain RPC endpoint arguments; we ignore this use case for now.
+
+A node wishing to invoke an RPC endpoint must first discover where the point-to-point RPC request should be sent to. This can be accomplished in several ways:
+
+1. Broadcast an ARP-style discovery request before invoking the RPC. The server, if any, will identify itself, allowing the client to send the P2P request transfer to it. This approach assumes a stateful two-stage interaction (the discovery results can be cached though).
+
+2. Broadcast the RPC payload together with the RPC endpoint name (or hash), assuming that the recipient will process the request and everyone else will ignore it. The response can be sent using a P2P transfer to the sender, since the sender's identity is known from the request transfer. This is stateless and simple, but forces every node to sift through each request published on the network.
+
+3. Rely on the existing topic allocation mechanism to find a segregated subject-ID for a topic, which is actually used for sending RPC requests. A request is published as an ordinary message, which is received normally by just one node providing said service. The response is sent using a P2P transfer like in the previous scenario.
+
+This PoC implements the last option as it appears to be by far the most efficient. An interesting side effect of this option is that it actually erases the difference between RPC endpoints and pub/sub topics. A response can be sent to the publisher of any message on any topic, not just some special kind of topic that we designate for RPCs. This opens up some interesting new network service design options.
+
+One implication of this approach is that the same RPC endpoint (i.e., topic) may be served (i.e., subscribed to) by more than one participant. If each responds to a request, this may cause the client to receive multible responses to a request. This can be considered a problem or a feature depending on the design objectives. If a strict one-server-per-endpoint rule must be enforced, both the client and the server (as well as any other node on the network) can monitor for multiple occupancy by simply subscribing to the heartbeat topic, since each node publishes usage flags per topic (pub/sub). However, multiple occupancy can also be used for the greater good to implement **anycast redundant services**, or to **multicast requests to multiple participants at once, while receiving separate responses from each**.
+
+The solution is thus not to introduce RPC as a separate feature at all, but to allow sending peer-to-peer responses to any published message.
+
+The large set of service-ID values becomes redundant in this design. In this PoC, only a single service-ID of 510 (chosen arbitrarily) is used to deliver all P2P responses. A topic message response is sent as an RPC-service request transfer, where the first 8 bytes contain the topic hash to which the response is sent, and the rest of the payload is used for the application data. The transfer-ID of the response matches that of the message that is being responded to, allowing the client to match response with the individual request messages.
+
+The 8-byte topic hash prefix could be replaced with the client-provided RPC-service-ID supplied with each message, instructing the server/subscriber to send the response P2P transfer to the specified service-ID. This saves a few bytes of overhead, but it appears to somewhat increase the complexity of both clients and servers.
+
+RPC demo apps:
+
+- [`main_udp_file_server.c`](examples/main_udp_file_server.c)
+- [`main_udp_file_client.c`](examples/main_udp_file_client.c)
+
 ## Application API
 
 More or less in line with existing conventions, the API should offer at least:
@@ -139,13 +169,15 @@ More or less in line with existing conventions, the API should offer at least:
 
 - Namespace-prefixed topic names if the leading symbol is not a separator: `topic/name` expands into `/namespace/topic/name`, where the `/namespace` is set on the node instance during its initialization.
 
-- Topics starting with `~` are prefixed with the node name, which itself is derived from UID by default: `~/topic/name` expands into `/abcd/1234/5678ef01/topic/name`, where the UID is 0xabcd12345678ef01, specifically VID=0xabcd PID=0x1234 IID=5678ef01, unless the local name is overridden. This is mostly intended for RPC endpoints, though.
+- Topics starting with `~` are prefixed with the node name, which itself is derived from UID by default: `~/topic/name` expands into `/abcd/1234/5678ef01/topic/name`, where the UID is 0xabcd12345678ef01, specifically VID=0xabcd PID=0x1234 IID=5678ef01, unless the local name is overridden.
 
 Ideally we should also introduce remappings that locally map a given topic name prefix to another prefix.
 
 The node-ID will disappear from the application scope completely. Ideally, it should be entirely automated away by the transport layer, since now we have the tools for that. Those applications that require fully manual control over the node-ID will still be able to set it up directly at the transport layer.
 
 To interact with old nodes not supporting named topics, pinned topics are used. For example, to subscribe to the old `uavcan.node.port.List` message (not needed for the new design), one will subscribe to topic `/7510`.
+
+There is no interoperability with old RPC services because they are not really exposed to the application directly anymore. To invoke an old RPC service, the application should reach out to the transport library directly.
 
 
 ## Rules
@@ -164,7 +196,7 @@ While the autoconfiguration is in progress, transfers may briefly be emitted on 
 
 Just use the current subject-ID mapping.
 
-If the consensus algoritm later finds a different mapping (e.g., an older topic is found and we need to move), the old subscription will be destroyed and replaced with a new one in the background (this happens from the `on_heartbeat` context).
+If the consensus algorithm later finds a different mapping (e.g., an older topic is found and we need to move), the old subscription will be destroyed and replaced with a new one in the background (this happens from the `on_heartbeat` context).
 
 #### When a message is received
 
@@ -216,27 +248,6 @@ From an integrator standpoint, the only difference is that topics are now assign
 
 
 ## Missing features
-
-### RPC endpoints
-
-These are much easier since they require no consensus -- each node does its own allocations locally.
-To avoid data corruption on sudden node-ID reassignment, the transfer should include the endpoint discriminator, similar to the topic discriminator.
-
-Ideally, out-of-order heartbeats should be allowed to enable faster RPC endpoint queries. When a client desires to invoke an RPC query, it will have to learn which node is providing it and under what service-ID. To speed up the discovery, a query is published, similarly to ARP. Then not just the server but all other clients that happen to know this endpoint will respond.
-
-Ideally, servers should always allocate a given endpoint to the same service-ID to minimize variability across reboots. It is up to the server to decide how the service-IDs are allocated, but ideally it could be also a hash of the endpoint name: `rapidhash(endpoint_name) & 0xFF`, incremented in case of a local collision.
-
-It should be noted that named RPC endpoints are indeed very different in their usage semantics compared to the old numerical endpoints. One practical consequence is that it is now possible to embed the name of the addressed resource, whatever it may be (file, register, command, etc.) directly into the RPC endpoint name. This could be leveraged to great advantage to, for example, replace the old register API with dedicated endpoints, where the "register" name and type are parts of the RPC endpoint name, and the data type is simply:
-
-```python
-byte[<=256] write
----
-byte[<=256] read
-```
-
-Such named services can then be used to configure the topics as well. For example, a local topic named `foo` could be remapped via an RPC endpoint `~/cyphal/foo?` (or `~_/foo?`, since we prefer shorter names to reduce gossip traffic), which is to contain the string topic name. Similar approaches could be used for topic introspection; for example, we could expose the topic type name via `~_/foo/t?`. One possible issue with this is that it is too easy to exhaust the small service-ID space of only 256 items; also, a large number of endpoints will make their discovery slow, since we announce at most one per heartbeat.
-
-If the sender happens to know the node-ID of the server from other sources (e.g., deduced from another transfer), then it is desirable to eliminate the service-ID mapping uncertainty completely (it will also save memory on the server because every service port requires some state to keep at the transport layer). In that case, the service-ID could be constant for all named endpoints (say 511) and the RPC request payload would be prepended with the full 64-bit endpoint hash. There is, strictly speaking, no need to prepend the hash to the response since it can be matched using the transfer-ID, but it could be useful as an additional correctness check.
 
 ### Wildcard topic subscriptions
 
