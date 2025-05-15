@@ -89,8 +89,7 @@ static void purge_tx(struct cy_udp_t* const cy_udp, const uint_fast8_t iface_ind
     }
 }
 
-// ReSharper disable once CppParameterMayBeConstPtrOrRef
-static cy_us_t now(struct cy_t* const cy)
+static cy_us_t now(const struct cy_t* const cy)
 {
     (void)cy;
     return cy_udp_now();

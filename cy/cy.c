@@ -756,9 +756,11 @@ cy_err_t cy_new(struct cy_t* const             cy,
     cy_err_t res                               = 0;
     if (cy->node_id > cy->node_id_max) {
         cy->heartbeat_next += (cy_us_t)random_uint(CY_START_DELAY_MIN_us, CY_START_DELAY_MAX_us);
+        cy->last_event_ts = cy->last_local_event_ts = cy->started_at;
     } else {
         bloom64_set(&cy->node_id_bloom, cy->node_id);
-        res = cy->transport.set_node_id(cy);
+        res               = cy->transport.set_node_id(cy);
+        cy->last_event_ts = cy->last_local_event_ts = 0;
     }
 
     // Register the heartbeat topic and subscribe to it.
@@ -978,6 +980,9 @@ bool cy_topic_new(struct cy_t* const                  cy,
                 topic->evictions++;
             }
         }
+        topic->last_event_ts = topic->last_local_event_ts = 0;
+    } else {
+        cy->last_event_ts = cy->last_local_event_ts = topic->last_event_ts = topic->last_local_event_ts = cy->now(cy);
     }
 
     // Insert the new topic into the name index tree. If it's not unique, bail out.

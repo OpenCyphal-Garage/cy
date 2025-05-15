@@ -78,10 +78,10 @@ int main(const int argc, char* argv[])
     }
 
     // WAIT FOR THE NODE TO JOIN THE NETWORK.
-    // We consider the node joined when it has a node-ID and there have been no topic consensus updates for 1 second.
-    // This stage can be skipped if we have a configuration hint recovered from nonvolatile storage.
+    // We consider the node joined when it has a node-ID and there have been no topic conflicts/divergences
+    // for some time. This stage can be skipped if we have a configuration hint recovered from nonvolatile storage.
     fprintf(stderr, "Waiting for the node to join the network...\n");
-    while ((!cy_has_node_id(&cy_udp.base)) || ((cy_udp_now() - cy_udp.base.last_event_ts) < MEGA)) {
+    while (!cy_ready(&cy_udp.base)) {
         res = cy_udp_spin_once(&cy_udp);
         if (res < 0) {
             errx(res, "cy_udp_spin_once");

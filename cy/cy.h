@@ -139,7 +139,7 @@ struct cy_transfer_meta_t
 };
 
 /// Returns the current monotonic time in microseconds. The initial time shall be non-negative.
-typedef cy_us_t (*cy_now_t)(struct cy_t*);
+typedef cy_us_t (*cy_now_t)(const struct cy_t*);
 
 /// Instructs the underlying transport to adopt the new node-ID.
 /// This is invoked either immediately from cy_new() if an explicit node-ID is given,
@@ -540,6 +540,20 @@ void cy_notify_node_id_collision(struct cy_t* const cy);
 static inline bool cy_has_node_id(const struct cy_t* const cy)
 {
     return cy->node_id <= cy->node_id_max;
+}
+
+/// A heuristical prediction of whether the local node is ready to fully participate in the network.
+/// The joining process will be bypassed if the node-ID and all topic allocations are recovered from non-volatile
+/// storage. This flag can briefly flip back to false if a node-ID or topic allocation conflict or a divergence
+/// are detected; it will return back to true automatically once the network is repaired.
+///
+/// Since the network fundamentally relies on an eventual consistency model, it is not possible to guarantee that
+/// any given state is final. It is always possible, for example, that while our network segment looks stable,
+/// it could actually be a partition of a larger network; when the partitions are rejoined, the younger and/or smaller
+/// partition will be forced to adapt to the main network, thus enduring a brief period of instability.
+static inline bool cy_ready(const struct cy_t* const cy)
+{
+    return cy_has_node_id(cy) && ((cy->now(cy) - cy->last_local_event_ts) > 1000000);
 }
 
 /// If the hint is provided, it will be used as the initial allocation state, unless either a conflict or divergence
