@@ -184,6 +184,7 @@ static void on_msg_trace(struct cy_subscription_t* const subscription,
     }
 }
 
+// ReSharper disable once CppParameterMayBeConstPtrOrRef
 static void on_response_trace(struct cy_response_future_t* const future)
 {
     struct cy_topic_t* topic = future->topic;

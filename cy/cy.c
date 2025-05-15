@@ -613,9 +613,11 @@ static void on_heartbeat(struct cy_subscription_t* const sub,
         // Everyone needs to publish their own new allocation and then we will pick max subject-ID out of that.
         if (!win) {
             allocate_topic(mine, mine->evictions + 1U, false);
+            cy->last_local_event_ts = mine->last_local_event_ts = ts;
         } else {
             schedule_gossip_asap(mine);
         }
+        cy->last_event_ts = mine->last_event_ts = ts;
     } else { // We have this topic! Check if we have consensus on the subject-ID.
         assert(mine->hash == other_hash);
         const int_fast8_t mine_lage  = log2_floor(mine->age);
@@ -651,7 +653,9 @@ static void on_heartbeat(struct cy_subscription_t* const sub,
                 if (mine->evictions == other_evictions) { // perfect sync, no need to gossip
                     update_last_gossip_time(mine, old_last_gossip);
                 }
+                cy->last_local_event_ts = mine->last_local_event_ts = ts;
             }
+            cy->last_event_ts = mine->last_event_ts = ts;
         }
         mine->age = max_u64(mine->age, other_age);
     }
