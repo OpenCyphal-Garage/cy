@@ -124,17 +124,30 @@ struct cy_bytes_mut_t
 /// of buffers instead of a single monolithic buffer. The last entry in the chain has next=NULL.
 ///
 /// The view points to the useful payload; DO NOT attempt to deallocate the view.
-/// The origin can only be used to deallocate the payload; that memory shall not be accessed in any way.
+/// The origin can only be used to deallocate the payload; that address shall not be accessed in any way.
 /// Normally, view and origin are identical, but this is not always the case depending on the transport library.
 /// The view is usually inside the origin, but even that is not guaranteed; e.g., if memory mapping is used.
 ///
 /// The head of the payload chain is always passed by value and thus does not require freeing; the following chain
 /// elements are also allocated from some memory resource and thus shall be freed with the payload.
-struct cy_payload_t
+///
+/// Warning: It is required that the first 8 bytes of the payload are NOT fragmented. Otherwise, Cy may refuse to
+/// accept the transfer. This requirement is trivial to meet because the MTU of all transports that supply fragmented
+/// payloads is much larger than 8 bytes.
+///
+/// In degenerate cases the size of a payload fragment may be zero.
+struct cy_buffer_owned_t
 {
-    struct cy_payload_t*  next;   ///< NULL in the last entry.
-    struct cy_bytes_t     view;   ///< Use this to access the actual data.
-    struct cy_bytes_mut_t origin; ///< Do not access the data (memory may not be mapped); only for freeing the payload.
+    struct cy_buffer_owned_t* next;   ///< NULL in the last entry.
+    struct cy_bytes_t         view;   ///< Use this to access the actual data.
+    struct cy_bytes_mut_t     origin; ///< Do not access! Address may not be mapped. Only for freeing the payload.
+};
+
+/// This is strictly a structural subtype of cy_buffer_owned_t to enable pointer conversion.
+struct cy_buffer_borrowed_t
+{
+    const struct cy_buffer_borrowed_t* next; ///< NULL in the last entry.
+    struct cy_bytes_t                  view;
 };
 
 struct cy_tree_t
@@ -151,7 +164,7 @@ struct cy_bloom64_t
     uint64_t* storage;
 };
 
-struct cy_transfer_meta_t
+struct cy_transfer_metadata_t
 {
     enum cy_prio_t priority;
     uint16_t       remote_node_id;
@@ -161,11 +174,11 @@ struct cy_transfer_meta_t
 /// A transfer object owns its payload.
 /// When passing it to Cy, the ownership is transferred.
 /// Likewise, when receiving a transfer, the payload shall be freed by the application.
-struct cy_transfer_t
+struct cy_transfer_owned_t
 {
-    cy_us_t                   timestamp;
-    struct cy_transfer_meta_t metadata;
-    struct cy_payload_t       payload_head;
+    cy_us_t                       timestamp;
+    struct cy_transfer_metadata_t metadata;
+    struct cy_buffer_owned_t      payload;
 };
 
 /// Returns the current monotonic time in microseconds. The initial time shall be non-negative.
@@ -189,15 +202,15 @@ typedef void (*cy_transport_clear_node_id_t)(struct cy_t*);
 /// Instructs the underlying transport layer to publish a new message on the topic.
 /// The function shall not increment the transfer-ID counter; Cy will do it.
 /// Takes ownership of the payload buffer chain.
-typedef cy_err_t (*cy_transport_publish_t)(struct cy_topic_t*, cy_us_t, struct cy_payload_t);
+typedef cy_err_t (*cy_transport_publish_t)(struct cy_topic_t*, cy_us_t, struct cy_buffer_borrowed_t);
 
 /// Instructs the underlying transport layer to send an RPC request transfer.
 /// Takes ownership of the payload buffer chain.
 typedef cy_err_t (*cy_transport_request_t)(struct cy_t*,
-                                           uint16_t                        service_id,
-                                           const struct cy_transfer_meta_t metadata,
-                                           cy_us_t                         tx_deadline,
-                                           struct cy_payload_t             payload);
+                                           uint16_t                            service_id,
+                                           const struct cy_transfer_metadata_t metadata,
+                                           cy_us_t                             tx_deadline,
+                                           struct cy_buffer_borrowed_t         payload);
 
 /// Instructs the underlying transport layer to create a new subscription on the topic.
 typedef cy_err_t (*cy_transport_subscribe_t)(struct cy_topic_t*);
@@ -221,9 +234,9 @@ typedef void (*cy_transport_unsubscribe_t)(struct cy_topic_t*);
 /// It is probably not useful to try and invoke cy_subscribe() immediately from the error handler.
 typedef void (*cy_transport_handle_resubscription_err_t)(struct cy_topic_t*, const cy_err_t);
 
-/// The head is passed by value so not freed, but its data obviously is.
-/// The following chain entries are freed depending on the transport library design.
-typedef void (*cy_transport_payload_chain_free_t)(struct cy_payload_t);
+/// Return payload memory obtained with received transfers via cy_ingest*().
+/// The head is passed by value so not freed, but its data and all other fragments are.
+typedef void (*cy_transport_buffer_release_t)(struct cy_t*, struct cy_buffer_owned_t);
 
 /// Transport layer interface functions.
 /// These can be underpinned by libcanard, libudpard, libserard, or any other transport library.
@@ -236,7 +249,7 @@ struct cy_transport_io_t
     cy_transport_subscribe_t                 subscribe;
     cy_transport_unsubscribe_t               unsubscribe;
     cy_transport_handle_resubscription_err_t handle_resubscription_err;
-    cy_transport_payload_chain_free_t        payload_chain_free;
+    cy_transport_buffer_release_t            payload_release;
 };
 
 /// A topic name is suffixed to the namespace name of the node that owns it, unless it begins with a `/`.
@@ -357,11 +370,11 @@ struct cy_topic_t
     /// If a payload is already available when a new transfer is received, Cy will free the old payload first.
     /// The user can detect when a new message is received by checking sub_last_transfer.timestamp.
     /// Optionally, a reception callback can be set in cy_subscription_t.
-    struct cy_transfer_t      sub_last_transfer;
-    struct cy_subscription_t* sub_list;
-    cy_us_t                   sub_transfer_id_timeout;
-    size_t                    sub_extent;
-    bool                      subscribed; ///< May be false even if sub_list is nonempty on resubscription error.
+    struct cy_transfer_owned_t sub_last_transfer;
+    struct cy_subscription_t*  sub_list;
+    cy_us_t                    sub_transfer_id_timeout;
+    size_t                     sub_extent;
+    bool                       subscribed; ///< May be false even if sub_list is nonempty on resubscription error.
 };
 
 typedef void (*cy_subscription_callback_t)(struct cy_subscription_t*);
@@ -396,7 +409,7 @@ struct cy_response_future_t
     /// The payload ownership is transferred to this structure.
     /// If a payload is already available when a response is received, Cy will free the old payload first.
     /// The user can detect when a new response is received by checking its timestamp.
-    struct cy_transfer_t last_response;
+    struct cy_transfer_owned_t last_response;
 
     /// Only these fields can be altered by the user while the future is pending.
     /// The callback may be NULL if the application prefers to check last_response by polling.
@@ -519,11 +532,28 @@ cy_err_t cy_new(struct cy_t* const             cy,
 void     cy_destroy(struct cy_t* const cy);
 
 /// This shall be invoked once the application is done processing a payload.
-/// The struct will be modified by zeroing all pointers in it.
+/// The struct will be modified by zeroing pointers and sizes in it.
 /// When Cy assigns a new payload to a subscription/response/etc object, it will check first if the previous payload
-/// is freed; if not, it will free it automatically. The nullification of the pointers is thus required to make it
+/// is released; if not, it will do it automatically. The nullification of the pointers is thus required to make it
 /// explicit that the payload is no longer valid and to prevent double-free errors.
-void cy_payload_free(struct cy_payload_t* const payload);
+/// Invoking this function on an already released payload has no effect and is safe.
+void cy_buffer_owned_release(struct cy_t* const cy, struct cy_buffer_owned_t* const payload);
+
+/// Returns the total size of all payload fragments in the chain.
+/// The complexity is linear, but the number of elements is very small (total size divided by MTU).
+size_t cy_buffer_owned_get_size(const struct cy_buffer_owned_t payload);
+
+/// Takes the head of a fragmented buffer list and copies the data into the contiguous buffer provided by the user.
+/// If the total size of all fragments combined exceeds the size of the user-provided buffer,
+/// copying will stop early after the buffer is filled, thus truncating the fragmented data short.
+/// The function has no effect and returns zero if the destination buffer is NULL.
+/// Returns the number of bytes copied into the contiguous destination buffer.
+size_t               cy_buffer_borrowed_gather(const struct cy_buffer_borrowed_t payload, struct cy_bytes_mut_t dest);
+static inline size_t cy_buffer_owned_gather(const struct cy_buffer_owned_t payload, const struct cy_bytes_mut_t dest)
+{
+    return cy_buffer_borrowed_gather(
+      (struct cy_buffer_borrowed_t){ .next = (struct cy_buffer_borrowed_t*)payload.next, .view = payload.view }, dest);
+}
 
 /// This is invoked whenever a new transfer on the topic is received.
 /// The library will dispatch it to the appropriate subscriber callbacks.
@@ -531,9 +561,7 @@ void cy_payload_free(struct cy_payload_t* const payload);
 ///
 /// If this is invoked together with cy_heartbeat(), then cy_ingest() must be invoked BEFORE cy_heartbeat()
 /// to ensure that the latest state updates are reflected in the next heartbeat message.
-///
-/// Takes ownership of the payload buffer chain.
-void cy_ingest_topic_transfer(struct cy_topic_t* const topic, const struct cy_transfer_t transfer);
+void cy_ingest_topic_transfer(struct cy_topic_t* const topic, const struct cy_transfer_owned_t transfer);
 
 /// Cy does not manage RPC endpoints explicitly; it is the responsibility of the transport-specific glue logic.
 /// Currently, the following RPC endpoints must be implemented in the glue logic:
@@ -543,9 +571,7 @@ void cy_ingest_topic_transfer(struct cy_topic_t* const topic, const struct cy_tr
 ///       The first 8 bytes of the transfer payload are the topic hash to which the response is sent.
 ///       Note that we send a topic response as an RPC request transfer; the reasoning is that a higher-level
 ///       response is carried by a lower-level request transfer.
-///
-/// Takes ownership of the payload buffer chain.
-void cy_ingest_topic_response_transfer(struct cy_t* const cy, const struct cy_transfer_t transfer);
+void cy_ingest_topic_response_transfer(struct cy_t* const cy, struct cy_transfer_owned_t transfer);
 
 /// This function must be invoked periodically to let the library publish heartbeats and handle response timeouts.
 /// The invocation period MUST NOT EXCEED the heartbeat period configured in cy_t; there is no lower limit.
@@ -682,8 +708,11 @@ static inline uint64_t cy_topic_get_discriminator(const struct cy_topic_t* const
 ///
 /// Future expansion: add wildcard subscribers that match topic names by pattern. Requires unbounded dynamic memory.
 ///
-/// It is allowed to remove the subscription from its own callback, but not from the callback of another
-/// subscription.
+/// It is allowed to remove the subscription from its own callback, but not from the callback of another subscription.
+///
+/// The extent and transfer-ID timeout of all subscriptions should be the same, or these values of subscriptions
+/// added later should be less than the values of subscriptions added earlier. Otherwise, the library will be forced
+/// to resubscribe, which may cause momentary data loss if there were transfers in the middle of reassembly.
 cy_err_t cy_subscribe(struct cy_topic_t* const         topic,
                       struct cy_subscription_t* const  sub,
                       const size_t                     extent,
@@ -709,20 +738,16 @@ enum cy_future_state_t
 /// The response future will not be registered unless the result is non-negative.
 ///
 /// If the response deadline is in the past, the message will be sent anyway but it will time out immediately.
-///
-/// Takes ownership of the payload buffer chain.
 cy_err_t cy_publish(struct cy_topic_t* const           topic,
                     const cy_us_t                      tx_deadline,
-                    const struct cy_payload_t          payload,
+                    const struct cy_buffer_borrowed_t  payload,
                     const cy_us_t                      response_deadline,
                     struct cy_response_future_t* const response_future);
 
 /// A simpler wrapper over cy_publish() when no response is needed/expected. 1 means one way.
-///
-/// Takes ownership of the payload buffer chain.
-static inline cy_err_t cy_publish1(struct cy_topic_t* const  topic,
-                                   const cy_us_t             tx_deadline,
-                                   const struct cy_payload_t payload)
+static inline cy_err_t cy_publish1(struct cy_topic_t* const          topic,
+                                   const cy_us_t                     tx_deadline,
+                                   const struct cy_buffer_borrowed_t payload)
 {
     return cy_publish(topic, tx_deadline, payload, 0, NULL);
 }
@@ -741,12 +766,10 @@ void cy_response_future_cancel(struct cy_response_future_t* const future);
 ///
 /// The response is be sent using an RPC request (sic) transfer to the publisher with the specified priority and
 /// the original transfer-ID.
-///
-/// Takes ownership of the payload buffer chain.
-cy_err_t cy_respond(struct cy_topic_t* const        topic,
-                    const cy_us_t                   tx_deadline,
-                    const struct cy_transfer_meta_t metadata,
-                    const struct cy_payload_t       payload);
+cy_err_t cy_respond(struct cy_topic_t* const            topic,
+                    const cy_us_t                       tx_deadline,
+                    const struct cy_transfer_metadata_t metadata,
+                    const struct cy_buffer_borrowed_t   payload);
 
 /// For diagnostics and logging only. Do not use in embedded and real-time applications.
 /// This function is only required if CY_CONFIG_TRACE is defined and is nonzero; otherwise it should be left undefined.

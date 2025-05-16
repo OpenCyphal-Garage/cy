@@ -18,20 +18,13 @@
 
 #define HEARTBEAT_PUB_TIMEOUT_us (1 * MEGA)
 
-static size_t smaller(const size_t a, const size_t b)
-{
-    return (a < b) ? a : b;
-}
-
-static int64_t min_i64(const int64_t a, const int64_t b)
-{
-    return (a < b) ? a : b;
-}
-
-static uint64_t max_u64(const uint64_t a, const uint64_t b)
-{
-    return (a > b) ? a : b;
-}
+// clang-format off
+static   size_t smaller(const size_t a,   const size_t b)   { return (a < b) ? a : b; }
+static   size_t  larger(const size_t a,   const size_t b)   { return (a > b) ? a : b; }
+static  int64_t min_i64(const int64_t a,  const int64_t b)  { return (a < b) ? a : b; }
+static  int64_t max_i64(const int64_t a,  const int64_t b)  { return (a > b) ? a : b; }
+static uint64_t max_u64(const uint64_t a, const uint64_t b) { return (a > b) ? a : b; }
+// clang-format on
 
 /// Returns -1 if the argument is zero to allow linear comparison.
 static int_fast8_t log2_floor(const uint64_t x)
@@ -530,7 +523,7 @@ static cy_err_t publish_heartbeat(struct cy_topic_t* const topic, const cy_us_t 
     const size_t             msz = sizeof(msg) - (CY_TOPIC_NAME_MAX - topic->name_length);
     assert(msz <= sizeof(msg));
     assert((msg.topic_name_length8_reserved16_evictions40 >> 56U) <= CY_TOPIC_NAME_MAX);
-    const struct cy_payload_t payload = { .data = &msg, .size = msz }; // FIXME serialization
+    const struct cy_buffer_borrowed_t payload = { .next = NULL, .view = { .data = &msg, .size = msz } };
 
     // Publish the message.
     assert(cy->node_id <= cy->node_id_max);
@@ -543,26 +536,20 @@ static cy_err_t publish_heartbeat(struct cy_topic_t* const topic, const cy_us_t 
 }
 
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
-static void on_heartbeat(struct cy_subscription_t* const sub,
-                         const cy_us_t                   ts,
-                         const struct cy_transfer_meta_t transfer,
-                         const struct cy_payload_t       payload)
+static void on_heartbeat(struct cy_subscription_t* const sub)
 {
     assert(sub != NULL);
-    assert(payload.data != NULL);
-    assert(payload.size <= sizeof(struct heartbeat_t));
-    if (payload.size < (sizeof(struct heartbeat_t) - CY_TOPIC_NAME_MAX)) {
-        return; // This is an old uavcan.node.Heartbeat.1 message, ignore it because it has no CRDT gossip data.
-    }
-    (void)ts;
-
     // Deserialize the message. TODO: deserialize properly.
     struct heartbeat_t heartbeat = { 0 };
-    memcpy(&heartbeat, payload.data, smaller(payload.size, sizeof(heartbeat)));
-    if (heartbeat.version != 1) {
+    const size_t       msg_size =
+      cy_buffer_owned_gather(sub->topic->sub_last_transfer.payload, //
+                             (struct cy_bytes_mut_t){ .size = sizeof(heartbeat), .data = &heartbeat });
+    if ((msg_size < (sizeof(heartbeat) - CY_TOPIC_NAME_MAX)) || (heartbeat.version != 1)) {
         return;
     }
-    const uint64_t other_hash      = heartbeat.topic_hash;
+    const cy_us_t                        ts         = sub->topic->sub_last_transfer.timestamp;
+    const struct cy_transfer_metadata_t* meta       = &sub->topic->sub_last_transfer.metadata;
+    const uint64_t                       other_hash = heartbeat.topic_hash;
     const uint64_t other_evictions = heartbeat.topic_name_length8_reserved16_evictions40 & ((1ULL << 40U) - 1U);
     const uint64_t other_age       = heartbeat.topic_flags8_age56 & ((1ULL << 56U) - 1U);
 
@@ -582,7 +569,7 @@ static void on_heartbeat(struct cy_subscription_t* const sub,
                  "\t remote #%016llx evict=%llu log2(age=%llx)=%+d '%s'",
                  cy_topic_get_subject_id(mine),
                  (unsigned long long)heartbeat.uid,
-                 transfer.remote_node_id,
+                 meta->remote_node_id,
                  (win ? "WIN" : "LOSE"),
                  (unsigned long long)mine->hash,
                  (unsigned long long)mine->evictions,
@@ -618,7 +605,7 @@ static void on_heartbeat(struct cy_subscription_t* const sub,
                      mine->name,
                      (unsigned long long)mine->hash,
                      (unsigned long long)heartbeat.uid,
-                     transfer.remote_node_id,
+                     meta->remote_node_id,
                      cy_topic_get_subject_id(mine),
                      (unsigned long long)mine->evictions,
                      (unsigned long long)mine->age,
@@ -761,10 +748,46 @@ cy_err_t cy_new(struct cy_t* const             cy,
     return res;
 }
 
-void cy_ingest_topic_transfer(struct cy_topic_t* const        topic,
-                              const cy_us_t                   ts,
-                              const struct cy_transfer_meta_t metadata,
-                              const struct cy_payload_t       payload)
+void cy_buffer_owned_release(struct cy_t* const cy, struct cy_buffer_owned_t* const payload)
+{
+    if ((cy != NULL) && (payload != NULL) && (payload->origin.data != NULL)) {
+        cy->transport.payload_release(cy, *payload);
+        // nullify the pointers to prevent double free
+        payload->next        = NULL;
+        payload->origin.size = 0;
+        payload->origin.data = NULL;
+    }
+}
+
+size_t cy_buffer_owned_get_size(const struct cy_buffer_owned_t* const payload)
+{
+    size_t                          out = 0;
+    const struct cy_buffer_owned_t* p   = payload;
+    while (p != NULL) {
+        out += p->origin.size;
+        p = p->next;
+    }
+    return out;
+}
+
+size_t cy_buffer_borrowed_gather(const struct cy_buffer_borrowed_t payload, struct cy_bytes_mut_t dest)
+{
+    size_t offset = 0;
+    if (NULL != dest.data) {
+        const struct cy_buffer_borrowed_t* frag = &payload;
+        while ((frag != NULL) && (offset < dest.size)) {
+            assert(frag->view.data != NULL);
+            const size_t frag_size = smaller(frag->view.size, dest.size - offset);
+            (void)memmove(((char*)dest.data) + offset, frag->view.data, frag_size);
+            offset += frag_size;
+            assert(offset <= dest.size);
+            frag = frag->next;
+        }
+    }
+    return offset;
+}
+
+void cy_ingest_topic_transfer(struct cy_topic_t* const topic, const struct cy_transfer_owned_t transfer)
 {
     assert(topic != NULL);
     struct cy_t* const cy = topic->cy;
@@ -772,47 +795,51 @@ void cy_ingest_topic_transfer(struct cy_topic_t* const        topic,
     // We snoop on all transfers to update the node-ID occupancy Bloom filter.
     // If we don't have a node-ID and this is a new Bloom entry, follow CSMA/CD: add random wait.
     // The point is to reduce the chances of multiple nodes appearing simultaneously and claiming same node-IDs.
-    if ((cy->node_id > cy->node_id_max) && !bloom64_get(&cy->node_id_bloom, metadata.remote_node_id)) {
+    if ((cy->node_id > cy->node_id_max) && !bloom64_get(&cy->node_id_bloom, transfer.metadata.remote_node_id)) {
         cy->heartbeat_next += (cy_us_t)random_uint(0, 2 * MEGA);
         CY_TRACE(cy,
                  "🔭 Discovered neighbor %04x publishing on '%s'@%04x; new Bloom popcount %zu",
-                 metadata.remote_node_id,
+                 transfer.metadata.remote_node_id,
                  topic->name,
                  cy_topic_get_subject_id(topic),
                  popcount_all(cy->node_id_bloom.n_bits, cy->node_id_bloom.storage) + 1U);
     }
-    bloom64_set(&cy->node_id_bloom, metadata.remote_node_id);
+    bloom64_set(&cy->node_id_bloom, transfer.metadata.remote_node_id);
 
     // Experimental: age the topic with received transfers. Not with the published ones because we don't want
     // unconnected publishers to inflate the age.
     topic->age++;
 
-    // Simply invoke all callbacks in the subscription list.
+    // Update the last received transfer.
+    cy_buffer_owned_release(cy, &topic->sub_last_transfer.payload); // does nothing if already released
+    topic->sub_last_transfer = transfer;
+
+    // Simply invoke all callbacks in the subscription list. They will read the last transfer from the topic object.
     struct cy_subscription_t* sub = topic->sub_list;
     while (sub != NULL) {
         assert(sub->topic == topic);
         struct cy_subscription_t* const next = sub->next; // In case the callback deletes this subscription.
         if (sub->callback != NULL) {
-            sub->callback(sub, ts, metadata, payload);
+            sub->callback(sub);
         }
         sub = next;
     }
 }
 
-void cy_ingest_topic_response_transfer(struct cy_t* const              cy,
-                                       const cy_us_t                   ts,
-                                       const struct cy_transfer_meta_t metadata,
-                                       const struct cy_payload_t       payload)
+void cy_ingest_topic_response_transfer(struct cy_t* const cy, struct cy_transfer_owned_t transfer)
 {
     assert(cy != NULL);
-    if (payload.size < 8U) {
+    // TODO: proper deserialization. This fails if the first <8 bytes are fragmented.
+    if (transfer.payload.view.size < 8U) {
+        cy->transport.payload_release(cy, transfer.payload);
         return; // Malformed response. The first 8 bytes shall contain the full topic hash.
     }
 
     // Deserialize the topic hash. The rest of the payload is for the application.
     uint64_t topic_hash = 0;
-    memcpy(&topic_hash, payload.data, sizeof(topic_hash));
-    struct cy_payload_t app_pld = { .data = ((char*)payload.data) + 8U, .size = payload.size - 8U };
+    memcpy(&topic_hash, transfer.payload.view.data, sizeof(topic_hash));
+    transfer.payload.view.size -= sizeof(topic_hash);
+    transfer.payload.view.data = ((const char*)transfer.payload.view.data) + sizeof(topic_hash);
 
     // Find the topic -- log(N) lookup.
     struct cy_topic_t* const topic = cy_topic_find_by_hash(cy, topic_hash);
@@ -821,8 +848,9 @@ void cy_ingest_topic_response_transfer(struct cy_t* const              cy,
     }
 
     // Find the matching pending response future -- log(N) lookup.
-    struct cy_tree_t* const tr =
-      cavl2_find(topic->response_futures_by_transfer_id, &metadata.transfer_id, &cavl_comp_response_future_transfer_id);
+    struct cy_tree_t* const tr = cavl2_find(topic->response_futures_by_transfer_id, //
+                                            &transfer.metadata.transfer_id,
+                                            &cavl_comp_response_future_transfer_id);
     if (tr == NULL) {
         return; // Unexpected or duplicate response. TODO: Linger completed futures for multiple responses?
     }
@@ -830,10 +858,9 @@ void cy_ingest_topic_response_transfer(struct cy_t* const              cy,
     assert(fut->state == cy_future_pending); // TODO Linger completed futures for multiple responses?
 
     // Finalize and retire the future.
-    fut->state              = cy_future_success;
-    fut->response_timestamp = ts;
-    fut->response_metadata  = metadata;
-    fut->response_payload   = app_pld;
+    fut->state = cy_future_success;
+    cy_buffer_owned_release(cy, &fut->last_response.payload); // does nothing if already released
+    fut->last_response = transfer;
     cavl2_remove(&cy->response_futures_by_deadline, &fut->index_deadline);
     cavl2_remove(&topic->response_futures_by_transfer_id, &fut->index_transfer_id);
     if (fut->callback != NULL) {
@@ -942,11 +969,13 @@ bool cy_topic_new(struct cy_t* const                  cy,
     topic->age       = 0;
     topic->aged_at   = cy->now(cy);
 
-    topic->user            = NULL;
-    topic->pub_transfer_id = 0;
-    topic->pub_priority    = cy_prio_nominal;
-    topic->sub_list        = NULL;
-    topic->subscribed      = false;
+    topic->user                    = NULL;
+    topic->pub_transfer_id         = 0;
+    topic->pub_priority            = cy_prio_nominal;
+    topic->sub_list                = NULL;
+    topic->sub_transfer_id_timeout = 0;
+    topic->sub_extent              = 0;
+    topic->subscribed              = false;
 
     if ((topic->name_length == 0) || (topic->name_length > CY_TOPIC_NAME_MAX) ||
         (cy->topic_count >= CY_TOPIC_SUBJECT_COUNT)) {
@@ -1062,8 +1091,15 @@ cy_err_t cy_subscribe(struct cy_topic_t* const         topic,
     assert(topic != NULL);
     assert(sub != NULL);
     assert((topic->name_length > 0) && (topic->name[0] != '\0'));
-    topic->sub_transfer_id_timeout = transfer_id_timeout;
-    topic->sub_extent              = extent;
+
+    // Caution: Unsubscription in the middle of a transfer reassembly will cause loss of that transfer.
+    if (topic->subscribed && ((topic->sub_extent < extent) || (topic->sub_transfer_id_timeout < transfer_id_timeout))) {
+        topic->cy->transport.unsubscribe(topic);
+        topic->subscribed = false;
+    }
+    topic->sub_transfer_id_timeout = max_i64(topic->sub_transfer_id_timeout, transfer_id_timeout);
+    topic->sub_extent              = larger(topic->sub_extent, extent);
+
     memset(sub, 0, sizeof(*sub));
     sub->next     = NULL;
     sub->topic    = topic;
@@ -1113,12 +1149,11 @@ cy_err_t cy_subscribe(struct cy_topic_t* const         topic,
 
 cy_err_t cy_publish(struct cy_topic_t* const           topic,
                     const cy_us_t                      tx_deadline,
-                    const struct cy_payload_t          payload,
+                    const struct cy_buffer_borrowed_t  payload,
                     const cy_us_t                      response_deadline,
                     struct cy_response_future_t* const response_future)
 {
     assert(topic != NULL);
-    assert((payload.data != NULL) || (payload.size == 0));
     assert((topic->name_length > 0) && (topic->name[0] != '\0'));
 
     topic->publishing = true;
@@ -1161,25 +1196,21 @@ cy_err_t cy_publish(struct cy_topic_t* const           topic,
     return res;
 }
 
-cy_err_t cy_respond(struct cy_topic_t* const        topic,
-                    const cy_us_t                   tx_deadline,
-                    const struct cy_transfer_meta_t metadata,
-                    const struct cy_payload_t       payload)
+cy_err_t cy_respond(struct cy_topic_t* const            topic,
+                    const cy_us_t                       tx_deadline,
+                    const struct cy_transfer_metadata_t metadata,
+                    const struct cy_buffer_borrowed_t   payload)
 {
     assert(topic != NULL);
-    assert((payload.data != NULL) || (payload.size == 0));
     assert((topic->name_length > 0) && (topic->name[0] != '\0'));
-
-    // TODO: allow the transport to accept scattered payload so we can avoid this nonsense here.
-    uint8_t pld[payload.size + 8U];
-    memcpy(pld, &topic->hash, 8U);
-    memcpy(pld + 8U, payload.data, payload.size);
-
     /// Yes, we send the response using a request transfer. In the future we may leverage this for reliable delivery.
     /// All responses are sent to the same RPC service-ID; they are discriminated by the topic hash.
     return topic->cy->transport.request(topic->cy,
                                         CY_RPC_SERVICE_ID_TOPIC_RESPONSE,
                                         metadata,
                                         tx_deadline,
-                                        (struct cy_payload_t){ .size = payload.size + 8U, .data = pld });
+                                        (struct cy_buffer_borrowed_t){
+                                          .next = &payload,
+                                          .view = { .size = 8U, .data = &topic->hash },
+                                        });
 }
