@@ -12,11 +12,6 @@
 
 #define RESPONSE_TIMEOUT (3 * MEGA)
 
-static size_t smaller(const size_t a, const size_t b)
-{
-    return (a < b) ? a : b;
-}
-
 struct file_read_request_t
 {
     uint64_t read_offset;
@@ -97,7 +92,7 @@ int main(const int argc, char* argv[])
         struct cy_response_future_t future;
         res = cy_udp_publish(&topic_file_read,
                              now + MEGA,
-                             (struct cy_payload_t){ .size = req.path_len + 10, .data = &req },
+                             (struct cy_buffer_borrowed_t){ .view = { .size = req.path_len + 10, .data = &req } },
                              now + RESPONSE_TIMEOUT,
                              &future);
         if (res < 0) {
@@ -121,7 +116,11 @@ int main(const int argc, char* argv[])
 
         // Process the next chunk.
         struct file_read_response_t resp;
-        memcpy(&resp, future.response_payload.data, smaller(sizeof(resp), future.response_payload.size));
+        const size_t                resp_size = cy_buffer_owned_gather(future.last_response.payload,
+                                                        (struct cy_bytes_mut_t){ .size = sizeof(resp), .data = &resp });
+        if (resp_size < 6) {
+            errx(0, "Invalid response size %zu", resp_size);
+        }
         if (resp.error != 0) {
             errx((int)resp.error, "Remote error");
         }

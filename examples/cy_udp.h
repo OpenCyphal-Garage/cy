@@ -118,7 +118,7 @@ static inline cy_err_t cy_udp_subscribe(struct cy_udp_topic_t* const     topic,
 
 static inline cy_err_t cy_udp_publish(struct cy_udp_topic_t* const       topic,
                                       const cy_us_t                      tx_deadline,
-                                      const struct cy_payload_t          payload,
+                                      const struct cy_buffer_borrowed_t  payload,
                                       const cy_us_t                      response_deadline,
                                       struct cy_response_future_t* const response_future)
 {
@@ -126,9 +126,9 @@ static inline cy_err_t cy_udp_publish(struct cy_udp_topic_t* const       topic,
 }
 
 /// Trivial convenience wrapper over cy_publish1().
-static inline cy_err_t cy_udp_publish1(struct cy_udp_topic_t* const topic,
-                                       const cy_us_t                tx_deadline,
-                                       const struct cy_payload_t    payload)
+static inline cy_err_t cy_udp_publish1(struct cy_udp_topic_t* const      topic,
+                                       const cy_us_t                     tx_deadline,
+                                       const struct cy_buffer_borrowed_t payload)
 {
     return cy_publish1(&topic->base, tx_deadline, payload);
 }

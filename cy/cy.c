@@ -751,20 +751,20 @@ cy_err_t cy_new(struct cy_t* const             cy,
 void cy_buffer_owned_release(struct cy_t* const cy, struct cy_buffer_owned_t* const payload)
 {
     if ((cy != NULL) && (payload != NULL) && (payload->origin.data != NULL)) {
-        cy->transport.payload_release(cy, *payload);
+        cy->transport.buffer_release(cy, *payload);
         // nullify the pointers to prevent double free
-        payload->next        = NULL;
+        payload->base.next   = NULL;
         payload->origin.size = 0;
         payload->origin.data = NULL;
     }
 }
 
-size_t cy_buffer_owned_get_size(const struct cy_buffer_owned_t* const payload)
+size_t cy_buffer_borrowed_get_size(const struct cy_buffer_borrowed_t payload)
 {
-    size_t                          out = 0;
-    const struct cy_buffer_owned_t* p   = payload;
+    size_t                             out = 0;
+    const struct cy_buffer_borrowed_t* p   = &payload;
     while (p != NULL) {
-        out += p->origin.size;
+        out += p->view.size;
         p = p->next;
     }
     return out;
@@ -810,6 +810,13 @@ void cy_ingest_topic_transfer(struct cy_topic_t* const topic, const struct cy_tr
     // unconnected publishers to inflate the age.
     topic->age++;
 
+    // Edge case: the subscription was just disabled while we were processing the transfer.
+    // We need to release the buffer because the application may never get to it.
+    if (topic->sub_list == NULL) {
+        cy->transport.buffer_release(cy, transfer.payload);
+        return; // No one is interested in this transfer.
+    }
+
     // Update the last received transfer.
     cy_buffer_owned_release(cy, &topic->sub_last_transfer.payload); // does nothing if already released
     topic->sub_last_transfer = transfer;
@@ -830,20 +837,21 @@ void cy_ingest_topic_response_transfer(struct cy_t* const cy, struct cy_transfer
 {
     assert(cy != NULL);
     // TODO: proper deserialization. This fails if the first <8 bytes are fragmented.
-    if (transfer.payload.view.size < 8U) {
-        cy->transport.payload_release(cy, transfer.payload);
+    if (transfer.payload.base.view.size < 8U) {
+        cy->transport.buffer_release(cy, transfer.payload);
         return; // Malformed response. The first 8 bytes shall contain the full topic hash.
     }
 
     // Deserialize the topic hash. The rest of the payload is for the application.
     uint64_t topic_hash = 0;
-    memcpy(&topic_hash, transfer.payload.view.data, sizeof(topic_hash));
-    transfer.payload.view.size -= sizeof(topic_hash);
-    transfer.payload.view.data = ((const char*)transfer.payload.view.data) + sizeof(topic_hash);
+    memcpy(&topic_hash, transfer.payload.base.view.data, sizeof(topic_hash));
+    transfer.payload.base.view.size -= sizeof(topic_hash);
+    transfer.payload.base.view.data = ((const char*)transfer.payload.base.view.data) + sizeof(topic_hash);
 
     // Find the topic -- log(N) lookup.
     struct cy_topic_t* const topic = cy_topic_find_by_hash(cy, topic_hash);
     if (topic == NULL) {
+        cy->transport.buffer_release(cy, transfer.payload);
         return; // We don't know this topic, ignore it.
     }
 
@@ -852,6 +860,7 @@ void cy_ingest_topic_response_transfer(struct cy_t* const cy, struct cy_transfer
                                             &transfer.metadata.transfer_id,
                                             &cavl_comp_response_future_transfer_id);
     if (tr == NULL) {
+        cy->transport.buffer_release(cy, transfer.payload);
         return; // Unexpected or duplicate response. TODO: Linger completed futures for multiple responses?
     }
     struct cy_response_future_t* const fut = CAVL2_TO_OWNER(tr, struct cy_response_future_t, index_transfer_id);

@@ -88,6 +88,28 @@ extern "C"
 /// response transfer as a confirmation for reliable transport.
 #define CY_RPC_SERVICE_ID_TOPIC_RESPONSE 510
 
+#define CY_PASTE_(a, b) a##b
+#define CY_PASTE(a, b)  CY_PASTE_(a, b)
+
+/// I am not sure if this should be part of the library because this is a rather complicated macro.
+/// It simply eliminates the boilerplate code for gathering a borrowed buffer into a contiguous storage on the stack.
+/// If the source buffer is only a single fragment, then no copying is done as the resulting cy_bytes_t is simply
+/// set to point to the only fragment.
+///
+/// Ideally, this should not be necessary at all, as all efficient APIs need to support scattered buffers;
+/// but the reality is that many APIs still expect contiguous buffers, which requires an extra copy.
+#define CY_BUFFER_GATHER_ON_STACK(to_bytes, from_buffer_borrowed_head)                                        \
+    struct cy_bytes_t to_bytes = { .data = from_buffer_borrowed_head.view.data,                               \
+                                   .size = from_buffer_borrowed_head.view.size };                             \
+    uint8_t           CY_PASTE(to_bytes, _storage)[cy_buffer_borrowed_get_size(from_buffer_borrowed_head)];   \
+    if (from_buffer_borrowed_head.next != NULL) {                                                             \
+        to_bytes.size =                                                                                       \
+          cy_buffer_borrowed_gather(from_buffer_borrowed_head,                                                \
+                                    (struct cy_bytes_mut_t){ .data = CY_PASTE(to_bytes, _storage),            \
+                                                             .size = sizeof(CY_PASTE(to_bytes, _storage)) }); \
+        to_bytes.data = CY_PASTE(to_bytes, _storage);                                                         \
+    }
+
 /// TODO: unified error codes: argument, memory, capacity, anonymous, name.
 typedef int32_t cy_err_t;
 typedef int64_t cy_us_t; ///< Monotonic microsecond timestamp. Signed to permit arithmetics in the past.
@@ -135,19 +157,16 @@ struct cy_bytes_mut_t
 /// accept the transfer. This requirement is trivial to meet because the MTU of all transports that supply fragmented
 /// payloads is much larger than 8 bytes.
 ///
-/// In degenerate cases the size of a payload fragment may be zero.
-struct cy_buffer_owned_t
-{
-    struct cy_buffer_owned_t* next;   ///< NULL in the last entry.
-    struct cy_bytes_t         view;   ///< Use this to access the actual data.
-    struct cy_bytes_mut_t     origin; ///< Do not access! Address may not be mapped. Only for freeing the payload.
-};
-
-/// This is strictly a structural subtype of cy_buffer_owned_t to enable pointer conversion.
+/// The size of a payload fragment may be zero.
 struct cy_buffer_borrowed_t
 {
     const struct cy_buffer_borrowed_t* next; ///< NULL in the last entry.
     struct cy_bytes_t                  view;
+};
+struct cy_buffer_owned_t
+{
+    struct cy_buffer_borrowed_t base;
+    struct cy_bytes_mut_t       origin; ///< Do not access! Address may not be mapped. Only for freeing the payload.
 };
 
 struct cy_tree_t
@@ -249,7 +268,7 @@ struct cy_transport_io_t
     cy_transport_subscribe_t                 subscribe;
     cy_transport_unsubscribe_t               unsubscribe;
     cy_transport_handle_resubscription_err_t handle_resubscription_err;
-    cy_transport_buffer_release_t            payload_release;
+    cy_transport_buffer_release_t            buffer_release;
 };
 
 /// A topic name is suffixed to the namespace name of the node that owns it, unless it begins with a `/`.
@@ -389,6 +408,13 @@ struct cy_subscription_t
     /// The callback may be NULL if the application prefers to check last_message by polling.
     cy_subscription_callback_t callback;
     void*                      user;
+};
+
+enum cy_future_state_t
+{
+    cy_future_pending = 0,
+    cy_future_success = 1,
+    cy_future_failure = 2,
 };
 
 /// Register an expectation for a response to a message sent to the topic.
@@ -541,7 +567,11 @@ void cy_buffer_owned_release(struct cy_t* const cy, struct cy_buffer_owned_t* co
 
 /// Returns the total size of all payload fragments in the chain.
 /// The complexity is linear, but the number of elements is very small (total size divided by MTU).
-size_t cy_buffer_owned_get_size(const struct cy_buffer_owned_t payload);
+size_t               cy_buffer_borrowed_get_size(const struct cy_buffer_borrowed_t payload);
+static inline size_t cy_buffer_owned_get_size(const struct cy_buffer_owned_t payload)
+{
+    return cy_buffer_borrowed_get_size(payload.base);
+}
 
 /// Takes the head of a fragmented buffer list and copies the data into the contiguous buffer provided by the user.
 /// If the total size of all fragments combined exceeds the size of the user-provided buffer,
@@ -551,8 +581,7 @@ size_t cy_buffer_owned_get_size(const struct cy_buffer_owned_t payload);
 size_t               cy_buffer_borrowed_gather(const struct cy_buffer_borrowed_t payload, struct cy_bytes_mut_t dest);
 static inline size_t cy_buffer_owned_gather(const struct cy_buffer_owned_t payload, const struct cy_bytes_mut_t dest)
 {
-    return cy_buffer_borrowed_gather(
-      (struct cy_buffer_borrowed_t){ .next = (struct cy_buffer_borrowed_t*)payload.next, .view = payload.view }, dest);
+    return cy_buffer_borrowed_gather(payload.base, dest);
 }
 
 /// This is invoked whenever a new transfer on the topic is received.
@@ -719,13 +748,6 @@ cy_err_t cy_subscribe(struct cy_topic_t* const         topic,
                       const cy_us_t                    transfer_id_timeout,
                       const cy_subscription_callback_t callback);
 void     cy_unsubscribe(struct cy_topic_t* const topic, struct cy_subscription_t* const sub);
-
-enum cy_future_state_t
-{
-    cy_future_pending = 0,
-    cy_future_success = 1,
-    cy_future_failure = 2,
-};
 
 /// The transfer-ID is always incremented, even on failure, to signal lost messages.
 /// This function always publishes only one transfer as requested; no auxiliary traffic is generated.

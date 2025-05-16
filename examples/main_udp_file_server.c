@@ -23,12 +23,11 @@ static uint64_t random_uid(void)
 /// Response schema:
 ///     uint32      errno
 ///     byte[<=256] data
-void on_file_read_msg(struct cy_subscription_t* const sub,
-                      const cy_us_t                   ts,
-                      const struct cy_transfer_meta_t transfer,
-                      const struct cy_payload_t       payload)
+void on_file_read_msg(struct cy_subscription_t* const sub)
 {
     assert(sub != NULL);
+    struct cy_transfer_owned_t* const transfer = &sub->topic->sub_last_transfer;
+    CY_BUFFER_GATHER_ON_STACK(payload, transfer->payload.base)
     if ((payload.size < 10) || (payload.size > (256 + 2 + 8))) {
         CY_TRACE(sub->topic->cy, "Malformed request: Payload size %zu is invalid", payload.size);
         return;
@@ -74,9 +73,9 @@ void on_file_read_msg(struct cy_subscription_t* const sub,
              response.data_len,
              response.error);
     (void)cy_respond(sub->topic, //
-                     ts + 1000000,
-                     transfer,
-                     (struct cy_payload_t){ .data = &response, .size = response.data_len + 6 });
+                     transfer->timestamp + 1000000,
+                     transfer->metadata,
+                     (struct cy_buffer_borrowed_t){ .view = { .data = &response, .size = response.data_len + 6 } });
 }
 
 /// The only command line argument is the node namespace.

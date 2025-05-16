@@ -11,7 +11,9 @@
 #include <time.h>
 
 /// Maximum expected incoming datagram size. If larger jumbo frames are expected, this value should be increased.
-#define RX_BUFFER_SIZE 2000
+#ifndef CY_UDP_SOCKET_READ_BUFFER_SIZE
+#define CY_UDP_SOCKET_READ_BUFFER_SIZE 2000
+#endif
 
 static int64_t min_i64(const int64_t a, const int64_t b)
 {
@@ -171,10 +173,18 @@ static void transport_clear_node_id(struct cy_t* const cy)
 }
 
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
-static cy_err_t transport_publish(struct cy_topic_t* const  topic,
-                                  const cy_us_t             tx_deadline,
-                                  const struct cy_payload_t payload)
+static cy_err_t transport_publish(struct cy_topic_t* const          topic,
+                                  const cy_us_t                     tx_deadline,
+                                  const struct cy_buffer_borrowed_t payload)
 {
+    struct UdpardPayload udpard_payload = { .size = payload.view.size, .data = payload.view.data };
+    uint8_t              linear_copy[cy_buffer_borrowed_get_size(payload)];
+    if (payload.next != NULL) { // TODO: support scattered tx buffers in libudpard
+        udpard_payload.size = cy_buffer_borrowed_gather(
+          payload, (struct cy_bytes_mut_t){ .data = linear_copy, .size = sizeof(linear_copy) });
+        udpard_payload.data = linear_copy;
+    }
+
     struct cy_udp_t* const cy_udp = (struct cy_udp_t*)topic->cy;
     cy_err_t               res    = 0;
     for (uint_fast8_t i = 0; i < CY_UDP_IFACE_COUNT_MAX; i++) {
@@ -184,7 +194,7 @@ static cy_err_t transport_publish(struct cy_topic_t* const  topic,
                                               (enum UdpardPriority)topic->pub_priority,
                                               cy_topic_get_subject_id(topic),
                                               topic->pub_transfer_id,
-                                              (struct UdpardPayload){ .size = payload.size, .data = payload.data },
+                                              udpard_payload,
                                               NULL);
             // NOLINTNEXTLINE(*-narrowing-conversions, *-avoid-nested-conditional-operator)
             res = (e < 0) ? (cy_err_t)e : ((res < 0) ? res : (cy_err_t)e);
@@ -193,12 +203,20 @@ static cy_err_t transport_publish(struct cy_topic_t* const  topic,
     return res;
 }
 
-static cy_err_t transport_request(struct cy_t* const              cy,
-                                  const uint16_t                  service_id,
-                                  const struct cy_transfer_meta_t metadata,
-                                  const cy_us_t                   tx_deadline,
-                                  const struct cy_payload_t       payload)
+static cy_err_t transport_request(struct cy_t* const                  cy,
+                                  const uint16_t                      service_id,
+                                  const struct cy_transfer_metadata_t metadata,
+                                  const cy_us_t                       tx_deadline,
+                                  const struct cy_buffer_borrowed_t   payload)
 {
+    struct UdpardPayload udpard_payload = { .size = payload.view.size, .data = payload.view.data };
+    uint8_t              linear_copy[cy_buffer_borrowed_get_size(payload)];
+    if (payload.next != NULL) { // TODO: support scattered tx buffers in libudpard
+        udpard_payload.size = cy_buffer_borrowed_gather(
+          payload, (struct cy_bytes_mut_t){ .data = linear_copy, .size = sizeof(linear_copy) });
+        udpard_payload.data = linear_copy;
+    }
+
     struct cy_udp_t* const cy_udp = (struct cy_udp_t*)cy;
     cy_err_t               res    = 0;
     for (uint_fast8_t i = 0; i < CY_UDP_IFACE_COUNT_MAX; i++) {
@@ -209,7 +227,7 @@ static cy_err_t transport_request(struct cy_t* const              cy,
                                               service_id,
                                               metadata.remote_node_id,
                                               metadata.transfer_id,
-                                              (struct UdpardPayload){ .size = payload.size, .data = payload.data },
+                                              udpard_payload,
                                               NULL);
             // NOLINTNEXTLINE(*-narrowing-conversions, *-avoid-nested-conditional-operator)
             res = (e < 0) ? (cy_err_t)e : ((res < 0) ? res : (cy_err_t)e);
@@ -266,6 +284,16 @@ static void transport_handle_resubscription_error(struct cy_topic_t* const cy_to
     CY_TRACE(cy_topic->cy, "Resubscription error on topic '%s': %d", cy_topic->name, error);
     // Currently, we don't do anything here. What we could do is to put all failed topics into some list,
     // and attempt to resubscribe to them every now and then from the spin functions.
+}
+
+static void transport_buffer_release(struct cy_t* const cy, const struct cy_buffer_owned_t buf)
+{
+    struct cy_udp_t* const cy_udp = (struct cy_udp_t*)cy;
+    static_assert(sizeof(struct UdpardFragment) == sizeof(struct cy_buffer_owned_t), "");
+    static_assert(offsetof(struct UdpardFragment, next) == offsetof(struct cy_buffer_owned_t, base.next), "");
+    static_assert(offsetof(struct UdpardFragment, view) == offsetof(struct cy_buffer_owned_t, base.view), "");
+    static_assert(offsetof(struct UdpardFragment, origin) == offsetof(struct cy_buffer_owned_t, origin), "");
+    udpardRxFragmentFree(*(struct UdpardFragment*)&buf, cy_udp->rx_mem.fragment, cy_udp->rx_mem.payload);
 }
 
 cy_err_t cy_udp_new(struct cy_udp_t* const cy_udp,
@@ -330,7 +358,8 @@ cy_err_t cy_udp_new(struct cy_udp_t* const cy_udp,
                                                  .request                   = transport_request,
                                                  .subscribe                 = transport_subscribe,
                                                  .unsubscribe               = transport_unsubscribe,
-                                                 .handle_resubscription_err = transport_handle_resubscription_error });
+                                                 .handle_resubscription_err = transport_handle_resubscription_error,
+                                                 .buffer_release            = transport_buffer_release });
     }
 
     // Cleanup on error.
@@ -377,11 +406,26 @@ static void tx_offload(struct cy_udp_t* const cy_udp)
     }
 }
 
-static struct cy_transfer_meta_t make_metadata(const struct UdpardRxTransfer* const tr)
+static struct cy_transfer_metadata_t make_metadata(const struct UdpardRxTransfer* const tr)
 {
-    return (struct cy_transfer_meta_t){ .priority       = (enum cy_prio_t)tr->priority,
-                                        .remote_node_id = tr->source_node_id,
-                                        .transfer_id    = tr->transfer_id };
+    return (struct cy_transfer_metadata_t){ .priority       = (enum cy_prio_t)tr->priority,
+                                            .remote_node_id = tr->source_node_id,
+                                            .transfer_id    = tr->transfer_id };
+}
+
+static struct cy_buffer_owned_t make_rx_buffer(const struct UdpardFragment head)
+{
+    static_assert(sizeof(struct UdpardFragment) == sizeof(struct cy_buffer_owned_t), "");
+    static_assert(offsetof(struct UdpardFragment, next) == offsetof(struct cy_buffer_owned_t, base.next), "");
+    static_assert(offsetof(struct UdpardFragment, view) == offsetof(struct cy_buffer_owned_t, base.view), "");
+    static_assert(offsetof(struct UdpardFragment, origin) == offsetof(struct cy_buffer_owned_t, origin), "");
+    return (struct cy_buffer_owned_t){
+        .base   = {
+            .next = (struct cy_buffer_borrowed_t*)head.next,
+            .view = { .size = head.view.size, .data = head.view.data },
+        },
+        .origin = { .size = head.origin.size, .data = head.origin.data },
+    };
 }
 
 static void ingest_topic_frame(struct cy_udp_topic_t* const      topic,
@@ -389,21 +433,16 @@ static void ingest_topic_frame(struct cy_udp_topic_t* const      topic,
                                const uint_fast8_t                iface_index,
                                const struct UdpardMutablePayload dgram)
 {
-    struct cy_udp_t* const cy_udp = (struct cy_udp_t*)topic->base.cy;
-    if (cy_topic_has_local_subscribers(&topic->base)) {
+    const struct cy_udp_t* const cy_udp = (struct cy_udp_t*)topic->base.cy;
+    if (cy_topic_has_local_subscribers(&topic->base) && topic->base.subscribed) {
         struct UdpardRxTransfer transfer = { 0 }; // udpard takes ownership of the dgram payload buffer.
         const int_fast8_t       er =
           udpardRxSubscriptionReceive(&topic->sub, (UdpardMicrosecond)ts, dgram, iface_index, &transfer);
         if (er == 1) {
-            // TODO FIXME BUG XXX currently we only handle single-frame payloads correctly. Modify the payload API
-            // to accept multipart payloads with a custom free function (transport library specific).
-            cy_ingest_topic_transfer(
-              &topic->base,
-              (cy_us_t)transfer.timestamp_usec,
-              make_metadata(&transfer),
-              (struct cy_payload_t){ .size = transfer.payload_size, .data = transfer.payload.view.data });
-            // This freeing should not be done here at all! Move the payload to the application instead.
-            udpardRxFragmentFree(transfer.payload, topic->sub.memory.fragment, topic->sub.memory.payload);
+            const struct cy_transfer_owned_t tr = { .timestamp = (cy_us_t)transfer.timestamp_usec,
+                                                    .metadata  = make_metadata(&transfer),
+                                                    .payload   = make_rx_buffer(transfer.payload) };
+            cy_ingest_topic_transfer(&topic->base, tr);
         } else if (er == 0) {
             (void)0; // Transfer is not yet completed, nothing to do for now.
         } else if (er == -UDPARD_ERROR_MEMORY) {
@@ -412,7 +451,7 @@ static void ingest_topic_frame(struct cy_udp_topic_t* const      topic,
             assert(false); // Unreachable -- internal error: unanticipated UDPARD error state (not possible).
         }
     } else { // The subscription was disabled while processing other socket reads. Ignore it.
-        cy_udp->mem.deallocate(cy_udp->mem.user_reference, RX_BUFFER_SIZE, dgram.data);
+        cy_udp->mem.deallocate(cy_udp->mem.user_reference, CY_UDP_SOCKET_READ_BUFFER_SIZE, dgram.data);
     }
 }
 
@@ -427,20 +466,15 @@ static void ingest_rpc_frame(struct cy_udp_t* const            cy_udp,
       &cy_udp->rpc_rx_dispatcher, (UdpardMicrosecond)ts, dgram, iface_index, &port, &transfer);
     if (er == 1) {
         assert(port != NULL);
-        // TODO FIXME BUG XXX currently we only handle single-frame payloads correctly. Modify the payload API
-        // to accept multipart payloads with a custom free function (transport library specific).
         if (port == &cy_udp->rpc_rx_port_topic_response) {
             assert(port->service_id == CY_RPC_SERVICE_ID_TOPIC_RESPONSE);
-            cy_ingest_topic_response_transfer(
-              &cy_udp->base,
-              (cy_us_t)transfer.base.timestamp_usec,
-              make_metadata(&transfer.base),
-              (struct cy_payload_t){ .size = transfer.base.payload_size, .data = transfer.base.payload.view.data });
+            const struct cy_transfer_owned_t tr = { .timestamp = (cy_us_t)transfer.base.timestamp_usec,
+                                                    .metadata  = make_metadata(&transfer.base),
+                                                    .payload   = make_rx_buffer(transfer.base.payload) };
+            cy_ingest_topic_response_transfer(&cy_udp->base, tr);
         } else {
             assert(false); // Forgot to handle?
         }
-        // This freeing should not be done here at all! Move the payload to the application instead.
-        udpardRxFragmentFree(transfer.base.payload, cy_udp->rx_mem.fragment, cy_udp->rx_mem.payload);
     } else if (er == 0) {
         (void)0; // Transfer is not yet completed, nothing to do for now.
     } else if (er == -UDPARD_ERROR_MEMORY) {
@@ -460,8 +494,8 @@ static void read_socket(struct cy_udp_t* const       cy_udp,
     // to LibUDPard, which will free it when it is no longer needed.
     // A deeply embedded system may be able to transfer this memory directly from the NIC driver to eliminate copy.
     struct UdpardMutablePayload dgram = {
-        .size = RX_BUFFER_SIZE,
-        .data = cy_udp->mem.allocate(cy_udp->mem.user_reference, RX_BUFFER_SIZE),
+        .size = CY_UDP_SOCKET_READ_BUFFER_SIZE,
+        .data = cy_udp->mem.allocate(cy_udp->mem.user_reference, CY_UDP_SOCKET_READ_BUFFER_SIZE),
     };
     if (NULL == dgram.data) {
         ++*((topic != NULL) ? &topic->rx_oom_count : &cy_udp->rpc_rx[iface_index].oom_count);
@@ -473,7 +507,7 @@ static void read_socket(struct cy_udp_t* const       cy_udp,
     if (rx_result < 0) {
         // We end up here if the socket was closed while processing another datagram.
         // This happens if a subscriber chose to unsubscribe dynamically or caused the node-ID to be changed.
-        cy_udp->mem.deallocate(cy_udp->mem.user_reference, RX_BUFFER_SIZE, dgram.data);
+        cy_udp->mem.deallocate(cy_udp->mem.user_reference, CY_UDP_SOCKET_READ_BUFFER_SIZE, dgram.data);
         if (topic != NULL) {
             assert(topic->rx_sock_err_handler != NULL);
             topic->rx_sock_err_handler(topic, iface_index, rx_result);
@@ -484,7 +518,7 @@ static void read_socket(struct cy_udp_t* const       cy_udp,
         return;
     }
     if (rx_result == 0) { // Nothing to read OR dgram dropped by filters (own traffic or wrong iface).
-        cy_udp->mem.deallocate(cy_udp->mem.user_reference, RX_BUFFER_SIZE, dgram.data);
+        cy_udp->mem.deallocate(cy_udp->mem.user_reference, CY_UDP_SOCKET_READ_BUFFER_SIZE, dgram.data);
         return;
     }
 
