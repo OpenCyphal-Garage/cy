@@ -749,6 +749,9 @@ cy_err_t cy_subscribe(struct cy_topic_t* const         topic,
                       const cy_subscription_callback_t callback);
 void     cy_unsubscribe(struct cy_topic_t* const topic, struct cy_subscription_t* const sub);
 
+/// Just a convenience function, nothing special.
+struct cy_response_future_t cy_response_future_init(const cy_response_callback_t callback, void* const user);
+
 /// The transfer-ID is always incremented, even on failure, to signal lost messages.
 /// This function always publishes only one transfer as requested; no auxiliary traffic is generated.
 /// If the local node-ID is not allocated, the function may fail depending on the capabilities of the transport library;

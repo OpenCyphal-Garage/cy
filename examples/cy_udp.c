@@ -61,22 +61,22 @@ static void* mem_alloc(void* const user, const size_t size)
     void* const            out    = malloc(size);
     if (size > 0) {
         if (out != NULL) {
-            cy_udp->mem_allocated_bytes += size;
             cy_udp->mem_allocated_fragments++;
         } else {
             cy_udp->mem_oom_count++;
         }
     }
+    // CY_TRACE(&cy_udp->base, "mem_alloc(%zu) -> %p", size, out);
     return out;
 }
 
 static void mem_free(void* const user, const size_t size, void* const pointer)
 {
     struct cy_udp_t* const cy_udp = (struct cy_udp_t*)user;
+    (void)size;
+    // CY_TRACE(&cy_udp->base, "mem_free(%zu, %p)", size, pointer);
     if (pointer != NULL) {
-        assert(cy_udp->mem_allocated_bytes >= size);
         assert(cy_udp->mem_allocated_fragments > 0);
-        cy_udp->mem_allocated_bytes -= size;
         cy_udp->mem_allocated_fragments--;
         free(pointer);
     }

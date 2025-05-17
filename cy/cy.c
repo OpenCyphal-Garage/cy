@@ -1156,6 +1156,11 @@ cy_err_t cy_subscribe(struct cy_topic_t* const         topic,
     return err;
 }
 
+struct cy_response_future_t cy_response_future_init(const cy_response_callback_t callback, void* const user)
+{
+    return (struct cy_response_future_t){ .callback = callback, .user = user };
+}
+
 cy_err_t cy_publish(struct cy_topic_t* const           topic,
                     const cy_us_t                      tx_deadline,
                     const struct cy_buffer_borrowed_t  payload,
@@ -1171,11 +1176,14 @@ cy_err_t cy_publish(struct cy_topic_t* const           topic,
     // The reason we can't do it afterward is that if the transport has a cyclic transfer-ID, insertion may fail if
     // we have exhausted the transfer-ID set.
     if (response_future != NULL) {
-        response_future->topic       = topic;
-        response_future->state       = cy_future_pending;
-        response_future->transfer_id = topic->pub_transfer_id;
-        response_future->deadline    = response_deadline;
-
+        response_future->index_deadline    = (struct cy_tree_t){ 0 };
+        response_future->index_transfer_id = (struct cy_tree_t){ 0 };
+        response_future->topic             = topic;
+        response_future->state             = cy_future_pending;
+        response_future->transfer_id       = topic->pub_transfer_id;
+        response_future->deadline          = response_deadline;
+        response_future->last_response     = (struct cy_transfer_owned_t){ 0 };
+        // NB: we don't touch the callback and the user pointer, as they are to be initialized by the user.
         const struct cy_tree_t* const tr = cavl2_find_or_insert(&topic->response_futures_by_transfer_id,
                                                                 &topic->pub_transfer_id,
                                                                 &cavl_comp_response_future_transfer_id,

@@ -70,7 +70,6 @@ struct cy_udp_t
     void (*rpc_rx_sock_err_handler)(struct cy_udp_t* topic, uint_fast8_t iface_index, int16_t error);
 
     size_t   mem_allocated_fragments;
-    size_t   mem_allocated_bytes;
     uint64_t mem_oom_count;
 };
 

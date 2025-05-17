@@ -89,8 +89,8 @@ int main(const int argc, char* argv[])
 
         // Send the request.
         fprintf(stderr, "\nRequesting offset %llu...\n", (unsigned long long)req.read_offset);
-        struct cy_response_future_t future;
-        res = cy_udp_publish(&topic_file_read,
+        struct cy_response_future_t future = cy_response_future_init(NULL, NULL);
+        res                                = cy_udp_publish(&topic_file_read,
                              now + MEGA,
                              (struct cy_buffer_borrowed_t){ .view = { .size = req.path_len + 10, .data = &req } },
                              now + RESPONSE_TIMEOUT,
