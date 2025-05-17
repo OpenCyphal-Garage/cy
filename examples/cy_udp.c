@@ -177,25 +177,19 @@ static cy_err_t transport_publish(struct cy_topic_t* const          topic,
                                   const cy_us_t                     tx_deadline,
                                   const struct cy_buffer_borrowed_t payload)
 {
-    struct UdpardPayload udpard_payload = { .size = payload.view.size, .data = payload.view.data };
-    uint8_t              linear_copy[cy_buffer_borrowed_get_size(payload)];
-    if (payload.next != NULL) { // TODO: support scattered tx buffers in libudpard
-        udpard_payload.size = cy_buffer_borrowed_gather(
-          payload, (struct cy_bytes_mut_t){ .data = linear_copy, .size = sizeof(linear_copy) });
-        udpard_payload.data = linear_copy;
-    }
-
+    CY_BUFFER_GATHER_ON_STACK(linear_payload, payload);
     struct cy_udp_t* const cy_udp = (struct cy_udp_t*)topic->cy;
     cy_err_t               res    = 0;
     for (uint_fast8_t i = 0; i < CY_UDP_IFACE_COUNT_MAX; i++) {
         if (cy_udp->tx[i].udpard_tx.queue_capacity > 0) {
-            const int32_t e = udpardTxPublish(&cy_udp->tx[i].udpard_tx,
-                                              (UdpardMicrosecond)tx_deadline,
-                                              (enum UdpardPriority)topic->pub_priority,
-                                              cy_topic_get_subject_id(topic),
-                                              topic->pub_transfer_id,
-                                              udpard_payload,
-                                              NULL);
+            const int32_t e =
+              udpardTxPublish(&cy_udp->tx[i].udpard_tx,
+                              (UdpardMicrosecond)tx_deadline,
+                              (enum UdpardPriority)topic->pub_priority,
+                              cy_topic_get_subject_id(topic),
+                              topic->pub_transfer_id,
+                              (struct UdpardPayload){ .size = payload.view.size, .data = payload.view.data },
+                              NULL);
             // NOLINTNEXTLINE(*-narrowing-conversions, *-avoid-nested-conditional-operator)
             res = (e < 0) ? (cy_err_t)e : ((res < 0) ? res : (cy_err_t)e);
         }
@@ -209,26 +203,20 @@ static cy_err_t transport_request(struct cy_t* const                  cy,
                                   const cy_us_t                       tx_deadline,
                                   const struct cy_buffer_borrowed_t   payload)
 {
-    struct UdpardPayload udpard_payload = { .size = payload.view.size, .data = payload.view.data };
-    uint8_t              linear_copy[cy_buffer_borrowed_get_size(payload)];
-    if (payload.next != NULL) { // TODO: support scattered tx buffers in libudpard
-        udpard_payload.size = cy_buffer_borrowed_gather(
-          payload, (struct cy_bytes_mut_t){ .data = linear_copy, .size = sizeof(linear_copy) });
-        udpard_payload.data = linear_copy;
-    }
-
+    CY_BUFFER_GATHER_ON_STACK(linear_payload, payload);
     struct cy_udp_t* const cy_udp = (struct cy_udp_t*)cy;
     cy_err_t               res    = 0;
     for (uint_fast8_t i = 0; i < CY_UDP_IFACE_COUNT_MAX; i++) {
         if (cy_udp->tx[i].udpard_tx.queue_capacity > 0) {
-            const int32_t e = udpardTxRequest(&cy_udp->tx[i].udpard_tx,
-                                              (UdpardMicrosecond)tx_deadline,
-                                              (enum UdpardPriority)metadata.priority,
-                                              service_id,
-                                              metadata.remote_node_id,
-                                              metadata.transfer_id,
-                                              udpard_payload,
-                                              NULL);
+            const int32_t e =
+              udpardTxRequest(&cy_udp->tx[i].udpard_tx,
+                              (UdpardMicrosecond)tx_deadline,
+                              (enum UdpardPriority)metadata.priority,
+                              service_id,
+                              metadata.remote_node_id,
+                              metadata.transfer_id,
+                              (struct UdpardPayload){ .size = payload.view.size, .data = payload.view.data },
+                              NULL);
             // NOLINTNEXTLINE(*-narrowing-conversions, *-avoid-nested-conditional-operator)
             res = (e < 0) ? (cy_err_t)e : ((res < 0) ? res : (cy_err_t)e);
         }

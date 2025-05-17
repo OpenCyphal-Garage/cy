@@ -1,3 +1,4 @@
+/// This is just a PoC, a crude approximation of what it might look like when implemented properly.
 /// Copyright (c) Pavel Kirienko <pavel@opencyphal.org>
 
 #pragma once
