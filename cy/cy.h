@@ -699,11 +699,11 @@ static inline uint64_t cy_topic_get_discriminator(const struct cy_topic_t* const
 }
 
 /// Technically, the callback can be NULL, and the subscriber will work anyway.
-/// One can still use the transfers from the underlying transport library before they are passed to cy_ingest().
+/// One can still use the transfers by polling the last received transfer in the topic object.
 ///
-/// Invoking this function on the same cy_subscription_t instance multiple times is allowed and will have no effect
-/// if the subscription is already active. This use case is added specifically to allow repairing broken
-/// resubscriptions when Cy attempts to move the topic to another subject-ID but fails to subscribe it.
+/// Invoking this function on the same cy_subscription_t instance multiple times is allowed.
+/// This is supported specifically to allow repairing broken resubscriptions when Cy attempts
+/// to move the topic to another subject-ID but fails to subscribe it.
 ///
 /// Future expansion: add wildcard subscribers that match topic names by pattern. Requires unbounded dynamic memory.
 ///
@@ -712,12 +712,19 @@ static inline uint64_t cy_topic_get_discriminator(const struct cy_topic_t* const
 /// The extent and transfer-ID timeout of all subscriptions should be the same, or these values of subscriptions
 /// added later should be less than the values of subscriptions added earlier. Otherwise, the library will be forced
 /// to resubscribe, which may cause momentary data loss if there were transfers in the middle of reassembly.
-cy_err_t cy_subscribe(struct cy_topic_t* const         topic,
-                      struct cy_subscription_t* const  sub,
-                      const size_t                     extent,
-                      const cy_us_t                    transfer_id_timeout,
-                      const cy_subscription_callback_t callback);
-void     cy_unsubscribe(struct cy_topic_t* const topic, struct cy_subscription_t* const sub);
+cy_err_t               cy_subscribe_with_transfer_id_timeout(struct cy_topic_t* const         topic,
+                                                             struct cy_subscription_t* const  sub,
+                                                             const size_t                     extent,
+                                                             const cy_us_t                    transfer_id_timeout,
+                                                             const cy_subscription_callback_t callback);
+static inline cy_err_t cy_subscribe(struct cy_topic_t* const         topic,
+                                    struct cy_subscription_t* const  sub,
+                                    const size_t                     extent,
+                                    const cy_subscription_callback_t callback)
+{
+    return cy_subscribe_with_transfer_id_timeout(topic, sub, extent, CY_TRANSFER_ID_TIMEOUT_DEFAULT_us, callback);
+}
+void cy_unsubscribe(struct cy_topic_t* const topic, struct cy_subscription_t* const sub);
 
 /// Just a convenience function, nothing special.
 struct cy_future_t cy_future_new(const cy_response_callback_t callback, void* const user);

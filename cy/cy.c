@@ -750,11 +750,7 @@ cy_err_t cy_new(struct cy_t* const                cy,
         if (cy->heartbeat_topic == NULL) {
             res = -654; // TODO error codes
         } else {
-            res = cy_subscribe(cy->heartbeat_topic,
-                               &cy->heartbeat_sub,
-                               sizeof(struct heartbeat_t),
-                               CY_TRANSFER_ID_TIMEOUT_DEFAULT_us,
-                               &on_heartbeat);
+            res = cy_subscribe(cy->heartbeat_topic, &cy->heartbeat_sub, sizeof(struct heartbeat_t), &on_heartbeat);
             if (res < 0) {
                 cy_topic_destroy(cy->heartbeat_topic);
             }
@@ -1117,11 +1113,11 @@ uint16_t cy_topic_get_subject_id(const struct cy_topic_t* const topic)
     return topic_get_subject_id(topic->hash, topic->evictions);
 }
 
-cy_err_t cy_subscribe(struct cy_topic_t* const         topic,
-                      struct cy_subscription_t* const  sub,
-                      const size_t                     extent,
-                      const cy_us_t                    transfer_id_timeout,
-                      const cy_subscription_callback_t callback)
+cy_err_t cy_subscribe_with_transfer_id_timeout(struct cy_topic_t* const         topic,
+                                               struct cy_subscription_t* const  sub,
+                                               const size_t                     extent,
+                                               const cy_us_t                    transfer_id_timeout,
+                                               const cy_subscription_callback_t callback)
 {
     assert(topic != NULL);
     assert(sub != NULL);
