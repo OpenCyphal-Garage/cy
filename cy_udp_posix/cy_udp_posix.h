@@ -2,7 +2,7 @@
 
 #pragma once
 
-#include "udp.h"
+#include "udp_wrapper.h"
 #include <cy.h>
 #include <udpard.h>
 
@@ -18,7 +18,7 @@ struct cy_udp_posix_topic_t
 {
     struct cy_topic_t           base;
     struct UdpardRxSubscription sub;
-    struct udp_rx_t             sock_rx[CY_UDP_POSIX_IFACE_COUNT_MAX];
+    struct udp_wrapper_rx_t     sock_rx[CY_UDP_POSIX_IFACE_COUNT_MAX];
 
     /// The count of out-of-memory errors that occurred while processing this topic.
     /// Every OOM implies that either a frame or a full transfer were lost.
@@ -44,15 +44,15 @@ struct cy_udp_posix_t
 
     struct
     {
-        struct UdpardTx udpard_tx;
-        struct udp_tx_t sock;
-        uint16_t        local_port;
-        uint64_t        frames_expired; ///< Number of tx frames that have timed out while waiting in the queue.
+        struct UdpardTx         udpard_tx;
+        struct udp_wrapper_tx_t sock;
+        uint16_t                local_port;
+        uint64_t                frames_expired; ///< Number of tx frames that have timed out while waiting in the queue.
     } tx[CY_UDP_POSIX_IFACE_COUNT_MAX];
 
     struct
     {
-        struct udp_rx_t sock;
+        struct udp_wrapper_rx_t sock;
         /// The count of out-of-memory errors that occurred while reading from this socket.
         /// Every OOM implies that either a frame or a full transfer were lost.
         uint64_t oom_count;
@@ -75,7 +75,7 @@ struct cy_udp_posix_t
 /// The namespace may be NULL or empty, in which case it defaults to "~".
 ///
 /// Unused interfaces should have address either 0 or 0xFFFFFFFF;
-/// to parse IP addresses from string see udp_parse_iface_address().
+/// to parse IP addresses from string see udp_wrapper_parse_iface_address().
 ///
 /// The local node ID should be set to CY_NODE_ID_INVALID unless manual configuration is required.
 cy_err_t cy_udp_posix_new(struct cy_udp_t* const cy_udp,

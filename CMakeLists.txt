@@ -47,5 +47,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${c_cxx_flags} -Wzero-as-null-pointer-constant")
 
-#add_subdirectory(tests)
+add_subdirectory(cy)
+add_subdirectory(cy_udp_posix)
 add_subdirectory(examples)
