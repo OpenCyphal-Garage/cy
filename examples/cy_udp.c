@@ -606,13 +606,7 @@ static cy_err_t spin_once_until(struct cy_udp_t* const cy_udp, const cy_us_t dea
     return res;
 }
 
-cy_err_t cy_udp_spin_once(struct cy_udp_t* const cy_udp)
-{
-    assert(cy_udp != NULL);
-    return spin_once_until(cy_udp, cy_udp->base.heartbeat_next);
-}
-
-cy_err_t cy_udp_spin_until(struct cy_udp_t* const cy_udp, const cy_us_t deadline)
+cy_err_t cy_udp_posix_spin_until(struct cy_udp_t* const cy_udp, const cy_us_t deadline)
 {
     cy_err_t res = 0;
     while (res >= 0) {
@@ -622,6 +616,12 @@ cy_err_t cy_udp_spin_until(struct cy_udp_t* const cy_udp, const cy_us_t deadline
         }
     }
     return res;
+}
+
+cy_err_t cy_udp_posix_spin_once(struct cy_udp_t* const cy_udp)
+{
+    assert(cy_udp != NULL);
+    return spin_once_until(cy_udp, min_i64(cy_udp_now() + 2000, cy_udp->base.heartbeat_next));
 }
 
 bool cy_udp_topic_new(struct cy_udp_t* const              cy_udp,
