@@ -806,11 +806,6 @@ static void mark_neighbor(struct cy_t* const cy, const uint16_t remote_node_id)
 {
     struct cy_bloom64_t* const bloom = cy->platform->node_id_bloom(cy);
     assert((bloom != NULL) && (bloom->n_bits > 0) && ((bloom->n_bits % 64) == 0) && (bloom->popcount <= bloom->n_bits));
-    if ((cy->node_id > cy->platform->node_id_max) && !bloom64_get(bloom, remote_node_id)) {
-        cy->heartbeat_next += (cy_us_t)random_uint(cy, 0, 2 * MEGA);
-        CY_TRACE(cy, "🔭 Discovered neighbor %04x; new Bloom popcount %zu", remote_node_id, bloom->popcount + 1U);
-    }
-    bloom64_set(bloom, remote_node_id);
     // A large population count indicates that the filter contains tombstones (marks for nodes that have left the
     // network). We can't remove them individually, so we purge the filter and start over.
     const bool bloom_congested = bloom->popcount > ((bloom->n_bits * 31ULL) / 32U);
@@ -819,6 +814,11 @@ static void mark_neighbor(struct cy_t* const cy, const uint16_t remote_node_id)
         bloom64_purge(bloom);
         assert(bloom->popcount == 0);
     }
+    if ((cy->node_id > cy->platform->node_id_max) && !bloom64_get(bloom, remote_node_id)) {
+        cy->heartbeat_next += (cy_us_t)random_uint(cy, 0, 2 * MEGA);
+        CY_TRACE(cy, "🔭 Discovered neighbor %04x; new Bloom popcount %zu", remote_node_id, bloom->popcount + 1U);
+    }
+    bloom64_set(bloom, remote_node_id);
 }
 
 void cy_ingest_topic_transfer(struct cy_topic_t* const topic, const struct cy_transfer_owned_t transfer)
@@ -1178,7 +1178,7 @@ cy_err_t cy_subscribe(struct cy_topic_t* const         topic,
     return err;
 }
 
-struct cy_future_t cy_future_init(const cy_response_callback_t callback, void* const user)
+struct cy_future_t cy_future_new(const cy_response_callback_t callback, void* const user)
 {
     return (struct cy_future_t){ .callback = callback, .user = user };
 }
