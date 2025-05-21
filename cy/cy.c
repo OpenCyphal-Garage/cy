@@ -33,13 +33,17 @@ static int_fast8_t log2_floor(const uint64_t x)
     return (int_fast8_t)((x == 0) ? -1 : (63 - __builtin_clzll(x)));
 }
 
+static uint64_t random_u64(const struct cy_t* const cy)
+{
+    const uint64_t seed[2] = { cy->platform->prng64(cy), cy->uid };
+    return rapidhash(seed, sizeof(seed));
+}
+
 /// The limits are inclusive. Returns min unless min < max.
 static uint64_t random_uint(const struct cy_t* const cy, const uint64_t min, const uint64_t max)
 {
     if (min < max) {
-        const uint64_t seed[2] = { cy->platform->prng64(cy), cy->uid };
-        const uint64_t x       = rapidhash(seed, sizeof(seed));
-        return (x % (max - min)) + min;
+        return (random_u64(cy) % (max - min)) + min;
     }
     return min;
 }
@@ -726,7 +730,7 @@ cy_err_t cy_new(struct cy_t* const                cy,
     // and to claim the address; if it's already taken, we will want to cause a collision to move the other node,
     // because manually assigned addresses take precedence over auto-assigned ones.
     // If we are not given a node-ID, we need to first listen to the network.
-    cy->heartbeat_period_max                   = MEGA;
+    cy->heartbeat_period_max                   = 100 * KILO;
     cy->heartbeat_full_gossip_cycle_period_max = 10 * MEGA;
     cy->heartbeat_next                         = cy->started_at;
     cy_err_t res                               = 0;
@@ -999,10 +1003,10 @@ struct cy_topic_t* cy_topic_new_hint(struct cy_t* const cy, const char* const na
     topic->age       = 0;
     topic->aged_at   = cy_now(cy);
 
-    topic->user                    = NULL;
-    topic->pub_transfer_id         = 0;
-    topic->pub_priority            = cy_prio_nominal;
-    topic->sub_list                = NULL;
+    topic->user            = NULL;
+    topic->pub_transfer_id = random_u64(cy); // https://forum.opencyphal.org/t/improve-the-transfer-id-timeout/2375
+    topic->pub_priority    = cy_prio_nominal;
+    topic->sub_list        = NULL;
     topic->sub_transfer_id_timeout = 0;
     topic->sub_extent              = 0;
     topic->subscribed              = false;

@@ -654,6 +654,7 @@ static inline struct cy_topic_t* cy_topic_new(struct cy_t* const cy, const char*
 void cy_topic_destroy(struct cy_topic_t* const topic);
 
 /// Complexity is logarithmic in the number of topics. NULL if not found.
+/// In practical terms, these queries are very fast and efficient.
 struct cy_topic_t* cy_topic_find_by_name(struct cy_t* const cy, const char* const name);
 struct cy_topic_t* cy_topic_find_by_hash(struct cy_t* const cy, const uint64_t hash);
 struct cy_topic_t* cy_topic_find_by_subject_id(struct cy_t* const cy, const uint16_t subject_id);
