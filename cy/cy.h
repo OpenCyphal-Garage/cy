@@ -34,12 +34,12 @@
 #define CY_TRACE(cy, ...) (void)0
 #endif
 
-// =============================================================================================================
-
 #ifdef __cplusplus
 extern "C"
 {
 #endif
+
+// =============================================  PRIMITIVES & CONSTANTS  =============================================
 
 /// A sensible middle ground between worst-case gossip traffic and memory utilization vs. longest name support.
 /// In CAN FD networks, topic names should be short to avoid multi-frame heartbeats.
@@ -117,7 +117,7 @@ typedef int64_t cy_us_t; ///< Monotonic microsecond timestamp. Signed to permit 
 
 struct cy_t;
 struct cy_topic_t;
-struct cy_response_future_t;
+struct cy_future_t;
 
 enum cy_prio_t
 {
@@ -180,7 +180,8 @@ struct cy_tree_t
 /// An ordinary Bloom filter with 64-bit words.
 struct cy_bloom64_t
 {
-    size_t    n_bits; ///< The total number of bits in the filter, a multiple of 64.
+    size_t    n_bits;   ///< The total number of bits in the filter, a multiple of 64.
+    size_t    popcount; ///< (popcount <= n_bits)
     uint64_t* storage;
 };
 
@@ -201,15 +202,43 @@ struct cy_transfer_owned_t
     struct cy_buffer_owned_t      payload;
 };
 
+// ===============================================  PLATFORM INTERFACE  ===============================================
+
 /// Returns the current monotonic time in microseconds. The initial time shall be non-negative.
-typedef cy_us_t (*cy_now_t)(const struct cy_t*);
+typedef cy_us_t (*cy_platform_now_t)(const struct cy_t*);
+
+/// Returns a PRNG hashing seed or a full pseudo-random 64-bit unsigned integer.
+/// A TRNG is preferred; if not available, a PRNG will suffice, but its initial state SHOULD be likely to be
+/// distinct across reboots happening in a quick succession. This condition does not apply if subsequent reboots are
+/// spaced apart by a long time (ca. 10 seconds or more). If this condition is not satisfied,
+/// the transfer-ID counters will be initialized with the same value every time,
+/// which may incur an initial synchronization delay (up to the transfer-ID timeout value).
+///
+/// The simplest compliant solution that can be implemented in a deeply embedded system is:
+///
+///     static uint64_t g_prng_state __attribute__ ((section (".noinit")));
+///     g_prng_state += 0xA0761D6478BD642FULL;  // add wyhash seed (64-bit prime)
+///     return g_prng_state;
+///
+/// If RTC is available, then the following is sufficient (the counter can be 8-bit if RTC is microsecond resolution):
+///
+///     static uint_fast16_t g_counter = 0;
+///     return ((uint64_t)rtc_get_time() << 16U) + ++g_counter;
+///
+/// Internally, Cy will hash the returned value with the local node's UID for whitening and to ensure that each node
+/// obtains different sequences.
+typedef uint64_t (*cy_platform_prng64_t)(const struct cy_t*);
+
+/// Return payload memory obtained with received transfers via cy_ingest*().
+/// The head is passed by value so not freed, but its data and all other fragments are.
+typedef void (*cy_platform_buffer_release_t)(struct cy_t*, struct cy_buffer_owned_t);
 
 /// Instructs the underlying transport to adopt the new node-ID.
 /// This is invoked either immediately from cy_new() if an explicit node-ID is given,
-/// or after some time from cy_heartbeat() when one is allocated automatically.
+/// or after some time from cy_update() when one is allocated automatically.
 /// When this function is invoked, cy_t contains a valid node-ID.
 /// Cy guarantees that this function will not be invoked unless the node-ID is currently unset.
-typedef cy_err_t (*cy_transport_set_node_id_t)(struct cy_t*);
+typedef cy_err_t (*cy_platform_node_id_set_t)(struct cy_t*);
 
 /// Instructs the underlying transport to abandon the current node-ID. Notice that this function is infallible.
 /// This is invoked only if a node-ID conflict is detected; in a well-managed network this should never happen.
@@ -217,26 +246,40 @@ typedef cy_err_t (*cy_transport_set_node_id_t)(struct cy_t*);
 /// one solution is to simply restart the node.
 /// It is recommended to purge the tx queue to avoid further collisions.
 /// Cy guarantees that this function will not be invoked unless the node-ID is currently set.
-typedef void (*cy_transport_clear_node_id_t)(struct cy_t*);
+typedef void (*cy_platform_node_id_clear_t)(struct cy_t*);
+
+/// The node-ID occupancy Bloom filter is used to track the occupancy of the node-ID space. The filter must be at least
+/// a single 64-bit word long. The number of bits in the filter (64 times the word count) defines the maximum number
+/// of nodes present in the network while the local node is still guaranteed to be able to auto-configure its own ID
+/// without collisions. The recommended parameters are two 64-bit words for CAN networks (takes 16 bytes) and
+/// 64~128 words (512~1024 bytes) for all other transports.
+///
+/// The filter is entirely managed by Cy, but its size depends on the transport layer (and how it's configured),
+/// so the filter is not allocated by Cy. Instead, it is accessed indirectly via this function.
+/// Every invocation returns a mutable borrowed reference to the filter, which outlives the Cy instance.
+typedef struct cy_bloom64_t* (*cy_platform_node_id_bloom_t)(struct cy_t*);
+
+/// Instructs the underlying transport layer to send an RPC request transfer.
+typedef cy_err_t (*cy_platform_request_t)(struct cy_t*,
+                                          uint16_t                            service_id,
+                                          const struct cy_transfer_metadata_t metadata,
+                                          cy_us_t                             tx_deadline,
+                                          struct cy_buffer_borrowed_t         payload);
+
+/// Allocates a new topic. NULL if out of memory.
+typedef struct cy_topic_t* (*cy_platform_topic_new_t)(struct cy_t*);
+
+typedef void (*cy_platform_topic_destroy_t)(struct cy_topic_t*);
 
 /// Instructs the underlying transport layer to publish a new message on the topic.
 /// The function shall not increment the transfer-ID counter; Cy will do it.
-/// Takes ownership of the payload buffer chain.
-typedef cy_err_t (*cy_transport_publish_t)(struct cy_topic_t*, cy_us_t, struct cy_buffer_borrowed_t);
-
-/// Instructs the underlying transport layer to send an RPC request transfer.
-/// Takes ownership of the payload buffer chain.
-typedef cy_err_t (*cy_transport_request_t)(struct cy_t*,
-                                           uint16_t                            service_id,
-                                           const struct cy_transfer_metadata_t metadata,
-                                           cy_us_t                             tx_deadline,
-                                           struct cy_buffer_borrowed_t         payload);
+typedef cy_err_t (*cy_platform_topic_publish_t)(struct cy_topic_t*, cy_us_t, struct cy_buffer_borrowed_t);
 
 /// Instructs the underlying transport layer to create a new subscription on the topic.
-typedef cy_err_t (*cy_transport_subscribe_t)(struct cy_topic_t*);
+typedef cy_err_t (*cy_platform_topic_subscribe_t)(struct cy_topic_t*);
 
 /// Instructs the underlying transport to destroy an existing subscription.
-typedef void (*cy_transport_unsubscribe_t)(struct cy_topic_t*);
+typedef void (*cy_platform_topic_unsubscribe_t)(struct cy_topic_t*);
 
 /// If a subject-ID collision or divergence are discovered, Cy may reassign the topic to a different subject-ID.
 /// To do that, it will first unsubscribe the topic using the corresponding function,
@@ -252,26 +295,39 @@ typedef void (*cy_transport_unsubscribe_t)(struct cy_topic_t*);
 /// A possible failure handling strategy is to record which topic has failed and to keep trying to re-subscribe
 /// in the background until it succeeds. Once the subscription is successful, no additional actions are needed.
 /// It is probably not useful to try and invoke cy_subscribe() immediately from the error handler.
-typedef void (*cy_transport_handle_resubscription_err_t)(struct cy_topic_t*, const cy_err_t);
+typedef void (*cy_platform_topic_handle_resubscription_error_t)(struct cy_topic_t*, const cy_err_t);
 
-/// Return payload memory obtained with received transfers via cy_ingest*().
-/// The head is passed by value so not freed, but its data and all other fragments are.
-typedef void (*cy_transport_buffer_release_t)(struct cy_t*, struct cy_buffer_owned_t);
-
-/// Transport layer interface functions.
-/// These can be underpinned by libcanard, libudpard, libserard, or any other transport library.
-struct cy_transport_io_t
+/// The platform- and transport-specific entities. These can be underpinned by libcanard, libudpard, libserard,
+/// or any other transport library, plus the platform-specific logic.
+/// None of the entities are mutable; instances of this struct are mostly intended to be static const singletons.
+struct cy_platform_t
 {
-    cy_transport_set_node_id_t               set_node_id;
-    cy_transport_clear_node_id_t             clear_node_id;
-    cy_transport_publish_t                   publish;
-    cy_transport_request_t                   request;
-    cy_transport_subscribe_t                 subscribe;
-    cy_transport_unsubscribe_t               unsubscribe;
-    cy_transport_handle_resubscription_err_t handle_resubscription_err;
-    cy_transport_buffer_release_t            buffer_release;
+    cy_platform_now_t            now;
+    cy_platform_prng64_t         prng64;
+    cy_platform_buffer_release_t buffer_release;
+
+    cy_platform_node_id_set_t   node_id_set;
+    cy_platform_node_id_clear_t node_id_clear;
+    cy_platform_node_id_bloom_t node_id_bloom;
+
+    cy_platform_request_t request;
+
+    cy_platform_topic_new_t                         topic_new;
+    cy_platform_topic_destroy_t                     topic_destroy;
+    cy_platform_topic_publish_t                     topic_publish;
+    cy_platform_topic_subscribe_t                   topic_subscribe;
+    cy_platform_topic_unsubscribe_t                 topic_unsubscribe;
+    cy_platform_topic_handle_resubscription_error_t topic_handle_resubscription_error;
+
+    uint16_t node_id_max;
 };
 
+// ===============================================  CY API  ===============================================
+
+/// This is the base type that is extended by the platform layer with transport- and platform-specific entities,
+/// such as socket handles, etc. Instantiation is therefore done inside the platform layer in the heap or some
+/// other dynamic storage.
+///
 /// A topic name is suffixed to the namespace name of the node that owns it, unless it begins with a `/`.
 /// The leading `~` in the name is replaced with `/vvvv/pppp/iiiiiiii`, where the letters represent hexadecimal
 /// digits of the vendor ID, product ID, and instance ID of the node.
@@ -369,11 +425,8 @@ struct cy_topic_t
     /// if this value is sufficiently far in the past, the network could be said to have reached a stable state.
     cy_us_t last_local_event_ts;
 
-    /// The user can use this field for arbitrary purposes.
-    void* user;
-
     /// Used for matching futures against received responses.
-    struct cy_tree_t* response_futures_by_transfer_id;
+    struct cy_tree_t* futures_by_transfer_id;
 
     /// Only used if the application publishes data on this topic.
     /// The priority can be adjusted as needed by the user.
@@ -395,10 +448,12 @@ struct cy_topic_t
     cy_us_t                    sub_transfer_id_timeout;
     size_t                     sub_extent;
     bool                       subscribed; ///< May be false even if sub_list is nonempty on resubscription error.
+
+    void* user; ///< The application can use this field for arbitrary purposes.
 };
 
 typedef void (*cy_subscription_callback_t)(struct cy_subscription_t*);
-typedef void (*cy_response_callback_t)(struct cy_response_future_t*);
+typedef void (*cy_response_callback_t)(struct cy_future_t*);
 
 struct cy_subscription_t
 {
@@ -422,7 +477,7 @@ enum cy_future_state_t
 /// The future shall not be moved or altered in anyway except for the user and callback fields until its state is
 /// no longer pending. Once it is not pending, it can be reused for another request.
 /// The future will enter the failure state to indicate that the response was not received before the deadline.
-struct cy_response_future_t
+struct cy_future_t
 {
     struct cy_tree_t index_deadline;
     struct cy_tree_t index_transfer_id;
@@ -444,9 +499,10 @@ struct cy_response_future_t
     void*                  user;
 };
 
-/// There are only two functions whose invocations may result in network traffic:
-/// - cy_heartbeat() -- heartbeat only, at most one per call.
-/// - cy_publish()   -- user transfers only.
+/// There are only three functions (plus convenience wrappers) whose invocations may result in network traffic:
+/// - cy_update()  -- heartbeat only, at most one per call.
+/// - cy_publish() -- user transfers only.
+/// - cy_respond() -- user transfers only.
 /// Creation of a new topic may cause resubscription of any existing topics (all in the worst case).
 ///
 /// TODO: ALLOW OUT-OF-ORDER HEARTBEATS BY DEFAULT, DISABLE AS AN OPTION FOR STRICT DETERMINISTIC SCHEDULING.
@@ -454,28 +510,7 @@ struct cy_response_future_t
 /// This will enable faster convergence and fast queries to discover a specific topic or RPC.
 struct cy_t
 {
-    /// The UID is actually composed of 16-bit vendor-ID, 16-bit product-ID, and 32-bit instance-ID (aka serial
-    /// number), arranged from the most significant to the least significant bits. However, Cy doesn't care about
-    /// the inner structure of the UID; all it needs is a number to order the nodes on the network and to seed PRNG.
-    /// Zero is not a valid UID.
-    uint64_t uid;
-
-    cy_us_t started_at;
-
-    uint16_t node_id;
-    uint16_t node_id_max; ///< Depends on the transport layer.
-
-    /// The size of the address occupancy Bloom filter effectively limits the maximum number of nodes that can be
-    /// statelessly auto-allocated in the network. More nodes can be added only if manual address assignment is used.
-    /// Nodes on the network may have different Bloom filter sizes, as it does not affect their compatibility.
-    ///
-    /// A filter composed of 64x64-bit words can support up to 4096 auto-allocated nodes per network, which is a safe
-    /// choice for most Cyphal networks.
-    /// For Cyphal/CAN, a single 64-bit word is sufficient, since CAN networks with >64 nodes are exceedingly rare.
-    struct cy_bloom64_t node_id_bloom;
-
-    /// The user can use this field for arbitrary purposes.
-    void* user;
+    const struct cy_platform_t* platform; ///< Never NULL.
 
     /// Namespace is a prefix added to all topics created on this instance, unless the topic name starts with "/".
     /// Local node name is prefixed to the topic name if it starts with `~`.
@@ -483,6 +518,14 @@ struct cy_t
     /// in the final topic name.
     char namespace_[CY_NAMESPACE_NAME_MAX + 1];
     char name[CY_NAMESPACE_NAME_MAX + 1];
+
+    /// The UID is actually composed of 16-bit vendor-ID, 16-bit product-ID, and 32-bit instance-ID (aka serial
+    /// number), arranged from the most significant to the least significant bits. However, Cy doesn't care about
+    /// the inner structure of the UID; all it needs is a number to order the nodes on the network and to seed PRNG.
+    /// Zero is not a valid UID.
+    uint64_t uid;
+    uint16_t node_id;
+    cy_us_t  started_at;
 
     /// Time when this node last saw a conflict (another topic occupying its subject-ID) or a divergence
     /// (same topic elsewhere using a different subject-ID) involving any of its topics,
@@ -504,8 +547,8 @@ struct cy_t
     /// if this value is sufficiently far in the past, the network could be said to have reached a stable state.
     cy_us_t last_local_event_ts;
 
-    cy_now_t                 now;
-    struct cy_transport_io_t transport;
+    /// Set from cy_notify_node_id_collision(). The actual handling is delayed.
+    bool node_id_collision;
 
     /// Heartbeat topic and related items.
     struct cy_topic_t*       heartbeat_topic;
@@ -520,43 +563,20 @@ struct cy_t
     struct cy_tree_t* topics_by_gossip_time;
 
     /// For detecting timed out futures. This index spans all topics.
-    struct cy_tree_t* response_futures_by_deadline;
+    struct cy_tree_t* futures_by_deadline;
 
     /// This is to ensure we don't exhaust the subject-ID space.
     size_t topic_count;
+
+    /// The user can use this field for arbitrary purposes.
+    void* user;
 };
 
-/// If node_id > node_id_max, it is assumed to be unknown, so a stateless PnP node-ID allocation will be performed.
-/// If a node-ID is given explicitly, a heartbeat will be published immediately to claim it. If the ID
-/// is already taken by another node, it will have to move. This behavior differs from the normal node-ID
-/// autoconfiguration process, where a node will make sure to avoid conflicts at the beginning to avoid disturbing
-/// the network; the rationale is that a manually assigned node-ID takes precedence over the auto-assigned one,
-/// thus forcing any squatters out of the way.
-///
-/// The node-ID occupancy Bloom filter is used to track the occupancy of the node-ID space. The filter must be at least
-/// a single 64-bit word long. The number of bits in the filter (64 times the word count) defines the maximum number
-/// of nodes present in the network while the local node is still guaranteed to be able to auto-configure its own ID
-/// without collisions. The recommended parameters are two 64-bit words for CAN networks (takes 16 bytes) and
-/// 64~128 words (512~1024 bytes) for all other transports.
-///
-/// The namespace may be NULL or empty, in which case it defaults to `/`. It may begin with `~`, which expands into UID.
-///
-/// The heartbeat_topic must point to an uninitialized topic structure that will be used to publish heartbeat messages;
-/// this is the only topic that is needed by Cy itself. It will be initialized and managed automatically; if necessary,
-/// the user can add additional subscriptions to it later.
-///
-/// No network traffic will be generated.
-cy_err_t cy_new(struct cy_t* const             cy,
-                const uint64_t                 uid,
-                const uint16_t                 node_id,
-                const uint16_t                 node_id_max,
-                const size_t                   node_id_occupancy_bloom_filter_64bit_word_count,
-                uint64_t* const                node_id_occupancy_bloom_filter_storage,
-                const char* const              namespace_,
-                struct cy_topic_t* const       heartbeat_topic,
-                const cy_now_t                 now,
-                const struct cy_transport_io_t transport_io);
-void     cy_destroy(struct cy_t* const cy);
+/// A convenience wrapper that returns the current time in microseconds.
+static inline cy_us_t cy_now(const struct cy_t* const cy)
+{
+    return cy->platform->now(cy);
+}
 
 /// This shall be invoked once the application is done processing a payload.
 /// The struct will be modified by zeroing pointers and sizes in it.
@@ -579,66 +599,11 @@ static inline size_t cy_buffer_owned_get_size(const struct cy_buffer_owned_t pay
 /// copying will stop early after the buffer is filled, thus truncating the fragmented data short.
 /// The function has no effect and returns zero if the destination buffer is NULL.
 /// Returns the number of bytes copied into the contiguous destination buffer.
-size_t               cy_buffer_borrowed_gather(const struct cy_buffer_borrowed_t payload, struct cy_bytes_mut_t dest);
+size_t cy_buffer_borrowed_gather(const struct cy_buffer_borrowed_t payload, const struct cy_bytes_mut_t dest);
 static inline size_t cy_buffer_owned_gather(const struct cy_buffer_owned_t payload, const struct cy_bytes_mut_t dest)
 {
     return cy_buffer_borrowed_gather(payload.base, dest);
 }
-
-/// This is invoked whenever a new transfer on the topic is received.
-/// The library will dispatch it to the appropriate subscriber callbacks.
-/// Excluding the callbacks, the time complexity is constant.
-///
-/// If this is invoked together with cy_heartbeat(), then cy_ingest() must be invoked BEFORE cy_heartbeat()
-/// to ensure that the latest state updates are reflected in the next heartbeat message.
-void cy_ingest_topic_transfer(struct cy_topic_t* const topic, const struct cy_transfer_owned_t transfer);
-
-/// Cy does not manage RPC endpoints explicitly; it is the responsibility of the transport-specific glue logic.
-/// Currently, the following RPC endpoints must be implemented in the glue logic:
-///
-///     - CY_RPC_SERVICE_ID_TOPIC_RESPONSE request (sic!) handler.
-///       Delivers the optional response to a message published on a topic.
-///       The first 8 bytes of the transfer payload are the topic hash to which the response is sent.
-///       Note that we send a topic response as an RPC request transfer; the reasoning is that a higher-level
-///       response is carried by a lower-level request transfer.
-void cy_ingest_topic_response_transfer(struct cy_t* const cy, struct cy_transfer_owned_t transfer);
-
-/// This function must be invoked periodically to let the library publish heartbeats and handle response timeouts.
-/// The invocation period MUST NOT EXCEED the heartbeat period configured in cy_t; there is no lower limit.
-/// The recommended invocation period is less than 10 milliseconds.
-///
-/// This is the only function that generates heartbeat --- the only kind of auxiliary traffic needed to support
-/// named topics. The returned value indicates the success of the heartbeat publication, if any took place, or zero.
-///
-/// If this is invoked together with cy_ingest(), then cy_heartbeat() must be invoked AFTER cy_ingest() to ensure
-/// that the latest state updates are reflected in the heartbeat message.
-///
-/// This function is also responsible for handling the local node-ID allocation.
-///
-/// Excluding the transport_publish dependency, the time complexity is logarithmic in the number of topics.
-cy_err_t cy_heartbeat(struct cy_t* const cy);
-
-/// When the transport library detects a discriminator error, it will notify Cy about it to let it rectify the
-/// problem. Transport frames with mismatched discriminators must be dropped; no processing at the transport layer
-/// is needed. This function is not essential for the protocol to function, but it speeds up collision repair.
-///
-/// The function will not perform any IO and will return immediately after quickly updating an internal state.
-/// It is thus safe to invoke it from a deep callback or from deep inside the transport library; the side effects
-/// are confined to the Cy state only. The time complexity is logarithmic in the number of topics.
-///
-/// If the transport library is unable to efficiently find the topic when a collision is found, use
-/// cy_topic_find_by_subject_id(). The function has no effect if the topic is NULL; it is not an error to call it
-/// with NULL to simplify chaining like:
-///     cy_notify_discriminator_collision(cy_topic_find_by_subject_id(cy, collision_subject_id));
-void cy_notify_discriminator_collision(struct cy_topic_t* const topic);
-
-/// When the transport library detects an incoming transport frame with the same source node-ID as the local node-ID,
-/// it must notify Cy about it to let it rectify the problem. This function will immediately invoke
-/// transport.clear_node_id() and commence the new node-ID allocation process.
-/// Note that the node-ID collision checks must be done on raw transport frames, not on reassembled transfers, for
-/// two reasons: 1. this is faster, allowing quick reaction; 2. in the presence of a node-ID conflict, transfers
-/// arriving from that ID cannot be robustly reassembled.
-void cy_notify_node_id_collision(struct cy_t* const cy);
 
 /// If a node-ID is given explicitly at startup, it will be used as-is and the node will become operational immediately.
 /// Otherwise, some initial node-ID autoconfiguration time will be needed before the local ID is available.
@@ -649,13 +614,13 @@ void cy_notify_node_id_collision(struct cy_t* const cy);
 /// An attempt to emit a transfer while the local node-ID is missing may fail, depending on the transport library.
 static inline bool cy_has_node_id(const struct cy_t* const cy)
 {
-    return cy->node_id <= cy->node_id_max;
+    return cy->node_id <= cy->platform->node_id_max;
 }
 
 /// A heuristical prediction of whether the local node is ready to fully participate in the network.
 /// The joining process will be bypassed if the node-ID and all topic allocations are recovered from non-volatile
-/// storage. This flag can briefly flip back to false if a node-ID or topic allocation conflict or a divergence
-/// are detected; it will return back to true automatically once the network is repaired.
+/// storage. This flag can briefly flip back to false if a topic allocation conflict or a divergence are detected;
+/// it will return back to true automatically once the network is repaired.
 ///
 /// Since the network fundamentally relies on an eventual consistency model, it is not possible to guarantee that
 /// any given state is final. It is always possible, for example, that while our network segment looks stable,
@@ -663,26 +628,21 @@ static inline bool cy_has_node_id(const struct cy_t* const cy)
 /// partition will be forced to adapt to the main network, thus enduring a brief period of instability.
 static inline bool cy_ready(const struct cy_t* const cy)
 {
-    return cy_has_node_id(cy) && ((cy->now(cy) - cy->last_local_event_ts) > 1000000);
+    return cy_has_node_id(cy) && ((cy->platform->now(cy) - cy->last_local_event_ts) > 1000000);
 }
 
+/// Register a new topic that may be used by the local application for publishing, subscribing, or both.
+/// Returns NULL if the topic name is not unique or not valid, or if the platform could not allocate the topic.
+///
 /// If the hint is provided, it will be used as the initial allocation state, unless either a conflict or divergence
 /// are discovered, which will be treated normally, without any preference to the hint. This option allows the user
 /// to optionally save the network configuration in a non-volatile storage, such that the next time the network becomes
 /// operational immediately, without waiting for the CRDT consensus. Remember that the hint is discarded on conflict.
-struct cy_topic_hint_t
+struct cy_topic_t* cy_topic_new_hint(struct cy_t* const cy, const char* const name, const uint16_t subject_id_hint);
+static inline struct cy_topic_t* cy_topic_new(struct cy_t* const cy, const char* const name)
 {
-    uint16_t subject_id; ///< This hint is ignored for pined topics.
-};
-
-/// Register a new topic that may be used by the local application for publishing, subscribing, or both.
-/// Returns falsity if the topic name is not unique or not valid.
-///
-/// No network traffic is generated here.
-bool cy_topic_new(struct cy_t* const                  cy,
-                  struct cy_topic_t* const            topic,
-                  const char* const                   name,
-                  const struct cy_topic_hint_t* const optional_hint);
+    return cy_topic_new_hint(cy, name, CY_SUBJECT_ID_INVALID);
+}
 void cy_topic_destroy(struct cy_topic_t* const topic);
 
 /// Complexity is logarithmic in the number of topics. NULL if not found.
@@ -751,24 +711,24 @@ cy_err_t cy_subscribe(struct cy_topic_t* const         topic,
 void     cy_unsubscribe(struct cy_topic_t* const topic, struct cy_subscription_t* const sub);
 
 /// Just a convenience function, nothing special.
-struct cy_response_future_t cy_response_future_init(const cy_response_callback_t callback, void* const user);
+struct cy_future_t cy_future_new(const cy_response_callback_t callback, void* const user);
 
 /// The transfer-ID is always incremented, even on failure, to signal lost messages.
 /// This function always publishes only one transfer as requested; no auxiliary traffic is generated.
 /// If the local node-ID is not allocated, the function may fail depending on the capabilities of the transport library;
 /// to avoid this, it is possible to check cy_has_node_id() before calling this function.
 ///
-/// If no response is needed/expected, the response_future must be NULL and the response_deadline is ignored.
-/// Otherwise, response_future must point to an uninitialized cy_response_future_t instance.
+/// If no response is needed/expected, the future must be NULL and the response_deadline is ignored.
+/// Otherwise, future must point to an uninitialized cy_future_t instance.
 ///
 /// The response future will not be registered unless the result is non-negative.
 ///
 /// If the response deadline is in the past, the message will be sent anyway but it will time out immediately.
-cy_err_t cy_publish(struct cy_topic_t* const           topic,
-                    const cy_us_t                      tx_deadline,
-                    const struct cy_buffer_borrowed_t  payload,
-                    const cy_us_t                      response_deadline,
-                    struct cy_response_future_t* const response_future);
+cy_err_t cy_publish(struct cy_topic_t* const          topic,
+                    const cy_us_t                     tx_deadline,
+                    const struct cy_buffer_borrowed_t payload,
+                    const cy_us_t                     response_deadline,
+                    struct cy_future_t* const         future);
 
 /// A simpler wrapper over cy_publish() when no response is needed/expected. 1 means one way.
 static inline cy_err_t cy_publish1(struct cy_topic_t* const          topic,
@@ -780,7 +740,7 @@ static inline cy_err_t cy_publish1(struct cy_topic_t* const          topic,
 
 /// This needs not be done after a future completes normally. It is only needed if the future needs to be
 /// destroyed before it completes. Calling this on a non-pending future has no effect.
-void cy_response_future_cancel(struct cy_response_future_t* const future);
+void cy_future_cancel(struct cy_future_t* const future);
 
 /// Send a response to a message received from a topic subscription. The response will be sent directly to the
 /// publisher using peer-to-peer transport, not affecting other nodes on this topic. The payload may be arbitrary
@@ -796,6 +756,86 @@ cy_err_t cy_respond(struct cy_topic_t* const            topic,
                     const cy_us_t                       tx_deadline,
                     const struct cy_transfer_metadata_t metadata,
                     const struct cy_buffer_borrowed_t   payload);
+
+// ====================================================================================================================
+// =================================================  END OF THE API  =================================================
+// ====================================================================================================================
+// The definitions that follow are used by the platform layer, not by the application.
+
+/// If node_id > node_id_max, it is assumed to be unknown, so a stateless PnP node-ID allocation will be performed.
+/// If a node-ID is given explicitly, a heartbeat will be published immediately to claim it. If the ID
+/// is already taken by another node, it will have to move. This behavior differs from the normal node-ID
+/// autoconfiguration process, where a node will make sure to avoid conflicts at the beginning to avoid disturbing
+/// the network; the rationale is that a manually assigned node-ID takes precedence over the auto-assigned one,
+/// thus forcing any squatters out of the way.
+///
+/// The namespace may be NULL or empty, in which case it defaults to `/`.
+/// It may begin with `~`, which expands into the node name.
+cy_err_t cy_new(struct cy_t* const                cy,
+                const struct cy_platform_t* const platform,
+                const uint64_t                    uid,
+                const uint16_t                    node_id,
+                const char* const                 namespace_);
+void     cy_destroy(struct cy_t* const cy);
+
+/// This function must be invoked periodically to let the library publish heartbeats and handle response timeouts.
+/// The invocation period MUST NOT EXCEED the heartbeat period configured in cy_t; there is no lower limit.
+/// The recommended invocation period is less than 10 milliseconds.
+///
+/// This is the only function that generates heartbeat --- the only kind of auxiliary traffic needed to support
+/// named topics. The returned value indicates the success of the heartbeat publication, if any took place, or zero.
+///
+/// If this is invoked together with cy_ingest(), then cy_update() must be invoked AFTER cy_ingest() to ensure
+/// that the latest state updates are reflected in the heartbeat message.
+///
+/// This function is also responsible for handling the local node-ID allocation.
+///
+/// Excluding the transport_publish dependency, the time complexity is logarithmic in the number of topics.
+cy_err_t cy_update(struct cy_t* const cy);
+
+/// When the transport library detects a discriminator error, it will notify Cy about it to let it rectify the
+/// problem. Transport frames with mismatched discriminators must be dropped; no processing at the transport layer
+/// is needed. This function is not essential for the protocol to function, but it speeds up collision repair.
+///
+/// The function will not perform any IO and will return immediately after quickly updating an internal state.
+/// It is thus safe to invoke it from a deep callback or from deep inside the transport library; the side effects
+/// are confined to the Cy state only. The time complexity is logarithmic in the number of topics.
+///
+/// If the transport library is unable to efficiently find the topic when a collision is found, use
+/// cy_topic_find_by_subject_id(). The function has no effect if the topic is NULL; it is not an error to call it
+/// with NULL to simplify chaining like:
+///     cy_notify_discriminator_collision(cy_topic_find_by_subject_id(cy, collision_subject_id));
+void cy_notify_discriminator_collision(struct cy_topic_t* const topic);
+
+/// When the transport library detects an incoming transport frame with the same source node-ID as the local node-ID,
+/// it must notify Cy about it to let it rectify the problem.
+///
+/// This function will simply set a flag and return immediately.
+/// It is thus safe to invoke it from a deep callback or from deep inside the transport library; the side effects
+/// are confined to the Cy state only. The time complexity is constant.
+///
+/// Note that the node-ID collision checks must be done on raw transport frames, not on reassembled transfers, for
+/// two reasons: 1. this is faster, allowing quick reaction; 2. in the presence of a node-ID conflict, transfers
+/// arriving from that ID cannot be robustly reassembled.
+void cy_notify_node_id_collision(struct cy_t* const cy);
+
+/// This is invoked whenever a new transfer on the topic is received.
+/// The library will dispatch it to the appropriate subscriber callbacks.
+/// Excluding the callbacks, the time complexity is constant.
+///
+/// If this is invoked together with cy_update(), then cy_ingest() must be invoked BEFORE cy_update()
+/// to ensure that the latest state updates are reflected in the next heartbeat message.
+void cy_ingest_topic_transfer(struct cy_topic_t* const topic, const struct cy_transfer_owned_t transfer);
+
+/// Cy does not manage RPC endpoints explicitly; it is the responsibility of the transport-specific glue logic.
+/// Currently, the following RPC endpoints must be implemented in the glue logic:
+///
+///     - CY_RPC_SERVICE_ID_TOPIC_RESPONSE request (sic!) handler.
+///       Delivers the optional response to a message published on a topic.
+///       The first 8 bytes of the transfer payload are the topic hash to which the response is sent.
+///       Note that we send a topic response as an RPC request transfer; the reasoning is that a higher-level
+///       response is carried by a lower-level request transfer.
+void cy_ingest_topic_response_transfer(struct cy_t* const cy, struct cy_transfer_owned_t transfer);
 
 /// For diagnostics and logging only. Do not use in embedded and real-time applications.
 /// This function is only required if CY_CONFIG_TRACE is defined and is nonzero; otherwise it should be left undefined.

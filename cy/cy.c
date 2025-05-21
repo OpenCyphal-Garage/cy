@@ -33,27 +33,13 @@ static int_fast8_t log2_floor(const uint64_t x)
     return (int_fast8_t)((x == 0) ? -1 : (63 - __builtin_clzll(x)));
 }
 
-#if CY_CONFIG_TRACE
-static size_t popcount_all(const size_t nbits, const void* x)
-{
-    size_t               out = 0;
-    const uint8_t* const p   = (const uint8_t*)x;
-    for (size_t i = 0; i < (nbits / 8U); i++) {
-        out += (size_t)__builtin_popcount(p[i]);
-    }
-    return out;
-}
-#endif
-
-static _Thread_local uint64_t g_prng_state; // NOLINT(*-avoid-non-const-global-variables)
-
 /// The limits are inclusive. Returns min unless min < max.
-static uint64_t random_uint(const uint64_t min, const uint64_t max)
+static uint64_t random_uint(const struct cy_t* const cy, const uint64_t min, const uint64_t max)
 {
     if (min < max) {
-        g_prng_state += 0xa0761d6478bd642fULL;
-        g_prng_state = rapidhash(&g_prng_state, sizeof(g_prng_state));
-        return (g_prng_state % (max - min)) + min;
+        const uint64_t seed[2] = { cy->platform->prng64(cy), cy->uid };
+        const uint64_t x       = rapidhash(seed, sizeof(seed));
+        return (x % (max - min)) + min;
     }
     return min;
 }
@@ -132,12 +118,11 @@ static int32_t cavl_comp_topic_gossip_time(const void* const user, const struct 
     return ((*(cy_us_t*)user) >= inner->last_gossip) ? +1 : -1;
 }
 
-static int32_t cavl_comp_response_future_transfer_id(const void* const user, const struct cy_tree_t* const node)
+static int32_t cavl_comp_future_transfer_id(const void* const user, const struct cy_tree_t* const node)
 {
     assert((user != NULL) && (node != NULL));
-    const uint64_t                           outer = *(uint64_t*)user;
-    const struct cy_response_future_t* const inner =
-      CAVL2_TO_OWNER(node, struct cy_response_future_t, index_transfer_id);
+    const uint64_t                  outer = *(uint64_t*)user;
+    const struct cy_future_t* const inner = CAVL2_TO_OWNER(node, struct cy_future_t, index_transfer_id);
     if (outer == inner->transfer_id) {
         return 0;
     }
@@ -145,21 +130,21 @@ static int32_t cavl_comp_response_future_transfer_id(const void* const user, con
 }
 
 /// Deadlines are not unique, so this comparator never returns 0.
-static int32_t cavl_comp_response_future_deadline(const void* const user, const struct cy_tree_t* const node)
+static int32_t cavl_comp_future_deadline(const void* const user, const struct cy_tree_t* const node)
 {
     assert((user != NULL) && (node != NULL));
-    const struct cy_response_future_t* const inner = CAVL2_TO_OWNER(node, struct cy_response_future_t, index_deadline);
+    const struct cy_future_t* const inner = CAVL2_TO_OWNER(node, struct cy_future_t, index_deadline);
     return ((*(cy_us_t*)user) >= inner->deadline) ? +1 : -1;
 }
 
-static struct cy_tree_t* cavl_factory_response_future_transfer_id(void* const user)
+static struct cy_tree_t* cavl_factory_future_transfer_id(void* const user)
 {
-    return &((struct cy_response_future_t*)user)->index_transfer_id;
+    return &((struct cy_future_t*)user)->index_transfer_id;
 }
 
-static struct cy_tree_t* cavl_factory_response_future_deadline(void* const user)
+static struct cy_tree_t* cavl_factory_future_deadline(void* const user)
 {
-    return &((struct cy_response_future_t*)user)->index_deadline;
+    return &((struct cy_future_t*)user)->index_deadline;
 }
 
 static struct cy_tree_t* cavl_factory_topic_subject_id(void* const user)
@@ -181,8 +166,13 @@ static struct cy_tree_t* cavl_factory_topic_gossip_time(void* const user)
 static void bloom64_set(struct cy_bloom64_t* const bloom, const size_t value)
 {
     assert(bloom != NULL);
-    const size_t index = value % bloom->n_bits;
-    bloom->storage[index / 64U] |= (1ULL << (index % 64U));
+    const size_t   index = value % bloom->n_bits;
+    const uint64_t mask  = 1ULL << (index % 64U);
+    if ((bloom->storage[index / 64U] & mask) == 0) {
+        bloom->storage[index / 64U] |= mask;
+        bloom->popcount++;
+    }
+    assert(bloom->popcount <= bloom->n_bits);
 }
 
 static bool bloom64_get(const struct cy_bloom64_t* const bloom, const size_t value)
@@ -198,6 +188,7 @@ static void bloom64_purge(struct cy_bloom64_t* const bloom)
     for (size_t i = 0; i < (bloom->n_bits + 63U) / 64U; i++) { // dear compiler please unroll this
         bloom->storage[i] = 0U; // I suppose this is better than memset cuz we're aligned to 64 bits.
     }
+    bloom->popcount = 0U;
 }
 
 /// This is guaranteed to return a valid node-ID. If the Bloom filter is not full, an unoccupied node-ID will be
@@ -216,12 +207,12 @@ static void bloom64_purge(struct cy_bloom64_t* const bloom)
 /// simply limit the node-ID allocation range to [0, 125], and thus ensure the reserved IDs are not used;
 /// all other transports that use much wider node-ID range (which is [0, 65534]) can just disregard the reservation
 /// because the likelihood of picking the reserved IDs is negligible, and the consequences of doing so are very minor.
-static uint16_t pick_node_id(struct cy_bloom64_t* const bloom, const uint16_t node_id_max)
+static uint16_t pick_node_id(const struct cy_t* const cy, struct cy_bloom64_t* const bloom, const uint16_t node_id_max)
 {
     // The algorithm is hierarchical: find a 64-bit word that has at least one zero bit, then find a zero bit in it.
     // This somewhat undermines the randomness of the result, but it is always fast.
     const size_t num_words  = (smaller(node_id_max, bloom->n_bits) + 63U) / 64U;
-    size_t       word_index = (size_t)random_uint(0U, num_words - 1U);
+    size_t       word_index = (size_t)random_uint(cy, 0U, num_words - 1U);
     for (size_t i = 0; i < num_words; i++) {
         if (bloom->storage[word_index] != UINT64_MAX) {
             break;
@@ -230,11 +221,11 @@ static uint16_t pick_node_id(struct cy_bloom64_t* const bloom, const uint16_t no
     }
     const uint64_t word = bloom->storage[word_index];
     if (word == UINT64_MAX) {
-        return (uint16_t)random_uint(0U, node_id_max); // The filter is full, fallback to random node-ID.
+        return (uint16_t)random_uint(cy, 0U, node_id_max); // The filter is full, fallback to random node-ID.
     }
 
     // Now we have a word with at least one zero bit. Find a random zero bit in it.
-    uint8_t bit_index = (uint8_t)random_uint(0U, 63U);
+    uint8_t bit_index = (uint8_t)random_uint(cy, 0U, 63U);
     assert(word != UINT64_MAX);
     while ((word & (1ULL << bit_index)) != 0) { // guaranteed to terminate, see above.
         bit_index = (bit_index + 1U) % 64U;
@@ -245,7 +236,8 @@ static uint16_t pick_node_id(struct cy_bloom64_t* const bloom, const uint16_t no
     size_t node_id = (word_index * 64U) + bit_index;
     assert(node_id < node_id_max);
     assert(bloom64_get(bloom, node_id) == false);
-    node_id += (size_t)random_uint(0, node_id_max / bloom->n_bits) * bloom->n_bits;
+    node_id += (size_t)random_uint(cy, 0, node_id_max / bloom->n_bits) * bloom->n_bits;
+    // TODO FIXME ensure we don't exceed node_id_max -- decrement until free?
     assert(node_id < node_id_max);
     assert(bloom64_get(bloom, node_id) == false);
     bloom64_set(bloom, node_id);
@@ -387,7 +379,7 @@ static void allocate_topic(struct cy_topic_t* const topic, const uint64_t new_ev
     // We need to make sure no underlying resources are sitting on this topic before we move it.
     // Otherwise, changing the subject-ID field on the go may break something underneath.
     if (topic->subscribed) {
-        cy->transport.unsubscribe(topic);
+        cy->platform->topic_unsubscribe(topic);
         topic->subscribed = false;
     }
 
@@ -438,10 +430,10 @@ static void allocate_topic(struct cy_topic_t* const topic, const uint64_t new_ev
     // If a subscription is needed, restore it. Notice that if this call failed in the past, we will retry here
     // as long as there is at least one live subscriber.
     if (topic->sub_list != NULL) {
-        const cy_err_t res = cy->transport.subscribe(topic);
+        const cy_err_t res = cy->platform->topic_subscribe(topic);
         topic->subscribed  = res >= 0;
         if (!topic->subscribed) {
-            cy->transport.handle_resubscription_err(topic, res); // ok not our problem anymore.
+            cy->platform->topic_handle_resubscription_error(topic, res); // ok not our problem anymore.
         }
     }
 
@@ -536,8 +528,8 @@ static cy_err_t publish_heartbeat(struct cy_topic_t* const topic, const cy_us_t 
     const struct cy_buffer_borrowed_t payload = { .next = NULL, .view = { .data = &msg, .size = msz } };
 
     // Publish the message.
-    assert(cy->node_id <= cy->node_id_max);
-    const cy_err_t pub_res = cy->transport.publish(cy->heartbeat_topic, now + HEARTBEAT_PUB_TIMEOUT_us, payload);
+    assert(cy->node_id <= cy->platform->node_id_max);
+    const cy_err_t pub_res = cy->platform->topic_publish(cy->heartbeat_topic, now + HEARTBEAT_PUB_TIMEOUT_us, payload);
     cy->heartbeat_topic->pub_transfer_id++;
 
     // Update gossip time even if failed so we don't get stuck publishing same gossip if error reporting is broken.
@@ -648,14 +640,14 @@ static void on_heartbeat(struct cy_subscription_t* const sub)
 
 // ----------------------------------------  RESPONSE FUTURES  ----------------------------------------
 
-static void retire_timed_out_response_futures(struct cy_t* cy, const cy_us_t now)
+static void retire_timed_out_futures(struct cy_t* cy, const cy_us_t now)
 {
-    struct cy_response_future_t* fut = (struct cy_response_future_t*)cavl2_min(cy->response_futures_by_deadline);
+    struct cy_future_t* fut = (struct cy_future_t*)cavl2_min(cy->futures_by_deadline);
     while ((fut != NULL) && (fut->deadline < now)) {
         assert(fut->state == cy_future_pending);
 
-        cavl2_remove(&cy->response_futures_by_deadline, &fut->index_deadline);
-        cavl2_remove(&fut->topic->response_futures_by_transfer_id, &fut->index_transfer_id);
+        cavl2_remove(&cy->futures_by_deadline, &fut->index_deadline);
+        cavl2_remove(&fut->topic->futures_by_transfer_id, &fut->index_transfer_id);
         fut->state = cy_future_failure;
         if (fut->callback != NULL) {
             fut->callback(fut);
@@ -664,35 +656,41 @@ static void retire_timed_out_response_futures(struct cy_t* cy, const cy_us_t now
         // cavl2_next_greater(), which is very efficient, but the problem here is that the user callback may modify
         // the tree unpredictably, and we don't want to put constraints on the callback behavior.
         // A more sophisticated solution is to mark the tree as modified, but it's not worth the effort.
-        fut = (struct cy_response_future_t*)cavl2_min(cy->response_futures_by_deadline);
+        fut = (struct cy_future_t*)cavl2_min(cy->futures_by_deadline);
     }
 }
 
 // ----------------------------------------  PUBLIC API  ----------------------------------------
 
-cy_err_t cy_new(struct cy_t* const             cy,
-                const uint64_t                 uid,
-                const uint16_t                 node_id,
-                const uint16_t                 node_id_max,
-                const size_t                   node_id_occupancy_bloom_filter_64bit_word_count,
-                uint64_t* const                node_id_occupancy_bloom_filter_storage,
-                const char* const              namespace_,
-                struct cy_topic_t* const       heartbeat_topic,
-                const cy_now_t                 now,
-                const struct cy_transport_io_t transport_io)
+cy_err_t cy_new(struct cy_t* const                cy,
+                const struct cy_platform_t* const platform,
+                const uint64_t                    uid,
+                const uint16_t                    node_id,
+                const char* const                 namespace_)
 {
     assert(cy != NULL);
     assert(uid != 0);
-    assert((node_id_occupancy_bloom_filter_storage != NULL) && (node_id_occupancy_bloom_filter_64bit_word_count > 0));
-
-    // This is fine even if multiple nodes run locally!
-    g_prng_state ^= uid;
+    assert(platform != NULL);
+    assert(platform->now != NULL);
+    assert(platform->prng64 != NULL);
+    assert(platform->buffer_release != NULL);
+    assert(platform->node_id_set != NULL);
+    assert(platform->node_id_clear != NULL);
+    assert(platform->node_id_bloom != NULL);
+    assert(platform->request != NULL);
+    assert(platform->topic_new != NULL);
+    assert(platform->topic_destroy != NULL);
+    assert(platform->topic_publish != NULL);
+    assert(platform->topic_subscribe != NULL);
+    assert(platform->topic_unsubscribe != NULL);
+    assert(platform->topic_handle_resubscription_error != NULL);
+    assert((platform->node_id_max > 0) && (platform->node_id_max < CY_NODE_ID_INVALID));
 
     // Init the object.
     memset(cy, 0, sizeof(*cy));
-    cy->uid         = uid;
-    cy->node_id     = (node_id <= node_id_max) ? node_id : CY_NODE_ID_INVALID;
-    cy->node_id_max = node_id_max;
+    cy->platform = platform;
+    cy->uid      = uid;
+    cy->node_id  = (node_id <= platform->node_id_max) ? node_id : CY_NODE_ID_INVALID;
     // namespace
     if ((namespace_ != NULL) && (namespace_[0] != '\0')) {
         const size_t len = smaller(CY_NAMESPACE_NAME_MAX, strlen(namespace_));
@@ -709,21 +707,20 @@ cy_err_t cy_new(struct cy_t* const             cy,
                    (unsigned)(uid >> 48U) & UINT16_MAX,
                    (unsigned)(uid >> 32U) & UINT16_MAX,
                    (unsigned long)(uid & UINT32_MAX));
-    cy->user                  = NULL;
-    cy->now                   = now;
-    cy->transport             = transport_io;
-    cy->heartbeat_topic       = heartbeat_topic;
     cy->topics_by_hash        = NULL;
     cy->topics_by_subject_id  = NULL;
     cy->topics_by_gossip_time = NULL;
     cy->topic_count           = 0;
+    cy->user                  = NULL;
 
     // Postpone calling the functions until after the object is set up.
-    cy->started_at = cy->now(cy);
+    cy->started_at = cy_now(cy);
 
-    cy->node_id_bloom.n_bits  = node_id_occupancy_bloom_filter_64bit_word_count * 64U;
-    cy->node_id_bloom.storage = node_id_occupancy_bloom_filter_storage;
-    bloom64_purge(&cy->node_id_bloom);
+    struct cy_bloom64_t* const node_id_bloom = platform->node_id_bloom(cy);
+    assert(node_id_bloom != NULL);
+    assert(node_id_bloom->n_bits > 0);
+    assert((node_id_bloom->n_bits % 64) == 0);
+    bloom64_purge(node_id_bloom);
 
     // If a node-ID is given explicitly, we want to publish our heartbeat ASAP to speed up network convergence
     // and to claim the address; if it's already taken, we will want to cause a collision to move the other node,
@@ -733,26 +730,30 @@ cy_err_t cy_new(struct cy_t* const             cy,
     cy->heartbeat_full_gossip_cycle_period_max = 10 * MEGA;
     cy->heartbeat_next                         = cy->started_at;
     cy_err_t res                               = 0;
-    if (cy->node_id > cy->node_id_max) {
-        cy->heartbeat_next += (cy_us_t)random_uint(CY_START_DELAY_MIN_us, CY_START_DELAY_MAX_us);
+    if (cy->node_id > cy->platform->node_id_max) {
+        cy->heartbeat_next += (cy_us_t)random_uint(cy, CY_START_DELAY_MIN_us, CY_START_DELAY_MAX_us);
         cy->last_event_ts = cy->last_local_event_ts = cy->started_at;
     } else {
-        bloom64_set(&cy->node_id_bloom, cy->node_id);
-        res               = cy->transport.set_node_id(cy);
+        bloom64_set(node_id_bloom, cy->node_id);
+        assert(node_id_bloom->popcount == 1);
+        res               = cy->platform->node_id_set(cy);
         cy->last_event_ts = cy->last_local_event_ts = 0;
     }
 
     // Register the heartbeat topic and subscribe to it.
     if (res >= 0) {
-        const bool topic_ok = cy_topic_new(cy, cy->heartbeat_topic, CY_CONFIG_HEARTBEAT_TOPIC_NAME, NULL);
-        assert(topic_ok);
-        res = cy_subscribe(cy->heartbeat_topic,
-                           &cy->heartbeat_sub,
-                           sizeof(struct heartbeat_t),
-                           CY_TRANSFER_ID_TIMEOUT_DEFAULT_us,
-                           &on_heartbeat);
-        if (res < 0) {
-            cy_topic_destroy(cy->heartbeat_topic);
+        cy->heartbeat_topic = cy_topic_new(cy, CY_CONFIG_HEARTBEAT_TOPIC_NAME);
+        if (cy->heartbeat_topic == NULL) {
+            res = -654; // TODO error codes
+        } else {
+            res = cy_subscribe(cy->heartbeat_topic,
+                               &cy->heartbeat_sub,
+                               sizeof(struct heartbeat_t),
+                               CY_TRANSFER_ID_TIMEOUT_DEFAULT_us,
+                               &on_heartbeat);
+            if (res < 0) {
+                cy_topic_destroy(cy->heartbeat_topic);
+            }
         }
     }
     return res;
@@ -761,7 +762,7 @@ cy_err_t cy_new(struct cy_t* const             cy,
 void cy_buffer_owned_release(struct cy_t* const cy, struct cy_buffer_owned_t* const payload)
 {
     if ((cy != NULL) && (payload != NULL) && (payload->origin.data != NULL)) {
-        cy->transport.buffer_release(cy, *payload);
+        cy->platform->buffer_release(cy, *payload);
         // nullify the pointers to prevent double free
         payload->base.next   = NULL;
         payload->origin.size = 0;
@@ -780,7 +781,7 @@ size_t cy_buffer_borrowed_get_size(const struct cy_buffer_borrowed_t payload)
     return out;
 }
 
-size_t cy_buffer_borrowed_gather(const struct cy_buffer_borrowed_t payload, struct cy_bytes_mut_t dest)
+size_t cy_buffer_borrowed_gather(const struct cy_buffer_borrowed_t payload, const struct cy_bytes_mut_t dest)
 {
     size_t offset = 0;
     if (NULL != dest.data) {
@@ -797,24 +798,35 @@ size_t cy_buffer_borrowed_gather(const struct cy_buffer_borrowed_t payload, stru
     return offset;
 }
 
+/// We snoop on all transfers to update the node-ID occupancy Bloom filter.
+/// If we don't have a node-ID and this is a new Bloom entry, follow CSMA/CD: add random wait.
+/// The point is to reduce the chances of multiple nodes appearing simultaneously and claiming same node-IDs.
+/// We keep tracking neighbors even if we have a node-ID in case we encounter a collision later and need to move.
+static void mark_neighbor(struct cy_t* const cy, const uint16_t remote_node_id)
+{
+    struct cy_bloom64_t* const bloom = cy->platform->node_id_bloom(cy);
+    assert((bloom != NULL) && (bloom->n_bits > 0) && ((bloom->n_bits % 64) == 0) && (bloom->popcount <= bloom->n_bits));
+    if ((cy->node_id > cy->platform->node_id_max) && !bloom64_get(bloom, remote_node_id)) {
+        cy->heartbeat_next += (cy_us_t)random_uint(cy, 0, 2 * MEGA);
+        CY_TRACE(cy, "🔭 Discovered neighbor %04x; new Bloom popcount %zu", remote_node_id, bloom->popcount + 1U);
+    }
+    bloom64_set(bloom, remote_node_id);
+    // A large population count indicates that the filter contains tombstones (marks for nodes that have left the
+    // network). We can't remove them individually, so we purge the filter and start over.
+    const bool bloom_congested = bloom->popcount > ((bloom->n_bits * 31ULL) / 32U);
+    if (bloom_congested) {
+        CY_TRACE(cy, "Bloom filter congested: popcount=%zu; purging to remove tombstones", bloom->popcount);
+        bloom64_purge(bloom);
+        assert(bloom->popcount == 0);
+    }
+}
+
 void cy_ingest_topic_transfer(struct cy_topic_t* const topic, const struct cy_transfer_owned_t transfer)
 {
     assert(topic != NULL);
     struct cy_t* const cy = topic->cy;
 
-    // We snoop on all transfers to update the node-ID occupancy Bloom filter.
-    // If we don't have a node-ID and this is a new Bloom entry, follow CSMA/CD: add random wait.
-    // The point is to reduce the chances of multiple nodes appearing simultaneously and claiming same node-IDs.
-    if ((cy->node_id > cy->node_id_max) && !bloom64_get(&cy->node_id_bloom, transfer.metadata.remote_node_id)) {
-        cy->heartbeat_next += (cy_us_t)random_uint(0, 2 * MEGA);
-        CY_TRACE(cy,
-                 "🔭 Discovered neighbor %04x publishing on '%s'@%04x; new Bloom popcount %zu",
-                 transfer.metadata.remote_node_id,
-                 topic->name,
-                 cy_topic_get_subject_id(topic),
-                 popcount_all(cy->node_id_bloom.n_bits, cy->node_id_bloom.storage) + 1U);
-    }
-    bloom64_set(&cy->node_id_bloom, transfer.metadata.remote_node_id);
+    mark_neighbor(cy, transfer.metadata.remote_node_id);
 
     // Experimental: age the topic with received transfers. Not with the published ones because we don't want
     // unconnected publishers to inflate the age.
@@ -823,7 +835,7 @@ void cy_ingest_topic_transfer(struct cy_topic_t* const topic, const struct cy_tr
     // Edge case: the subscription was just disabled while we were processing the transfer.
     // We need to release the buffer because the application may never get to it.
     if (topic->sub_list == NULL) {
-        cy->transport.buffer_release(cy, transfer.payload);
+        cy->platform->buffer_release(cy, transfer.payload);
         return; // No one is interested in this transfer.
     }
 
@@ -846,9 +858,11 @@ void cy_ingest_topic_transfer(struct cy_topic_t* const topic, const struct cy_tr
 void cy_ingest_topic_response_transfer(struct cy_t* const cy, struct cy_transfer_owned_t transfer)
 {
     assert(cy != NULL);
+    mark_neighbor(cy, transfer.metadata.remote_node_id);
+
     // TODO: proper deserialization. This fails if the first <8 bytes are fragmented.
     if (transfer.payload.base.view.size < 8U) {
-        cy->transport.buffer_release(cy, transfer.payload);
+        cy->platform->buffer_release(cy, transfer.payload);
         return; // Malformed response. The first 8 bytes shall contain the full topic hash.
     }
 
@@ -861,52 +875,63 @@ void cy_ingest_topic_response_transfer(struct cy_t* const cy, struct cy_transfer
     // Find the topic -- log(N) lookup.
     struct cy_topic_t* const topic = cy_topic_find_by_hash(cy, topic_hash);
     if (topic == NULL) {
-        cy->transport.buffer_release(cy, transfer.payload);
+        cy->platform->buffer_release(cy, transfer.payload);
         return; // We don't know this topic, ignore it.
     }
 
     // Find the matching pending response future -- log(N) lookup.
-    struct cy_tree_t* const tr = cavl2_find(topic->response_futures_by_transfer_id, //
+    struct cy_tree_t* const tr = cavl2_find(topic->futures_by_transfer_id, //
                                             &transfer.metadata.transfer_id,
-                                            &cavl_comp_response_future_transfer_id);
+                                            &cavl_comp_future_transfer_id);
     if (tr == NULL) {
-        cy->transport.buffer_release(cy, transfer.payload);
+        cy->platform->buffer_release(cy, transfer.payload);
         return; // Unexpected or duplicate response. TODO: Linger completed futures for multiple responses?
     }
-    struct cy_response_future_t* const fut = CAVL2_TO_OWNER(tr, struct cy_response_future_t, index_transfer_id);
+    struct cy_future_t* const fut = CAVL2_TO_OWNER(tr, struct cy_future_t, index_transfer_id);
     assert(fut->state == cy_future_pending); // TODO Linger completed futures for multiple responses?
 
     // Finalize and retire the future.
     fut->state = cy_future_success;
     cy_buffer_owned_release(cy, &fut->last_response.payload); // does nothing if already released
     fut->last_response = transfer;
-    cavl2_remove(&cy->response_futures_by_deadline, &fut->index_deadline);
-    cavl2_remove(&topic->response_futures_by_transfer_id, &fut->index_transfer_id);
+    cavl2_remove(&cy->futures_by_deadline, &fut->index_deadline);
+    cavl2_remove(&topic->futures_by_transfer_id, &fut->index_transfer_id);
     if (fut->callback != NULL) {
         fut->callback(fut);
     }
 }
 
-cy_err_t cy_heartbeat(struct cy_t* const cy)
+cy_err_t cy_update(struct cy_t* const cy)
 {
     cy_err_t      res = 0;
-    const cy_us_t now = cy->now(cy);
+    const cy_us_t now = cy_now(cy);
 
-    retire_timed_out_response_futures(cy, now);
+    retire_timed_out_futures(cy, now);
+
+    if (cy->node_id_collision) {
+        CY_TRACE(cy, "Processing the delayed node-ID collision event now.");
+        cy->node_id_collision = false;
+        if (cy->node_id <= cy->platform->node_id_max) {
+            cy->node_id = CY_NODE_ID_INVALID;
+            cy->platform->node_id_clear(cy);
+            cy->heartbeat_next = now;
+        }
+    }
 
     if (now >= cy->heartbeat_next) {
         // If it is time to publish a heartbeat but we still don't have a node-ID, it means that it is time to allocate!
-        if (cy->node_id >= cy->node_id_max) {
-            cy->node_id = pick_node_id(&cy->node_id_bloom, cy->node_id_max);
-            assert(cy->node_id <= cy->node_id_max);
-            res = cy->transport.set_node_id(cy);
-            CY_TRACE(cy,
-                     "Picked own node-ID %04x; Bloom popcount %zu; set_node_id()->%d",
-                     cy->node_id,
-                     popcount_all(cy->node_id_bloom.n_bits, cy->node_id_bloom.storage),
-                     res);
+        if (cy->node_id >= cy->platform->node_id_max) {
+            struct cy_bloom64_t* const bloom = cy->platform->node_id_bloom(cy);
+            assert((bloom != NULL) && (bloom->n_bits > 0) && ((bloom->n_bits % 64) == 0) &&
+                   (bloom->popcount <= bloom->n_bits));
+            // Pick the node-ID using the most recent state of the Bloom filter.
+            cy->node_id = pick_node_id(cy, bloom, cy->platform->node_id_max);
+            assert(cy->node_id <= cy->platform->node_id_max);
+            res = cy->platform->node_id_set(cy);
+            CY_TRACE(
+              cy, "Picked own node-ID %04x; Bloom popcount %zu; node_id_set()->%d", cy->node_id, bloom->popcount, res);
         }
-        assert(cy->node_id <= cy->node_id_max);
+        assert(cy->node_id <= cy->platform->node_id_max);
         if (res < 0) {
             return res; // Failed to set node-ID, bail out. Will try again next time.
         }
@@ -945,35 +970,21 @@ void cy_notify_discriminator_collision(struct cy_topic_t* const topic)
 void cy_notify_node_id_collision(struct cy_t* const cy)
 {
     assert(cy != NULL);
-    if (cy->node_id > cy->node_id_max) {
-        return; // We are not using a node-ID, nothing to do.
+    if (!cy->node_id_collision) {
+        cy->node_id_collision = true;
+        CY_TRACE(cy, "💥 node-ID %04x", cy->node_id);
     }
-    CY_TRACE(cy,
-             "💥 node-ID %04x; Bloom purge with popcount %zu",
-             cy->node_id,
-             popcount_all(cy->node_id_bloom.n_bits, cy->node_id_bloom.storage));
-    // We must reset the Bloom filter because there may be tombstones in it.
-    // It will be repopulated afresh during the delay we set below.
-    bloom64_purge(&cy->node_id_bloom);
-    // We don't want to reuse the same node-ID to avoid the risk of picking up RPC transfers addressed to the
-    // conflicting node, so we mark it used. The conflicting node may continue using that address if it hasn't heard
-    // us yet, which is preferable as it minimizes disruptions. If the other node heard us, it will also be abandoning
-    // this address, but we don't want it either because there may be in-flight RPC transfers addressed to it.
-    bloom64_set(&cy->node_id_bloom, cy->node_id);
-    // Restart the node-ID allocation process.
-    cy->node_id = CY_NODE_ID_INVALID;
-    cy->heartbeat_next += (cy_us_t)random_uint(CY_START_DELAY_MIN_us, CY_START_DELAY_MAX_us);
-    cy->transport.clear_node_id(cy);
 }
 
-bool cy_topic_new(struct cy_t* const                  cy,
-                  struct cy_topic_t* const            topic,
-                  const char* const                   name,
-                  const struct cy_topic_hint_t* const optional_hint)
+struct cy_topic_t* cy_topic_new_hint(struct cy_t* const cy, const char* const name, const uint16_t subject_id_hint)
 {
-    assert(cy != NULL);
-    assert(topic != NULL);
-    assert(name != NULL);
+    if ((cy == NULL) || (name == NULL)) {
+        return NULL;
+    }
+    struct cy_topic_t* const topic = cy->platform->topic_new(cy);
+    if (topic == NULL) {
+        return NULL;
+    }
     memset(topic, 0, sizeof(*topic));
     topic->cy = cy;
 
@@ -986,7 +997,7 @@ bool cy_topic_new(struct cy_t* const                  cy,
     topic->hash      = topic_hash(topic->name_length, topic->name);
     topic->evictions = 0; // starting from the preferred subject-ID.
     topic->age       = 0;
-    topic->aged_at   = cy->now(cy);
+    topic->aged_at   = cy_now(cy);
 
     topic->user                    = NULL;
     topic->pub_transfer_id         = 0;
@@ -1002,17 +1013,17 @@ bool cy_topic_new(struct cy_t* const                  cy,
     }
 
     // Apply the hints from the user to achieve the desired initial state.
-    if (optional_hint != NULL) {
+    if (subject_id_hint <= cy->platform->node_id_max) {
         if (!is_pinned(topic->hash)) {
             // Fit the lowest evictions counter such that we land at the specified subject-ID.
             // Avoid negative remainders, so we don't use simple evictions=(subject_id-hash)%6144.
-            while (topic_get_subject_id(topic->hash, topic->evictions) != optional_hint->subject_id) {
+            while (topic_get_subject_id(topic->hash, topic->evictions) != subject_id_hint) {
                 topic->evictions++;
             }
         }
         topic->last_event_ts = topic->last_local_event_ts = 0;
     } else {
-        cy->last_event_ts = cy->last_local_event_ts = topic->last_event_ts = topic->last_local_event_ts = cy->now(cy);
+        cy->last_event_ts = cy->last_local_event_ts = topic->last_event_ts = topic->last_local_event_ts = cy_now(cy);
     }
 
     // Insert the new topic into the name index tree. If it's not unique, bail out.
@@ -1045,9 +1056,10 @@ bool cy_topic_new(struct cy_t* const                  cy,
              (unsigned long long)topic->hash,
              cy_topic_get_subject_id(topic),
              cy->topic_count);
-    return true;
+    return topic;
 hell:
-    return false;
+    cy->platform->topic_destroy(topic);
+    return NULL;
 }
 
 void cy_topic_destroy(struct cy_topic_t* const topic)
@@ -1113,7 +1125,7 @@ cy_err_t cy_subscribe(struct cy_topic_t* const         topic,
 
     // Caution: Unsubscription in the middle of a transfer reassembly will cause loss of that transfer.
     if (topic->subscribed && ((topic->sub_extent < extent) || (topic->sub_transfer_id_timeout < transfer_id_timeout))) {
-        topic->cy->transport.unsubscribe(topic);
+        topic->cy->platform->topic_unsubscribe(topic);
         topic->subscribed = false;
     }
     topic->sub_transfer_id_timeout = max_i64(topic->sub_transfer_id_timeout, transfer_id_timeout);
@@ -1153,7 +1165,7 @@ cy_err_t cy_subscribe(struct cy_topic_t* const         topic,
     // Ensure the transport layer subscription is active.
     cy_err_t err = 0;
     if (!topic->subscribed) {
-        err               = topic->cy->transport.subscribe(topic);
+        err               = topic->cy->platform->topic_subscribe(topic);
         topic->subscribed = err >= 0;
     }
     CY_TRACE(topic->cy,
@@ -1166,16 +1178,16 @@ cy_err_t cy_subscribe(struct cy_topic_t* const         topic,
     return err;
 }
 
-struct cy_response_future_t cy_response_future_init(const cy_response_callback_t callback, void* const user)
+struct cy_future_t cy_future_init(const cy_response_callback_t callback, void* const user)
 {
-    return (struct cy_response_future_t){ .callback = callback, .user = user };
+    return (struct cy_future_t){ .callback = callback, .user = user };
 }
 
-cy_err_t cy_publish(struct cy_topic_t* const           topic,
-                    const cy_us_t                      tx_deadline,
-                    const struct cy_buffer_borrowed_t  payload,
-                    const cy_us_t                      response_deadline,
-                    struct cy_response_future_t* const response_future)
+cy_err_t cy_publish(struct cy_topic_t* const          topic,
+                    const cy_us_t                     tx_deadline,
+                    const struct cy_buffer_borrowed_t payload,
+                    const cy_us_t                     response_deadline,
+                    struct cy_future_t* const         future)
 {
     assert(topic != NULL);
     assert((topic->name_length > 0) && (topic->name[0] != '\0'));
@@ -1185,37 +1197,37 @@ cy_err_t cy_publish(struct cy_topic_t* const           topic,
     // Set up the response future first. If publication fails, we will have to undo it later.
     // The reason we can't do it afterward is that if the transport has a cyclic transfer-ID, insertion may fail if
     // we have exhausted the transfer-ID set.
-    if (response_future != NULL) {
-        response_future->index_deadline    = (struct cy_tree_t){ 0 };
-        response_future->index_transfer_id = (struct cy_tree_t){ 0 };
-        response_future->topic             = topic;
-        response_future->state             = cy_future_pending;
-        response_future->transfer_id       = topic->pub_transfer_id;
-        response_future->deadline          = response_deadline;
-        response_future->last_response     = (struct cy_transfer_owned_t){ 0 };
+    if (future != NULL) {
+        future->index_deadline    = (struct cy_tree_t){ 0 };
+        future->index_transfer_id = (struct cy_tree_t){ 0 };
+        future->topic             = topic;
+        future->state             = cy_future_pending;
+        future->transfer_id       = topic->pub_transfer_id;
+        future->deadline          = response_deadline;
+        future->last_response     = (struct cy_transfer_owned_t){ 0 };
         // NB: we don't touch the callback and the user pointer, as they are to be initialized by the user.
-        const struct cy_tree_t* const tr = cavl2_find_or_insert(&topic->response_futures_by_transfer_id,
+        const struct cy_tree_t* const tr = cavl2_find_or_insert(&topic->futures_by_transfer_id,
                                                                 &topic->pub_transfer_id,
-                                                                &cavl_comp_response_future_transfer_id,
-                                                                response_future,
-                                                                &cavl_factory_response_future_transfer_id);
-        if (tr != &response_future->index_transfer_id) {
+                                                                &cavl_comp_future_transfer_id,
+                                                                future,
+                                                                &cavl_factory_future_transfer_id);
+        if (tr != &future->index_transfer_id) {
             return -12345; // TODO error codes that abstract away the specific error codes of the transport library.
         }
     }
 
-    const cy_err_t res = topic->cy->transport.publish(topic, tx_deadline, payload);
+    const cy_err_t res = topic->cy->platform->topic_publish(topic, tx_deadline, payload);
 
-    if (response_future != NULL) {
+    if (future != NULL) {
         if (res >= 0) {
-            const struct cy_tree_t* const tr = cavl2_find_or_insert(&topic->cy->response_futures_by_deadline,
+            const struct cy_tree_t* const tr = cavl2_find_or_insert(&topic->cy->futures_by_deadline,
                                                                     &response_deadline,
-                                                                    &cavl_comp_response_future_deadline,
-                                                                    response_future,
-                                                                    &cavl_factory_response_future_deadline);
-            assert(tr == &response_future->index_deadline);
+                                                                    &cavl_comp_future_deadline,
+                                                                    future,
+                                                                    &cavl_factory_future_deadline);
+            assert(tr == &future->index_deadline);
         } else {
-            cavl2_remove(&topic->response_futures_by_transfer_id, &response_future->index_transfer_id);
+            cavl2_remove(&topic->futures_by_transfer_id, &future->index_transfer_id);
         }
     }
 
@@ -1232,7 +1244,7 @@ cy_err_t cy_respond(struct cy_topic_t* const            topic,
     assert((topic->name_length > 0) && (topic->name[0] != '\0'));
     /// Yes, we send the response using a request transfer. In the future we may leverage this for reliable delivery.
     /// All responses are sent to the same RPC service-ID; they are discriminated by the topic hash.
-    return topic->cy->transport.request(topic->cy,
+    return topic->cy->platform->request(topic->cy,
                                         CY_RPC_SERVICE_ID_TOPIC_RESPONSE,
                                         metadata,
                                         tx_deadline,

@@ -73,9 +73,6 @@ struct cy_udp_t
     uint64_t mem_oom_count;
 };
 
-/// A convenience wrapper over clock_gettime(CLOCK_MONOTIC).
-cy_us_t cy_udp_now(void);
-
 /// The namespace may be NULL or empty, in which case it defaults to "~".
 ///
 /// Unused interfaces should have address either 0 or 0xFFFFFFFF;
@@ -99,35 +96,3 @@ cy_err_t cy_udp_spin_once(struct cy_udp_t* const cy_udp);
 /// deadline is reached or until an event arrives. The function may return early even if no events are available.
 /// The current monotonic time is as defined in cy_udp_now().
 cy_err_t cy_udp_spin_until(struct cy_udp_t* const cy_udp, const cy_us_t deadline);
-
-bool cy_udp_topic_new(struct cy_udp_t* const              cy_udp,
-                      struct cy_udp_topic_t* const        topic,
-                      const char* const                   name,
-                      const struct cy_topic_hint_t* const optional_hints);
-
-/// Trivial convenience wrapper over cy_subscribe().
-static inline cy_err_t cy_udp_subscribe(struct cy_udp_topic_t* const     topic,
-                                        struct cy_subscription_t* const  sub,
-                                        const size_t                     extent,
-                                        const cy_us_t                    transfer_id_timeout,
-                                        const cy_subscription_callback_t callback)
-{
-    return cy_subscribe(&topic->base, sub, extent, transfer_id_timeout, callback);
-}
-
-static inline cy_err_t cy_udp_publish(struct cy_udp_topic_t* const       topic,
-                                      const cy_us_t                      tx_deadline,
-                                      const struct cy_buffer_borrowed_t  payload,
-                                      const cy_us_t                      response_deadline,
-                                      struct cy_response_future_t* const response_future)
-{
-    return cy_publish(&topic->base, tx_deadline, payload, response_deadline, response_future);
-}
-
-/// Trivial convenience wrapper over cy_publish1().
-static inline cy_err_t cy_udp_publish1(struct cy_udp_topic_t* const      topic,
-                                       const cy_us_t                     tx_deadline,
-                                       const struct cy_buffer_borrowed_t payload)
-{
-    return cy_publish1(&topic->base, tx_deadline, payload);
-}
