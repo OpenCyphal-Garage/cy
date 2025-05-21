@@ -118,15 +118,15 @@ static int32_t cavl_comp_topic_gossip_time(const void* const user, const struct 
     return ((*(cy_us_t*)user) >= inner->last_gossip) ? +1 : -1;
 }
 
-static int32_t cavl_comp_future_transfer_id(const void* const user, const struct cy_tree_t* const node)
+static int32_t cavl_comp_future_transfer_id_masked(const void* const user, const struct cy_tree_t* const node)
 {
     assert((user != NULL) && (node != NULL));
     const uint64_t                  outer = *(uint64_t*)user;
     const struct cy_future_t* const inner = CAVL2_TO_OWNER(node, struct cy_future_t, index_transfer_id);
-    if (outer == inner->transfer_id) {
+    if (outer == inner->transfer_id_masked) {
         return 0;
     }
-    return (outer >= inner->transfer_id) ? +1 : -1;
+    return (outer >= inner->transfer_id_masked) ? +1 : -1;
 }
 
 /// Deadlines are not unique, so this comparator never returns 0.
@@ -880,9 +880,9 @@ void cy_ingest_topic_response_transfer(struct cy_t* const cy, struct cy_transfer
     }
 
     // Find the matching pending response future -- log(N) lookup.
-    struct cy_tree_t* const tr = cavl2_find(topic->futures_by_transfer_id, //
-                                            &transfer.metadata.transfer_id,
-                                            &cavl_comp_future_transfer_id);
+    const uint64_t          transfer_id_masked = transfer.metadata.transfer_id & cy->platform->transfer_id_mask;
+    struct cy_tree_t* const tr =
+      cavl2_find(topic->futures_by_transfer_id, &transfer_id_masked, &cavl_comp_future_transfer_id_masked);
     if (tr == NULL) {
         cy->platform->buffer_release(cy, transfer.payload);
         return; // Unexpected or duplicate response. TODO: Linger completed futures for multiple responses?
@@ -1198,17 +1198,17 @@ cy_err_t cy_publish(struct cy_topic_t* const          topic,
     // The reason we can't do it afterward is that if the transport has a cyclic transfer-ID, insertion may fail if
     // we have exhausted the transfer-ID set.
     if (future != NULL) {
-        future->index_deadline    = (struct cy_tree_t){ 0 };
-        future->index_transfer_id = (struct cy_tree_t){ 0 };
-        future->topic             = topic;
-        future->state             = cy_future_pending;
-        future->transfer_id       = topic->pub_transfer_id;
-        future->deadline          = response_deadline;
-        future->last_response     = (struct cy_transfer_owned_t){ 0 };
+        future->index_deadline     = (struct cy_tree_t){ 0 };
+        future->index_transfer_id  = (struct cy_tree_t){ 0 };
+        future->topic              = topic;
+        future->state              = cy_future_pending;
+        future->transfer_id_masked = topic->pub_transfer_id & topic->cy->platform->transfer_id_mask;
+        future->deadline           = response_deadline;
+        future->last_response      = (struct cy_transfer_owned_t){ 0 };
         // NB: we don't touch the callback and the user pointer, as they are to be initialized by the user.
         const struct cy_tree_t* const tr = cavl2_find_or_insert(&topic->futures_by_transfer_id,
-                                                                &topic->pub_transfer_id,
-                                                                &cavl_comp_future_transfer_id,
+                                                                &future->transfer_id_masked,
+                                                                &cavl_comp_future_transfer_id_masked,
                                                                 future,
                                                                 &cavl_factory_future_transfer_id);
         if (tr != &future->index_transfer_id) {

@@ -492,8 +492,8 @@ struct cy_future_t
 
     struct cy_topic_t*     topic;
     enum cy_future_state_t state;
-    uint64_t               transfer_id; ///< TODO: needs modulus from the transport layer.
-    cy_us_t                deadline;    ///< We're indexing on this so it shall not be changed after insertion.
+    uint64_t               transfer_id_masked; ///< Masked as (platform->transfer_id_mask & transfer_id)
+    cy_us_t                deadline;           ///< We're indexing on this so it shall not be changed after insertion.
 
     /// These fields are populated once the response is received.
     /// The payload ownership is transferred to this structure.
