@@ -15,6 +15,7 @@
 #include "udp_wrapper.h"
 
 #include <assert.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -83,9 +84,9 @@ static void mem_free(void* const user, const size_t size, void* const pointer)
     if (pointer != NULL) {
         assert(cy_udp->mem_allocated_fragments > 0);
         cy_udp->mem_allocated_fragments--;
+        memset(pointer, 0xA5, size); // a simple diagnostic aid
         free(pointer);
     }
-    memset(pointer, 0xA5, size); // a simple diagnostic aid
 }
 
 static void purge_tx(struct cy_udp_posix_t* const cy_udp, const uint_fast8_t iface_index)
@@ -381,6 +382,10 @@ cy_err_t cy_udp_posix_new(struct cy_udp_posix_t* const cy_udp,
     cy_udp->rx_mem.payload.user_reference = cy_udp;
     cy_udp->tx_sock_err_handler           = default_tx_sock_err_handler;
     cy_udp->rpc_rx_sock_err_handler       = default_rpc_rx_sock_err_handler;
+
+    cy_udp->node_id_bloom.storage  = cy_udp->node_id_bloom_storage;
+    cy_udp->node_id_bloom.n_bits   = sizeof(cy_udp->node_id_bloom_storage) * CHAR_BIT;
+    cy_udp->node_id_bloom.popcount = 0;
 
     // Initialize the udpard tx pipelines. They are all initialized always even if the corresponding iface is disabled,
     // for regularity, because an unused tx pipline needs no resources, so it's not a problem.

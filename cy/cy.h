@@ -38,7 +38,7 @@
 #if CY_CONFIG_TRACE
 #define CY_TRACE(cy, ...) cy_trace(cy, __FILE__, __LINE__, __func__, __VA_ARGS__)
 #else
-#define CY_TRACE(cy, ...) (void)0
+#define CY_TRACE(cy, ...) (void)cy
 #endif
 
 #ifdef __cplusplus
@@ -520,9 +520,9 @@ struct cy_future_t
 /// - cy_respond() -- user transfers only.
 /// Creation of a new topic may cause resubscription of any existing topics (all in the worst case).
 ///
-/// TODO: ALLOW OUT-OF-ORDER HEARTBEATS BY DEFAULT, DISABLE AS AN OPTION FOR STRICT DETERMINISTIC SCHEDULING.
-/// TODO: this means that when we schedule a gossip asap, reschedule the next heartbeat as well.
-/// This will enable faster convergence and fast queries to discover a specific topic or RPC.
+/// TODO: Use a form of leaky bucket to allow unscheduled heartbeats on collision/divergence,
+/// and at the same time limit the worst case bursts. Say, we could be limited to 10 heartbeats per second
+/// and by default publish 1 heartbeat per second.
 struct cy_t
 {
     const struct cy_platform_t* platform; ///< Never NULL.

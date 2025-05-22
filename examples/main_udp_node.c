@@ -1,4 +1,4 @@
-#include "cy_udp.h"
+#include "cy_udp_posix.h"
 #include <rapidhash.h>
 #include <time.h>
 #include <stdio.h>
@@ -66,8 +66,7 @@ struct config_topic_t
 
 struct config_t
 {
-    uint32_t iface_address[CY_UDP_IFACE_COUNT_MAX];
-    uint16_t local_node_id;
+    uint32_t iface_address[CY_UDP_POSIX_IFACE_COUNT_MAX];
     uint64_t local_uid;
     size_t   tx_queue_capacity_per_iface;
 
@@ -81,7 +80,6 @@ static struct config_t load_config(const int argc, char* argv[])
 {
     // Load default config.
     struct config_t cfg = {
-        .local_node_id               = CY_NODE_ID_INVALID,
         .local_uid                   = random_uid(),
         .tx_queue_capacity_per_iface = 1000,
         .namespace                   = NULL, // will use the default namespace by default.
@@ -93,12 +91,10 @@ static struct config_t load_config(const int argc, char* argv[])
     size_t          iface_count = 0;
     struct arg_kv_t arg;
     while ((arg = arg_kv_next(argc, argv)).key_hash != 0) {
-        if ((arg_kv_hash("iface") == arg.key_hash) && (iface_count < CY_UDP_IFACE_COUNT_MAX)) {
-            cfg.iface_address[iface_count++] = udp_parse_iface_address(arg.value);
+        if ((arg_kv_hash("iface") == arg.key_hash) && (iface_count < CY_UDP_POSIX_IFACE_COUNT_MAX)) {
+            cfg.iface_address[iface_count++] = udp_wrapper_parse_iface_address(arg.value);
         } else if (arg_kv_hash("uid") == arg.key_hash) {
             cfg.local_uid = strtoull(arg.value, NULL, 0);
-        } else if (arg_kv_hash("node_id") == arg.key_hash) {
-            cfg.local_node_id = (uint16_t)strtoul(arg.value, NULL, 0);
         } else if (arg_kv_hash("tx_queue_capacity") == arg.key_hash) {
             cfg.tx_queue_capacity_per_iface = strtoul(arg.value, NULL, 0);
         } else if (arg_kv_hash("ns") == arg.key_hash) {
@@ -124,10 +120,10 @@ static struct config_t load_config(const int argc, char* argv[])
 
     // Print the actual configs we're using.
     fprintf(stderr, "ifaces:");
-    for (size_t i = 0; i < CY_UDP_IFACE_COUNT_MAX; i++) {
+    for (size_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
         fprintf(stderr, " 0x%08x", cfg.iface_address[i]);
     }
-    fprintf(stderr, "\nid: 0x%016llx %04x\n", (unsigned long long)cfg.local_uid, cfg.local_node_id);
+    fprintf(stderr, "\nuid: 0x%016llx\n", (unsigned long long)cfg.local_uid);
     fprintf(stderr, "tx_queue_capacity: %zu\n", cfg.tx_queue_capacity_per_iface);
     fprintf(stderr, "topics:\n");
     for (size_t i = 0; i < cfg.topic_count; i++) {
@@ -189,7 +185,7 @@ static void on_msg_trace(struct cy_subscription_t* const subscription)
 }
 
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
-static void on_response_trace(struct cy_response_future_t* const future)
+static void on_response_trace(struct cy_future_t* const future)
 {
     struct cy_topic_t* topic = future->topic;
     if (future->state == cy_future_success) {
@@ -230,9 +226,9 @@ static void on_response_trace(struct cy_response_future_t* const future)
                  ascii);
     } else if (future->state == cy_future_failure) {
         CY_TRACE(topic->cy,
-                 "↩️⌛ Response to %s tid %llu has timed out",
+                 "↩️⌛ Response to %s tid %016llx (masked) has timed out",
                  future->topic->name,
-                 (unsigned long long)future->transfer_id);
+                 (unsigned long long)future->transfer_id_masked);
     } else {
         assert(false);
     }
@@ -243,48 +239,51 @@ int main(const int argc, char* argv[])
     srand((unsigned)time(NULL));
     const struct config_t cfg = load_config(argc, argv);
 
-    // Set up the node instance.
-    struct cy_udp_t cy_udp;
+    // Set up the node instance. The initialization is the only platform-specific part.
+    // The rest of the API is platform- and transport-agnostic.
+    struct cy_udp_posix_t cy_udp_posix;
     {
-        const cy_err_t res = cy_udp_new(&cy_udp, //
-                                        cfg.local_uid,
-                                        cfg.namespace,
-                                        cfg.iface_address,
-                                        cfg.local_node_id,
-                                        cfg.tx_queue_capacity_per_iface);
+        const cy_err_t res = cy_udp_posix_new(&cy_udp_posix, //
+                                              cfg.local_uid,
+                                              cfg.namespace,
+                                              cfg.iface_address,
+                                              cfg.tx_queue_capacity_per_iface);
         if (res < 0) {
             fprintf(stderr, "cy_udp_new: %d\n", res);
             return 1;
         }
     }
+    struct cy_t* const cy = &cy_udp_posix.base;
+
+    // ------------------------------  End of the platform- and transport-specific part  ------------------------------
 
     // Create topics.
-    struct cy_udp_topic_t*    topics = calloc(cfg.topic_count, sizeof(struct cy_udp_topic_t));
-    struct cy_subscription_t* subs   = calloc(cfg.topic_count, sizeof(struct cy_subscription_t));
+    struct cy_topic_t*       topics[cfg.topic_count];
+    struct cy_subscription_t subs[cfg.topic_count];
     for (size_t i = 0; i < cfg.topic_count; i++) {
-        cy_err_t res = cy_udp_topic_new(&cy_udp, &topics[i], cfg.topics[i].name, NULL);
-        if (res < 0) {
-            fprintf(stderr, "cy_udp_topic_new: %d\n", res);
+        topics[i] = cy_topic_new(cy, cfg.topics[i].name);
+        if (topics[i] == NULL) {
+            fprintf(stderr, "cy_udp_topic_new: %p\n", (void*)topics[i]);
             return 1;
         }
         if (cfg.topics[i].sub) {
-            res = cy_udp_subscribe(&topics[i], &subs[i], 1024 * 1024, CY_TRANSFER_ID_TIMEOUT_DEFAULT_us, on_msg_trace);
+            const cy_err_t res = cy_subscribe(topics[i], &subs[i], 1024 * 1024, on_msg_trace);
             if (res < 0) {
                 fprintf(stderr, "cy_udp_subscribe: %d\n", res);
                 return 1;
             }
         }
     }
-    struct cy_response_future_t* futures = calloc(cfg.topic_count, sizeof(struct cy_response_future_t));
+    struct cy_future_t* futures = calloc(cfg.topic_count, sizeof(struct cy_future_t));
     for (size_t i = 0; i < cfg.topic_count; i++) {
         futures->state    = cy_future_success;
         futures->callback = on_response_trace;
     }
 
     // Spin the event loop and publish the topics.
-    cy_us_t next_publish_at = cy_udp_now() + 1000000;
+    cy_us_t next_publish_at = cy_now(cy) + 1000000;
     while (true) {
-        const cy_err_t err_spin = cy_udp_spin_once(&cy_udp);
+        const cy_err_t err_spin = cy_udp_posix_spin_once(&cy_udp_posix);
         if (err_spin < 0) {
             fprintf(stderr, "cy_udp_spin_once: %d\n", err_spin);
             break;
@@ -293,9 +292,9 @@ int main(const int argc, char* argv[])
         // Publish messages.
         // I'm thinking that it would be nice to have olga_scheduler ported to C11...
         // See https://github.com/Zubax/olga_scheduler
-        const cy_us_t now = cy_udp_now();
+        const cy_us_t now = cy_now(cy);
         if (now >= next_publish_at) {
-            if (cy_has_node_id(&cy_udp.base)) {
+            if (cy_has_node_id(cy)) {
                 for (size_t i = 0; i < cfg.topic_count; i++) {
                     if ((!cfg.topics[i].pub) || (futures[i].state == cy_future_pending)) {
                         continue;
@@ -303,14 +302,14 @@ int main(const int argc, char* argv[])
                     char msg[256];
                     sprintf(msg,
                             "Hello from %016llx! The current time is %lld us.",
-                            (unsigned long long)cy_udp.base.uid,
+                            (unsigned long long)cy->uid,
                             (long long)now);
                     const cy_err_t pub_res =
-                      cy_udp_publish(&topics[i],
-                                     now + 100000,
-                                     (struct cy_buffer_borrowed_t){ .view = { .data = msg, .size = strlen(msg) } },
-                                     now + 1000000,
-                                     &futures[i]);
+                      cy_publish(topics[i],
+                                 now + 100000,
+                                 (struct cy_buffer_borrowed_t){ .view = { .data = msg, .size = strlen(msg) } },
+                                 now + 1000000,
+                                 &futures[i]);
                     if (pub_res < 0) {
                         fprintf(stderr, "cy_udp_publish: %d\n", pub_res);
                         break;
@@ -319,10 +318,10 @@ int main(const int argc, char* argv[])
             }
             next_publish_at += 1000000U;
 
-            CY_TRACE(&cy_udp.base,
+            CY_TRACE(cy,
                      "Heap: allocated %zu fragments, %llu OOMs",
-                     cy_udp.mem_allocated_fragments,
-                     (unsigned long long)cy_udp.mem_oom_count);
+                     cy_udp_posix.mem_allocated_fragments,
+                     (unsigned long long)cy_udp_posix.mem_oom_count);
         }
     }
 

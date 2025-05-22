@@ -4,8 +4,6 @@ cmake_minimum_required(VERSION 3.24)
 project(cy_examples CXX)
 enable_testing()
 
-include_directories(${CMAKE_SOURCE_DIR}/lib)
-
 # Cy trace logging helper.
 add_library(cy_trace_stderr STATIC cy_trace_stderr.c)
 target_link_libraries(cy_trace_stderr PUBLIC cy)

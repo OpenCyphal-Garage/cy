@@ -11,3 +11,4 @@ target_include_directories(udpard SYSTEM INTERFACE ${CMAKE_SOURCE_DIR}/lib/libud
 # Cy UDP POSIX static library.
 add_library(cy_udp_posix STATIC ${CMAKE_CURRENT_SOURCE_DIR}/cy_udp_posix.c ${CMAKE_CURRENT_SOURCE_DIR}/udp_wrapper.c)
 target_link_libraries(cy_udp_posix PUBLIC cy udpard)
+target_include_directories(cy_udp_posix SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
