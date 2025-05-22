@@ -224,7 +224,7 @@ static cy_err_t platform_request(struct cy_t* const                  cy,
                               service_id,
                               metadata.remote_node_id,
                               metadata.transfer_id,
-                              (struct UdpardPayload){ .size = payload.view.size, .data = payload.view.data },
+                              (struct UdpardPayload){ .size = linear_payload.size, .data = linear_payload.data },
                               NULL);
             // NOLINTNEXTLINE(*-narrowing-conversions, *-avoid-nested-conditional-operator)
             res = (e < 0) ? (cy_err_t)e : ((res < 0) ? res : (cy_err_t)e);
@@ -272,7 +272,7 @@ static cy_err_t platform_topic_publish(struct cy_topic_t* const          topic,
                               (enum UdpardPriority)topic->pub_priority,
                               cy_topic_get_subject_id(topic),
                               topic->pub_transfer_id,
-                              (struct UdpardPayload){ .size = payload.view.size, .data = payload.view.data },
+                              (struct UdpardPayload){ .size = linear_payload.size, .data = linear_payload.data },
                               NULL);
             // NOLINTNEXTLINE(*-narrowing-conversions, *-avoid-nested-conditional-operator)
             res = (e < 0) ? (cy_err_t)e : ((res < 0) ? res : (cy_err_t)e);

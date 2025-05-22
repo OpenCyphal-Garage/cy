@@ -318,10 +318,10 @@ int main(const int argc, char* argv[])
             }
             next_publish_at += 1000000U;
 
-            CY_TRACE(cy,
-                     "Heap: allocated %zu fragments, %llu OOMs",
-                     cy_udp_posix.mem_allocated_fragments,
-                     (unsigned long long)cy_udp_posix.mem_oom_count);
+            // CY_TRACE(cy,
+            //          "Heap: allocated %zu fragments, %llu OOMs",
+            //          cy_udp_posix.mem_allocated_fragments,
+            //          (unsigned long long)cy_udp_posix.mem_oom_count);
         }
     }
 
