@@ -249,7 +249,7 @@ int main(const int argc, char* argv[])
                                               cfg.iface_address,
                                               cfg.tx_queue_capacity_per_iface);
         if (res < 0) {
-            fprintf(stderr, "cy_udp_new: %d\n", res);
+            fprintf(stderr, "cy_udp_posix_new: %d\n", res);
             return 1;
         }
     }
@@ -263,13 +263,13 @@ int main(const int argc, char* argv[])
     for (size_t i = 0; i < cfg.topic_count; i++) {
         topics[i] = cy_topic_new(cy, cfg.topics[i].name);
         if (topics[i] == NULL) {
-            fprintf(stderr, "cy_udp_topic_new: %p\n", (void*)topics[i]);
+            fprintf(stderr, "cy_topic_new: %p\n", (void*)topics[i]);
             return 1;
         }
         if (cfg.topics[i].sub) {
             const cy_err_t res = cy_subscribe(topics[i], &subs[i], 1024 * 1024, on_msg_trace);
             if (res < 0) {
-                fprintf(stderr, "cy_udp_subscribe: %d\n", res);
+                fprintf(stderr, "cy_subscribe: %d\n", res);
                 return 1;
             }
         }
@@ -285,7 +285,7 @@ int main(const int argc, char* argv[])
     while (true) {
         const cy_err_t err_spin = cy_udp_posix_spin_once(&cy_udp_posix);
         if (err_spin < 0) {
-            fprintf(stderr, "cy_udp_spin_once: %d\n", err_spin);
+            fprintf(stderr, "cy_udp_posix_spin_once: %d\n", err_spin);
             break;
         }
 
@@ -311,7 +311,7 @@ int main(const int argc, char* argv[])
                                  now + 1000000,
                                  &futures[i]);
                     if (pub_res < 0) {
-                        fprintf(stderr, "cy_udp_publish: %d\n", pub_res);
+                        fprintf(stderr, "cy_publish: %d\n", pub_res);
                         break;
                     }
                 }

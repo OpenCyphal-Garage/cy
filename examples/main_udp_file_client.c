@@ -1,4 +1,4 @@
-#include "cy_udp.h"
+#include "cy_udp_posix.h"
 #include <time.h>
 #include <stdio.h>
 #include <string.h>
@@ -53,23 +53,19 @@ int main(const int argc, char* argv[])
     }
     memcpy(req.path, argv[2], req.path_len);
 
-    // SET UP THE NODE.
-    struct cy_udp_t cy_udp;
-    cy_err_t        res = cy_udp_new(&cy_udp, //
-                              random_uid(),
-                              argv[1],
-                              (uint32_t[3]){ udp_parse_iface_address("127.0.0.1") },
-                              CY_NODE_ID_INVALID,
-                              1000);
+    // SET UP THE NODE. This is the only platform-specific part; the rest is platform- and transport-agnostic.
+    struct cy_udp_posix_t cy_udp;
+    cy_err_t              res = cy_udp_posix_new(
+      &cy_udp, random_uid(), argv[1], (uint32_t[3]){ udp_wrapper_parse_iface_address("127.0.0.1") }, 1000);
     if (res < 0) {
-        errx(res, "cy_udp_new");
+        errx(res, "cy_udp_posix_new");
     }
+    struct cy_t* const cy = &cy_udp.base;
 
     // SET UP THE FILE READ TOPIC.
-    struct cy_udp_topic_t topic_file_read;
-    res = cy_udp_topic_new(&cy_udp, &topic_file_read, "file/read", NULL);
-    if (res < 0) {
-        errx(res, "cy_udp_topic_new");
+    struct cy_topic_t* const topic_file_read = cy_topic_new(cy, "file/read");
+    if (topic_file_read == NULL) {
+        errx(0, "cy_topic_new");
     }
 
     // WAIT FOR THE NODE TO JOIN THE NETWORK.
@@ -77,26 +73,26 @@ int main(const int argc, char* argv[])
     // for some time. This stage can be skipped if we have a configuration hint recovered from nonvolatile storage.
     fprintf(stderr, "Waiting for the node to join the network...\n");
     while (!cy_ready(&cy_udp.base)) {
-        res = cy_udp_spin_once(&cy_udp);
+        res = cy_udp_posix_spin_once(&cy_udp);
         if (res < 0) {
-            errx(res, "cy_udp_spin_once");
+            errx(res, "cy_udp_posix_spin_once");
         }
     }
 
     // READ THE FILE SEQUENTIALLY.
     while (true) {
-        const cy_us_t now = cy_udp_now();
+        const cy_us_t now = cy_udp_posix_now();
 
         // Send the request.
+        struct cy_future_t future = cy_future_new(NULL, NULL);
         fprintf(stderr, "\nRequesting offset %llu...\n", (unsigned long long)req.read_offset);
-        struct cy_response_future_t future = cy_response_future_init(NULL, NULL);
-        res                                = cy_udp_publish(&topic_file_read,
-                             now + MEGA,
-                             (struct cy_buffer_borrowed_t){ .view = { .size = req.path_len + 10, .data = &req } },
-                             now + RESPONSE_TIMEOUT,
-                             &future);
+        res = cy_publish(topic_file_read,
+                         now + MEGA,
+                         (struct cy_buffer_borrowed_t){ .view = { .size = req.path_len + 10, .data = &req } },
+                         now + RESPONSE_TIMEOUT,
+                         &future);
         if (res < 0) {
-            errx(res, "cy_udp_publish");
+            errx(res, "cy_publish");
         }
 
         // Wait for the response while spinning the event loop.
@@ -104,9 +100,9 @@ int main(const int argc, char* argv[])
         // We could also spin the loop in a background thread and use a condition variable to wake up the main thread.
         assert(future.state == cy_future_pending);
         while (future.state == cy_future_pending) {
-            res = cy_udp_spin_once(&cy_udp);
+            res = cy_udp_posix_spin_once(&cy_udp);
             if (res < 0) {
-                errx(res, "cy_udp_spin_once");
+                errx(res, "cy_udp_posix_spin_once");
             }
         }
         if (future.state == cy_future_failure) {

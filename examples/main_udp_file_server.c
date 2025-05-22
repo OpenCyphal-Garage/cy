@@ -1,4 +1,4 @@
-#include "cy_udp.h"
+#include "cy_udp_posix.h"
 #include <time.h>
 #include <stdio.h>
 #include <string.h>
@@ -83,35 +83,34 @@ int main(const int argc, char* argv[])
 {
     srand((unsigned)time(NULL));
 
-    // SET UP THE NODE.
-    struct cy_udp_t cy_udp;
-    cy_err_t        res = cy_udp_new(&cy_udp,
-                              random_uid(),
-                              (argc > 1) ? argv[1] : "~",
-                              (uint32_t[3]){ udp_parse_iface_address("127.0.0.1") },
-                              CY_NODE_ID_INVALID,
-                              1000);
+    // SET UP THE NODE. This is the only platform-specific part; the rest is platform- and transport-agnostic.
+    struct cy_udp_posix_t cy_udp;
+    cy_err_t              res = cy_udp_posix_new(&cy_udp,
+                                    random_uid(),
+                                    (argc > 1) ? argv[1] : "~",
+                                    (uint32_t[3]){ udp_wrapper_parse_iface_address("127.0.0.1") },
+                                    1000);
     if (res < 0) {
-        errx(res, "cy_udp_new");
+        errx(res, "cy_udp_posix_new");
     }
+    struct cy_t* const cy = &cy_udp.base;
 
     // SET UP THE FILE READ TOPIC.
-    struct cy_udp_topic_t topic_file_read;
-    res = cy_udp_topic_new(&cy_udp, &topic_file_read, "file/read", NULL);
-    if (res < 0) {
-        errx(res, "cy_udp_topic_new");
+    struct cy_topic_t* const topic_file_read = cy_topic_new(cy, "file/read");
+    if (topic_file_read == NULL) {
+        errx(0, "cy_udp_topic_new");
     }
     struct cy_subscription_t sub_file_read;
-    res = cy_udp_subscribe(&topic_file_read, &sub_file_read, 1024, CY_TRANSFER_ID_TIMEOUT_DEFAULT_us, on_file_read_msg);
+    res = cy_subscribe(topic_file_read, &sub_file_read, 1024, on_file_read_msg);
     if (res < 0) {
-        errx(res, "cy_udp_subscribe");
+        errx(res, "cy_subscribe");
     }
 
     // SPIN THE EVENT LOOP.
     while (1) {
-        res = cy_udp_spin_once(&cy_udp);
+        res = cy_udp_posix_spin_once(&cy_udp);
         if (res < 0) {
-            errx(res, "cy_udp_spin_once");
+            errx(res, "cy_udp_posix_spin_once");
         }
     }
 
