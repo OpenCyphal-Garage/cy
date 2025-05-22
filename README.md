@@ -23,49 +23,47 @@ Stretch goals:
 ## TL;DR
 
 ```c
-// SET UP LOCAL NODE:
-struct cy_udp_t cy_udp;
-cy_err_t res = cy_udp_new(&cy_udp,
-                          local_unique_id,  // 64-bit composed of VID+PID+IID
-                          "/my_namespace",  // topic name prefix (defaults to "/")
-                          (uint32_t[3]){ udp_parse_iface_address("127.0.0.1") },
-                          CY_NODE_ID_INVALID, // will self-allocate
-                          1000);            // tx queue capacity per interface
+// SET UP LOCAL NODE. This is the only platform-specific part.
+// The rest of the API is platform- and transport-agnostic, with the exception of the event loop spin functions.
+struct cy_udp_posix_t cy_udp_posix; // In this example we're running over Cyphal/UDP, this node runs on POSIX.
+cy_err_t res = cy_udp_posix_new(&cy_udp_posix,
+                                local_unique_id,  // 64-bit composed of VID+PID+IID
+                                "my_namespace",   // topic name prefix (defaults to nothing)
+                                (uint32_t[3]){ udp_parse_iface_address("127.0.0.1") },
+                                1000);            // tx queue capacity per interface
 if (res < 0) { ... }
+
+// The rest of the API is platform- and transport-agnostic, except the event loop spinners.
+struct cy_t* const cy = &cy_udp_posix.base;
 
 // JOIN A TOPIC (to publish and/or subscribe).
 // To interface with an old node that does not support named topics, put the subject-ID into the topic name;
 // e.g., `/1234`. This will bypass the automatic subject-ID allocation and pin the topic as specified.
-struct cy_udp_topic_t my_topic;
-cy_err_t res = cy_udp_topic_new(&cy_udp,
-                                &my_topic,
-                                "my_topic",  // expands into "/my_namespace/my_topic"
-                                NULL);
+struct cy_topic_t* const my_topic = cy_topic_new(cy, "my_topic");  // expands into "my_namespace/my_topic"
 if (res < 0) { ... }
 
 // SUBSCRIBE TO TOPIC (nothing needs to be done if we want to publish):
 struct cy_subscription_t my_subscription;
-cy_err_t res = cy_udp_subscribe(&my_topic,
-                                &my_subscription,
-                                1024 * 1024,                       // extent (max message size)
-                                CY_TRANSFER_ID_TIMEOUT_DEFAULT_us, // going to remove this
-                                on_message_received_callback);     // the callback is optional
+res = cy_subscribe(my_topic,
+                   &my_subscription,
+                   1024 * 1024,                       // extent (max message size)
+                   on_message_received_callback);     // the callback is optional, we can also poll
 if (res < 0) { ... }
 
 // SPIN THE EVENT LOOP
 while (true) {
-    const cy_err_t err_spin = cy_udp_spin_once(&cy_udp);
+    const cy_err_t err_spin = cy_udp_posix_spin_once(&cy_udp_posix);
     if (err_spin < 0) { ... }
 
     // PUBLISH MESSAGES (no need to do anything else unlike in the case of subscription)
     // Optionally we can check if the local node has a node-ID. It will automatically appear
-    // if not given explicitly at startup in a few seconds. If a collision is discovered,
-    // it will briefly disappear and re-appear again a few seconds later.
-    if (cy_has_node_id(&cy_udp.base)) {
+    // if not given explicitly at startup in a few seconds; once appeared, it will always remain available,
+    // but it may change if a collision is discovered (should never happen in a well-managed network).
+    if (cy_has_node_id(cy)) {
         char msg[256];
-        sprintf(msg, "I am %016llx. time=%lld us", (unsigned long long)cy_udp.base.uid, (long long)now);
-        const struct cy_payload_t payload = { .data = msg, .size = strlen(msg) };
-        const cy_err_t            pub_res = cy_udp_publish1(&my_topic, now + 100000, payload);
+        sprintf(msg, "I am %016llx. time=%lld us", (unsigned long long)cy->uid, (long long)now);
+        const struct cy_buffer_borrowed_t payload = { .view.data = msg, .view.size = strlen(msg) };
+        const cy_err_t pub_res = cy_udp_publish1(my_topic, now + 100000, payload);
         if (pub_res < 0) { ... }
     }
 }
