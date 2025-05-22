@@ -148,6 +148,9 @@ static cy_err_t platform_node_id_set(struct cy_t* const cy)
                                       true,
                                       CY_UDP_POSIX_TOPIC_RESPONSE_EXTENT);
     assert(res >= 0); // infallible by design
+    // https://github.com/pavel-kirienko/cy/issues/8
+    // https://github.com/OpenCyphal/libudpard/issues/63 (applies to requests only in this case)
+    cy_udp->rpc_rx_port_topic_response.port.transfer_id_timeout_usec = 0;
 
     // Now it is finally time to open the multicast RX sockets.
     for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
