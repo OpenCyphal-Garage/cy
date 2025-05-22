@@ -47,6 +47,17 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${c_cxx_flags} -Wzero-as-null-pointer-constant")
 
+include_directories(${CMAKE_SOURCE_DIR}/lib)
+
+# These are just temporary options for debugging and testing.
+# Overriding the preferred subject-ID creates a very challenging environment for the consensus algorithm,
+# increasing the random pick collision probability to 100%.
+add_compile_definitions(
+        CY_CONFIG_TRACE=1
+        CY_CONFIG_HEARTBEAT_TOPIC_NAME="/8191"
+        CY_CONFIG_PREFERRED_TOPIC_OVERRIDE=0
+)
+
 add_subdirectory(cy)
 add_subdirectory(cy_udp_posix)
 add_subdirectory(examples)

@@ -3,13 +3,11 @@
 cmake_minimum_required(VERSION 3.24)
 project(cy_udp_posix C)
 
-set(lib_dir ${CMAKE_SOURCE_DIR}/lib)
-
 # LibUDPard static library.
-add_library(udpard STATIC ${lib_dir}/libudpard/libudpard/udpard.c)
-target_compile_options(udpard PRIVATE -Wno-cast-align)
-target_include_directories(udpard SYSTEM INTERFACE ${lib_dir}/libudpard/libudpard)
+add_library(udpard STATIC ${CMAKE_SOURCE_DIR}/lib/libudpard/libudpard/udpard.c)
+target_compile_options(udpard PRIVATE -Wno-cast-align -Wno-error)
+target_include_directories(udpard SYSTEM INTERFACE ${CMAKE_SOURCE_DIR}/lib/libudpard/libudpard)
 
 # Cy UDP POSIX static library.
-add_library(cy_udp_posix STATIC cy_udp_posix.c udp_wrapper.c)
+add_library(cy_udp_posix STATIC ${CMAKE_CURRENT_SOURCE_DIR}/cy_udp_posix.c ${CMAKE_CURRENT_SOURCE_DIR}/udp_wrapper.c)
 target_link_libraries(cy_udp_posix PUBLIC cy udpard)

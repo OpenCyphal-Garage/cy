@@ -42,7 +42,7 @@ static int_fast8_t log2_floor(const uint64_t x)
 
 static uint64_t random_u64(const struct cy_t* const cy)
 {
-    const uint64_t seed[2] = { cy->platform->prng64(cy), cy->uid };
+    const uint64_t seed[2] = { cy->platform->prng(cy), cy->uid };
     return rapidhash(seed, sizeof(seed));
 }
 
@@ -683,7 +683,7 @@ cy_err_t cy_new(struct cy_t* const                cy,
     assert(uid != 0);
     assert(platform != NULL);
     assert(platform->now != NULL);
-    assert(platform->prng64 != NULL);
+    assert(platform->prng != NULL);
     assert(platform->buffer_release != NULL);
     assert(platform->node_id_set != NULL);
     assert(platform->node_id_clear != NULL);

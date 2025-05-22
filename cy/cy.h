@@ -233,8 +233,8 @@ typedef cy_us_t (*cy_platform_now_t)(const struct cy_t*);
 ///     return ((uint64_t)rtc_get_time() << 16U) + ++g_counter;
 ///
 /// Internally, Cy will hash the returned value with the local node's UID for whitening and to ensure that each node
-/// obtains different sequences.
-typedef uint64_t (*cy_platform_prng64_t)(const struct cy_t*);
+/// obtains different sequences even if they all share the same PRNG source.
+typedef uint64_t (*cy_platform_prng_t)(const struct cy_t*);
 
 /// Return payload memory obtained with received transfers via cy_ingest*().
 /// The head is passed by value so not freed, but its data and all other fragments are.
@@ -310,7 +310,7 @@ typedef void (*cy_platform_topic_handle_resubscription_error_t)(struct cy_topic_
 struct cy_platform_t
 {
     cy_platform_now_t            now;
-    cy_platform_prng64_t         prng64;
+    cy_platform_prng_t           prng;
     cy_platform_buffer_release_t buffer_release;
 
     cy_platform_node_id_set_t   node_id_set;
