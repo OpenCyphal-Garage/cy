@@ -492,7 +492,8 @@ static void ingest_topic_frame(struct cy_udp_posix_topic_t* const topic,
                                const struct UdpardMutablePayload  dgram)
 {
     const struct cy_udp_posix_t* const cy_udp = (struct cy_udp_posix_t*)topic->base.cy;
-    if (cy_topic_has_local_subscribers(&topic->base) && topic->base.subscribed) {
+    // TODO instead of topic->base.sub_list use the subscription count.
+    if ((topic->base.sub_list != NULL) && topic->base.subscribed) {
         struct UdpardRxTransfer transfer = { 0 }; // udpard takes ownership of the dgram payload buffer.
         const int_fast8_t       er =
           udpardRxSubscriptionReceive(&topic->sub, (UdpardMicrosecond)ts, dgram, iface_index, &transfer);
@@ -629,7 +630,8 @@ static cy_err_t spin_once_until(struct cy_udp_posix_t* const cy_udp, const cy_us
     for (struct cy_udp_posix_topic_t* topic = (struct cy_udp_posix_topic_t*)cy_topic_iter_first(&cy_udp->base);
          topic != NULL;
          topic = (struct cy_udp_posix_topic_t*)cy_topic_iter_next(&topic->base)) {
-        if (cy_topic_has_local_subscribers(&topic->base)) {
+        // TODO instead of topic->base.sub_listuse the subscription count
+        if (topic->base.sub_list != NULL) {
             for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
                 if (is_valid_ip(cy_udp->local_iface_address[i])) {
                     assert(udp_wrapper_rx_is_initialized(&topic->sock_rx[i]));

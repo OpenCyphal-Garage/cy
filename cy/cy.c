@@ -523,8 +523,8 @@ static cy_err_t publish_heartbeat(struct cy_topic_t* const topic, const cy_us_t 
     age_topic(topic, now);
 
     // Construct the heartbeat message.
-    const uint8_t flags = (cy_topic_has_local_publishers(topic) ? TOPIC_FLAG_PUBLISHING : 0U) |
-                          (cy_topic_has_local_subscribers(topic) ? TOPIC_FLAG_SUBSCRIBED : 0U);
+    const uint8_t flags = (topic->publishing ? TOPIC_FLAG_PUBLISHING : 0U) | //
+                          ((topic->sub_list != NULL) ? TOPIC_FLAG_SUBSCRIBED : 0U);
     const struct heartbeat_t msg = make_heartbeat(now - cy->started_at, //
                                                   cy->uid,
                                                   flags,
@@ -983,7 +983,7 @@ void cy_notify_node_id_collision(struct cy_t* const cy)
     }
 }
 
-struct cy_topic_t* cy_topic_new_hint(struct cy_t* const cy, const char* const name, const uint16_t subject_id_hint)
+struct cy_topic_t* cy_topic_new(struct cy_t* const cy, const char* const name)
 {
     if ((cy == NULL) || (name == NULL)) {
         return NULL;
@@ -1014,23 +1014,11 @@ struct cy_topic_t* cy_topic_new_hint(struct cy_t* const cy, const char* const na
     topic->sub_extent              = 0;
     topic->subscribed              = false;
 
+    cy->last_event_ts = cy->last_local_event_ts = topic->last_event_ts = topic->last_local_event_ts = cy_now(cy);
+
     if ((topic->name_length == 0) || (topic->name_length > CY_TOPIC_NAME_MAX) ||
         (cy->topic_count >= CY_TOPIC_SUBJECT_COUNT)) {
         goto hell;
-    }
-
-    // Apply the hints from the user to achieve the desired initial state.
-    if (subject_id_hint <= cy->platform->node_id_max) {
-        if (!is_pinned(topic->hash)) {
-            // Fit the lowest evictions counter such that we land at the specified subject-ID.
-            // Avoid negative remainders, so we don't use simple evictions=(subject_id-hash)%6144.
-            while (topic_get_subject_id(topic->hash, topic->evictions) != subject_id_hint) {
-                topic->evictions++;
-            }
-        }
-        topic->last_event_ts = topic->last_local_event_ts = 0;
-    } else {
-        cy->last_event_ts = cy->last_local_event_ts = topic->last_event_ts = topic->last_local_event_ts = cy_now(cy);
     }
 
     // Insert the new topic into the name index tree. If it's not unique, bail out.
@@ -1067,6 +1055,17 @@ struct cy_topic_t* cy_topic_new_hint(struct cy_t* const cy, const char* const na
 hell:
     cy->platform->topic_destroy(topic);
     return NULL;
+}
+
+void cy_topic_hint(struct cy_topic_t* const topic, const uint16_t subject_id)
+{
+    if ((topic != NULL) && (subject_id < CY_TOTAL_SUBJECT_COUNT) && (!is_pinned(topic->hash))) {
+        // Fit the lowest evictions counter such that we land at the specified subject-ID.
+        // Avoid negative remainders, so we don't use simple evictions=(subject_id-hash)%6144.
+        while (topic_get_subject_id(topic->hash, topic->evictions) != subject_id) {
+            topic->evictions++;
+        }
+    }
 }
 
 void cy_topic_destroy(struct cy_topic_t* const topic)

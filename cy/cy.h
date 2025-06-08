@@ -650,17 +650,18 @@ static inline bool cy_ready(const struct cy_t* const cy)
 
 /// Register a new topic that may be used by the local application for publishing, subscribing, or both.
 /// Returns NULL if the topic name is not unique or not valid, or if the platform could not allocate the topic.
+struct cy_topic_t* cy_topic_new(struct cy_t* const cy, const char* const name);
+void               cy_topic_destroy(struct cy_topic_t* const topic);
+
+/// If the topic configuration is restored from non-volatile memory or elsewhere, it can be supplied to the library
+/// via this function immediately after the topic is first created. This function should not be invoked at any other
+/// moment except immediately after initialization.
 ///
 /// If the hint is provided, it will be used as the initial allocation state, unless either a conflict or divergence
 /// are discovered, which will be treated normally, without any preference to the hint. This option allows the user
 /// to optionally save the network configuration in a non-volatile storage, such that the next time the network becomes
 /// operational immediately, without waiting for the CRDT consensus. Remember that the hint is discarded on conflict.
-struct cy_topic_t* cy_topic_new_hint(struct cy_t* const cy, const char* const name, const uint16_t subject_id_hint);
-static inline struct cy_topic_t* cy_topic_new(struct cy_t* const cy, const char* const name)
-{
-    return cy_topic_new_hint(cy, name, CY_SUBJECT_ID_INVALID);
-}
-void cy_topic_destroy(struct cy_topic_t* const topic);
+void cy_topic_hint(struct cy_topic_t* const topic, const uint16_t subject_id);
 
 /// Complexity is logarithmic in the number of topics. NULL if not found.
 /// In practical terms, these queries are very fast and efficient.
@@ -680,16 +681,6 @@ struct cy_topic_t* cy_topic_iter_first(struct cy_t* const cy);
 struct cy_topic_t* cy_topic_iter_next(struct cy_topic_t* const topic);
 
 uint16_t cy_topic_get_subject_id(const struct cy_topic_t* const topic);
-
-static inline bool cy_topic_has_local_publishers(const struct cy_topic_t* const topic)
-{
-    return topic->publishing;
-}
-
-static inline bool cy_topic_has_local_subscribers(const struct cy_topic_t* const topic)
-{
-    return topic->sub_list != NULL;
-}
 
 /// Technically, the callback can be NULL, and the subscriber will work anyway.
 /// One can still use the transfers by polling the last received transfer in the topic object.
