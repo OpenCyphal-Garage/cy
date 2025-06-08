@@ -1,3 +1,6 @@
 [submodule "lib/libudpard"]
 	path = lib/libudpard
 	url = https://github.com/OpenCyphal/libudpard
+[submodule "lib/wild_key_value"]
+	path = lib/wild_key_value
+	url = https://github.com/pavel-kirienko/wild_key_value

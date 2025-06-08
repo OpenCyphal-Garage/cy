@@ -94,6 +94,8 @@ extern "C"
 ///
 /// We are using RPC request transfers to deliver responses because in the future we may want to use the unused
 /// response transfer as a confirmation for reliable transport.
+///
+/// TODO: use RPC response transfers instead.
 #define CY_RPC_SERVICE_ID_TOPIC_RESPONSE 510
 
 #define CY_PASTE_(a, b) a##b

@@ -47,7 +47,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${c_cxx_flags} -Wzero-as-null-pointer-constant")
 
-include_directories(${CMAKE_SOURCE_DIR}/lib)
+include_directories(${CMAKE_SOURCE_DIR}/lib ${CMAKE_SOURCE_DIR}/lib/wild_key_value)
 
 # These are just temporary options for debugging and testing.
 # Overriding the preferred subject-ID creates a very challenging environment for the consensus algorithm,
