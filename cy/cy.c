@@ -962,7 +962,7 @@ cy_err_t cy_update(struct cy_t* const cy)
     return res;
 }
 
-void cy_notify_discriminator_collision(struct cy_topic_t* const topic)
+void cy_notify_topic_hash_collision(struct cy_topic_t* const topic)
 {
     // Schedule the topic for gossiping ASAP, unless it is already scheduled.
     if ((topic != NULL) && (topic->last_gossip > 0)) {

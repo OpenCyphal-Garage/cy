@@ -691,22 +691,6 @@ static inline bool cy_topic_has_local_subscribers(const struct cy_topic_t* const
     return topic->sub_list != NULL;
 }
 
-/// Topic discriminator is fused into every transport frame and possibly transfer for subject-ID collision detection.
-/// It is defined as the 51 most significant bits of the topic name hash, while the least significant bits are
-/// used for deterministic subject-ID allocation. The two numbers must be uncorrelated to minimize collisions.
-/// For pinned topics, the discriminator is zero because we don't want to check it for compatibility with old
-/// nodes; this is ensured by our special topic hash function. Transports are expected to use either the full 51-bit
-/// discriminator or any part thereof (excepting the most significant zero bits ofc), depending on their design.
-///
-/// Given the size of the subject-ID space of 6144 identifiers and 2^51 possible discriminators, the probability of
-/// a collision on a network with 1000 topics is birthday(6144*(2**51), 1000) ~ 3.6e-14, or one in ~28 trillion.
-/// This is assuming that all bits of the discriminator are used. If only 32 bits are used, the probability is
-/// birthday(6144*(2**32), 1000) ~ 1.9e-8, or one in 53 million.
-static inline uint64_t cy_topic_get_discriminator(const struct cy_topic_t* const topic)
-{
-    return topic->hash >> CY_SUBJECT_BITS;
-}
-
 /// Technically, the callback can be NULL, and the subscriber will work anyway.
 /// One can still use the transfers by polling the last received transfer in the topic object.
 ///
@@ -818,8 +802,8 @@ void     cy_destroy(struct cy_t* const cy);
 /// Excluding the transport_publish dependency, the time complexity is logarithmic in the number of topics.
 cy_err_t cy_update(struct cy_t* const cy);
 
-/// When the transport library detects a discriminator error, it will notify Cy about it to let it rectify the
-/// problem. Transport frames with mismatched discriminators must be dropped; no processing at the transport layer
+/// When the transport library detects a topic hash error, it will notify Cy about it to let it rectify the
+/// problem. Transport frames with mismatched topic hash must be dropped; no processing at the transport layer
 /// is needed. This function is not essential for the protocol to function, but it speeds up collision repair.
 ///
 /// The function will not perform any IO and will return immediately after quickly updating an internal state.
@@ -829,8 +813,8 @@ cy_err_t cy_update(struct cy_t* const cy);
 /// If the transport library is unable to efficiently find the topic when a collision is found, use
 /// cy_topic_find_by_subject_id(). The function has no effect if the topic is NULL; it is not an error to call it
 /// with NULL to simplify chaining like:
-///     cy_notify_discriminator_collision(cy_topic_find_by_subject_id(cy, collision_subject_id));
-void cy_notify_discriminator_collision(struct cy_topic_t* const topic);
+///     cy_notify_topic_hash_collision(cy_topic_find_by_subject_id(cy, collision_subject_id));
+void cy_notify_topic_hash_collision(struct cy_topic_t* const topic);
 
 /// When the transport library detects an incoming transport frame with the same source node-ID as the local node-ID,
 /// it must notify Cy about it to let it rectify the problem.
