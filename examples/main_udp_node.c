@@ -134,7 +134,7 @@ static struct config_t load_config(const int argc, char* argv[])
 }
 
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
-static void on_msg_trace(struct cy_subscription_t* const subscription)
+static void on_msg_trace(struct cy_subscriber_t* const subscription)
 {
     struct cy_transfer_owned_t* const transfer = &subscription->topic->sub_last_transfer;
     CY_BUFFER_GATHER_ON_STACK(payload, transfer->payload.base)
@@ -258,8 +258,8 @@ int main(const int argc, char* argv[])
     // ------------------------------  End of the platform- and transport-specific part  ------------------------------
 
     // Create topics.
-    struct cy_topic_t*       topics[cfg.topic_count];
-    struct cy_subscription_t subs[cfg.topic_count];
+    struct cy_topic_t*     topics[cfg.topic_count];
+    struct cy_subscriber_t subs[cfg.topic_count];
     for (size_t i = 0; i < cfg.topic_count; i++) {
         topics[i] = cy_topic_new(cy, cfg.topics[i].name);
         if (topics[i] == NULL) {

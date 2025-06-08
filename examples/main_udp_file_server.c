@@ -23,7 +23,7 @@ static uint64_t random_uid(void)
 /// Response schema:
 ///     uint32      errno
 ///     byte[<=256] data
-void on_file_read_msg(struct cy_subscription_t* const sub)
+void on_file_read_msg(struct cy_subscriber_t* const sub)
 {
     assert(sub != NULL);
     struct cy_transfer_owned_t* const transfer = &sub->topic->sub_last_transfer;
@@ -100,7 +100,7 @@ int main(const int argc, char* argv[])
     if (topic_file_read == NULL) {
         errx(0, "cy_udp_topic_new");
     }
-    struct cy_subscription_t sub_file_read;
+    struct cy_subscriber_t sub_file_read;
     res = cy_subscribe(topic_file_read, &sub_file_read, 1024, on_file_read_msg);
     if (res < 0) {
         errx(res, "cy_subscribe");

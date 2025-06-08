@@ -127,6 +127,7 @@ typedef int64_t cy_us_t; ///< Monotonic microsecond timestamp. Signed to permit 
 struct cy_t;
 struct cy_topic_t;
 struct cy_future_t;
+struct cy_subscriber_t;
 
 enum cy_prio_t
 {
@@ -339,7 +340,150 @@ struct cy_platform_t
     uint64_t transfer_id_mask;
 };
 
-// ===============================================  CY API  ===============================================
+// --------------------------------------------------    PUBLISHER    --------------------------------------------------
+
+struct cy_publisher_t
+{
+    struct cy_topic_t* topic;
+    enum cy_prio_t     pub_priority; ///< Defaults to cy_prio_nominal; can be overridden.
+};
+
+enum cy_future_state_t
+{
+    cy_future_pending,
+    cy_future_success,
+    cy_future_failure,
+};
+
+typedef void (*cy_response_callback_t)(struct cy_future_t*);
+
+/// Register an expectation for a response to a message sent to the topic.
+/// The future shall not be moved or altered in anyway except for the user and callback fields until its state is
+/// no longer pending. Once it is not pending, it can be reused for another request.
+/// The future will enter the failure state to indicate that the response was not received before the deadline.
+struct cy_future_t
+{
+    struct cy_tree_t index_deadline;
+    struct cy_tree_t index_transfer_id;
+
+    struct cy_topic_t*     topic;
+    enum cy_future_state_t state;
+    uint64_t               transfer_id_masked; ///< Masked as (platform->transfer_id_mask & transfer_id)
+    cy_us_t                deadline;           ///< We're indexing on this so it shall not be changed after insertion.
+
+    /// These fields are populated once the response is received.
+    /// The payload ownership is transferred to this structure.
+    /// If a payload is already available when a response is received, Cy will free the old payload first.
+    /// The user can detect when a new response is received by checking its timestamp.
+    struct cy_transfer_owned_t last_response;
+
+    /// Only these fields can be altered by the user while the future is pending.
+    /// The callback may be NULL if the application prefers to check last_response by polling.
+    cy_response_callback_t callback;
+    void*                  user;
+};
+
+/// Create a new publisher on the topic.
+/// Every advertisement needs to be unadvertised later to clean up resources.
+cy_err_t cy_advertise(struct cy_t* const           cy,
+                      struct cy_publisher_t* const publisher,
+                      const char* const            name,
+                      const enum cy_prio_t         priority);
+void     cy_unadvertise(const struct cy_publisher_t* publisher);
+
+/// Just a convenience function, nothing special.
+struct cy_future_t cy_future_new(const cy_response_callback_t callback, void* const user);
+
+/// The transfer-ID is always incremented, even on failure, to signal lost messages.
+/// This function always publishes only one transfer as requested; no auxiliary traffic is generated.
+/// If the local node-ID is not allocated, the function may fail depending on the capabilities of the transport library;
+/// to avoid this, it is possible to check cy_has_node_id() before calling this function.
+///
+/// If no response is needed/expected, the future must be NULL and the response_deadline is ignored.
+/// Otherwise, future must point to an uninitialized cy_future_t instance.
+///
+/// The response future will not be registered unless the result is non-negative.
+///
+/// If the response deadline is in the past, the message will be sent anyway but it will time out immediately.
+cy_err_t cy_publish(const struct cy_publisher_t*      publisher,
+                    const cy_us_t                     tx_deadline,
+                    const struct cy_buffer_borrowed_t payload,
+                    const cy_us_t                     response_deadline,
+                    struct cy_future_t* const         future);
+
+/// A simpler wrapper over cy_publish() when no response is needed/expected. 1 means one way.
+static inline cy_err_t cy_publish1(const struct cy_publisher_t*      publisher,
+                                   const cy_us_t                     tx_deadline,
+                                   const struct cy_buffer_borrowed_t payload)
+{
+    return cy_publish(publisher, tx_deadline, payload, 0, NULL);
+}
+
+/// This needs not be done after a future completes normally. It is only needed if the future needs to be
+/// destroyed before it completes. Calling this on a non-pending future has no effect.
+void cy_future_cancel(struct cy_future_t* const future);
+
+// --------------------------------------------------   SUBSCRIBER    --------------------------------------------------
+
+typedef void (*cy_subscriber_callback_t)(struct cy_subscriber_t*);
+
+/// TODO: use wildcards!
+struct cy_subscriber_t
+{
+    struct cy_topic_t* topic;
+
+    struct cy_subscriber_t* next;
+
+    /// These fields may be altered by the user at any time; e.g., to implement a state machine.
+    /// The callback may be NULL if the application prefers to check last_message by polling.
+    cy_subscriber_callback_t callback;
+    void*                    user;
+};
+
+/// Technically, the callback can be NULL, and the subscriber will work anyway.
+/// One can still use the transfers by polling the last received transfer in the topic object.
+///
+/// Invoking this function on the same cy_subscriber_t instance multiple times is allowed.
+/// This is supported specifically to allow repairing broken resubscriptions when Cy attempts
+/// to move the topic to another subject-ID but fails to subscribe it.
+///
+/// Future expansion: add wildcard subscribers that match topic names by pattern. Requires unbounded dynamic memory.
+///
+/// It is allowed to remove the subscription from its own callback, but not from the callback of another subscription.
+///
+/// The extent and transfer-ID timeout of all subscriptions should be the same, or these values of subscriptions
+/// added later should be less than the values of subscriptions added earlier. Otherwise, the library will be forced
+/// to resubscribe, which may cause momentary data loss if there were transfers in the middle of reassembly.
+cy_err_t               cy_subscribe_with_transfer_id_timeout(struct cy_topic_t* const       topic,
+                                                             struct cy_subscriber_t* const  sub,
+                                                             const size_t                   extent,
+                                                             const cy_us_t                  transfer_id_timeout,
+                                                             const cy_subscriber_callback_t callback);
+static inline cy_err_t cy_subscribe(struct cy_topic_t* const       topic,
+                                    struct cy_subscriber_t* const  sub,
+                                    const size_t                   extent,
+                                    const cy_subscriber_callback_t callback)
+{
+    return cy_subscribe_with_transfer_id_timeout(topic, sub, extent, CY_TRANSFER_ID_TIMEOUT_DEFAULT_us, callback);
+}
+void cy_unsubscribe(struct cy_topic_t* const topic, struct cy_subscriber_t* const sub);
+
+/// Send a response to a message received from a topic subscription. The response will be sent directly to the
+/// publisher using peer-to-peer transport, not affecting other nodes on this topic. The payload may be arbitrary
+/// and the metadata shall be taken from the original message. The transfer-ID will not be incremented since it's
+/// not a publication.
+///
+/// This can be invoked either from a subscription callback or at any later point. The topic may even get reallocated
+/// in the process but it doesn't matter.
+///
+/// The response is be sent using an RPC request (sic) transfer to the publisher with the specified priority and
+/// the original transfer-ID.
+cy_err_t cy_respond(struct cy_topic_t* const            topic,
+                    const cy_us_t                       tx_deadline,
+                    const struct cy_transfer_metadata_t metadata,
+                    const struct cy_buffer_borrowed_t   payload);
+
+// --------------------------------------------------  TOPIC & NODE   --------------------------------------------------
 
 /// This is the base type that is extended by the platform layer with transport- and platform-specific entities,
 /// such as socket handles, etc. Instantiation is therefore done inside the platform layer in the heap or some
@@ -446,74 +590,23 @@ struct cy_topic_t
     struct cy_tree_t* futures_by_transfer_id;
 
     /// Only used if the application publishes data on this topic.
-    /// The priority can be adjusted as needed by the user.
-    ///
-    /// The publishing flag will be set automatically on first publish(). The application can also set it manually.
-    /// The purpose of this flag is to inform other network participants whether we intend to publish on this topic.
-    /// If the application is no longer planning to continue publishing, the flag should be zeroed (or topic destroyed).
-    uint64_t       pub_transfer_id;
-    enum cy_prio_t pub_priority;
-    bool           publishing;
+    /// pub_count tracks the number of existing advertisements on this topic; when this number reaches zero
+    /// and there are no live subscriptions, the topic will be garbage collected by Cy.
+    uint64_t pub_transfer_id;
+    uint64_t pub_count;
 
     /// Only used if the application subscribes on this topic.
     /// The payload ownership is transferred to sub_last_transfer when a new transfer is received.
     /// If a payload is already available when a new transfer is received, Cy will free the old payload first.
     /// The user can detect when a new message is received by checking sub_last_transfer.timestamp.
-    /// Optionally, a reception callback can be set in cy_subscription_t.
+    /// Optionally, a reception callback can be set in cy_subscriber_t.
     struct cy_transfer_owned_t sub_last_transfer;
-    struct cy_subscription_t*  sub_list;
+    struct cy_subscriber_t*    sub_list;
     cy_us_t                    sub_transfer_id_timeout;
     size_t                     sub_extent;
     bool                       subscribed; ///< May be false even if sub_list is nonempty on resubscription error.
 
     void* user; ///< The application can use this field for arbitrary purposes.
-};
-
-typedef void (*cy_subscription_callback_t)(struct cy_subscription_t*);
-typedef void (*cy_response_callback_t)(struct cy_future_t*);
-
-struct cy_subscription_t
-{
-    struct cy_subscription_t* next;
-    struct cy_topic_t*        topic;
-
-    /// These fields may be altered by the user at any time; e.g., to implement a state machine.
-    /// The callback may be NULL if the application prefers to check last_message by polling.
-    cy_subscription_callback_t callback;
-    void*                      user;
-};
-
-enum cy_future_state_t
-{
-    cy_future_pending = 0,
-    cy_future_success = 1,
-    cy_future_failure = 2,
-};
-
-/// Register an expectation for a response to a message sent to the topic.
-/// The future shall not be moved or altered in anyway except for the user and callback fields until its state is
-/// no longer pending. Once it is not pending, it can be reused for another request.
-/// The future will enter the failure state to indicate that the response was not received before the deadline.
-struct cy_future_t
-{
-    struct cy_tree_t index_deadline;
-    struct cy_tree_t index_transfer_id;
-
-    struct cy_topic_t*     topic;
-    enum cy_future_state_t state;
-    uint64_t               transfer_id_masked; ///< Masked as (platform->transfer_id_mask & transfer_id)
-    cy_us_t                deadline;           ///< We're indexing on this so it shall not be changed after insertion.
-
-    /// These fields are populated once the response is received.
-    /// The payload ownership is transferred to this structure.
-    /// If a payload is already available when a response is received, Cy will free the old payload first.
-    /// The user can detect when a new response is received by checking its timestamp.
-    struct cy_transfer_owned_t last_response;
-
-    /// Only these fields can be altered by the user while the future is pending.
-    /// The callback may be NULL if the application prefers to check last_response by polling.
-    cy_response_callback_t callback;
-    void*                  user;
 };
 
 /// There are only three functions (plus convenience wrappers) whose invocations may result in network traffic:
@@ -568,11 +661,11 @@ struct cy_t
     bool node_id_collision;
 
     /// Heartbeat topic and related items.
-    struct cy_topic_t*       heartbeat_topic;
-    struct cy_subscription_t heartbeat_sub;
-    cy_us_t                  heartbeat_next;
-    cy_us_t                  heartbeat_period_max;
-    cy_us_t                  heartbeat_full_gossip_cycle_period_max; ///< Max time to gossip all local topics.
+    struct cy_topic_t*     heartbeat_topic;
+    struct cy_subscriber_t heartbeat_sub;
+    cy_us_t                heartbeat_next;
+    cy_us_t                heartbeat_period_max;
+    cy_us_t                heartbeat_full_gossip_cycle_period_max; ///< Max time to gossip all local topics.
 
     /// Topics have multiple indexes.
     struct cy_tree_t* topics_by_hash;
@@ -648,11 +741,6 @@ static inline bool cy_ready(const struct cy_t* const cy)
     return cy_has_node_id(cy) && ((cy->platform->now(cy) - cy->last_local_event_ts) > 1000000);
 }
 
-/// Register a new topic that may be used by the local application for publishing, subscribing, or both.
-/// Returns NULL if the topic name is not unique or not valid, or if the platform could not allocate the topic.
-struct cy_topic_t* cy_topic_new(struct cy_t* const cy, const char* const name);
-void               cy_topic_destroy(struct cy_topic_t* const topic);
-
 /// If the topic configuration is restored from non-volatile memory or elsewhere, it can be supplied to the library
 /// via this function immediately after the topic is first created. This function should not be invoked at any other
 /// moment except immediately after initialization.
@@ -665,9 +753,9 @@ void cy_topic_hint(struct cy_topic_t* const topic, const uint16_t subject_id);
 
 /// Complexity is logarithmic in the number of topics. NULL if not found.
 /// In practical terms, these queries are very fast and efficient.
-struct cy_topic_t* cy_topic_find_by_name(struct cy_t* const cy, const char* const name);
-struct cy_topic_t* cy_topic_find_by_hash(struct cy_t* const cy, const uint64_t hash);
-struct cy_topic_t* cy_topic_find_by_subject_id(struct cy_t* const cy, const uint16_t subject_id);
+struct cy_topic_t* cy_topic_find_by_name(const struct cy_t* const cy, const char* const name);
+struct cy_topic_t* cy_topic_find_by_hash(const struct cy_t* const cy, const uint64_t hash);
+struct cy_topic_t* cy_topic_find_by_subject_id(const struct cy_t* const cy, const uint16_t subject_id);
 
 /// Iterate over all topics in an unspecified order.
 /// This is useful when handling IO multiplexing (building the list of descriptors to read) and for introspection.
@@ -677,85 +765,10 @@ struct cy_topic_t* cy_topic_find_by_subject_id(struct cy_t* const cy, const uint
 ///     for (struct cy_topic_t* topic = cy_topic_iter_first(cy); topic != NULL; topic = cy_topic_iter_next(topic)) {
 ///         ...
 ///     }
-struct cy_topic_t* cy_topic_iter_first(struct cy_t* const cy);
+struct cy_topic_t* cy_topic_iter_first(const struct cy_t* const cy);
 struct cy_topic_t* cy_topic_iter_next(struct cy_topic_t* const topic);
 
 uint16_t cy_topic_get_subject_id(const struct cy_topic_t* const topic);
-
-/// Technically, the callback can be NULL, and the subscriber will work anyway.
-/// One can still use the transfers by polling the last received transfer in the topic object.
-///
-/// Invoking this function on the same cy_subscription_t instance multiple times is allowed.
-/// This is supported specifically to allow repairing broken resubscriptions when Cy attempts
-/// to move the topic to another subject-ID but fails to subscribe it.
-///
-/// Future expansion: add wildcard subscribers that match topic names by pattern. Requires unbounded dynamic memory.
-///
-/// It is allowed to remove the subscription from its own callback, but not from the callback of another subscription.
-///
-/// The extent and transfer-ID timeout of all subscriptions should be the same, or these values of subscriptions
-/// added later should be less than the values of subscriptions added earlier. Otherwise, the library will be forced
-/// to resubscribe, which may cause momentary data loss if there were transfers in the middle of reassembly.
-cy_err_t               cy_subscribe_with_transfer_id_timeout(struct cy_topic_t* const         topic,
-                                                             struct cy_subscription_t* const  sub,
-                                                             const size_t                     extent,
-                                                             const cy_us_t                    transfer_id_timeout,
-                                                             const cy_subscription_callback_t callback);
-static inline cy_err_t cy_subscribe(struct cy_topic_t* const         topic,
-                                    struct cy_subscription_t* const  sub,
-                                    const size_t                     extent,
-                                    const cy_subscription_callback_t callback)
-{
-    return cy_subscribe_with_transfer_id_timeout(topic, sub, extent, CY_TRANSFER_ID_TIMEOUT_DEFAULT_us, callback);
-}
-void cy_unsubscribe(struct cy_topic_t* const topic, struct cy_subscription_t* const sub);
-
-/// Just a convenience function, nothing special.
-struct cy_future_t cy_future_new(const cy_response_callback_t callback, void* const user);
-
-/// The transfer-ID is always incremented, even on failure, to signal lost messages.
-/// This function always publishes only one transfer as requested; no auxiliary traffic is generated.
-/// If the local node-ID is not allocated, the function may fail depending on the capabilities of the transport library;
-/// to avoid this, it is possible to check cy_has_node_id() before calling this function.
-///
-/// If no response is needed/expected, the future must be NULL and the response_deadline is ignored.
-/// Otherwise, future must point to an uninitialized cy_future_t instance.
-///
-/// The response future will not be registered unless the result is non-negative.
-///
-/// If the response deadline is in the past, the message will be sent anyway but it will time out immediately.
-cy_err_t cy_publish(struct cy_topic_t* const          topic,
-                    const cy_us_t                     tx_deadline,
-                    const struct cy_buffer_borrowed_t payload,
-                    const cy_us_t                     response_deadline,
-                    struct cy_future_t* const         future);
-
-/// A simpler wrapper over cy_publish() when no response is needed/expected. 1 means one way.
-static inline cy_err_t cy_publish1(struct cy_topic_t* const          topic,
-                                   const cy_us_t                     tx_deadline,
-                                   const struct cy_buffer_borrowed_t payload)
-{
-    return cy_publish(topic, tx_deadline, payload, 0, NULL);
-}
-
-/// This needs not be done after a future completes normally. It is only needed if the future needs to be
-/// destroyed before it completes. Calling this on a non-pending future has no effect.
-void cy_future_cancel(struct cy_future_t* const future);
-
-/// Send a response to a message received from a topic subscription. The response will be sent directly to the
-/// publisher using peer-to-peer transport, not affecting other nodes on this topic. The payload may be arbitrary
-/// and the metadata shall be taken from the original message. The transfer-ID will not be incremented since it's
-/// not a publication.
-///
-/// This can be invoked either from a subscription callback or at any later point. The topic may even get reallocated
-/// in the process but it doesn't matter.
-///
-/// The response is be sent using an RPC request (sic) transfer to the publisher with the specified priority and
-/// the original transfer-ID.
-cy_err_t cy_respond(struct cy_topic_t* const            topic,
-                    const cy_us_t                       tx_deadline,
-                    const struct cy_transfer_metadata_t metadata,
-                    const struct cy_buffer_borrowed_t   payload);
 
 // ====================================================================================================================
 // =================================================  END OF THE API  =================================================

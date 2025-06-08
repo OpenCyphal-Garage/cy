@@ -43,7 +43,7 @@ struct cy_topic_t* const my_topic = cy_topic_new(cy, "my_topic");  // expands in
 if (res < 0) { ... }
 
 // SUBSCRIBE TO TOPIC (nothing needs to be done if we want to publish):
-struct cy_subscription_t my_subscription;
+struct cy_subscriber_t my_subscription;
 res = cy_subscribe(my_topic,
                    &my_subscription,
                    1024 * 1024,                       // extent (max message size)
