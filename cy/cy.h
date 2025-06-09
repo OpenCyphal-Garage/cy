@@ -524,6 +524,7 @@ struct cy_topic_t
 
     /// The topic name is not explicitly stored but it can be reconstructed ad-hoc from the trie.
     struct wkv_node_t* name;
+    // TODO FIXME: we need to store the full name to allow references from wildcard substitutions.
 
     struct cy_t* cy;
 
