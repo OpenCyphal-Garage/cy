@@ -685,6 +685,7 @@ struct cy_t
     /// When a heartbeat is received, its topic name will be compared against these wildcards,
     /// and if a match is found, a new subscription will be constructed automatically.
     struct wkv_t subscribers_by_name;
+    struct wkv_t subscribers_by_wildcard; ///< Only wildcards for automatic subscriptions on heartbeat.
 
     /// For detecting timed out futures. This index spans all topics.
     struct cy_tree_t* futures_by_deadline;
