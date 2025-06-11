@@ -632,6 +632,7 @@ static cy_err_t publish_heartbeat(struct cy_topic_t* const topic, const cy_us_t 
                           ((topic->sub_count > 0) ? TOPIC_FLAG_SUBSCRIBED : 0U);
     char name[CY_TOPIC_NAME_MAX + 1];
     cy_topic_get_name(topic, name);
+    // TODO: heartbeats published out-of-order in response to a divergence need not carry the name!
     const struct heartbeat_t msg = make_heartbeat(now - cy->started_at, //
                                                   cy->uid,
                                                   flags,
