@@ -58,13 +58,13 @@ extern "C"
 ///
 /// Max name length is chosen such that together with the 1-byte length prefix the result is a multiple of 8 bytes,
 /// because it helps with memory-aliased C structures for quick serialization.
-#define CY_TOPIC_NAME_MAX 96
+#define CY_TOPIC_NAME_MAX 88
 
 /// The max namespace length should also provide space for at least one separator and the one-character topic name.
 #define CY_NAMESPACE_NAME_MAX (CY_TOPIC_NAME_MAX - 2)
 
 /// If not sure, use this value for the transfer-ID timeout.
-#define CY_TRANSFER_ID_TIMEOUT_DEFAULT_us 2000000L
+#define CY_TRANSFER_ID_TIMEOUT_DEFAULT_us 10000000L
 
 /// If a node-ID is provided by the user, it will be used as-is and the node will become operational immediately.
 ///
@@ -309,28 +309,56 @@ static inline cy_err_t cy_publish1(struct cy_publisher_t* const      pub,
 //                                                      SUBSCRIBER
 // =====================================================================================================================
 
-struct cy_arrival_t
+struct cy_substitution_t
 {
-    struct cy_subscriber_t*          subscriber;
-    struct cy_topic_t*               topic;
-    struct cy_transfer_owned_t*      transfer;
-    const struct wkv_substitution_t* substitutions;
+    struct wkv_str_t str;     ///< The substring that matched the substitution token in the pattern. Not NUL-terminated.
+    size_t           ordinal; ///< Zero-based index of the substitution token as occurred in the pattern.
 };
 
-typedef void (*cy_subscriber_callback_t)(struct cy_arrival_t);
-
-/// Subscribers SHALL NOT be copied/moved after initialization until destroyed.
-struct cy_subscriber_t
+struct cy_arrival_t
 {
-    struct cy_t*       cy;
-    struct wkv_node_t* name;
+    struct cy_subscriber_t*     subscriber; ///< Which subscriber matched on this topic by verbatim name or pattern.
+    struct cy_topic_t*          topic;      ///< The specific topic that received the transfer.
+    struct cy_transfer_owned_t* transfer;   ///< The actual received message and its metadata.
 
-    /// These parameters are used to configure the underlying transport layer implementation.
-    /// These values shall not be changed by the user; the only valid way to set them is during initialization.
-    /// They need to be stored per subscriber to support wildcard subscriptions, where the first subscription may
-    /// be created asynchronously wrt the user calling cy_subscribe().
+    /// When a wildcard match occurs, the matcher will store the string substitutions that had to be made to
+    /// achieve the match. For example, if the pattern is "ins/?/data/*" and the key is "ins/0/data/foo/456",
+    /// then the substitutions will be (together with their ordinals):
+    ///  1. #0 "0"
+    ///  2. #1 "foo"
+    ///  3. #1 "456"
+    /// The lifetime of the substitutions is the same as the lifetime of the topic or subscriber, whichever is shorter.
+    size_t                          substitution_count; ///< The size of the following substitutions array.
+    const struct cy_substitution_t* substitutions;      ///< A contiguous array of substitutions.
+};
+
+typedef void (*cy_subscriber_callback_t)(const struct cy_arrival_t*);
+
+/// These parameters are used to configure the underlying transport layer implementation.
+/// These values shall not be changed by the user; the only way to set them is when a new subscription is created.
+/// They need to be stored per subscriber to support wildcard subscriptions, where the first subscription may
+/// be created asynchronously wrt the user calling cy_subscribe().
+struct cy_subscription_params_t
+{
     size_t  extent;
     cy_us_t transfer_id_timeout;
+};
+
+/// Subscribers SHALL NOT be copied/moved after initialization until destroyed.
+/// There may be more than one subscriber with the same name (pattern).
+/// The user must not alter any fields except for the callback and the user pointer.
+struct cy_subscriber_t
+{
+    struct cy_t*            cy;
+    struct cy_subscriber_t* next; ///< Next subscriber with the same name, NULL in the last entry.
+
+    struct wkv_node_t* index_name;
+    struct wkv_node_t* index_wildcard;
+
+    /// If this is a wildcard subscriber, we will need to publish a scout message.
+    struct cy_subscriber_t* next_scout;
+
+    struct cy_subscription_params_t params;
 
     /// The callback may be changed by the user at any time; e.g., to implement a state machine.
     /// The user field can be changed arbitrarily at any moment.
@@ -342,20 +370,21 @@ struct cy_subscriber_t
 ///
 /// The extent and transfer-ID timeout of all subscriptions should be the same, or these values of subscriptions
 /// added later should be less than the values of subscriptions added earlier. Otherwise, the library will be forced
-/// to resubscribe, which may cause momentary data loss if there were transfers in the middle of reassembly.
-cy_err_t               cy_subscribe_with_transfer_id_timeout(struct cy_subscriber_t* const  sub,
-                                                             struct cy_t* const             cy,
-                                                             const char* const              name,
-                                                             const size_t                   extent,
-                                                             const cy_us_t                  transfer_id_timeout,
-                                                             const cy_subscriber_callback_t callback);
+/// to resubscribe, which may cause momentary data loss if there were transfers in the middle of reassembly,
+/// plus it is usually slow.
+cy_err_t               cy_subscribe_with_params(struct cy_subscriber_t* const         sub,
+                                                struct cy_t* const                    cy,
+                                                const char* const                     name,
+                                                const struct cy_subscription_params_t params,
+                                                const cy_subscriber_callback_t        callback);
 static inline cy_err_t cy_subscribe(struct cy_subscriber_t* const  sub,
                                     struct cy_t* const             cy,
                                     const char* const              name,
                                     const size_t                   extent,
                                     const cy_subscriber_callback_t callback)
 {
-    return cy_subscribe_with_transfer_id_timeout(sub, cy, name, extent, CY_TRANSFER_ID_TIMEOUT_DEFAULT_us, callback);
+    const struct cy_subscription_params_t params = { extent, CY_TRANSFER_ID_TIMEOUT_DEFAULT_us };
+    return cy_subscribe_with_params(sub, cy, name, params, callback);
 }
 void cy_unsubscribe(struct cy_subscriber_t* const sub);
 
@@ -369,7 +398,7 @@ void cy_unsubscribe(struct cy_subscriber_t* const sub);
 ///
 /// The response is be sent using an RPC request (sic) transfer to the publisher with the specified priority and
 /// the original transfer-ID.
-cy_err_t cy_respond(struct cy_subscriber_t* const       sub,
+cy_err_t cy_respond(struct cy_topic_t* const            topic,
                     const cy_us_t                       tx_deadline,
                     const struct cy_transfer_metadata_t metadata,
                     const struct cy_buffer_borrowed_t   payload);
@@ -484,9 +513,6 @@ struct cy_topic_t
     /// Used for matching futures against received responses.
     struct cy_tree_t* futures_by_transfer_id;
 
-    // TODO: add a quick O(1) lookup capability for subscribers that match this topic. Something like:
-    // struct cy_topic_subscriber_ref_t* subscribers;
-
     /// Only used if the application publishes data on this topic.
     /// pub_count tracks the number of existing advertisements on this topic; when this number reaches zero
     /// and there are no live subscriptions, the topic will be garbage collected by Cy.
@@ -494,12 +520,8 @@ struct cy_topic_t
     size_t   pub_count;
 
     /// Only used if the application subscribes on this topic.
-    /// sub_count counts the number of active subscribers that match this topic; when this number reaches zero
-    /// and there are no live publishers, the topic will be garbage collected by Cy.
-    cy_us_t sub_transfer_id_timeout;
-    size_t  sub_extent;
-    size_t  sub_count;  // TODO remove
-    bool    subscribed; ///< May be false even if sub_count>0 on resubscription error.
+    struct cy_topic_subscriber_match_t* subscribers;
+    bool subscribed; ///< May be (tentatively) false even with subscribers!=NULL on resubscription error.
 };
 
 /// Complexity is logarithmic in the number of topics. NULL if not found.
@@ -516,6 +538,8 @@ struct cy_topic_t* cy_topic_find_by_subject_id(const struct cy_t* const cy, cons
 /// are discovered, which will be treated normally, without any preference to the hint. This option allows the user
 /// to optionally save the network configuration in a non-volatile storage, such that the next time the network becomes
 /// operational immediately, without waiting for the CRDT consensus. Remember that the hint is discarded on conflict.
+///
+/// The hint will be silently ignored if it is invalid, inapplicable, or if the topic is not freshly created.
 void cy_topic_hint(struct cy_topic_t* const topic, const uint16_t subject_id);
 
 /// Iterate over all topics in an unspecified order.
@@ -546,17 +570,17 @@ typedef void* (*cy_platform_realloc_t)(const struct cy_t*, void*, size_t);
 /// Returns a PRNG hashing seed or a full pseudo-random 64-bit unsigned integer.
 /// A TRNG is preferred; if not available, a PRNG will suffice, but its initial state SHOULD be likely to be
 /// distinct across reboots happening in a quick succession. This condition does not apply if subsequent reboots are
-/// spaced apart by a long time (ca. 10 seconds or more). If this condition is not satisfied,
-/// the transfer-ID counters will be initialized with the same value every time,
-/// which may incur an initial synchronization delay (up to the transfer-ID timeout value).
+/// spaced apart by a long time.
 ///
-/// The simplest compliant solution that can be implemented in a deeply embedded system is:
+/// The simplest compliant solution that can be implemented in an embedded system without TRNG is:
 ///
 ///     static uint64_t g_prng_state __attribute__ ((section (".noinit")));
 ///     g_prng_state += 0xA0761D6478BD642FULL;  // add wyhash seed (64-bit prime)
 ///     return g_prng_state;
 ///
-/// If RTC is available, then the following is sufficient (the counter can be 8-bit if RTC is microsecond resolution):
+/// It is desirable to save the PRNG state in a battery-backed memory, if available; otherwise, in small MCUs one could
+/// hash the entire RAM contents at startup to scavenge as much entropy as possible, or use ADC or clock noise.
+/// If RTC is available, then the following is sufficient:
 ///
 ///     static uint_fast16_t g_counter = 0;
 ///     return ((uint64_t)rtc_get_time() << 16U) + ++g_counter;
@@ -612,7 +636,7 @@ typedef void (*cy_platform_topic_destroy_t)(struct cy_topic_t*);
 typedef cy_err_t (*cy_platform_topic_publish_t)(struct cy_publisher_t*, cy_us_t, struct cy_buffer_borrowed_t);
 
 /// Instructs the underlying transport layer to create a new subscription on the topic.
-typedef cy_err_t (*cy_platform_topic_subscribe_t)(struct cy_topic_t*);
+typedef cy_err_t (*cy_platform_topic_subscribe_t)(struct cy_topic_t*, struct cy_subscription_params_t);
 
 /// Instructs the underlying transport to destroy an existing subscription.
 typedef void (*cy_platform_topic_unsubscribe_t)(struct cy_topic_t*);
@@ -623,14 +647,12 @@ typedef void (*cy_platform_topic_unsubscribe_t)(struct cy_topic_t*);
 ///
 /// The unsubscription function is infallible, but the subscription function may fail.
 /// If it does, this callback will be invoked to inform the user about the failure,
-/// along with the error code returned by the subscription function. It is up to the user to repair the problem.
+/// along with the error code returned by the subscription function. It is up to the user to handle the error.
 /// If the user does nothing, the topic will be simply left in the unsubscribed state, as if
-/// cy_topic_subscribe() was never invoked. However, if the topic needs to be moved again in the future,
-/// Cy will use that opportunity to attempt another subscription, which may or may not succeed.
+/// cy_topic_subscribe() was never invoked. Cy will keep attempting to re-subscribe the topic when matching
+/// heartbeats are received, or when the topic has to be moved.
 ///
-/// A possible failure handling strategy is to record which topic has failed and to keep trying to re-subscribe
-/// in the background until it succeeds. Once the subscription is successful, no additional actions are needed.
-/// It is probably not useful to try and invoke cy_subscribe() immediately from the error handler.
+/// Depending on the platform implementation, the handler usually does not need to do anything.
 typedef void (*cy_platform_topic_handle_resubscription_error_t)(struct cy_topic_t*, const cy_err_t);
 
 /// The platform- and transport-specific entities. These can be underpinned by libcanard, libudpard, libserard,
@@ -735,11 +757,13 @@ struct cy_t
     struct cy_tree_t* topics_by_gossip_time;
     struct wkv_t      topics_by_name;
 
-    /// Contains topic name wildcard patterns.
-    /// When a heartbeat is received, its topic name will be compared against these wildcards,
+    /// When a heartbeat is received, its topic name will be compared against the wildcards,
     /// and if a match is found, a new subscription will be constructed automatically.
-    struct wkv_t subscribers_by_name;
+    struct wkv_t subscribers_by_name;     ///< Both verbatim and wildcards.
     struct wkv_t subscribers_by_wildcard; ///< Only wildcards for automatic subscriptions on heartbeat.
+
+    /// Only for wildcard subscriptions.
+    struct cy_subscriber_t* next_scout;
 
     /// For detecting timed out futures. This index spans all topics.
     struct cy_tree_t* futures_by_deadline;
