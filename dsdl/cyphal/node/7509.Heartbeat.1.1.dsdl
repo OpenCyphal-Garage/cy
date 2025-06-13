@@ -57,10 +57,11 @@ uint56 topic_age
 
 bool topic_flag_publishing      # The sender is publishing on this topic.
 bool topic_flag_subscribed      # The sender is subscribed to this topic.
+bool topic_flag_scout           # This heartbeat is requesting everyone who has matching topics to gossip them ASAP.
 # Additional flags may be added in the future. Possible candidates:
 # - topic_flag_response_expected  # Publisher expects subscribers to respond to messages published on this topic.
-# - topic_flag_reliable  # Publisher requires ack per message; subscriber requires ack per response (if any).
-void6
+# - topic_flag_reliable
+void5
 
 @assert _offset_ == {32 * 8}
 uint40 topic_evictions

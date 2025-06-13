@@ -349,14 +349,8 @@ struct cy_subscription_params_t
 /// The user must not alter any fields except for the callback and the user pointer.
 struct cy_subscriber_t
 {
-    struct cy_t*            cy;
-    struct cy_subscriber_t* next; ///< Next subscriber with the same name, NULL in the last entry.
-
-    struct wkv_node_t* index_name;
-    struct wkv_node_t* index_wildcard;
-
-    /// If this is a wildcard subscriber, we will need to publish a scout message.
-    struct cy_subscriber_t* next_scout;
+    struct cy_subscriber_root_t* root;
+    struct cy_subscriber_t*      next;
 
     struct cy_subscription_params_t params;
 
@@ -372,6 +366,8 @@ struct cy_subscriber_t
 /// added later should be less than the values of subscriptions added earlier. Otherwise, the library will be forced
 /// to resubscribe, which may cause momentary data loss if there were transfers in the middle of reassembly,
 /// plus it is usually slow.
+///
+/// The complexity is about linear in the number of subscriptions.
 cy_err_t               cy_subscribe_with_params(struct cy_subscriber_t* const         sub,
                                                 struct cy_t* const                    cy,
                                                 const char* const                     name,
@@ -386,7 +382,7 @@ static inline cy_err_t cy_subscribe(struct cy_subscriber_t* const  sub,
     const struct cy_subscription_params_t params = { extent, CY_TRANSFER_ID_TIMEOUT_DEFAULT_us };
     return cy_subscribe_with_params(sub, cy, name, params, callback);
 }
-void cy_unsubscribe(struct cy_subscriber_t* const sub);
+void cy_unsubscribe(struct cy_t* const cy, struct cy_subscriber_t* const sub);
 
 /// Send a response to a message received from a topic subscription. The response will be sent directly to the
 /// publisher using peer-to-peer transport, not affecting other nodes on this topic. The payload may be arbitrary
@@ -404,7 +400,7 @@ cy_err_t cy_respond(struct cy_topic_t* const            topic,
                     const struct cy_buffer_borrowed_t   payload);
 
 /// Copies the subscriber name into the user-supplied buffer.
-void cy_subscriber_name(const struct cy_subscriber_t* const sub, char* const out_name);
+void cy_subscriber_name(struct cy_t* const cy, const struct cy_subscriber_t* const sub, char* const out_name);
 
 // =====================================================================================================================
 //                                                      TOPIC
@@ -412,7 +408,8 @@ void cy_subscriber_name(const struct cy_subscriber_t* const sub, char* const out
 
 /// This is the base type that is extended by the platform layer with transport- and platform-specific entities,
 /// such as socket handles, etc. Instantiation is therefore done inside the platform layer in the heap or some
-/// other dynamic storage.
+/// other dynamic storage. The user code is not expected to interact with the topic type, and the only reason it is
+/// defined in the header file is to allow the platform layer to use it.
 ///
 /// A topic name is suffixed to the namespace name of the node that owns it, unless it begins with a `/`.
 /// The leading `~` in the name is replaced with `/vvvv/pppp/iiiiiiii`, where the letters represent hexadecimal
@@ -441,7 +438,7 @@ struct cy_topic_t
     /// We need to store the full name to allow valid references from name substitutions during pattern matching.
     char name[CY_TOPIC_NAME_MAX + 1];
 
-    struct cy_t* cy;
+    struct cy_t* cy; ///< TODO: remove the implicit pointer, pass it explicitly instead.
 
     /// Assuming we have 1000 topics, the probability of a topic name hash collision is:
     /// >>> from decimal import Decimal
@@ -520,7 +517,7 @@ struct cy_topic_t
     size_t   pub_count;
 
     /// Only used if the application subscribes on this topic.
-    struct cy_topic_subscriber_match_t* subscribers;
+    struct cy_topic_coupling_t* couplings;
     bool subscribed; ///< May be (tentatively) false even with subscribers!=NULL on resubscription error.
 };
 
@@ -553,7 +550,7 @@ void cy_topic_hint(struct cy_topic_t* const topic, const uint16_t subject_id);
 struct cy_topic_t* cy_topic_iter_first(const struct cy_t* const cy);
 struct cy_topic_t* cy_topic_iter_next(struct cy_topic_t* const topic);
 
-uint16_t cy_topic_get_subject_id(const struct cy_topic_t* const topic);
+uint16_t cy_topic_subject_id(const struct cy_topic_t* const topic);
 
 // =====================================================================================================================
 //                                              LOW-LEVEL PLATFORM INTERFACE
@@ -644,16 +641,16 @@ typedef void (*cy_platform_topic_unsubscribe_t)(struct cy_topic_t*);
 /// If a subject-ID collision or divergence are discovered, Cy may reassign the topic to a different subject-ID.
 /// To do that, it will first unsubscribe the topic using the corresponding function,
 /// and then invoke the subscription function to recreate the subscription with the new subject-ID.
-///
 /// The unsubscription function is infallible, but the subscription function may fail.
 /// If it does, this callback will be invoked to inform the user about the failure,
-/// along with the error code returned by the subscription function. It is up to the user to handle the error.
-/// If the user does nothing, the topic will be simply left in the unsubscribed state, as if
-/// cy_topic_subscribe() was never invoked. Cy will keep attempting to re-subscribe the topic when matching
-/// heartbeats are received, or when the topic has to be moved.
+/// along with the error code returned by the subscription function.
 ///
-/// Depending on the platform implementation, the handler usually does not need to do anything.
-typedef void (*cy_platform_topic_handle_resubscription_error_t)(struct cy_topic_t*, const cy_err_t);
+/// The callback is also used to report errors that occur when attempting to create a new topic that matches a
+/// wildcard subscriber; in this case, the topic pointer will be NULL.
+///
+/// Normally, the error handler does not need to do anything specific aside from perhaps logging/reporting the error.
+/// Cy will keep attempting to repair the topic periodically when relevant heartbeats are received.
+typedef void (*cy_platform_topic_handle_subscription_error_t)(struct cy_t*, struct cy_topic_t*, const cy_err_t);
 
 /// The platform- and transport-specific entities. These can be underpinned by libcanard, libudpard, libserard,
 /// or any other transport library, plus the platform-specific logic.
@@ -671,12 +668,12 @@ struct cy_platform_t
 
     cy_platform_request_t request;
 
-    cy_platform_topic_new_t                         topic_new;
-    cy_platform_topic_destroy_t                     topic_destroy;
-    cy_platform_topic_publish_t                     topic_publish;
-    cy_platform_topic_subscribe_t                   topic_subscribe;
-    cy_platform_topic_unsubscribe_t                 topic_unsubscribe;
-    cy_platform_topic_handle_resubscription_error_t topic_handle_resubscription_error;
+    cy_platform_topic_new_t                       topic_new;
+    cy_platform_topic_destroy_t                   topic_destroy;
+    cy_platform_topic_publish_t                   topic_publish;
+    cy_platform_topic_subscribe_t                 topic_subscribe;
+    cy_platform_topic_unsubscribe_t               topic_unsubscribe;
+    cy_platform_topic_handle_subscription_error_t topic_handle_subscription_error;
 
     /// 127 for Cyphal/CAN, 65534 for Cyphal/UDP and Cyphal/Serial, etc.
     /// This is used for the automatic node-ID allocation.
@@ -759,11 +756,12 @@ struct cy_t
 
     /// When a heartbeat is received, its topic name will be compared against the wildcards,
     /// and if a match is found, a new subscription will be constructed automatically.
+    /// The values of these tree nodes point to instances of cy_subscriber_root_t.
     struct wkv_t subscribers_by_name;     ///< Both verbatim and wildcards.
     struct wkv_t subscribers_by_wildcard; ///< Only wildcards for automatic subscriptions on heartbeat.
 
     /// Only for wildcard subscriptions.
-    struct cy_subscriber_t* next_scout;
+    struct cy_subscriber_root_t* next_scout;
 
     /// For detecting timed out futures. This index spans all topics.
     struct cy_tree_t* futures_by_deadline;
