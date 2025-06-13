@@ -657,12 +657,45 @@ static cy_err_t topic_ensure(struct cy_t* const cy, struct cy_topic_t** const ou
     return (cy_topic_find_by_name(cy, name) == NULL) ? 0 : topic_new(cy, out_topic, name);
 }
 
-/// Returns non-NULL on OOM.
-static void wkv_cb_link_subscriptions(const struct wkv_event_t evt)
+/// Create a new coupling between a topic and a subscriber.
+/// Allocates new memory for the coupling, which may fail.
+/// Don't forget topic_ensure_subscribed() afterward if necessary.
+static cy_err_t topic_couple(struct cy_t* const                 cy,
+                             struct cy_topic_t* const           topic,
+                             struct cy_subscriber_root_t* const subr,
+                             const size_t                       substitution_count,
+                             const struct wkv_substitution_t*   substitutions)
 {
-    struct cy_topic_t* const      topic      = (struct cy_topic_t*)evt.context;
-    struct cy_subscriber_t* const subscriber = (struct cy_subscriber_t*)evt.node->value;
-    assert((topic != NULL) && (subscriber != NULL));
+    // Allocate the new coupling object with the substitutions flex array.
+    // Each topic keeps its own couplings because the sets of subscription names and topic names are orthogonal.
+    struct cy_topic_coupling_t* const cpl = (struct cy_topic_coupling_t*)mem_alloc(
+      cy,
+      offsetof(struct cy_topic_coupling_t, substitutions) + (substitution_count * sizeof(struct cy_substitution_t)));
+    if (cpl != NULL) {
+        cpl->root               = subr;
+        cpl->next               = topic->couplings;
+        topic->couplings        = cpl;
+        cpl->substitution_count = substitution_count;
+        // When we copy the substitutions, we assume that the lifetime of the substituted string segments is at least
+        // the same as the lifetime of the topic, which is true because the substitutions point into the topic name
+        // string, which is part of the topic object.
+        const struct wkv_substitution_t* s = substitutions;
+        for (size_t i = 0U; s != NULL; i++) {
+            assert(i < cpl->substitution_count);
+            cpl->substitutions[i] = (struct cy_substitution_t){ .str = s->str, .ordinal = s->ordinal };
+            s                     = s->next;
+        }
+    }
+    return (cpl == NULL) ? -CY_ERR_MEMORY : 0;
+}
+
+/// Returns non-NULL on OOM.
+static void* wkv_cb_couple_new_topic(const struct wkv_event_t evt)
+{
+    struct cy_topic_t* const      topic = (struct cy_topic_t*)evt.context;
+    struct cy_subscriber_t* const sub   = (struct cy_subscriber_t*)evt.node->value;
+    const cy_err_t res = topic_couple(topic->cy, topic, sub->root, evt.substitution_count, evt.substitutions);
+    return (0 == res) ? NULL : "";
 }
 
 /// If there is a wildcard subscriber matching the name of this topic, attempt to create a new subscription.
@@ -685,12 +718,12 @@ static void topic_subscribe_if_matching(struct cy_t* const cy, const struct wkv_
         }
     }
     // Attach subscriptions.
-    if (NULL != wkv_route(&cy->subscribers_by_wildcard, name, topic, wkv_cb_link_subscriptions)) {
+    if (NULL != wkv_route(&cy->subscribers_by_wildcard, name, topic, wkv_cb_couple_new_topic)) {
         // TODO discard the topic!
         cy->platform->topic_handle_subscription_error(cy, NULL, -CY_ERR_MEMORY);
         return;
     }
-    // Create the transport subscription.
+    // Create the transport subscription once at the end, considering the parameters from all subscribers.
     topic_ensure_subscribed(topic);
 }
 
@@ -993,98 +1026,88 @@ cy_err_t cy_publish(struct cy_publisher_t* const      pub,
 //                                                      SUBSCRIBER
 // =====================================================================================================================
 
-void* wkv_cb_unsubscribe_if_params_different(const struct wkv_event_t evt)
-{
-    const struct cy_subscription_params_t* const new = (const struct cy_subscription_params_t*)evt.context;
-    struct cy_topic_t* const topic                   = (struct cy_topic_t*)evt.node->value;
-    if (topic->subscribed) {
-        const struct cy_subscription_params_t old = deduce_subscription_params(topic);
-        const bool need_resubscription = (new->extent > old.extent) || //-------------------------------------
-                                         (new->transfer_id_timeout > old.transfer_id_timeout);
-        if (need_resubscription) {
-            topic->cy->platform->topic_unsubscribe(topic);
-            topic->subscribed = false;
-        }
-    }
-    return NULL;
-}
-
 /// Returns non-NULL on OOM, which aborts the traversal early.
-void* wkv_cb_insert_subscription(const struct wkv_event_t evt)
+void* wkv_cb_couple_new_subscription(const struct wkv_event_t evt)
 {
     struct cy_subscriber_t* const sub   = (struct cy_subscriber_t*)evt.context;
     struct cy_topic_t* const      topic = (struct cy_topic_t*)evt.node->value;
-    struct cy_t* const            cy    = topic->cy;
-    // Allocate the new coupling object with the substitutions flex array.
-    // Each topic keeps its own couplings because the sets of subscription names and topic names are orthogonal.
-    struct cy_topic_coupling_t* const cpl =
-      (struct cy_topic_coupling_t*)mem_alloc(cy,
-                                             offsetof(struct cy_topic_coupling_t, substitutions) +
-                                               (evt.substitution_count * sizeof(struct cy_substitution_t)));
-    if (cpl != NULL) {
-        cpl->root               = sub->root;
-        cpl->next               = topic->couplings;
-        topic->couplings        = cpl;
-        cpl->substitution_count = evt.substitution_count;
-        // When we copy the substitutions, we assume that the lifetime of the substituted string segments is at least
-        // the same as the lifetime of the topic, which is true because the substitutions point into the topic name
-        // string, which is part of the topic object.
-        const struct wkv_substitution_t* s = evt.substitutions;
-        for (size_t i = 0U; s != NULL; i++) {
-            assert(i < cpl->substitution_count);
-            cpl->substitutions[i] = (struct cy_substitution_t){ .str = s->str, .ordinal = s->ordinal };
-            s                     = s->next;
-        }
-    }
-    // Restore the subscription after inserting the new subscriber. This may change the extent/TID-timeout parameters.
-    // We do the restoration here so that we don't have to rescan the index again afterward.
-    topic_ensure_subscribed((struct cy_topic_t*)evt.node->value);
-    return (cpl == NULL) ? "" : NULL;
-}
 
-void* wkv_cb_restore_subscriptions(const struct wkv_event_t evt)
-{
-    topic_ensure_subscribed((struct cy_topic_t*)evt.node->value);
-    return NULL;
+    // If the new subscription parameters are different, we will need to resubscribe this topic.
+    bool resubscribe = false;
+    if (topic->subscribed) {
+        const struct cy_subscription_params_t param_old = deduce_subscription_params(topic);
+        const struct cy_subscription_params_t param_new = sub->params;
+        resubscribe = (param_new.extent > param_old.extent) || //-------------------------------------
+                      (param_new.transfer_id_timeout > param_old.transfer_id_timeout);
+    }
+
+    // Create the coupling.
+    const cy_err_t res = topic_couple(topic->cy, topic, sub->root, evt.substitution_count, evt.substitutions);
+
+    // Refresh the subscription if needed. Due to the new coupling, the params are now different.
+    if (res >= 0) {
+        if (resubscribe) {
+            topic->cy->platform->topic_unsubscribe(topic);
+            topic->subscribed = false;
+        }
+        topic_ensure_subscribed(topic);
+    }
+
+    return (0 == res) ? NULL : "";
 }
 
 /// Either finds an existing subscriber root or creates a new one. NULL if OOM.
-static struct cy_subscriber_root_t* ensure_subscriber_root(struct cy_t* const cy, const struct wkv_str_t key)
+static cy_err_t ensure_subscriber_root(struct cy_t* const                  cy,
+                                       const struct wkv_str_t              key,
+                                       struct cy_subscriber_root_t** const out_root)
 {
-    assert((cy != NULL) && (key.str != NULL) && (key.len > 0U));
+    assert((cy != NULL) && (key.str != NULL) && (key.len > 0U) && (out_root != NULL));
 
     // Find or allocate a tree node.
     struct wkv_node_t* const node = wkv_set(&cy->subscribers_by_name, key);
     if (node == NULL) {
-        return NULL;
+        return -CY_ERR_MEMORY;
     }
 
     // If exists, return as is.
     if (node->value != NULL) {
-        return (struct cy_subscriber_root_t*)node->value;
+        *out_root = (struct cy_subscriber_root_t*)node->value;
+        return 0;
     }
 
     // Otherwise, allocate a new root, if possible.
     node->value = mem_alloc(cy, sizeof(struct cy_subscriber_root_t));
     if (node->value == NULL) {
         wkv_del(&cy->subscribers_by_name, node);
-        return NULL; // OOM
+        return -CY_ERR_MEMORY;
     }
     struct cy_subscriber_root_t* const root = (struct cy_subscriber_root_t*)node->value;
     memset(root, 0, sizeof(*root));
 
     // Insert the new root into the indexes.
+    const bool wc    = is_wildcard(key.str);
     root->index_name = node;
-    if (is_wildcard(key.str)) {
+    if (wc) {
         root->index_wildcard = wkv_set(&cy->subscribers_by_wildcard, key);
         if (root->index_wildcard == NULL) {
             wkv_del(&cy->subscribers_by_name, node);
             mem_free(cy, node->value);
-            return NULL;
+            return -CY_ERR_MEMORY;
         }
         assert(root->index_wildcard->value == NULL);
         root->index_wildcard->value = root;
-        // Register the next pending scout. We do it strictly in the FIFO order.
+    } else {
+        root->index_wildcard = NULL;
+        const cy_err_t res   = topic_ensure(cy, NULL, key.str);
+        if (res < 0) {
+            wkv_del(&cy->subscribers_by_name, node);
+            mem_free(cy, node->value);
+            return res;
+        }
+    }
+
+    // Register the next pending scout. We do it strictly in the FIFO order.
+    if (wc) {
         struct cy_subscriber_root_t* next_scout = cy->next_scout;
         while ((next_scout != NULL) && (next_scout->next_scout != NULL)) {
             next_scout = next_scout->next_scout;
@@ -1094,10 +1117,10 @@ static struct cy_subscriber_root_t* ensure_subscriber_root(struct cy_t* const cy
         } else {
             next_scout->next_scout = root;
         }
-    } else {
-        root->index_wildcard = NULL;
     }
-    return root;
+
+    *out_root = root;
+    return 0;
 }
 
 cy_err_t cy_subscribe_with_params(struct cy_subscriber_t* const         sub,
@@ -1114,20 +1137,17 @@ cy_err_t cy_subscribe_with_params(struct cy_subscriber_t* const         sub,
         return -CY_ERR_NAME;
     }
     const struct wkv_str_t key = wkv_key(name_buf);
-
     (void)memset(sub, 0, sizeof(*sub));
-    sub->root     = ensure_subscriber_root(cy, key);
-    sub->params   = params;
-    sub->callback = callback;
-    if (sub->root == NULL) {
-        return -CY_ERR_MEMORY;
+    const cy_err_t res = ensure_subscriber_root(cy, key, &sub->root);
+    if (res < 0) {
+        return res;
     }
+    assert(sub->root != NULL);
+    sub->params     = params;
+    sub->callback   = callback;
     sub->next       = sub->root->head;
     sub->root->head = sub;
-
-    (void)wkv_match(&cy->topics_by_name, key, &sub->params, wkv_cb_unsubscribe_if_params_different);
-    if (NULL != wkv_match(&cy->topics_by_name, key, sub, wkv_cb_insert_subscription)) {
-        (void)wkv_match(&cy->topics_by_name, key, NULL, wkv_cb_restore_subscriptions);
+    if (NULL != wkv_match(&cy->topics_by_name, key, sub, wkv_cb_couple_new_subscription)) {
         cy_unsubscribe(cy, sub);
         return -CY_ERR_MEMORY;
     }
