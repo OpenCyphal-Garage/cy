@@ -28,6 +28,9 @@
 #define KILO 1000L
 #define MEGA 1000000LL
 
+/// The earliest representable time in microseconds.
+#define BIG_BANG INT64_MIN
+
 #define HEARTBEAT_PUB_TIMEOUT_us (1 * MEGA)
 
 // clang-format off
@@ -365,7 +368,7 @@ static void update_last_gossip_time(struct cy_topic_t* const topic, const cy_us_
     assert(tree == &topic->index_gossip_time);
 }
 
-static void schedule_gossip_asap(struct cy_topic_t* const topic)
+static void schedule_gossip(struct cy_topic_t* const topic, const cy_us_t new_time)
 {
     assert(topic->cy->topics_by_gossip_time != NULL); // This index is never empty if we have topics
     if (topic->last_gossip > 0) {                     // Don't do anything if it's already scheduled.
@@ -375,8 +378,8 @@ static void schedule_gossip_asap(struct cy_topic_t* const topic)
         // (unless the user placed it in the dynamically allocated subject-ID range, which is not our problem);
         // we are publishing it just to announce that we have it; as such, the urgency of this action is a bit lower
         // than that of an actual colliding topic announcement, so we choose next-greater time to deprioritize it.
-        const cy_us_t rank = is_pinned(topic->hash) ? 1 : 0;
-        update_last_gossip_time(topic, rank);
+        const cy_us_t deranking = is_pinned(topic->hash) ? 1 : 0;
+        update_last_gossip_time(topic, new_time + deranking);
     }
 }
 
@@ -537,7 +540,7 @@ static void topic_allocate(struct cy_topic_t* const topic, const uint64_t new_ev
 
     // Whenever we alter a topic, we need to make sure that everyone knows about it.
     // Recursively we can alter a lot of topics like this.
-    schedule_gossip_asap(topic);
+    schedule_gossip(topic, BIG_BANG);
 
     // If a subscription is needed, restore it. Notice that if this call failed in the past, we will retry here
     // as long as there is at least one live subscriber.
@@ -727,6 +730,12 @@ static void topic_subscribe_if_matching(struct cy_t* const cy, const struct wkv_
     topic_ensure_subscribed(topic);
 }
 
+static void* wkv_cb_topic_mark_scout_response(const struct wkv_event_t evt)
+{
+    schedule_gossip((struct cy_topic_t*)evt.node->value, BIG_BANG + 10);
+    return NULL;
+}
+
 // =====================================================================================================================
 //                                                      HEARTBEAT
 // =====================================================================================================================
@@ -854,7 +863,7 @@ static void on_heartbeat(const struct cy_arrival_t* const evt)
                 assert(mine->evictions != other_evictions);
                 if ((mine_lage > other_lage) || ((mine_lage == other_lage) && (mine->evictions > other_evictions))) {
                     CY_TRACE(cy, "We won, existing allocation not altered; expecting remote to adjust.");
-                    schedule_gossip_asap(mine);
+                    schedule_gossip(mine, BIG_BANG);
                 } else {
                     assert((mine_lage <= other_lage) &&
                            ((mine_lage < other_lage) || (mine->evictions < other_evictions)));
@@ -909,12 +918,13 @@ static void on_heartbeat(const struct cy_arrival_t* const evt)
                 topic_allocate(mine, mine->evictions + 1U, false);
                 cy->last_local_event_ts = mine->last_local_event_ts = ts;
             } else {
-                schedule_gossip_asap(mine);
+                schedule_gossip(mine, BIG_BANG);
             }
             cy->last_event_ts = mine->last_event_ts = ts;
         }
     } else {
-        // TODO
+        // A scout message is simply asking us to check if we have any matching topics, and gossip them ASAP if so.
+        (void)wkv_match(&cy->topics_by_name, key, NULL, wkv_cb_topic_mark_scout_response);
     }
 }
 
@@ -1558,7 +1568,7 @@ void cy_notify_topic_hash_collision(struct cy_topic_t* const topic)
     if ((topic != NULL) && (topic->last_gossip > 0)) {
         CY_TRACE(topic->cy, "💥 '%s'@%04x", topic->name, cy_topic_subject_id(topic));
         // Topics with the same time will be ordered FIFO -- the tree is stable.
-        schedule_gossip_asap(topic);
+        schedule_gossip(topic, BIG_BANG);
         // We could subtract the heartbeat period from the next heartbeat time to make it come out sooner,
         // but this way we would generate unpredictable network loading. We probably don't want that.
     }
