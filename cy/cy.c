@@ -8,7 +8,7 @@
 /// This is just a PoC, a crude approximation of what it might look like when implemented properly.
 /// Copyright (c) Pavel Kirienko <pavel@opencyphal.org>
 
-#include "cy.h"
+#include "cy_platform.h"
 
 #define CAVL2_RELATION int32_t
 #define CAVL2_T        struct cy_tree_t
@@ -1251,6 +1251,11 @@ uint16_t cy_topic_subject_id(const struct cy_topic_t* const topic)
     return topic_subject_id(topic->hash, topic->evictions);
 }
 
+struct wkv_str_t cy_topic_name(const struct cy_topic_t* const topic)
+{
+    return (struct wkv_str_t){ .len = topic->index_name->key_len, .str = topic->name };
+}
+
 // =====================================================================================================================
 //                                                      NODE
 // =====================================================================================================================
@@ -1353,6 +1358,21 @@ cy_err_t cy_new(struct cy_t* const                cy,
         }
     }
     return res;
+}
+
+bool cy_joined(const struct cy_t* const cy)
+{
+    return cy->node_id <= cy->platform->node_id_max;
+}
+
+bool cy_ready(const struct cy_t* const cy)
+{
+    return cy_joined(cy) && ((cy_now(cy) - cy->last_event_ts) > (1 * MEGA));
+}
+
+cy_us_t cy_now(const struct cy_t* const cy)
+{
+    return cy->platform->now(cy);
 }
 
 // =====================================================================================================================
