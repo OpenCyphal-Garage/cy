@@ -32,7 +32,7 @@ struct cy_udp_posix_topic_t
     void (*rx_sock_err_handler)(struct cy_udp_posix_t*       cy_udp,
                                 struct cy_udp_posix_topic_t* topic,
                                 uint_fast8_t                 iface_index,
-                                int16_t                      error);
+                                uint32_t                     err_no);
 };
 
 struct cy_udp_posix_t
@@ -70,24 +70,23 @@ struct cy_udp_posix_t
     } rpc_rx[CY_UDP_POSIX_IFACE_COUNT_MAX];
 
     /// Handler for errors occurring while reading from the socket of the topic on the specified iface.
-    /// These are platform-specific.
     /// The default handler is provided which will use CY_TRACE() to report the error.
     /// This is only used to initialize the corresponding field of cy_udp_posix_topic_t when a new topic is created.
     /// Changes to this handler will not affect existing topics.
     void (*rx_sock_err_handler)(struct cy_udp_posix_t*       cy_udp,
                                 struct cy_udp_posix_topic_t* topic,
                                 uint_fast8_t                 iface_index,
-                                int16_t                      error);
+                                uint32_t                     err_no);
 
     /// Handler for errors occurring while writing into a tx socket on the specified iface.
     /// These are platform-specific.
     /// The default handler is provided which will use CY_TRACE() to report the error.
-    void (*tx_sock_err_handler)(struct cy_udp_posix_t* cy_udp, uint_fast8_t iface_index, int16_t error);
+    void (*tx_sock_err_handler)(struct cy_udp_posix_t* cy_udp, uint_fast8_t iface_index, uint32_t err_no);
 
     /// Handler for errors occurring while reading from an RPC RX socket on the specified iface.
     /// These are platform-specific.
     /// The default handler is provided which will use CY_TRACE() to report the error.
-    void (*rpc_rx_sock_err_handler)(struct cy_udp_posix_t* topic, uint_fast8_t iface_index, int16_t error);
+    void (*rpc_rx_sock_err_handler)(struct cy_udp_posix_t* topic, uint_fast8_t iface_index, uint32_t err_no);
 
     size_t   mem_allocated_fragments;
     uint64_t mem_oom_count;

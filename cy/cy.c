@@ -463,7 +463,7 @@ static void topic_ensure_subscribed(struct cy_t* const cy, struct cy_topic_t* co
     if ((topic->couplings != NULL) && (!topic->subscribed)) {
         const struct cy_subscription_params_t params = deduce_subscription_params(topic);
         const cy_err_t                        res    = cy->platform->topic_subscribe(cy, topic, params);
-        topic->subscribed                            = res >= 0;
+        topic->subscribed                            = res == CY_OK;
         CY_TRACE(cy,
                  "Platform subscription for '%s' #%016llx @%04x extent=%zu tid_timeout=%lld result=%d",
                  topic->name,
@@ -666,11 +666,11 @@ static cy_err_t topic_new(struct cy_t* const cy, struct cy_topic_t** const out_t
 
 oom: // TODO correct deinitialization
     cy->platform->topic_destroy(cy, topic);
-    return -CY_ERR_NAME;
+    return CY_ERR_NAME;
 
 bad_name: // TODO correct deinitialization
     cy->platform->topic_destroy(cy, topic);
-    return -CY_ERR_NAME;
+    return CY_ERR_NAME;
 }
 
 static cy_err_t topic_ensure(struct cy_t* const cy, struct cy_topic_t** const out_topic, const char* const name)
@@ -719,7 +719,7 @@ static cy_err_t topic_couple(struct cy_t* const                 cy,
             s                     = s->next;
         }
     }
-    return (cpl == NULL) ? -CY_ERR_MEMORY : 0;
+    return (cpl == NULL) ? CY_ERR_MEMORY : CY_OK;
 }
 
 /// Returns non-NULL on OOM.
@@ -747,7 +747,7 @@ static void topic_subscribe_if_matching(struct cy_t* const cy, const struct wkv_
     struct cy_topic_t* topic = NULL;
     {
         const cy_err_t res = topic_new(cy, &topic, name.str);
-        if (res < 0) {
+        if (res != CY_OK) {
             cy->platform->topic_on_subscription_error(cy, NULL, res);
             return;
         }
@@ -755,7 +755,7 @@ static void topic_subscribe_if_matching(struct cy_t* const cy, const struct wkv_
     // Attach subscriptions.
     if (NULL != wkv_route(&cy->subscribers_by_wildcard, name, (void* [2]){ cy, topic }, wkv_cb_couple_new_topic)) {
         // TODO discard the topic!
-        cy->platform->topic_on_subscription_error(cy, NULL, -CY_ERR_MEMORY);
+        cy->platform->topic_on_subscription_error(cy, NULL, CY_ERR_MEMORY);
         return;
     }
     // Create the transport subscription once at the end, considering the parameters from all subscribers.
@@ -845,7 +845,7 @@ static cy_err_t publish_heartbeat_scout(struct cy_t* const cy, const cy_us_t now
     wkv_get_key(&cy->subscribers_by_name, subr->index_name, msg.topic_name);
     const cy_err_t res = publish_heartbeat(cy, now, &msg);
     CY_TRACE(cy, "📢 Published scout '%s' result=%d", msg.topic_name, res);
-    if (res >= 0) {
+    if (res == CY_OK) {
         cy->next_scout = subr->next_scout; // delist the scout if publication succeeded
     }
     return res;
@@ -1004,7 +1004,7 @@ cy_err_t cy_advertise(struct cy_t* const           cy,
     const cy_err_t res = topic_ensure(cy, &pub->topic, name);
     pub->priority      = cy_prio_nominal;
     pub->user          = NULL;
-    if (res >= 0) {
+    if (res == CY_OK) {
         assert(pub->topic != NULL);
         pub->topic->pub_count++;
         // We use a simplified response extent handling here: simply store the maximum seen value without bothering
@@ -1065,14 +1065,14 @@ cy_err_t cy_publish(struct cy_t* const                cy,
                                                                 future,
                                                                 &cavl_factory_future_transfer_id);
         if (tr != &future->index_transfer_id) {
-            return -CY_ERR_CAPACITY;
+            return CY_ERR_CAPACITY;
         }
     }
 
     const cy_err_t res = cy->platform->topic_publish(cy, pub, tx_deadline, payload);
 
     if (future != NULL) {
-        if (res >= 0) {
+        if (res == CY_OK) {
             const struct cy_tree_t* const tr = cavl2_find_or_insert(&cy->futures_by_deadline,
                                                                     &response_deadline,
                                                                     &cavl_comp_future_deadline,
@@ -1109,14 +1109,14 @@ void* wkv_cb_couple_new_subscription(const struct wkv_event_t evt)
     // Create the coupling.
     const cy_err_t res = topic_couple(cy, topic, sub->root, evt.substitution_count, evt.substitutions);
     // Refresh the subscription if needed. Due to the new coupling, the params are now different.
-    if (res >= 0) {
+    if (res == CY_OK) {
         if (resubscribe) {
             cy->platform->topic_unsubscribe(cy, topic);
             topic->subscribed = false;
         }
         topic_ensure_subscribed(cy, topic);
     }
-    return (0 == res) ? NULL : "";
+    return (CY_OK == res) ? NULL : "";
 }
 
 /// Either finds an existing subscriber root or creates a new one. NULL if OOM.
@@ -1129,13 +1129,13 @@ static cy_err_t ensure_subscriber_root(struct cy_t* const                  cy,
     // Find or allocate a tree node.
     struct wkv_node_t* const node = wkv_set(&cy->subscribers_by_name, key);
     if (node == NULL) {
-        return -CY_ERR_MEMORY;
+        return CY_ERR_MEMORY;
     }
 
     // If exists, return as is.
     if (node->value != NULL) {
         *out_root = (struct cy_subscriber_root_t*)node->value;
-        return 0;
+        return CY_OK;
     }
 
     CY_TRACE(cy, "✨ New subscriber root for '%s'", key.str);
@@ -1144,7 +1144,7 @@ static cy_err_t ensure_subscriber_root(struct cy_t* const                  cy,
     node->value = mem_alloc(cy, sizeof(struct cy_subscriber_root_t));
     if (node->value == NULL) {
         wkv_del(&cy->subscribers_by_name, node);
-        return -CY_ERR_MEMORY;
+        return CY_ERR_MEMORY;
     }
     struct cy_subscriber_root_t* const root = (struct cy_subscriber_root_t*)node->value;
     memset(root, 0, sizeof(*root));
@@ -1157,14 +1157,14 @@ static cy_err_t ensure_subscriber_root(struct cy_t* const                  cy,
         if (root->index_wildcard == NULL) {
             wkv_del(&cy->subscribers_by_name, node);
             mem_free(cy, node->value);
-            return -CY_ERR_MEMORY;
+            return CY_ERR_MEMORY;
         }
         assert(root->index_wildcard->value == NULL);
         root->index_wildcard->value = root;
     } else {
         root->index_wildcard = NULL;
         const cy_err_t res   = topic_ensure(cy, NULL, key.str);
-        if (res < 0) {
+        if (res != CY_OK) {
             wkv_del(&cy->subscribers_by_name, node);
             mem_free(cy, node->value);
             return res;
@@ -1185,7 +1185,7 @@ static cy_err_t ensure_subscriber_root(struct cy_t* const                  cy,
     }
 
     *out_root = root;
-    return 0;
+    return CY_OK;
 }
 
 cy_err_t cy_subscribe_with_params(struct cy_t* const                    cy,
@@ -1195,11 +1195,11 @@ cy_err_t cy_subscribe_with_params(struct cy_t* const                    cy,
                                   const cy_subscriber_callback_t        callback)
 {
     if ((sub == NULL) || (cy == NULL) || (name == NULL) || (params.transfer_id_timeout < 0) || (callback == NULL)) {
-        return -CY_ERR_ARGUMENT;
+        return CY_ERR_ARGUMENT;
     }
     char name_buf[CY_TOPIC_NAME_MAX + 1U];
     if (!compose_topic_name(cy->namespace_, cy->name, name, name_buf)) {
-        return -CY_ERR_NAME;
+        return CY_ERR_NAME;
     }
     const struct wkv_str_t key = wkv_key(name_buf);
     (void)memset(sub, 0, sizeof(*sub));
@@ -1209,7 +1209,7 @@ cy_err_t cy_subscribe_with_params(struct cy_t* const                    cy,
              params.extent,
              (long long)params.transfer_id_timeout);
     const cy_err_t res = ensure_subscriber_root(cy, key, &sub->root);
-    if (res < 0) {
+    if (res != CY_OK) {
         return res;
     }
     assert(sub->root != NULL);
@@ -1219,9 +1219,9 @@ cy_err_t cy_subscribe_with_params(struct cy_t* const                    cy,
     sub->root->head = sub;
     if (NULL != wkv_match(&cy->topics_by_name, key, (void* [2]){ cy, sub }, wkv_cb_couple_new_subscription)) {
         cy_unsubscribe(cy, sub);
-        return -CY_ERR_MEMORY;
+        return CY_ERR_MEMORY;
     }
-    return 0;
+    return CY_OK;
 }
 
 cy_err_t cy_respond(struct cy_t* const                  cy,
@@ -1403,7 +1403,7 @@ cy_err_t cy_new(struct cy_t* const                cy,
     // If we are not given a node-ID, we need to first listen to the network.
     cy->heartbeat_period = HEARTBEAT_DEFAULT_PERIOD_us;
     cy->heartbeat_next   = cy->started_at;
-    cy_err_t res         = 0;
+    cy_err_t res         = CY_OK;
     if (cy->node_id > cy->platform->node_id_max) {
         cy->heartbeat_next += (cy_us_t)random_uint(cy, CY_START_DELAY_MIN_us, CY_START_DELAY_MAX_us);
         cy->last_event_ts = cy->last_local_event_ts = cy->started_at;
@@ -1415,12 +1415,12 @@ cy_err_t cy_new(struct cy_t* const                cy,
     }
 
     // Pub/sub on the heartbeat topic.
-    if (res >= 0) {
+    if (res == CY_OK) {
         res = cy_advertise(cy, &cy->heartbeat_pub, CY_CONFIG_HEARTBEAT_TOPIC_NAME, 0);
-        if (res >= 0) {
+        if (res == CY_OK) {
             res = cy_subscribe(
               cy, &cy->heartbeat_sub, CY_CONFIG_HEARTBEAT_TOPIC_NAME, sizeof(struct heartbeat_t), &on_heartbeat);
-            if (res < 0) {
+            if (res != CY_OK) {
                 cy_unadvertise(&cy->heartbeat_pub);
             }
         }
@@ -1600,7 +1600,7 @@ void cy_ingest_topic_response_transfer(struct cy_t* const cy, struct cy_transfer
 
 cy_err_t cy_update(struct cy_t* const cy)
 {
-    cy_err_t      res = 0;
+    cy_err_t      res = CY_OK;
     const cy_us_t now = cy_now(cy);
 
     retire_timed_out_futures(cy, now);
@@ -1629,7 +1629,7 @@ cy_err_t cy_update(struct cy_t* const cy)
               cy, "Picked own node-ID %04x; Bloom popcount %zu; node_id_set()->%d", cy->node_id, bloom->popcount, res);
         }
         assert(cy->node_id <= cy->platform->node_id_max);
-        if (res < 0) {
+        if (res != CY_OK) {
             return res; // Failed to set node-ID, bail out. Will try again next time.
         }
 

@@ -77,7 +77,7 @@ extern "C"
 #define CY_BUFFER_GATHER_ON_STACK(to_bytes, from_buffer_borrowed_head)                                        \
     struct cy_bytes_t to_bytes = { .data = from_buffer_borrowed_head.view.data,                               \
                                    .size = from_buffer_borrowed_head.view.size };                             \
-    uint8_t           CY_PASTE(to_bytes, _storage)[cy_buffer_borrowed_size(from_buffer_borrowed_head)];       \
+    unsigned char     CY_PASTE(to_bytes, _storage)[cy_buffer_borrowed_size(from_buffer_borrowed_head)];       \
     if (from_buffer_borrowed_head.next != NULL) {                                                             \
         to_bytes.size =                                                                                       \
           cy_buffer_borrowed_gather(from_buffer_borrowed_head,                                                \
@@ -86,6 +86,8 @@ extern "C"
         to_bytes.data = CY_PASTE(to_bytes, _storage);                                                         \
     }
 
+#define CY_OK 0
+// error code 1 is omitted intentionally
 #define CY_ERR_ARGUMENT 2
 #define CY_ERR_MEMORY   3
 #define CY_ERR_CAPACITY 4
@@ -93,8 +95,8 @@ extern "C"
 #define CY_ERR_NAME     6
 #define CY_ERR_MEDIA    7
 
-typedef int8_t  cy_err_t;
-typedef int64_t cy_us_t; ///< Monotonic microsecond timestamp. Signed to permit arithmetics in the past.
+typedef uint_fast8_t cy_err_t;
+typedef int64_t      cy_us_t; ///< Monotonic microsecond timestamp. Signed to permit arithmetics in the past.
 
 struct cy_t;
 struct cy_topic_t;
@@ -156,7 +158,7 @@ struct cy_tree_t
 {
     struct cy_tree_t* up;
     struct cy_tree_t* lr[2];
-    int8_t            bf;
+    int_fast8_t       bf;
 };
 
 /// An ordinary Bloom filter with 64-bit words.
