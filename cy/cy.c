@@ -34,6 +34,9 @@
 #define HEARTBEAT_DEFAULT_PERIOD_us 333331
 #define HEARTBEAT_PUB_TIMEOUT_us    (1 * MEGA)
 
+/// Responses have an 8-byte prefix containing the topic hash that the response is for.
+#define RESPONSE_PAYLOAD_OVERHEAD_BYTES 8U
+
 // clang-format off
 static   size_t smaller(const size_t a,   const size_t b)   { return (a < b) ? a : b; }
 static   size_t  larger(const size_t a,   const size_t b)   { return (a > b) ? a : b; }
@@ -467,7 +470,7 @@ static void topic_ensure_subscribed(struct cy_topic_t* const topic)
                  (long long)params.transfer_id_timeout,
                  res);
         if (!topic->subscribed) {
-            topic->cy->platform->topic_handle_subscription_error(topic->cy, topic, res); // not our problem anymore
+            topic->cy->platform->topic_on_subscription_error(topic->cy, topic, res); // not our problem anymore
         }
     }
 }
@@ -605,7 +608,7 @@ static cy_err_t topic_new(struct cy_t* const cy, struct cy_topic_t** const out_t
     topic->age       = 0;
     topic->aged_at   = cy_now(cy);
 
-    topic->response_extent = 0;
+    topic->response_extent_with_overhead = RESPONSE_PAYLOAD_OVERHEAD_BYTES;
 
     topic->pub_transfer_id = random_u64(cy); // https://forum.opencyphal.org/t/improve-the-transfer-id-timeout/2375
     topic->pub_count       = 0;
@@ -741,14 +744,14 @@ static void topic_subscribe_if_matching(struct cy_t* const cy, const struct wkv_
     {
         const cy_err_t res = topic_new(cy, &topic, name.str);
         if (res < 0) {
-            cy->platform->topic_handle_subscription_error(cy, NULL, res);
+            cy->platform->topic_on_subscription_error(cy, NULL, res);
             return;
         }
     }
     // Attach subscriptions.
     if (NULL != wkv_route(&cy->subscribers_by_wildcard, name, topic, wkv_cb_couple_new_topic)) {
         // TODO discard the topic!
-        cy->platform->topic_handle_subscription_error(cy, NULL, -CY_ERR_MEMORY);
+        cy->platform->topic_on_subscription_error(cy, NULL, -CY_ERR_MEMORY);
         return;
     }
     // Create the transport subscription once at the end, considering the parameters from all subscribers.
@@ -1003,7 +1006,9 @@ cy_err_t cy_advertise(struct cy_publisher_t* const pub,
         // to unroll it back when the largest publisher is removed. This is good enough in this case because the
         // underlying platform layer is expected to use just a single P2P session for all incoming responses,
         // meaning that the effective response extent is simply the maximum of all publishers of all local topics.
-        pub->topic->response_extent = larger(pub->topic->response_extent, response_extent);
+        pub->topic->response_extent_with_overhead = larger(pub->topic->response_extent_with_overhead, //
+                                                           response_extent + RESPONSE_PAYLOAD_OVERHEAD_BYTES);
+        cy->platform->topic_on_response_extent_update(cy, pub->topic);
     }
     CY_TRACE(cy,
              "✨ New publisher '%s' #%016llx @%04x: topic_count=%zu pub_count=%zu res=%d",
@@ -1336,7 +1341,8 @@ cy_err_t cy_new(struct cy_t* const                cy,
     assert(platform->topic_publish != NULL);
     assert(platform->topic_subscribe != NULL);
     assert(platform->topic_unsubscribe != NULL);
-    assert(platform->topic_handle_subscription_error != NULL);
+    assert(platform->topic_on_response_extent_update != NULL);
+    assert(platform->topic_on_subscription_error != NULL);
     assert((platform->node_id_max > 0) && (platform->node_id_max < CY_NODE_ID_INVALID));
 
     // Init the object.

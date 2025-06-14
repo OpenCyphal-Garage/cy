@@ -16,6 +16,8 @@
 #define CY_UDP_POSIX_IFACE_COUNT_MAX           UDPARD_NETWORK_INTERFACE_COUNT_MAX
 #define CY_UDP_POSIX_NODE_ID_BLOOM_64BIT_WORDS 128
 
+struct cy_udp_posix_t;
+
 struct cy_udp_posix_topic_t
 {
     struct cy_topic_t           base;
@@ -26,15 +28,19 @@ struct cy_udp_posix_topic_t
     /// Every OOM implies that either a frame or a full transfer were lost.
     uint64_t rx_oom_count;
 
-    /// Handler for errors occurring while reading from the socket of this topic on the specified iface.
-    /// These are platform-specific.
-    /// The default handler is provided which will use CY_TRACE() to report the error.
-    void (*rx_sock_err_handler)(struct cy_udp_posix_topic_t* topic, uint_fast8_t iface_index, int16_t error);
+    /// Initialized from the eponymous field of cy_udp_posix_t when a new topic is created.
+    void (*rx_sock_err_handler)(struct cy_udp_posix_t*       cy_udp,
+                                struct cy_udp_posix_topic_t* topic,
+                                uint_fast8_t                 iface_index,
+                                int16_t                      error);
 };
 
 struct cy_udp_posix_t
 {
     struct cy_t base;
+
+    /// Maximum seen value across all topics since initialization.
+    size_t response_extent_with_overhead;
 
     uint64_t            node_id_bloom_storage[CY_UDP_POSIX_NODE_ID_BLOOM_64BIT_WORDS];
     struct cy_bloom64_t node_id_bloom;
@@ -62,6 +68,16 @@ struct cy_udp_posix_t
         /// Every OOM implies that either a frame or a full transfer were lost.
         uint64_t oom_count;
     } rpc_rx[CY_UDP_POSIX_IFACE_COUNT_MAX];
+
+    /// Handler for errors occurring while reading from the socket of the topic on the specified iface.
+    /// These are platform-specific.
+    /// The default handler is provided which will use CY_TRACE() to report the error.
+    /// This is only used to initialize the corresponding field of cy_udp_posix_topic_t when a new topic is created.
+    /// Changes to this handler will not affect existing topics.
+    void (*rx_sock_err_handler)(struct cy_udp_posix_t*       cy_udp,
+                                struct cy_udp_posix_topic_t* topic,
+                                uint_fast8_t                 iface_index,
+                                int16_t                      error);
 
     /// Handler for errors occurring while writing into a tx socket on the specified iface.
     /// These are platform-specific.

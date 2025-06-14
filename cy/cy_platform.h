@@ -166,7 +166,9 @@ struct cy_topic_t
     /// The platform layer is expected to continuously track the maximum seen response extent whenever a
     /// transfer is published on any topic, and if an increase is detected, it should reconfigure the P2P response
     /// session to accommodate the new maximum.
-    size_t response_extent;
+    /// As the name suggests, the 8-byte topic hash prefix size is included in this value, so the platform
+    /// layer doesn't need to adjust it.
+    size_t response_extent_with_overhead;
 
     /// Only used if the application publishes data on this topic.
     /// pub_count tracks the number of existing advertisements on this topic; when this number reaches zero
@@ -261,6 +263,10 @@ typedef cy_err_t (*cy_platform_topic_subscribe_t)(struct cy_topic_t*, struct cy_
 /// Instructs the underlying transport to destroy an existing subscription.
 typedef void (*cy_platform_topic_unsubscribe_t)(struct cy_topic_t*);
 
+/// Invoked when the response extent of a topic is updated (e.g., when a new publisher is created on the topic),
+/// or when the topic is created for the first time. It may also be invoked when the value is not actually changed.
+typedef void (*cy_platform_topic_on_response_extent_update_t)(struct cy_t*, struct cy_topic_t*);
+
 /// If a subject-ID collision or divergence are discovered, Cy may reassign the topic to a different subject-ID.
 /// To do that, it will first unsubscribe the topic using the corresponding function,
 /// and then invoke the subscription function to recreate the subscription with the new subject-ID.
@@ -273,7 +279,7 @@ typedef void (*cy_platform_topic_unsubscribe_t)(struct cy_topic_t*);
 ///
 /// Normally, the error handler does not need to do anything specific aside from perhaps logging/reporting the error.
 /// Cy will keep attempting to repair the topic periodically when relevant heartbeats are received.
-typedef void (*cy_platform_topic_handle_subscription_error_t)(struct cy_t*, struct cy_topic_t*, const cy_err_t);
+typedef void (*cy_platform_topic_on_subscription_error_t)(struct cy_t*, struct cy_topic_t*, const cy_err_t);
 
 /// The platform- and transport-specific entities. These can be underpinned by libcanard, libudpard, libserard,
 /// or any other transport library, plus the platform-specific logic.
@@ -296,7 +302,8 @@ struct cy_platform_t
     cy_platform_topic_publish_t                   topic_publish;
     cy_platform_topic_subscribe_t                 topic_subscribe;
     cy_platform_topic_unsubscribe_t               topic_unsubscribe;
-    cy_platform_topic_handle_subscription_error_t topic_handle_subscription_error;
+    cy_platform_topic_on_response_extent_update_t topic_on_response_extent_update;
+    cy_platform_topic_on_subscription_error_t     topic_on_subscription_error;
 
     /// 127 for Cyphal/CAN, 65534 for Cyphal/UDP and Cyphal/Serial, etc.
     /// This is used for the automatic node-ID allocation.
