@@ -1,0 +1,100 @@
+# A generic create/read/update/delete (CRUD) service operating on named byte blobs. This can be used to access files
+# or any other named resources on remote nodes, such as configuration registers, key/value store, etc.
+#
+# Many edge cases are intentionally left to be implementation-defined.
+#
+# The type is designed to be easily mappable to C structs.
+#
+# Implementations do not have to support the full set of features, since there are many use cases where some of the
+# more complex features do not make sense.
+# E.g., if this is used to configure small embedded nodes, then new/rename commands may not make sense.
+# The following support tiers are defined, but strict adherence is not expected:
+#   0. Read existing entries at seek=0. This is the bare minimum level.
+#   1. Read existing entries at seek=0 and list directories.
+#   2. Read and write existing entries at seek=0, list directories.
+#   3. Tier 2 but seekable, which allows entries larger than 1 KiB.
+#   4. Tier 3 plus creation and deletion of entries.
+#   5. Tier 4 plus moving (rename=1, new=0).
+#   6. Tier 5 plus copying (rename=1, new=1).
+
+int64 seek
+# If the entry is not a directory, specifies the offset in bytes. A non-negative value specifies the offset from
+# the origin; a negative value specifies the offset from the point two bytes past the last byte of the file.
+# That is, given a file that contains "abcdef", specific offset values point to:
+#
+#   Offset  Points to
+#    1      b
+#    0      a
+#   -1      immediately past f; append on write, return empty on read
+#   -2      f
+#   -7      a
+#   -8      implementation-defined
+#
+# It follows that if the file is empty, 0 and -1 are equivalent. Negative seek values that point before the origin
+# are handled in an implementation-defined way.
+#
+# Some special files may not support non-zero offsets; e.g., streams or key-value storage entries;
+# in this case, ERROR_SEEK is returned.
+#
+# Directory listings are obtained by setting path to the directory path and incrementing seek until empty data
+# is returned. Support for negative seek values in directory listings is optional.
+# If the entry is a directory, specifies the index of the item inside the directory, following an
+# implementation-defined ordering.
+
+bool new
+# The entry is created with the specified data. If already exists, it is truncated, if supported by the file type.
+# Some special file types, like key-value entries, only support truncated writes, so this flag may have no effect.
+# Parent directories created automatically.
+
+bool rename
+# If data is empty and new=0, delete the entry. Applies recursively to directories.
+#
+# If data is non-empty and new=0, move the entry to the utf8-encoded location in the data array.
+# Applies recursively to directories. Moving should be implemented as an atomic operation if possible.
+#
+# If data is empty and new=1, behavior is implementation-defined.
+#
+# If data is non-empty and new=1, copy the entry to the utf8-encoded location in the data array.
+# Applies recursively to directories.
+
+void14
+
+byte[<=1024] data
+
+utf8[<256] path
+# Names that start with zero byte "\x00" are reserved. Some of the defined names are:
+#   "\x00\x00" -- data is interpreted by the command shell with implementation-defined semantics.
+#   "\x00\x01" -- node info: UID u64, software version (major u8, minor u8, patch u16, vcs u32), revision hash u64.
+
+@sealed
+
+---
+
+uint64 seek
+# The offset of the first data byte relative to the file origin.
+# Undefined for non-seekable entries (e.g., directories, pipes).
+# This can be used to check the file size by writing zero bytes at seek = -1.
+
+uint4 ERROR_OK          = 0     # Otherwise, the data array contains error-specific context.
+uint4 ERROR_SEEK        = 1     # Entry is not seekable.
+uint4 ERROR_SUPPORT     = 2     # Requested protocol feature is not implemented (e.g., cannot create/delete/move).
+uint4 ERROR_EXISTENCE   = 3     # Entry does not exist when it should, or exists when it shouldn't. Includes bad path when creating.
+uint4 ERROR_KIND        = 4     # E.g., attempted to write an entry which is a directory.
+uint4 ERROR_CAPACITY    = 5     # Out of storage space or entry size limit.
+uint4 ERROR_PERMISSION  = 6     # E.g., entry is not mutable.
+uint4 ERROR_RUNTIME     = 7     # Error coming from the low-level execution environment; e.g., IO error.
+uint4 ERROR_OTHER       = 15    # Error-specific information contained in the data array.
+uint4 error
+
+void4
+
+bool end        # Last data byte is the last byte of entry. Empty data indicates that seek points past the end.
+bool directory  # The data contains utf8-encoded file names relative to the directory path.
+bool immutable  # An attempt to modify the entry is likely to fail.
+void5
+
+byte[<=1024] data
+# The data may be empty if the request data is non-empty.
+# If error is non-zero, this field may contain arbitrary additional error context in utf8.
+
+@sealed

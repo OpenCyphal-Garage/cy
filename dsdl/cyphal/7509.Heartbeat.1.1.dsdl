@@ -30,8 +30,10 @@ uint8 version
 # in which case we may replace this and all following fields with a union, and this field will become the uninon tag.
 # Publishers of Heartbeat v1.0 will not populate this field, meaning that it will read as zero.
 
-UID.0.1 uid
+uint64 uid
 # This 64-bit value completely and uniquely identifies the node: its vendor, product type, and specific instance.
+# We use the compact scalar representation here for reasons of serialization efficiency;
+# the elaborated representation is defined in the separate cyphal.UID type nearby.
 
 # ----------------------------------------  TOPIC ALLOCATION CRDT GOSSIP  ----------------------------------------
 
