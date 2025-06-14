@@ -31,12 +31,12 @@
 /// The earliest representable time in microseconds.
 #define BIG_BANG INT64_MIN
 
-#define HEARTBEAT_PUB_TIMEOUT_us (1 * MEGA)
+#define HEARTBEAT_DEFAULT_PERIOD_us 333331
+#define HEARTBEAT_PUB_TIMEOUT_us    (1 * MEGA)
 
 // clang-format off
 static   size_t smaller(const size_t a,   const size_t b)   { return (a < b) ? a : b; }
 static   size_t  larger(const size_t a,   const size_t b)   { return (a > b) ? a : b; }
-static  int64_t min_i64(const int64_t a,  const int64_t b)  { return (a < b) ? a : b; }
 static  int64_t max_i64(const int64_t a,  const int64_t b)  { return (a > b) ? a : b; }
 static uint64_t max_u64(const uint64_t a, const uint64_t b) { return (a > b) ? a : b; }
 // clang-format on
@@ -663,6 +663,7 @@ static cy_err_t topic_ensure(struct cy_t* const cy, struct cy_topic_t** const ou
 /// Create a new coupling between a topic and a subscriber.
 /// Allocates new memory for the coupling, which may fail.
 /// Don't forget topic_ensure_subscribed() afterward if necessary.
+/// The substitutions must not lose validity until the topic is destroyed.
 static cy_err_t topic_couple(struct cy_t* const                 cy,
                              struct cy_topic_t* const           topic,
                              struct cy_subscriber_root_t* const subr,
@@ -759,61 +760,56 @@ struct heartbeat_t
 };
 static_assert(sizeof(struct heartbeat_t) == 128, "bad layout");
 
-static struct heartbeat_t make_heartbeat(const cy_us_t     uptime,
-                                         const uint64_t    uid,
-                                         const uint8_t     flags,
-                                         const uint64_t    evictions,
-                                         const uint64_t    age,
-                                         const uint64_t    hash,
-                                         const size_t      name_len,
-                                         const char* const name)
+static cy_err_t publish_heartbeat(struct cy_t* const cy, const cy_us_t now, struct heartbeat_t* const message)
 {
-    assert(name_len <= CY_TOPIC_NAME_MAX);
-    struct heartbeat_t obj = {
-        .uptime                                    = (uint32_t)(uptime / MEGA),
-        .version                                   = 1,
-        .uid                                       = uid,
-        .topic_hash                                = hash,
-        .topic_flags8_age56                        = (((uint64_t)flags) << 56U) | age,
-        .topic_name_length8_reserved16_evictions40 = (((uint64_t)name_len) << 56U) | evictions,
-    };
-    memcpy(obj.topic_name, name, name_len);
-    return obj;
-}
-
-static cy_err_t publish_heartbeat(struct cy_topic_t* const topic, const cy_us_t now)
-{
-    assert(topic != NULL);
-    struct cy_t* const cy = topic->cy;
-
-    topic_age(topic, now);
-    topic_ensure_subscribed(topic); // use this opportunity to repair the subscription if broken
-
-    // Construct the heartbeat message.
-    const uint8_t flags = ((topic->pub_count > 0) ? TOPIC_FLAG_PUBLISHING : 0U) | //
-                          ((topic->couplings != NULL) ? TOPIC_FLAG_SUBSCRIBED : 0U);
-    // TODO: heartbeats published out-of-order in response to a divergence need not carry the name!
-    const struct heartbeat_t msg = make_heartbeat(now - cy->started_at, //
-                                                  cy->uid,
-                                                  flags,
-                                                  topic->evictions,
-                                                  topic->age,
-                                                  topic->hash,
-                                                  topic->index_name->key_len,
-                                                  topic->name);
-    const size_t             msz = sizeof(msg) - (CY_TOPIC_NAME_MAX - topic->index_name->key_len);
-    assert(msz <= sizeof(msg));
-    assert((msg.topic_name_length8_reserved16_evictions40 >> 56U) <= CY_TOPIC_NAME_MAX);
-    const struct cy_buffer_borrowed_t payload = { .next = NULL, .view = { .data = &msg, .size = msz } };
-
-    // Publish the message.
+    message->uptime  = (uint32_t)((now - cy->started_at) / MEGA);
+    message->version = 1;
+    message->uid     = cy->uid;
+    const size_t message_size =
+      sizeof(*message) - (CY_TOPIC_NAME_MAX - (message->topic_name_length8_reserved16_evictions40 >> 56U));
+    assert(message_size <= sizeof(message));
+    assert((message->topic_name_length8_reserved16_evictions40 >> 56U) <= CY_TOPIC_NAME_MAX);
+    const struct cy_buffer_borrowed_t payload = { .next = NULL, .view = { .data = message, .size = message_size } };
     assert(cy->node_id <= cy->platform->node_id_max);
     const cy_err_t pub_res = cy->platform->topic_publish(&cy->heartbeat_pub, now + HEARTBEAT_PUB_TIMEOUT_us, payload);
     cy->heartbeat_pub.topic->pub_transfer_id++;
+    return pub_res;
+}
 
+static cy_err_t publish_heartbeat_gossip(struct cy_t* const cy, struct cy_topic_t* const topic, const cy_us_t now)
+{
+    topic_age(topic, now);
+    topic_ensure_subscribed(topic); // use this opportunity to repair the subscription if broken
+    const uint8_t flags = ((topic->pub_count > 0) ? TOPIC_FLAG_PUBLISHING : 0U) | //
+                          ((topic->couplings != NULL) ? TOPIC_FLAG_SUBSCRIBED : 0U);
+    // Possible optimization: we don't have to transmit the topic name if the message is urgent, i.e.,
+    // if it is published in response to a divergent allocation or possibly a collision.
+    struct heartbeat_t msg = {
+        .topic_hash                                = topic->hash,
+        .topic_flags8_age56                        = (((uint64_t)flags) << 56U) | topic->age,
+        .topic_name_length8_reserved16_evictions40 = (((uint64_t)topic->index_name->key_len) << 56U) | topic->evictions,
+    };
+    memcpy(msg.topic_name, topic->name, topic->index_name->key_len);
     // Update gossip time even if failed so we don't get stuck publishing same gossip if error reporting is broken.
     update_last_gossip_time(topic, now);
-    return pub_res;
+    return publish_heartbeat(cy, now, &msg);
+}
+
+static cy_err_t publish_heartbeat_scout(struct cy_t* const cy, const cy_us_t now)
+{
+    struct cy_subscriber_root_t* subr = cy->next_scout;
+    assert(subr != NULL);
+    struct heartbeat_t msg = {
+        .topic_hash         = 8185, // https://github.com/pavel-kirienko/cy/issues/12#issuecomment-2953184238
+        .topic_flags8_age56 = (((uint64_t)TOPIC_FLAG_SCOUT) << 56U),
+        .topic_name_length8_reserved16_evictions40 = (((uint64_t)subr->index_name->key_len) << 56U),
+    };
+    wkv_get_key(&cy->subscribers_by_name, subr->index_name, msg.topic_name);
+    const cy_err_t res = publish_heartbeat(cy, now, &msg);
+    if (res >= 0) {
+        cy->next_scout = subr->next_scout; // delist the scout if publication succeeded
+    }
+    return res;
 }
 
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
@@ -1332,10 +1328,9 @@ cy_err_t cy_new(struct cy_t* const                cy,
     // and to claim the address; if it's already taken, we will want to cause a collision to move the other node,
     // because manually assigned addresses take precedence over auto-assigned ones.
     // If we are not given a node-ID, we need to first listen to the network.
-    cy->heartbeat_period_max                   = 100 * KILO;
-    cy->heartbeat_full_gossip_cycle_period_max = 10 * MEGA;
-    cy->heartbeat_next                         = cy->started_at;
-    cy_err_t res                               = 0;
+    cy->heartbeat_period = HEARTBEAT_DEFAULT_PERIOD_us;
+    cy->heartbeat_next   = cy->started_at;
+    cy_err_t res         = 0;
     if (cy->node_id > cy->platform->node_id_max) {
         cy->heartbeat_next += (cy_us_t)random_uint(cy, CY_START_DELAY_MIN_us, CY_START_DELAY_MAX_us);
         cy->last_event_ts = cy->last_local_event_ts = cy->started_at;
@@ -1566,18 +1561,23 @@ cy_err_t cy_update(struct cy_t* const cy)
         // Find the next topic to gossip.
         const struct cy_tree_t* const t = cavl2_min(cy->topics_by_gossip_time);
         assert(t != NULL); // We always have at least the heartbeat topic.
-        struct cy_topic_t* const tp = CAVL2_TO_OWNER(t, struct cy_topic_t, index_gossip_time);
-        assert(tp->cy == cy);
+        struct cy_topic_t* tp = CAVL2_TO_OWNER(t, struct cy_topic_t, index_gossip_time);
+        // If this is not an urgent gossip and we have pending scouts, prefer the scouts.
+        if ((tp->last_gossip > 0) && (cy->next_scout != NULL)) {
+            tp = NULL;
+        }
 
         // Publish the heartbeat.
-        res = publish_heartbeat(tp, now);
+        if (tp != NULL) {
+            res = publish_heartbeat_gossip(cy, tp, now);
+        } else {
+            res = publish_heartbeat_scout(cy, now);
+        }
 
         // Schedule the next one.
         // If this heartbeat failed to publish, we simply give up and move on to try again in the next period.
-        assert(cy->topic_count > 0); // we always have at least the heartbeat topic
-        const cy_us_t period = min_i64(cy->heartbeat_full_gossip_cycle_period_max / (cy_us_t)cy->topic_count, //
-                                       cy->heartbeat_period_max);
-        cy->heartbeat_next += period; // Do not accumulate heartbeat phase slip!
+        assert(cy->topic_count > 0);                // we always have at least the heartbeat topic
+        cy->heartbeat_next += cy->heartbeat_period; // Do not accumulate heartbeat phase slip!
     }
     return res;
 }

@@ -357,8 +357,7 @@ struct cy_t
     struct cy_publisher_t  heartbeat_pub;
     struct cy_subscriber_t heartbeat_sub;
     cy_us_t                heartbeat_next;
-    cy_us_t                heartbeat_period_max;
-    cy_us_t                heartbeat_full_gossip_cycle_period_max; ///< Max time to gossip all local topics.
+    cy_us_t                heartbeat_period;
 
     /// Topics have multiple indexes.
     struct cy_tree_t* topics_by_hash;
@@ -402,12 +401,11 @@ cy_err_t cy_new(struct cy_t* const                cy,
 void     cy_destroy(struct cy_t* const cy);
 
 /// This function must be invoked periodically to let the library publish heartbeats and handle response timeouts.
-/// The invocation period MUST NOT EXCEED the heartbeat period configured in cy_t; there is no lower limit.
-/// The recommended invocation period is less than 10 milliseconds.
+/// The most efficient invocation schedule is guided by cy->heartbeat_next, but not less often than every 10 ms;
+/// if a fixed-rate updates are desired, then the recommended period is 1 millisecond.
 ///
-/// This is the only function that generates heartbeat ======================================== the only kind of
-/// auxiliary traffic needed to support named topics. The returned value indicates the success of the heartbeat
-/// publication, if any took place, or zero.
+/// This is the only function that generates heartbeat -- the only kind of auxiliary traffic needed by the protocol.
+/// The returned value indicates the success of the heartbeat publication, if any took place, or zero.
 ///
 /// If this is invoked together with cy_ingest(), then cy_update() must be invoked AFTER cy_ingest() to ensure
 /// that the latest state updates are reflected in the heartbeat message.
