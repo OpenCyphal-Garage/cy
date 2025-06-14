@@ -982,7 +982,7 @@ static void retire_timed_out_futures(struct cy_t* cy, const cy_us_t now)
         assert(fut->state == cy_future_pending);
         cavl2_remove(&cy->futures_by_deadline, &fut->index_deadline);
         cavl2_remove(&fut->publisher->topic->futures_by_transfer_id, &fut->index_transfer_id);
-        fut->state = cy_future_failure;
+        fut->state = cy_future_response_timeout;
         if (fut->callback != NULL) {
             fut->callback(fut);
         }

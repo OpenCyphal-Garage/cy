@@ -201,7 +201,7 @@ enum cy_future_state_t
 {
     cy_future_pending,
     cy_future_success,
-    cy_future_failure,
+    cy_future_response_timeout,
 };
 
 typedef void (*cy_future_callback_t)(struct cy_future_t*);
