@@ -245,18 +245,32 @@ Regardless of the above steps, merge the local age as max(local age, remote age)
 From an integrator standpoint, the only difference is that topics are now assigned not via registers as numbers, but as topic name remappings as strings: `uavcan.pub.my_subject.id=1234` is now a remapping from `my_subject` to `/1234`.
 
 
+## Implementation notes
+
+```mermaid
+classDiagram
+direction LR
+    class cy {
+        +advertise()
+        +subscribe()
+    }
+    class publisher {
+        +publish()
+    }
+    class subscriber {
+        +callback
+    }
+    cy "1" o-- "*" _topic
+    cy "1" o-- "*" _subscriber_root
+    _topic "1" o-- "*" _linkage
+    _topic "1" <-- "*" publisher
+    _linkage "*" --> "1" _subscriber_root
+    _subscriber_root "1" o-- "*" subscriber
+    note "Automatically managed private entities are prefixed with '_'"
+```
+
+
 ## Missing features
-
-### Wildcard topic subscriptions
-
-This is not a protocol feature but a library feature, which is easy to add.
-The protocol requires no (nontrivial) changes to incorporate this.
-
-One specific use case can be found here: <https://forum.opencyphal.org/t/rfc-add-array-of-ports/1878>
-
-An asterisk `*` should match a given topic name segment (between `/` like `abc/*/qwe` matches `abc/def/qwe`) and the matched string should be passed to the application via the callback. Similarly, `**` could perhaps be useful by analogy with glob patterns.
-
-More complex key expressions could eventually be supported in the spirit of Zenoh or even DDS.
 
 ### Type assignability checking
 
