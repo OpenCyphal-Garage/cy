@@ -89,8 +89,6 @@ struct cy_topic_t
     /// We need to store the full name to allow valid references from name substitutions during pattern matching.
     char name[CY_TOPIC_NAME_MAX + 1];
 
-    struct cy_t* cy; ///< TODO: remove the implicit pointer, pass it explicitly instead.
-
     /// Assuming we have 1000 topics, the probability of a topic name hash collision is:
     /// >>> from decimal import Decimal
     /// >>> n = 1000
@@ -187,7 +185,7 @@ typedef cy_us_t (*cy_platform_now_t)(const struct cy_t*);
 /// The semantics are per the standard realloc from stdlib, except:
 /// - If the fragment is not increased in size, reallocation MUST succeed.
 /// - If the size is zero, it must behave like free() (which is often the case in realloc() but technically an UB).
-typedef void* (*cy_platform_realloc_t)(const struct cy_t*, void*, size_t);
+typedef void* (*cy_platform_realloc_t)(struct cy_t*, void*, size_t);
 
 /// Returns a PRNG hashing seed or a full pseudo-random 64-bit unsigned integer.
 /// A TRNG is preferred; if not available, a PRNG will suffice, but its initial state SHOULD be likely to be
@@ -251,17 +249,20 @@ typedef cy_err_t (*cy_platform_request_t)(struct cy_t*,
 /// Allocates a new topic. NULL if out of memory.
 typedef struct cy_topic_t* (*cy_platform_topic_new_t)(struct cy_t*);
 
-typedef void (*cy_platform_topic_destroy_t)(struct cy_topic_t*);
+typedef void (*cy_platform_topic_destroy_t)(struct cy_t*, struct cy_topic_t*);
 
 /// Instructs the underlying transport layer to publish a new message on the topic.
 /// The function shall not increment the transfer-ID counter; Cy will do it.
-typedef cy_err_t (*cy_platform_topic_publish_t)(struct cy_publisher_t*, cy_us_t, struct cy_buffer_borrowed_t);
+typedef cy_err_t (*cy_platform_topic_publish_t)(struct cy_t*,
+                                                struct cy_publisher_t*,
+                                                cy_us_t,
+                                                struct cy_buffer_borrowed_t);
 
 /// Instructs the underlying transport layer to create a new subscription on the topic.
-typedef cy_err_t (*cy_platform_topic_subscribe_t)(struct cy_topic_t*, struct cy_subscription_params_t);
+typedef cy_err_t (*cy_platform_topic_subscribe_t)(struct cy_t*, struct cy_topic_t*, struct cy_subscription_params_t);
 
 /// Instructs the underlying transport to destroy an existing subscription.
-typedef void (*cy_platform_topic_unsubscribe_t)(struct cy_topic_t*);
+typedef void (*cy_platform_topic_unsubscribe_t)(struct cy_t*, struct cy_topic_t*);
 
 /// Invoked when the response extent of a topic is updated (e.g., when a new publisher is created on the topic),
 /// or when the topic is created for the first time. It may also be invoked when the value is not actually changed.
@@ -441,7 +442,7 @@ cy_err_t cy_update(struct cy_t* const cy);
 /// cy_topic_find_by_subject_id(). The function has no effect if the topic is NULL; it is not an error to call it
 /// with NULL to simplify chaining like:
 ///     cy_notify_topic_hash_collision(cy_topic_find_by_subject_id(cy, collision_subject_id));
-void cy_notify_topic_hash_collision(struct cy_topic_t* const topic);
+void cy_notify_topic_hash_collision(struct cy_t* const cy, struct cy_topic_t* const topic);
 
 /// When the transport library detects an incoming transport frame with the same source node-ID as the local node-ID,
 /// it must notify Cy about it to let it rectify the problem.
@@ -462,7 +463,9 @@ void cy_notify_node_id_collision(struct cy_t* const cy);
 ///
 /// If this is invoked together with cy_update(), then cy_ingest() must be invoked BEFORE cy_update()
 /// to ensure that the latest state updates are reflected in the next heartbeat message.
-void cy_ingest_topic_transfer(struct cy_topic_t* const topic, struct cy_transfer_owned_t transfer);
+void cy_ingest_topic_transfer(struct cy_t* const         cy,
+                              struct cy_topic_t* const   topic,
+                              struct cy_transfer_owned_t transfer);
 
 /// Cy does not manage RPC endpoints explicitly; it is the responsibility of the transport-specific glue logic.
 /// Currently, the following RPC endpoints must be implemented in the glue logic:

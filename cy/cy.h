@@ -235,8 +235,8 @@ struct cy_future_t
 /// The response_extent is the extent (maximum size) of the response payload if the publisher expects responses;
 /// if no response is expected/needed, the response_extent should be zero. If responses are needed but their maximum
 /// size is unknown, pick any sensible large value.
-cy_err_t cy_advertise(struct cy_publisher_t* const pub,
-                      struct cy_t* const           cy,
+cy_err_t cy_advertise(struct cy_t* const           cy,
+                      struct cy_publisher_t* const pub,
                       const char* const            name,
                       const size_t                 response_extent);
 void     cy_unadvertise(const struct cy_publisher_t* pub);
@@ -259,18 +259,20 @@ void cy_future_cancel(struct cy_future_t* const future);
 /// The response future will not be registered unless the result is non-negative.
 ///
 /// If the response deadline is in the past, the message will be sent anyway but it will time out immediately.
-cy_err_t cy_publish(struct cy_publisher_t* const      pub,
+cy_err_t cy_publish(struct cy_t* const                cy,
+                    struct cy_publisher_t* const      pub,
                     const cy_us_t                     tx_deadline,
                     const struct cy_buffer_borrowed_t payload,
                     const cy_us_t                     response_deadline,
                     struct cy_future_t* const         future);
 
 /// A simpler wrapper over cy_publish() when no response is needed/expected. 1 means one way.
-static inline cy_err_t cy_publish1(struct cy_publisher_t* const      pub,
+static inline cy_err_t cy_publish1(struct cy_t* const                cy,
+                                   struct cy_publisher_t* const      pub,
                                    const cy_us_t                     tx_deadline,
                                    const struct cy_buffer_borrowed_t payload)
 {
-    return cy_publish(pub, tx_deadline, payload, 0, NULL);
+    return cy_publish(cy, pub, tx_deadline, payload, 0, NULL);
 }
 
 // =====================================================================================================================
@@ -285,6 +287,7 @@ struct cy_substitution_t
 
 struct cy_arrival_t
 {
+    struct cy_t*                cy;
     struct cy_subscriber_t*     subscriber; ///< Which subscriber matched on this topic by verbatim name or pattern.
     struct cy_topic_t*          topic;      ///< The specific topic that received the transfer.
     struct cy_transfer_owned_t* transfer;   ///< The actual received message and its metadata.
@@ -336,19 +339,19 @@ struct cy_subscriber_t
 /// plus it is usually slow.
 ///
 /// The complexity is about linear in the number of subscriptions.
-cy_err_t               cy_subscribe_with_params(struct cy_subscriber_t* const         sub,
-                                                struct cy_t* const                    cy,
+cy_err_t               cy_subscribe_with_params(struct cy_t* const                    cy,
+                                                struct cy_subscriber_t* const         sub,
                                                 const char* const                     name,
                                                 const struct cy_subscription_params_t params,
                                                 const cy_subscriber_callback_t        callback);
-static inline cy_err_t cy_subscribe(struct cy_subscriber_t* const  sub,
-                                    struct cy_t* const             cy,
+static inline cy_err_t cy_subscribe(struct cy_t* const             cy,
+                                    struct cy_subscriber_t* const  sub,
                                     const char* const              name,
                                     const size_t                   extent,
                                     const cy_subscriber_callback_t callback)
 {
     const struct cy_subscription_params_t params = { extent, CY_TRANSFER_ID_TIMEOUT_DEFAULT_us };
-    return cy_subscribe_with_params(sub, cy, name, params, callback);
+    return cy_subscribe_with_params(cy, sub, name, params, callback);
 }
 void cy_unsubscribe(struct cy_t* const cy, struct cy_subscriber_t* const sub);
 
@@ -362,23 +365,18 @@ void cy_unsubscribe(struct cy_t* const cy, struct cy_subscriber_t* const sub);
 ///
 /// The response is be sent using an RPC request (sic) transfer to the publisher with the specified priority and
 /// the original transfer-ID.
-cy_err_t cy_respond(struct cy_topic_t* const            topic,
+cy_err_t cy_respond(struct cy_t* const                  cy,
+                    struct cy_topic_t* const            topic,
                     const cy_us_t                       tx_deadline,
                     const struct cy_transfer_metadata_t metadata,
                     const struct cy_buffer_borrowed_t   payload);
 
 /// Copies the subscriber name into the user-supplied buffer.
-void cy_subscriber_name(struct cy_t* const cy, const struct cy_subscriber_t* const sub, char* const out_name);
+void cy_subscriber_name(const struct cy_t* const cy, const struct cy_subscriber_t* const sub, char* const out_name);
 
 // =====================================================================================================================
 //                                                      TOPIC
 // =====================================================================================================================
-
-/// Complexity is logarithmic in the number of topics. NULL if not found.
-/// In practical terms, these queries are very fast and efficient.
-struct cy_topic_t* cy_topic_find_by_name(const struct cy_t* const cy, const char* const name);
-struct cy_topic_t* cy_topic_find_by_hash(const struct cy_t* const cy, const uint64_t hash);
-struct cy_topic_t* cy_topic_find_by_subject_id(const struct cy_t* const cy, const uint16_t subject_id);
 
 /// If the topic configuration is restored from non-volatile memory or elsewhere, it can be supplied to the library
 /// via this function immediately after the topic is first created. This function should not be invoked at any other
@@ -390,7 +388,13 @@ struct cy_topic_t* cy_topic_find_by_subject_id(const struct cy_t* const cy, cons
 /// operational immediately, without waiting for the CRDT consensus. Remember that the hint is discarded on conflict.
 ///
 /// The hint will be silently ignored if it is invalid, inapplicable, or if the topic is not freshly created.
-void cy_topic_hint(struct cy_topic_t* const topic, const uint16_t subject_id);
+void cy_topic_hint(struct cy_t* const cy, struct cy_topic_t* const topic, const uint16_t subject_id);
+
+/// Complexity is logarithmic in the number of topics. NULL if not found.
+/// In practical terms, these queries are very fast and efficient.
+struct cy_topic_t* cy_topic_find_by_name(const struct cy_t* const cy, const char* const name);
+struct cy_topic_t* cy_topic_find_by_hash(const struct cy_t* const cy, const uint64_t hash);
+struct cy_topic_t* cy_topic_find_by_subject_id(const struct cy_t* const cy, const uint16_t subject_id);
 
 /// Iterate over all topics in an unspecified order.
 /// This is useful when handling IO multiplexing (building the list of descriptors to read) and for introspection.

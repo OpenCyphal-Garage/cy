@@ -8,6 +8,7 @@
 /// This is just a PoC, a crude approximation of what it might look like when implemented properly.
 /// Copyright (c) Pavel Kirienko <pavel@opencyphal.org>
 
+// ReSharper disable CppDFATimeOver
 #include "cy_platform.h"
 
 #define CAVL2_RELATION int32_t
@@ -31,6 +32,8 @@
 /// The earliest representable time in microseconds.
 #define BIG_BANG INT64_MIN
 
+/// We chose it to be a prime number of microseconds closest to 1/3 of a second to avoid stable aliasing with any
+/// faster publisher on the network. This is not important by any margin but is nice to have.
 #define HEARTBEAT_DEFAULT_PERIOD_us 333331
 #define HEARTBEAT_PUB_TIMEOUT_us    (1 * MEGA)
 
@@ -65,6 +68,7 @@ static uint64_t random_uint(const struct cy_t* const cy, const uint64_t min, con
     return min;
 }
 
+// ReSharper disable once CppParameterMayBeConstPtrOrRef
 static void* wkv_realloc(struct wkv_t* const self, void* ptr, const size_t new_size)
 {
     return ((struct cy_t*)self->context)->platform->realloc((struct cy_t*)self->context, ptr, new_size);
@@ -358,12 +362,12 @@ static bool left_wins(const struct cy_topic_t* const left, const uint64_t r_age,
 }
 
 /// log(N) index update requires removal and reinsertion.
-static void update_last_gossip_time(struct cy_topic_t* const topic, const cy_us_t ts)
+static void update_last_gossip_time(struct cy_t* const cy, struct cy_topic_t* const topic, const cy_us_t ts)
 {
-    assert(topic->cy->topics_by_gossip_time != NULL); // This index is never empty if we have topics
-    cavl2_remove(&topic->cy->topics_by_gossip_time, &topic->index_gossip_time);
+    assert(cy->topics_by_gossip_time != NULL); // This index is never empty if we have topics
+    cavl2_remove(&cy->topics_by_gossip_time, &topic->index_gossip_time);
     topic->last_gossip                 = ts;
-    const struct cy_tree_t* const tree = cavl2_find_or_insert(&topic->cy->topics_by_gossip_time, //
+    const struct cy_tree_t* const tree = cavl2_find_or_insert(&cy->topics_by_gossip_time, //
                                                               &ts,
                                                               cavl_comp_topic_gossip_time,
                                                               topic,
@@ -371,9 +375,9 @@ static void update_last_gossip_time(struct cy_topic_t* const topic, const cy_us_
     assert(tree == &topic->index_gossip_time);
 }
 
-static void schedule_gossip(struct cy_topic_t* const topic, cy_us_t new_time)
+static void schedule_gossip(struct cy_t* const cy, struct cy_topic_t* const topic, cy_us_t new_time)
 {
-    assert(topic->cy->topics_by_gossip_time != NULL); // This index is never empty if we have topics
+    assert(cy->topics_by_gossip_time != NULL); // This index is never empty if we have topics
     // This is an optional optimization: if this is a pinned topic, it normally cannot collide with another one;
     // we are publishing it just to announce that we have it; as such, the urgency of this action is a bit lower
     // than that of an actual colliding topic announcement, so we choose next-greater time to deprioritize it.
@@ -381,9 +385,8 @@ static void schedule_gossip(struct cy_topic_t* const topic, cy_us_t new_time)
         new_time++;
     }
     if (topic->last_gossip > new_time) { // Don't do anything if it's already scheduled.
-        CY_TRACE(
-          topic->cy, "'%s' #%016llx @%04x", topic->name, (unsigned long long)topic->hash, cy_topic_subject_id(topic));
-        update_last_gossip_time(topic, new_time);
+        CY_TRACE(cy, "'%s' #%016llx @%04x", topic->name, (unsigned long long)topic->hash, cy_topic_subject_id(topic));
+        update_last_gossip_time(cy, topic, new_time);
     }
 }
 
@@ -434,7 +437,7 @@ static uint16_t topic_subject_id(const uint64_t hash, const uint64_t evictions)
 
 /// This is linear complexity but we expect to have few subscribers per topic, so it is acceptable.
 /// If this becomes a problem, we can simply store the subscription parameters in the topic fields.
-static struct cy_subscription_params_t deduce_subscription_params(struct cy_topic_t* const topic)
+static struct cy_subscription_params_t deduce_subscription_params(const struct cy_topic_t* const topic)
 {
     struct cy_subscription_params_t out = { 0, 0 };
     // Go over all couplings and all subscribers in each coupling.
@@ -455,13 +458,13 @@ static struct cy_subscription_params_t deduce_subscription_params(struct cy_topi
 
 /// If a subscription is needed but is not active, this function will attempt to resubscribe.
 /// Errors are handled via the platform handler, so from the caller's perspective this is infallible.
-static void topic_ensure_subscribed(struct cy_topic_t* const topic)
+static void topic_ensure_subscribed(struct cy_t* const cy, struct cy_topic_t* const topic)
 {
     if ((topic->couplings != NULL) && (!topic->subscribed)) {
         const struct cy_subscription_params_t params = deduce_subscription_params(topic);
-        const cy_err_t                        res    = topic->cy->platform->topic_subscribe(topic, params);
+        const cy_err_t                        res    = cy->platform->topic_subscribe(cy, topic, params);
         topic->subscribed                            = res >= 0;
-        CY_TRACE(topic->cy,
+        CY_TRACE(cy,
                  "Platform subscription for '%s' #%016llx @%04x extent=%zu tid_timeout=%lld result=%d",
                  topic->name,
                  (unsigned long long)topic->hash,
@@ -470,7 +473,7 @@ static void topic_ensure_subscribed(struct cy_topic_t* const topic)
                  (long long)params.transfer_id_timeout,
                  res);
         if (!topic->subscribed) {
-            topic->cy->platform->topic_on_subscription_error(topic->cy, topic, res); // not our problem anymore
+            cy->platform->topic_on_subscription_error(cy, topic, res); // not our problem anymore
         }
     }
 }
@@ -482,9 +485,11 @@ static void topic_ensure_subscribed(struct cy_topic_t* const topic)
 /// index tree on every iteration, and there may be as many iterations as there are local topics in the theoretical
 /// worst case. The amortized worst case is only O(log(N)) because the topics are sparsely distributed thanks to the
 /// topic hash function, unless there is a large number of topics (~>1000).
-static void topic_allocate(struct cy_topic_t* const topic, const uint64_t new_evictions, const bool virgin)
+static void topic_allocate(struct cy_t* const       cy,
+                           struct cy_topic_t* const topic,
+                           const uint64_t           new_evictions,
+                           const bool               virgin)
 {
-    struct cy_t* const cy = topic->cy;
     assert(cy->topic_count <= CY_TOPIC_SUBJECT_COUNT); // There is certain to be a free subject-ID!
 
     static const int         call_depth_indent = 2;
@@ -507,7 +512,7 @@ static void topic_allocate(struct cy_topic_t* const topic, const uint64_t new_ev
     // Otherwise, changing the subject-ID field on the go may break something underneath.
     if (topic->subscribed) {
         assert(topic->couplings != NULL);
-        cy->platform->topic_unsubscribe(topic);
+        cy->platform->topic_unsubscribe(cy, topic);
         topic->subscribed = false;
     }
 
@@ -538,7 +543,7 @@ static void topic_allocate(struct cy_topic_t* const topic, const uint64_t new_ev
             // This is our slot now! The other topic has to move.
             // This can trigger a chain reaction that in the worst case can leave no topic unturned.
             // One issue is that the worst-case recursive call depth equals the number of topics in the system.
-            topic_allocate(other, other->evictions + 1U, false);
+            topic_allocate(cy, other, other->evictions + 1U, false);
             // Remember that we're still out of tree at the moment. We pushed the other topic out of its slot,
             // but it is possible that there was a chain reaction that caused someone else to occupy this slot.
             // Since that someone else was ultimately pushed out by the topic that just lost arbitration to us,
@@ -553,12 +558,12 @@ static void topic_allocate(struct cy_topic_t* const topic, const uint64_t new_ev
 
     // Whenever we alter a topic, we need to make sure that everyone knows about it.
     // Recursively we can alter a lot of topics like this.
-    schedule_gossip(topic, BIG_BANG);
+    schedule_gossip(cy, topic, BIG_BANG);
 
     // If a subscription is needed, restore it. Notice that if this call failed in the past, we will retry here
     // as long as there is at least one live subscriber.
     assert(!topic->subscribed);
-    topic_ensure_subscribed(topic);
+    topic_ensure_subscribed(cy, topic);
 
     CY_TRACE(cy,
              "🔚%*s'%s' #%016llx @%04x evict=%llu age=%llu subscribed=%d iters=%zu",
@@ -595,8 +600,6 @@ static cy_err_t topic_new(struct cy_t* const cy, struct cy_topic_t** const out_t
         return CY_ERR_MEMORY;
     }
     memset(topic, 0, sizeof(*topic));
-    topic->cy = cy;
-
     if (!compose_topic_name(cy->namespace_, cy->name, name, topic->name)) {
         goto bad_name;
     }
@@ -647,7 +650,7 @@ static cy_err_t topic_new(struct cy_t* const cy, struct cy_topic_t** const out_t
     // meaning that another pinned topic is not occupying the same subject-ID.
     // Remember that topics arbitrate locally the same way they do externally, meaning that adding a new local topic
     // may displace another local one.
-    topic_allocate(topic, 0, true);
+    topic_allocate(cy, topic, 0, true);
 
     if (out_topic != NULL) {
         *out_topic = topic;
@@ -662,11 +665,11 @@ static cy_err_t topic_new(struct cy_t* const cy, struct cy_topic_t** const out_t
     return 0;
 
 oom: // TODO correct deinitialization
-    cy->platform->topic_destroy(topic);
+    cy->platform->topic_destroy(cy, topic);
     return -CY_ERR_NAME;
 
 bad_name: // TODO correct deinitialization
-    cy->platform->topic_destroy(topic);
+    cy->platform->topic_destroy(cy, topic);
     return -CY_ERR_NAME;
 }
 
@@ -722,9 +725,10 @@ static cy_err_t topic_couple(struct cy_t* const                 cy,
 /// Returns non-NULL on OOM.
 static void* wkv_cb_couple_new_topic(const struct wkv_event_t evt)
 {
-    struct cy_topic_t* const      topic = (struct cy_topic_t*)evt.context;
-    struct cy_subscriber_t* const sub   = (struct cy_subscriber_t*)evt.node->value;
-    const cy_err_t res = topic_couple(topic->cy, topic, sub->root, evt.substitution_count, evt.substitutions);
+    struct cy_t* const                  cy    = (struct cy_t*)(((void**)evt.context)[0]);
+    struct cy_topic_t* const            topic = (struct cy_topic_t*)(((void**)evt.context)[1]);
+    const struct cy_subscriber_t* const sub   = (struct cy_subscriber_t*)evt.node->value;
+    const cy_err_t res = topic_couple(cy, topic, sub->root, evt.substitution_count, evt.substitutions);
     return (0 == res) ? NULL : "";
 }
 
@@ -749,13 +753,13 @@ static void topic_subscribe_if_matching(struct cy_t* const cy, const struct wkv_
         }
     }
     // Attach subscriptions.
-    if (NULL != wkv_route(&cy->subscribers_by_wildcard, name, topic, wkv_cb_couple_new_topic)) {
+    if (NULL != wkv_route(&cy->subscribers_by_wildcard, name, (void* [2]){ cy, topic }, wkv_cb_couple_new_topic)) {
         // TODO discard the topic!
         cy->platform->topic_on_subscription_error(cy, NULL, -CY_ERR_MEMORY);
         return;
     }
     // Create the transport subscription once at the end, considering the parameters from all subscribers.
-    topic_ensure_subscribed(topic);
+    topic_ensure_subscribed(cy, topic);
 }
 
 static void* wkv_cb_topic_mark_scout_response(const struct wkv_event_t evt)
@@ -767,7 +771,7 @@ static void* wkv_cb_topic_mark_scout_response(const struct wkv_event_t evt)
              topic->name,
              (unsigned long long)(topic->hash),
              cy_topic_subject_id(topic));
-    schedule_gossip(topic, BIG_BANG + 10);
+    schedule_gossip(cy, topic, BIG_BANG + 10);
     return NULL;
 }
 
@@ -804,7 +808,8 @@ static cy_err_t publish_heartbeat(struct cy_t* const cy, const cy_us_t now, stru
     assert((message->topic_name_length8_reserved16_evictions40 >> 56U) <= CY_TOPIC_NAME_MAX);
     const struct cy_buffer_borrowed_t payload = { .next = NULL, .view = { .data = message, .size = message_size } };
     assert(cy->node_id <= cy->platform->node_id_max);
-    const cy_err_t pub_res = cy->platform->topic_publish(&cy->heartbeat_pub, now + HEARTBEAT_PUB_TIMEOUT_us, payload);
+    const cy_err_t pub_res =
+      cy->platform->topic_publish(cy, &cy->heartbeat_pub, now + HEARTBEAT_PUB_TIMEOUT_us, payload);
     cy->heartbeat_pub.topic->pub_transfer_id++;
     return pub_res;
 }
@@ -812,7 +817,7 @@ static cy_err_t publish_heartbeat(struct cy_t* const cy, const cy_us_t now, stru
 static cy_err_t publish_heartbeat_gossip(struct cy_t* const cy, struct cy_topic_t* const topic, const cy_us_t now)
 {
     topic_age(topic, now);
-    topic_ensure_subscribed(topic); // use this opportunity to repair the subscription if broken
+    topic_ensure_subscribed(cy, topic); // use this opportunity to repair the subscription if broken
     const uint8_t flags = ((topic->pub_count > 0) ? TOPIC_FLAG_PUBLISHING : 0U) | //
                           ((topic->couplings != NULL) ? TOPIC_FLAG_SUBSCRIBED : 0U);
     // Possible optimization: we don't have to transmit the topic name if the message is urgent, i.e.,
@@ -824,13 +829,13 @@ static cy_err_t publish_heartbeat_gossip(struct cy_t* const cy, struct cy_topic_
     };
     memcpy(msg.topic_name, topic->name, topic->index_name->key_len);
     // Update gossip time even if failed so we don't get stuck publishing same gossip if error reporting is broken.
-    update_last_gossip_time(topic, now);
+    update_last_gossip_time(cy, topic, now);
     return publish_heartbeat(cy, now, &msg);
 }
 
 static cy_err_t publish_heartbeat_scout(struct cy_t* const cy, const cy_us_t now)
 {
-    struct cy_subscriber_root_t* subr = cy->next_scout;
+    const struct cy_subscriber_root_t* subr = cy->next_scout;
     assert(subr != NULL);
     struct heartbeat_t msg = {
         .topic_hash         = 8185, // https://github.com/pavel-kirienko/cy/issues/12#issuecomment-2953184238
@@ -850,7 +855,7 @@ static cy_err_t publish_heartbeat_scout(struct cy_t* const cy, const cy_us_t now
 static void on_heartbeat(const struct cy_arrival_t* const evt)
 {
     assert((evt->subscriber != NULL) && (evt->topic != NULL) && (evt->transfer != NULL));
-    struct cy_t* const cy = evt->topic->cy;
+    struct cy_t* const cy = evt->cy;
     // Deserialize the message. TODO: deserialize properly.
     struct heartbeat_t heartbeat = { 0 };
     const size_t       msg_size  = cy_buffer_owned_gather(
@@ -893,7 +898,7 @@ static void on_heartbeat(const struct cy_arrival_t* const evt)
                 assert(mine->evictions != other_evictions);
                 if ((mine_lage > other_lage) || ((mine_lage == other_lage) && (mine->evictions > other_evictions))) {
                     CY_TRACE(cy, "We won, existing allocation not altered; expecting remote to adjust.");
-                    schedule_gossip(mine, BIG_BANG);
+                    schedule_gossip(cy, mine, BIG_BANG);
                 } else {
                     assert((mine_lage <= other_lage) &&
                            ((mine_lage < other_lage) || (mine->evictions < other_evictions)));
@@ -902,15 +907,15 @@ static void on_heartbeat(const struct cy_arrival_t* const evt)
                              "We lost, reallocating the topic to try and match the remote, or offer new alternative.");
                     const cy_us_t old_last_gossip = mine->last_gossip;
                     mine->age                     = max_u64(mine->age, other_age);
-                    topic_allocate(mine, other_evictions, false);
+                    topic_allocate(cy, mine, other_evictions, false);
                     if (mine->evictions == other_evictions) { // perfect sync, no need to gossip
-                        update_last_gossip_time(mine, old_last_gossip);
+                        update_last_gossip_time(cy, mine, old_last_gossip);
                     }
                     cy->last_local_event_ts = mine->last_local_event_ts = ts;
                 }
                 cy->last_event_ts = mine->last_event_ts = ts;
             } else {
-                topic_ensure_subscribed(mine); // use this opportunity to repair the subscription if broken
+                topic_ensure_subscribed(cy, mine); // use this opportunity to repair the subscription if broken
             }
             mine->age = max_u64(mine->age, other_age);
         } else { // We don't know this topic; check for a subject-ID collision and do auto-subscription.
@@ -945,10 +950,10 @@ static void on_heartbeat(const struct cy_arrival_t* const evt)
             // will also move, but the trick is that the others could have settled on different subject-IDs.
             // Everyone needs to publish their own new allocation and then we will pick max subject-ID out of that.
             if (!win) {
-                topic_allocate(mine, mine->evictions + 1U, false);
+                topic_allocate(cy, mine, mine->evictions + 1U, false);
                 cy->last_local_event_ts = mine->last_local_event_ts = ts;
             } else {
-                schedule_gossip(mine, BIG_BANG);
+                schedule_gossip(cy, mine, BIG_BANG);
             }
             cy->last_event_ts = mine->last_event_ts = ts;
         }
@@ -989,16 +994,16 @@ static void retire_timed_out_futures(struct cy_t* cy, const cy_us_t now)
     }
 }
 
-cy_err_t cy_advertise(struct cy_publisher_t* const pub,
-                      struct cy_t* const           cy,
+cy_err_t cy_advertise(struct cy_t* const           cy,
+                      struct cy_publisher_t* const pub,
                       const char* const            name,
                       const size_t                 response_extent)
 {
     assert((pub != NULL) && (cy != NULL) && (name != NULL));
     memset(pub, 0, sizeof(*pub));
-    cy_err_t res  = topic_ensure(cy, &pub->topic, name);
-    pub->priority = cy_prio_nominal;
-    pub->user     = NULL;
+    const cy_err_t res = topic_ensure(cy, &pub->topic, name);
+    pub->priority      = cy_prio_nominal;
+    pub->user          = NULL;
     if (res >= 0) {
         assert(pub->topic != NULL);
         pub->topic->pub_count++;
@@ -1030,7 +1035,8 @@ void cy_future_new(struct cy_future_t* const future, const cy_response_callback_
     future->user     = user;
 }
 
-cy_err_t cy_publish(struct cy_publisher_t* const      pub,
+cy_err_t cy_publish(struct cy_t* const                cy,
+                    struct cy_publisher_t* const      pub,
                     const cy_us_t                     tx_deadline,
                     const struct cy_buffer_borrowed_t payload,
                     const cy_us_t                     response_deadline,
@@ -1040,8 +1046,6 @@ cy_err_t cy_publish(struct cy_publisher_t* const      pub,
     struct cy_topic_t* const topic = pub->topic;
     assert(topic != NULL);
     assert(topic->pub_count > 0);
-    struct cy_t* const cy = topic->cy;
-    assert(cy != NULL);
 
     // Set up the response future first. If publication fails, we will have to undo it later.
     // The reason we can't do it afterward is that if the transport has a cyclic transfer-ID, insertion may fail if
@@ -1065,7 +1069,7 @@ cy_err_t cy_publish(struct cy_publisher_t* const      pub,
         }
     }
 
-    const cy_err_t res = cy->platform->topic_publish(pub, tx_deadline, payload);
+    const cy_err_t res = cy->platform->topic_publish(cy, pub, tx_deadline, payload);
 
     if (future != NULL) {
         if (res >= 0) {
@@ -1091,9 +1095,9 @@ cy_err_t cy_publish(struct cy_publisher_t* const      pub,
 /// Returns non-NULL on OOM, which aborts the traversal early.
 void* wkv_cb_couple_new_subscription(const struct wkv_event_t evt)
 {
-    struct cy_subscriber_t* const sub   = (struct cy_subscriber_t*)evt.context;
-    struct cy_topic_t* const      topic = (struct cy_topic_t*)evt.node->value;
-
+    struct cy_t* const                  cy    = (struct cy_t*)(((void**)evt.context)[0]);
+    const struct cy_subscriber_t* const sub   = (struct cy_subscriber_t*)(((void**)evt.context)[1]);
+    struct cy_topic_t* const            topic = (struct cy_topic_t*)evt.node->value;
     // If the new subscription parameters are different, we will need to resubscribe this topic.
     bool resubscribe = false;
     if (topic->subscribed) {
@@ -1102,19 +1106,16 @@ void* wkv_cb_couple_new_subscription(const struct wkv_event_t evt)
         resubscribe = (param_new.extent > param_old.extent) || //-------------------------------------
                       (param_new.transfer_id_timeout > param_old.transfer_id_timeout);
     }
-
     // Create the coupling.
-    const cy_err_t res = topic_couple(topic->cy, topic, sub->root, evt.substitution_count, evt.substitutions);
-
+    const cy_err_t res = topic_couple(cy, topic, sub->root, evt.substitution_count, evt.substitutions);
     // Refresh the subscription if needed. Due to the new coupling, the params are now different.
     if (res >= 0) {
         if (resubscribe) {
-            topic->cy->platform->topic_unsubscribe(topic);
+            cy->platform->topic_unsubscribe(cy, topic);
             topic->subscribed = false;
         }
-        topic_ensure_subscribed(topic);
+        topic_ensure_subscribed(cy, topic);
     }
-
     return (0 == res) ? NULL : "";
 }
 
@@ -1187,8 +1188,8 @@ static cy_err_t ensure_subscriber_root(struct cy_t* const                  cy,
     return 0;
 }
 
-cy_err_t cy_subscribe_with_params(struct cy_subscriber_t* const         sub,
-                                  struct cy_t* const                    cy,
+cy_err_t cy_subscribe_with_params(struct cy_t* const                    cy,
+                                  struct cy_subscriber_t* const         sub,
                                   const char* const                     name,
                                   const struct cy_subscription_params_t params,
                                   const cy_subscriber_callback_t        callback)
@@ -1216,14 +1217,15 @@ cy_err_t cy_subscribe_with_params(struct cy_subscriber_t* const         sub,
     sub->callback   = callback;
     sub->next       = sub->root->head;
     sub->root->head = sub;
-    if (NULL != wkv_match(&cy->topics_by_name, key, sub, wkv_cb_couple_new_subscription)) {
+    if (NULL != wkv_match(&cy->topics_by_name, key, (void* [2]){ cy, sub }, wkv_cb_couple_new_subscription)) {
         cy_unsubscribe(cy, sub);
         return -CY_ERR_MEMORY;
     }
     return 0;
 }
 
-cy_err_t cy_respond(struct cy_topic_t* const            topic,
+cy_err_t cy_respond(struct cy_t* const                  cy,
+                    struct cy_topic_t* const            topic,
                     const cy_us_t                       tx_deadline,
                     const struct cy_transfer_metadata_t metadata,
                     const struct cy_buffer_borrowed_t   payload)
@@ -1231,17 +1233,17 @@ cy_err_t cy_respond(struct cy_topic_t* const            topic,
     assert(topic != NULL);
     /// Yes, we send the response using a request transfer. In the future we may leverage this for reliable delivery.
     /// All responses are sent to the same RPC service-ID; they are discriminated by the topic hash.
-    return topic->cy->platform->request(topic->cy,
-                                        CY_RPC_SERVICE_ID_TOPIC_RESPONSE,
-                                        metadata,
-                                        tx_deadline,
-                                        (struct cy_buffer_borrowed_t){
-                                          .next = &payload,
-                                          .view = { .size = 8U, .data = &topic->hash },
-                                        });
+    return cy->platform->request(cy,
+                                 CY_RPC_SERVICE_ID_TOPIC_RESPONSE,
+                                 metadata,
+                                 tx_deadline,
+                                 (struct cy_buffer_borrowed_t){
+                                   .next = &payload,
+                                   .view = { .size = RESPONSE_PAYLOAD_OVERHEAD_BYTES, .data = &topic->hash },
+                                 });
 }
 
-void cy_subscriber_name(struct cy_t* const cy, const struct cy_subscriber_t* const sub, char* const out_name)
+void cy_subscriber_name(const struct cy_t* const cy, const struct cy_subscriber_t* const sub, char* const out_name)
 {
     wkv_get_key(&cy->subscribers_by_name, sub->root->index_name, out_name);
 }
@@ -1250,22 +1252,31 @@ void cy_subscriber_name(struct cy_t* const cy, const struct cy_subscriber_t* con
 //                                                      TOPIC
 // =====================================================================================================================
 
-void cy_topic_hint(struct cy_topic_t* const topic, const uint16_t subject_id)
+void cy_topic_hint(struct cy_t* const cy, struct cy_topic_t* const topic, const uint16_t subject_id)
 {
-    if ((topic != NULL) && (subject_id < CY_TOTAL_SUBJECT_COUNT) && (!is_pinned(topic->hash)) && (topic->age == 0)) {
+    if ((topic != NULL) && (subject_id < CY_TOTAL_SUBJECT_COUNT) && (!is_pinned(topic->hash)) &&
+        (topic->evictions == 0)) {
+        // Existing subscriptions need to be deactivated first, if any.
+        if (topic->subscribed) {
+            assert(topic->couplings != NULL);
+            cy->platform->topic_unsubscribe(cy, topic);
+        }
         // Fit the lowest evictions counter such that we land at the specified subject-ID.
         // Avoid negative remainders, so we don't use simple evictions=(subject_id-hash)%6144.
         while (topic_subject_id(topic->hash, topic->evictions) != subject_id) {
             topic->evictions++;
         }
+        assert(cy_topic_subject_id(topic) == subject_id);
+        // Restore the subscriptions.
+        topic_ensure_subscribed(cy, topic);
     }
 }
 
 struct cy_topic_t* cy_topic_find_by_name(const struct cy_t* const cy, const char* const name)
 {
     assert((cy != NULL) && (name != NULL));
-    struct wkv_node_t* const node  = wkv_get(&cy->topics_by_name, wkv_key(name));
-    struct cy_topic_t* const topic = (node != NULL) ? (struct cy_topic_t*)node->value : NULL;
+    const struct wkv_node_t* const node  = wkv_get(&cy->topics_by_name, wkv_key(name));
+    struct cy_topic_t* const       topic = (node != NULL) ? (struct cy_topic_t*)node->value : NULL;
     assert(topic == cy_topic_find_by_hash(cy, topic_hash(wkv_key(name))));
     return topic;
 }
@@ -1278,7 +1289,6 @@ struct cy_topic_t* cy_topic_find_by_hash(const struct cy_t* const cy, const uint
         return NULL;
     }
     assert(topic->hash == hash);
-    assert(topic->cy == cy);
     return topic;
 }
 
@@ -1291,7 +1301,6 @@ struct cy_topic_t* cy_topic_find_by_subject_id(const struct cy_t* const cy, cons
     }
     struct cy_topic_t* topic = CAVL2_TO_OWNER(t, struct cy_topic_t, index_subject_id);
     assert(cy_topic_subject_id(topic) == subject_id);
-    assert(topic->cy == cy);
     return topic;
 }
 
@@ -1407,10 +1416,10 @@ cy_err_t cy_new(struct cy_t* const                cy,
 
     // Pub/sub on the heartbeat topic.
     if (res >= 0) {
-        res = cy_advertise(&cy->heartbeat_pub, cy, CY_CONFIG_HEARTBEAT_TOPIC_NAME, 0);
+        res = cy_advertise(cy, &cy->heartbeat_pub, CY_CONFIG_HEARTBEAT_TOPIC_NAME, 0);
         if (res >= 0) {
             res = cy_subscribe(
-              &cy->heartbeat_sub, cy, CY_CONFIG_HEARTBEAT_TOPIC_NAME, sizeof(struct heartbeat_t), &on_heartbeat);
+              cy, &cy->heartbeat_sub, CY_CONFIG_HEARTBEAT_TOPIC_NAME, sizeof(struct heartbeat_t), &on_heartbeat);
             if (res < 0) {
                 cy_unadvertise(&cy->heartbeat_pub);
             }
@@ -1504,10 +1513,11 @@ static void mark_neighbor(struct cy_t* const cy, const uint16_t remote_node_id)
     bloom64_set(bloom, remote_node_id);
 }
 
-void cy_ingest_topic_transfer(struct cy_topic_t* const topic, struct cy_transfer_owned_t transfer)
+void cy_ingest_topic_transfer(struct cy_t* const         cy,
+                              struct cy_topic_t* const   topic,
+                              struct cy_transfer_owned_t transfer)
 {
     assert(topic != NULL);
-    struct cy_t* const cy = topic->cy;
 
     mark_neighbor(cy, transfer.metadata.remote_node_id);
 
@@ -1524,7 +1534,8 @@ void cy_ingest_topic_transfer(struct cy_topic_t* const topic, struct cy_transfer
         const struct cy_topic_coupling_t* const next_cpl = cpl->next;
         struct cy_subscriber_t* const           next_sub = sub->next;
         while (sub != NULL) {
-            const struct cy_arrival_t evt = { .subscriber         = sub,
+            const struct cy_arrival_t evt = { .cy                 = cy,
+                                              .subscriber         = sub,
                                               .topic              = topic,
                                               .transfer           = &transfer,
                                               .substitution_count = cpl->substitution_count,
@@ -1642,13 +1653,13 @@ cy_err_t cy_update(struct cy_t* const cy)
     return res;
 }
 
-void cy_notify_topic_hash_collision(struct cy_topic_t* const topic)
+void cy_notify_topic_hash_collision(struct cy_t* const cy, struct cy_topic_t* const topic)
 {
     // Schedule the topic for gossiping ASAP, unless it is already scheduled.
     if ((topic != NULL) && (topic->last_gossip > 0)) {
-        CY_TRACE(topic->cy, "💥 '%s'@%04x", topic->name, cy_topic_subject_id(topic));
+        CY_TRACE(cy, "💥 '%s'@%04x", topic->name, cy_topic_subject_id(topic));
         // Topics with the same time will be ordered FIFO -- the tree is stable.
-        schedule_gossip(topic, BIG_BANG);
+        schedule_gossip(cy, topic, BIG_BANG);
         // We could subtract the heartbeat period from the next heartbeat time to make it come out sooner,
         // but this way we would generate unpredictable network loading. We probably don't want that.
     }
