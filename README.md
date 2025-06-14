@@ -267,6 +267,7 @@ direction LR
     _linkage "*" --> "1" _subscriber_root
     _subscriber_root "1" o-- "*" subscriber
     note "Automatically managed private entities are prefixed with '_'"
+    note "Heap-allocated items are: _topic, _subscriber_root, _linkage"
 ```
 
 
