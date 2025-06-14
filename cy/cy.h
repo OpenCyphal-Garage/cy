@@ -204,7 +204,7 @@ enum cy_future_state_t
     cy_future_failure,
 };
 
-typedef void (*cy_response_callback_t)(struct cy_future_t*);
+typedef void (*cy_future_callback_t)(struct cy_future_t*);
 
 /// Register an expectation for a response to a message sent to the topic.
 /// The future shall not be moved or altered in any way except for the user and callback fields until its state is
@@ -228,8 +228,8 @@ struct cy_future_t
 
     /// Only these fields can be altered by the user while the future is pending.
     /// The callback may be NULL if the application prefers to check last_response by polling.
-    cy_response_callback_t callback;
-    void*                  user;
+    cy_future_callback_t callback;
+    void*                user;
 };
 
 /// Create a new publisher on the topic.
@@ -245,7 +245,7 @@ cy_err_t cy_advertise(struct cy_t* const           cy,
 void     cy_unadvertise(const struct cy_publisher_t* pub);
 
 /// Just a convenience function, nothing special.
-void cy_future_new(struct cy_future_t* const future, const cy_response_callback_t callback, void* const user);
+void cy_future_new(struct cy_future_t* const future, const cy_future_callback_t callback, void* const user);
 
 /// This needs not be done after a future completes normally. It is only needed if the future needs to be
 /// destroyed before it completes. Calling this on a non-pending future has no effect.

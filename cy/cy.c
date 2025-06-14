@@ -1026,7 +1026,7 @@ cy_err_t cy_advertise(struct cy_t* const           cy,
     return res;
 }
 
-void cy_future_new(struct cy_future_t* const future, const cy_response_callback_t callback, void* const user)
+void cy_future_new(struct cy_future_t* const future, const cy_future_callback_t callback, void* const user)
 {
     assert(future != NULL);
     memset(future, 0, sizeof(*future));
