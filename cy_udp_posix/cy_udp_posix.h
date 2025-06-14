@@ -10,7 +10,7 @@
 #pragma once
 
 #include "udp_wrapper.h"
-#include <cy.h>
+#include <cy_platform.h>
 #include <udpard.h>
 
 #define CY_UDP_POSIX_IFACE_COUNT_MAX           UDPARD_NETWORK_INTERFACE_COUNT_MAX

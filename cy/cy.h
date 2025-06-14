@@ -231,7 +231,14 @@ struct cy_future_t
 
 /// Create a new publisher on the topic.
 /// Every advertisement needs to be unadvertised later to clean up resources.
-cy_err_t cy_advertise(struct cy_publisher_t* const pub, struct cy_t* const cy, const char* const name);
+///
+/// The response_extent is the extent (maximum size) of the response payload if the publisher expects responses;
+/// if no response is expected/needed, the response_extent should be zero. If responses are needed but their maximum
+/// size is unknown, pick any sensible large value.
+cy_err_t cy_advertise(struct cy_publisher_t* const pub,
+                      struct cy_t* const           cy,
+                      const char* const            name,
+                      const size_t                 response_extent);
 void     cy_unadvertise(const struct cy_publisher_t* pub);
 
 /// Just a convenience function, nothing special.

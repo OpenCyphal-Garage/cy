@@ -605,6 +605,8 @@ static cy_err_t topic_new(struct cy_t* const cy, struct cy_topic_t** const out_t
     topic->age       = 0;
     topic->aged_at   = cy_now(cy);
 
+    topic->response_extent = 0;
+
     topic->pub_transfer_id = random_u64(cy); // https://forum.opencyphal.org/t/improve-the-transfer-id-timeout/2375
     topic->pub_count       = 0;
 
@@ -984,20 +986,24 @@ static void retire_timed_out_futures(struct cy_t* cy, const cy_us_t now)
     }
 }
 
-cy_err_t cy_advertise(struct cy_publisher_t* const pub, struct cy_t* const cy, const char* const name)
+cy_err_t cy_advertise(struct cy_publisher_t* const pub,
+                      struct cy_t* const           cy,
+                      const char* const            name,
+                      const size_t                 response_extent)
 {
     assert((pub != NULL) && (cy != NULL) && (name != NULL));
     memset(pub, 0, sizeof(*pub));
-    cy_err_t res  = 0;
-    pub->topic    = cy_topic_find_by_name(cy, name);
+    cy_err_t res  = topic_ensure(cy, &pub->topic, name);
     pub->priority = cy_prio_nominal;
     pub->user     = NULL;
-    if (pub->topic == NULL) {
-        res = topic_new(cy, &pub->topic, name);
-    }
     if (res >= 0) {
         assert(pub->topic != NULL);
         pub->topic->pub_count++;
+        // We use a simplified response extent handling here: simply store the maximum seen value without bothering
+        // to unroll it back when the largest publisher is removed. This is good enough in this case because the
+        // underlying platform layer is expected to use just a single P2P session for all incoming responses,
+        // meaning that the effective response extent is simply the maximum of all publishers of all local topics.
+        pub->topic->response_extent = larger(pub->topic->response_extent, response_extent);
     }
     CY_TRACE(cy,
              "✨ New publisher '%s' #%016llx @%04x: topic_count=%zu pub_count=%zu res=%d",
@@ -1395,7 +1401,7 @@ cy_err_t cy_new(struct cy_t* const                cy,
 
     // Pub/sub on the heartbeat topic.
     if (res >= 0) {
-        res = cy_advertise(&cy->heartbeat_pub, cy, CY_CONFIG_HEARTBEAT_TOPIC_NAME);
+        res = cy_advertise(&cy->heartbeat_pub, cy, CY_CONFIG_HEARTBEAT_TOPIC_NAME, 0);
         if (res >= 0) {
             res = cy_subscribe(
               &cy->heartbeat_sub, cy, CY_CONFIG_HEARTBEAT_TOPIC_NAME, sizeof(struct heartbeat_t), &on_heartbeat);

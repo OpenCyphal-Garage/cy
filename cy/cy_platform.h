@@ -161,6 +161,13 @@ struct cy_topic_t
     /// Used for matching futures against received responses.
     struct cy_tree_t* futures_by_transfer_id;
 
+    /// Computed as the maximum seen response extent among all publishers on this topic.
+    /// Used by the platform layer to automatically configure the extent for P2P response transfers.
+    /// The platform layer is expected to continuously track the maximum seen response extent whenever a
+    /// transfer is published on any topic, and if an increase is detected, it should reconfigure the P2P response
+    /// session to accommodate the new maximum.
+    size_t response_extent;
+
     /// Only used if the application publishes data on this topic.
     /// pub_count tracks the number of existing advertisements on this topic; when this number reaches zero
     /// and there are no live subscriptions, the topic will be garbage collected by Cy.
