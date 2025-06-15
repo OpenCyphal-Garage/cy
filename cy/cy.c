@@ -725,14 +725,15 @@ static void* wkv_cb_couple_new_topic(const struct wkv_event_t evt)
 }
 
 /// If there is a pattern subscriber matching the name of this topic, attempt to create a new subscription.
-static void topic_subscribe_if_matching(struct cy_t* const cy, const struct wkv_str_t resolved_name)
+/// If a new subscription is created, the new topic will be returned.
+static struct cy_topic_t* topic_subscribe_if_matching(struct cy_t* const cy, const struct wkv_str_t resolved_name)
 {
     assert((cy != NULL) && (resolved_name.str != NULL));
     if (resolved_name.len == 0) {
-        return; // Ensure the remote is not trying to feed us an empty name, that's bad.
+        return NULL; // Ensure the remote is not trying to feed us an empty name, that's bad.
     }
     if (NULL == wkv_route(&cy->subscribers_by_pattern, resolved_name, NULL, wkv_cb_first)) {
-        return; // No match.
+        return NULL; // No match.
     }
     CY_TRACE(cy, "✨'%s'", resolved_name.str);
     // Create the new topic.
@@ -741,7 +742,7 @@ static void topic_subscribe_if_matching(struct cy_t* const cy, const struct wkv_
         const cy_err_t res = topic_new(cy, &topic, resolved_name);
         if (res != CY_OK) {
             cy->platform->topic_on_subscription_error(cy, NULL, res);
-            return;
+            return NULL;
         }
     }
     // Attach subscriptions.
@@ -751,10 +752,11 @@ static void topic_subscribe_if_matching(struct cy_t* const cy, const struct wkv_
                           wkv_cb_couple_new_topic)) {
         // TODO discard the topic!
         cy->platform->topic_on_subscription_error(cy, NULL, CY_ERR_MEMORY);
-        return;
+        return NULL;
     }
     // Create the transport subscription once at the end, considering the parameters from all subscribers.
     topic_ensure_subscribed(cy, topic);
+    return topic;
 }
 
 static void* wkv_cb_topic_mark_scout_response(const struct wkv_event_t evt)
@@ -794,7 +796,7 @@ static cy_err_t publish_heartbeat(struct cy_t* const cy, const cy_us_t now, stru
     message->version = 1;
     message->uid     = cy->uid;
     const size_t message_size =
-      sizeof(struct heartbeat_t) - (CY_TOPIC_NAME_MAX - (message->topic_name_length8_reserved16_evictions40 >> 56U));
+      offsetof(struct heartbeat_t, topic_name) + (message->topic_name_length8_reserved16_evictions40 >> 56U);
     assert(message_size <= sizeof(struct heartbeat_t));
     assert((message->topic_name_length8_reserved16_evictions40 >> 56U) <= CY_TOPIC_NAME_MAX);
     const struct cy_buffer_borrowed_t payload = { .next = NULL, .view = { .data = message, .size = message_size } };
@@ -850,7 +852,7 @@ static void on_heartbeat(struct cy_t* const cy, const struct cy_arrival_t* const
     struct heartbeat_t heartbeat = { 0 };
     const size_t       msg_size  = cy_buffer_owned_gather(
       evt->transfer->payload, (struct cy_bytes_mut_t){ .size = sizeof(heartbeat), .data = &heartbeat });
-    if ((msg_size < (sizeof(heartbeat) - CY_TOPIC_NAME_MAX)) || (heartbeat.version != 1)) {
+    if ((msg_size < offsetof(struct heartbeat_t, topic_name)) || (heartbeat.version != 1)) {
         return;
     }
     const cy_us_t                        ts         = evt->transfer->timestamp;
@@ -865,6 +867,9 @@ static void on_heartbeat(struct cy_t* const cy, const struct cy_arrival_t* const
     if (!is_scout) {
         // Find the topic in our local database.
         struct cy_topic_t* mine = cy_topic_find_by_hash(cy, other_hash);
+        if (mine == NULL) {
+            mine = topic_subscribe_if_matching(cy, key);
+        }
         if (mine != NULL) { // We have this topic! Check if we have consensus on the subject-ID.
             assert(mine->hash == other_hash);
             const int_fast8_t mine_lage  = log2_floor(mine->age);
@@ -910,7 +915,6 @@ static void on_heartbeat(struct cy_t* const cy, const struct cy_arrival_t* const
             }
             mine->age = max_u64(mine->age, other_age);
         } else { // We don't know this topic; check for a subject-ID collision and do auto-subscription.
-            topic_subscribe_if_matching(cy, key);
             mine = cy_topic_find_by_subject_id(cy, topic_subject_id(other_hash, other_evictions));
             if (mine == NULL) {
                 return; // We are not using this subject-ID, no collision.

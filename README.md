@@ -23,57 +23,79 @@ Stretch goals:
 ## TL;DR
 
 ```c
-// SET UP LOCAL NODE. This is the only platform-specific part.
-// The rest of the API is platform- and transport-agnostic, with the exception of the event loop spin functions.
+// SET UP LOCAL NODE.
+// The initial configuration is platform- and transport-specific, unlike the rest of the API.
 struct cy_udp_posix_t cy_udp_posix; // In this example we're running over Cyphal/UDP, this node runs on POSIX.
 cy_err_t res = cy_udp_posix_new(&cy_udp_posix,
                                 local_unique_id,  // 64-bit composed of VID+PID+IID
-                                "my_namespace",   // topic name prefix (defaults to nothing)
+                                "my_namespace",   // topic name prefix (defaults to the local node UID if empty)
                                 (uint32_t[3]){ udp_parse_iface_address("127.0.0.1") },
                                 1000);            // tx queue capacity per interface
-if (res < 0) { ... }
+if (res != CY_OK) { ... }
 
 // The rest of the API is platform- and transport-agnostic, except the event loop spinners.
 struct cy_t* const cy = &cy_udp_posix.base;
 
-// JOIN A TOPIC (to publish and/or subscribe).
+// CREATE PUBLISHERS.
 // To interface with an old node that does not support named topics, put the subject-ID into the topic name;
 // e.g., `/1234`. This will bypass the automatic subject-ID allocation and pin the topic as specified.
-struct cy_topic_t* const my_topic = cy_topic_new(cy, "my_topic");  // expands into "my_namespace/my_topic"
-if (res < 0) { ... }
+// The last argument is the extent of response messages sent back from the remote subscribers.
+// If no responses are needed or expected, set it to zero.
+// The "_c" suffix at the end of some functions indicates that the function accepts an ordinary C-string
+// instead of wkv_str_t that is used internally throughout.
+struct cy_publisher_t my_publisher;
+res = cy_advertise_c(cy, &my_publisher, "my_topic", 0);
+if (res != CY_OK) { ... }
 
-// SUBSCRIBE TO TOPIC (nothing needs to be done if we want to publish):
-struct cy_subscriber_t my_subscription;
-res = cy_subscribe(my_topic,
-                   &my_subscription,
-                   1024 * 1024,                       // extent (max message size)
-                   on_message_received_callback);     // the callback is optional, we can also poll
-if (res < 0) { ... }
+// CREATE SUBSCRIBERS.
+// Subscribers can specify a verbatim topic name or a pattern. Pattern subscribers will actively discover
+// topics on the network whose names match the pattern, and automatically subscribe to them in the background.
+// There may be multiple local subscribers on the same topic.
+struct cy_subscriber_t verbatim_subscription;
+res = cy_subscribe_c(cy,
+                     &verbatim_subscription,
+                     "/other_namespace/my_topic",
+                     1024 * 1024,                   // extent (max message size)
+                     on_message_received_callback);
+if (res != CY_OK) { ... }
+
+// Multiple patterns may match the same topic. For example, "/?/def" and "/abc/*" both match "/abc/def".
+// The library does reference counting and routing internally so that each subscriber gets the relevant data
+// and topics remain alive as long as at least one subscriber (or publisher) is using it.
+struct cy_subscriber_t pattern_subscription;
+res = cy_subscribe_c(cy,
+                     &pattern_subscription,
+                     "/?/my_topic",                 // Will match any segment in place of '?'
+                     1024 * 1024,
+                     on_message_received_callback);
+if (res != CY_OK) { ... }
 
 // SPIN THE EVENT LOOP
 while (true) {
+    // SPIN THE EVENT LOOP.
+    // This part is also platform-specific, but the data API is purely platform- and transport-agnostic.
     const cy_err_t err_spin = cy_udp_posix_spin_once(&cy_udp_posix);
-    if (err_spin < 0) { ... }
+    if (err_spin != CY_OK) { ... }
 
     // PUBLISH MESSAGES (no need to do anything else unlike in the case of subscription)
     // Optionally we can check if the local node has a node-ID. It will automatically appear
     // if not given explicitly at startup in a few seconds; once appeared, it will always remain available,
     // but it may change if a collision is discovered (should never happen in a well-managed network).
-    if (cy_has_node_id(cy)) {
+    if (cy_joined(cy)) {
         char msg[256];
         sprintf(msg, "I am %016llx. time=%lld us", (unsigned long long)cy->uid, (long long)now);
         const struct cy_buffer_borrowed_t payload = { .view.data = msg, .view.size = strlen(msg) };
-        const cy_err_t pub_res = cy_udp_publish1(my_topic, now + 100000, payload);
-        if (pub_res < 0) { ... }
+        const cy_err_t pub_res = cy_udp_publish1(cy, &my_publisher, now + 100000, payload);
+        if (pub_res != CY_OK) { ... }
     }
 }
 ```
 
-Build-time dependencies:
+Build-time dependencies, all single-header-only:
 
-- [cavl2.h](https://github.com/pavel-kirienko/cavl)
-- [Rapidhash](https://github.com/Nicoshev/rapidhash) by Nicolas De Carli (BSD 2-clause license)
-- libudpard
+- [`cavl2.h`](https://github.com/pavel-kirienko/cavl) -- AVL tree.
+- [`wkv.h`](https://github.com/pavel-kirienko/wild_key_value) -- key-value container with fast pattern matching & routing.
+- [`rapidhash.h`](https://github.com/Nicoshev/rapidhash) -- a good 64-bit hash by Nicolas De Carli (BSD 2-clause license).
 
 ## Solution
 
@@ -81,13 +103,13 @@ Build-time dependencies:
 
 The new node-ID autoconfiguration protocol does not require an allocator; instead, a straightforward address claiming procedure is implemented:
 
-1. When joining the network without a node-ID preconfigured, the node will listen for a random time interval ca. 1~3 seconds. The source node-ID of each received transfer is marked as taken in a local bitmask. If the transport layer has a large node-ID space (which is the case for every transport except Cyphal/CAN), the bitmask is replaced with a Bloom filter, whose bit capacity defines the maximum number of nodes that can be autoconfigured in this way (e.g., a 512-byte Bloom filter allows allocating at least 4096 nodes).
+1. When joining the network without a node-ID preconfigured, the node will listen for a random time interval ca. 1~3 seconds. The source node-ID of each received transfer (heartbeats or whatever else may occur) is marked as taken in a local bitmask. If the transport layer has a large node-ID space (which is the case for every transport except Cyphal/CAN), the bitmask is replaced with a Bloom filter, whose bit capacity defines the maximum number of nodes that can be autoconfigured in this way (e.g., a 512-byte Bloom filter allows allocating at least 4096 nodes).
 
 2. When a new node is discovered, the listening time is extended by a random penalty ca. 0~1 seconds. This is to reduce the likelihood of multiple nodes claiming an address at the same time.
 
 3. Once the initial delay has expired, an unoccupied node-ID is chosen from the bitmask/Bloom filter and marked as used. The first heartbeat is published immediately to claim the address.
 
-If a node-ID conflict is discovered at any later point, even if the node-ID was configured manually, we reset the bitmask/Bloom filter, reset the local node-ID, and restart the process from scratch.
+If a node-ID conflict is discovered at any later point, even if the node-ID was configured manually, we repeat step 3 only; i.e., simply pick a new node-ID from the Bloom/mask. In case of high node churn the Bloom/mask will eventually become congested; when the congestion is imminent, the entire filter state is dropped and then gradually rebuilt from scratch in the background.
 
 This method is stateless and quite simple (~100 LoC to implement), and ensures that existing nodes are not disturbed by newcomers. However, it doesn't guarantee no-disturbance if the network is partitioned when new participants join; in that case, once the network is de-partitioned, collisions may occur. To mitigate that, the collision monitoring is done continuously, even if a node-ID is manually assigned, and nodes should save the node-ID, once allocated, into the non-volatile memory, such that a stable configuration, once discovered, remains stable, and nodes can bypass the autoconfiguration delay at boot unless joining the network for the first time.
 
@@ -125,8 +147,8 @@ A new 64-bit globally unique node-ID is defined that replaces both the old 128-b
 
 The named topic protocol somewhat lifts the level of abstraction presented to the application. Considering that, it does no longer appear useful to include the application-specific fields `health` and `mode` in the heartbeat message. Instead, applications should choose more specialized means of status reporting. In this proposal, these two fields along with the vendor-specific status code are consumed by the new `uint32 user_word`. Applications that seek full compatibility with the old nodes will set the two least significant bytes to the health and mode values. Eventually, it is expected that this field will become a simple general-purpose status reporting word with fully application-defined semantics.
 
-- [`7509.cyphal.node.Heartbeat.1.1`](dsdl/cyphal/node/7509.Heartbeat.1.1.dsdl)
-- [`cyphal.node.UID`](dsdl/cyphal/node/UID.0.1.dsdl)
+- [`7509.cyphal.Heartbeat.1.1`](dsdl/cyphal/7509.Heartbeat.1.1.dsdl)
+- [`cyphal.UID`](dsdl/cyphal/UID.0.1.dsdl)
 
 ### RPC
 
@@ -281,6 +303,16 @@ direction LR
 ### Type assignability checking
 
 There is currently no robust solution on the horizon, but one tentative solution is to suffix the topic name with the type name. For example, if we have `zubax.fluxgrip.Feedback.1.0`, the topic could be named `/magnet/rear/status.fb1`, where `.fb1` hints at the type name and version.
+
+### Retirement of automatically created topics with no publishers
+
+Pattern subscribers (e.g., `/?/foo/*`) will automatically create new topics in the background when gossips matching the pattern are received. This will create issues with small nodes if the network sees some topic churn, because it will leave local tombstones taking up memory (computationally they are basically ~free).
+
+The solution is simple: maintain a new topic index that only contains topics *without local publishers* that are *coupled only with pattern subscribers* ordered by *last extrinsic activity*. Extrinsic activity is the reception of a heartbeat gossiping that topic, or receiving a transfer on that topic. Updating the index on every received transfer might be computationally expensive if it's an AVL tree; perhaps it could be replaced with a doubly-linked list, where on each update the topic is simply moved to the end, which is a constant-complexity operation; the oldest topic will be kept in the beginning of the list.
+
+The automatic retirement timeout should be set to a value greater than the topic scalability limit (say 1000 topics) times maximum heartbeat period (let's say 0.5 seconds), so ~10 minutes. There should be API to override this value.
+
+Alternatively, the user could specify the maximum number of automatic subscriptions, so that when the number is exceeded, the library will retire the oldest topic. This may cause subscription churn if not used carefully though.
 
 
 ## Changes to the transport libraries: libudpard, libcanard, libserard, etc.

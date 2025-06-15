@@ -666,6 +666,7 @@ static void read_socket(struct cy_udp_posix_t* const       cy_udp,
         cy_udp->mem.deallocate(cy_udp->mem.user_reference, CY_UDP_SOCKET_READ_BUFFER_SIZE, dgram.data);
         return;
     }
+    // TODO: realloc the buffer to fit the actual size of the datagram to reduce inner fragmentation.
 
     // Check for address collisions. This must be done at the frame level because if there are multiple nodes
     // sitting at our ID, we may be unable to receive any multiframe transfers from them.
@@ -779,5 +780,5 @@ cy_err_t cy_udp_posix_spin_until(struct cy_udp_posix_t* const cy_udp, const cy_u
 cy_err_t cy_udp_posix_spin_once(struct cy_udp_posix_t* const cy_udp)
 {
     assert(cy_udp != NULL);
-    return spin_once_until(cy_udp, min_i64(cy_udp_posix_now() + 2000, cy_udp->base.heartbeat_next));
+    return spin_once_until(cy_udp, min_i64(cy_udp_posix_now() + 1000, cy_udp->base.heartbeat_next));
 }
