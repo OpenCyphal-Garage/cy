@@ -578,7 +578,9 @@ static void topic_age(struct cy_topic_t* const topic, const cy_us_t now)
 /// out_topic may be new if the reference is not immediately needed (it can be found later via indexes).
 static cy_err_t topic_new(struct cy_t* const        cy,
                           struct cy_topic_t** const out_topic,
-                          const struct wkv_str_t    resolved_name)
+                          const struct wkv_str_t    resolved_name,
+                          const uint64_t            hash,
+                          const uint64_t            evictions)
 {
     struct cy_topic_t* const topic = cy->platform->topic_new(cy);
     if (topic == NULL) {
@@ -591,8 +593,8 @@ static cy_err_t topic_new(struct cy_t* const        cy,
     memcpy(topic->name, resolved_name.str, resolved_name.len);
     topic->name[resolved_name.len] = '\0';
 
-    topic->hash      = topic_hash(resolved_name);
-    topic->evictions = 0; // starting from the preferred subject-ID.
+    topic->hash      = hash;
+    topic->evictions = evictions;
     topic->age       = 0;
     topic->aged_at   = cy_now(cy);
 
@@ -667,7 +669,7 @@ static cy_err_t topic_ensure(struct cy_t* const        cy,
         }
         return 0;
     }
-    return topic_new(cy, out_topic, resolved_name);
+    return topic_new(cy, out_topic, resolved_name, topic_hash(resolved_name), 0);
 }
 
 /// Create a new coupling between a topic and a subscriber.
@@ -726,7 +728,10 @@ static void* wkv_cb_couple_new_topic(const struct wkv_event_t evt)
 
 /// If there is a pattern subscriber matching the name of this topic, attempt to create a new subscription.
 /// If a new subscription is created, the new topic will be returned.
-static struct cy_topic_t* topic_subscribe_if_matching(struct cy_t* const cy, const struct wkv_str_t resolved_name)
+static struct cy_topic_t* topic_subscribe_if_matching(struct cy_t* const     cy,
+                                                      const struct wkv_str_t resolved_name,
+                                                      const uint64_t         hash,
+                                                      const uint64_t         evictions)
 {
     assert((cy != NULL) && (resolved_name.str != NULL));
     if (resolved_name.len == 0) {
@@ -739,7 +744,7 @@ static struct cy_topic_t* topic_subscribe_if_matching(struct cy_t* const cy, con
     // Create the new topic.
     struct cy_topic_t* topic = NULL;
     {
-        const cy_err_t res = topic_new(cy, &topic, resolved_name);
+        const cy_err_t res = topic_new(cy, &topic, resolved_name, hash, evictions);
         if (res != CY_OK) {
             cy->platform->topic_on_subscription_error(cy, NULL, res);
             return NULL;
@@ -868,7 +873,7 @@ static void on_heartbeat(struct cy_t* const cy, const struct cy_arrival_t* const
         // Find the topic in our local database.
         struct cy_topic_t* mine = cy_topic_find_by_hash(cy, other_hash);
         if (mine == NULL) {
-            mine = topic_subscribe_if_matching(cy, key);
+            mine = topic_subscribe_if_matching(cy, key, other_hash, other_evictions);
         }
         if (mine != NULL) { // We have this topic! Check if we have consensus on the subject-ID.
             assert(mine->hash == other_hash);
