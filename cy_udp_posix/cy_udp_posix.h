@@ -101,11 +101,19 @@ cy_us_t cy_udp_posix_now(void);
 /// to parse IP addresses from string see udp_wrapper_parse_iface_address().
 ///
 /// The local node ID should be set to CY_NODE_ID_INVALID unless manual configuration is required.
-cy_err_t cy_udp_posix_new(struct cy_udp_posix_t* const cy_udp,
-                          const uint64_t               uid,
-                          const char* const            namespace_,
-                          const uint32_t               local_iface_address[CY_UDP_POSIX_IFACE_COUNT_MAX],
-                          const size_t                 tx_queue_capacity_per_iface);
+cy_err_t               cy_udp_posix_new(struct cy_udp_posix_t* const cy_udp,
+                                        const uint64_t               uid,
+                                        const struct wkv_str_t       namespace_,
+                                        const uint32_t               local_iface_address[CY_UDP_POSIX_IFACE_COUNT_MAX],
+                                        const size_t                 tx_queue_capacity_per_iface);
+static inline cy_err_t cy_udp_posix_new_c(struct cy_udp_posix_t* const cy_udp,
+                                          const uint64_t               uid,
+                                          const char* const            namespace_,
+                                          const uint32_t local_iface_address[CY_UDP_POSIX_IFACE_COUNT_MAX],
+                                          const size_t   tx_queue_capacity_per_iface)
+{
+    return cy_udp_posix_new(cy_udp, uid, wkv_key(namespace_), local_iface_address, tx_queue_capacity_per_iface);
+}
 
 /// Keep running the event loop until the deadline is reached or until the first error.
 /// If the deadline is not in the future, the function will process pending events once and return without blocking.

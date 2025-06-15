@@ -267,7 +267,7 @@ direction LR
     cy "1" o-- "*" _subscriber_root
     _topic "1" o-- "*" _linkage
     _topic "1" <-- "*" publisher
-    publisher "1" o-- "*" future
+    publisher "1" <-- "*" future
     _linkage "*" --> "1" _subscriber_root
     _subscriber_root "1" o-- "*" subscriber
     note "Automatically managed private entities are prefixed with '_'"

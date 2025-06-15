@@ -447,7 +447,7 @@ cy_us_t cy_udp_posix_now(void)
 
 cy_err_t cy_udp_posix_new(struct cy_udp_posix_t* const cy_udp,
                           const uint64_t               uid,
-                          const char* const            namespace_,
+                          const struct wkv_str_t       namespace_,
                           const uint32_t               local_iface_address[CY_UDP_POSIX_IFACE_COUNT_MAX],
                           const size_t                 tx_queue_capacity_per_iface)
 {

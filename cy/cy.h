@@ -238,11 +238,18 @@ struct cy_future_t
 /// The response_extent is the extent (maximum size) of the response payload if the publisher expects responses;
 /// if no response is expected/needed, the response_extent should be zero. If responses are needed but their maximum
 /// size is unknown, pick any sensible large value.
-cy_err_t cy_advertise(struct cy_t* const           cy,
-                      struct cy_publisher_t* const pub,
-                      const char* const            name,
-                      const size_t                 response_extent);
-void     cy_unadvertise(const struct cy_publisher_t* pub);
+cy_err_t               cy_advertise(struct cy_t* const           cy,
+                                    struct cy_publisher_t* const pub,
+                                    const struct wkv_str_t       name,
+                                    const size_t                 response_extent);
+static inline cy_err_t cy_advertise_c(struct cy_t* const           cy,
+                                      struct cy_publisher_t* const pub,
+                                      const char* const            name,
+                                      const size_t                 response_extent)
+{
+    return cy_advertise(cy, pub, wkv_key(name), response_extent);
+}
+void cy_unadvertise(const struct cy_publisher_t* pub);
 
 /// Just a convenience function, nothing special.
 void cy_future_new(struct cy_future_t* const future, const cy_future_callback_t callback, void* const user);
@@ -295,7 +302,7 @@ struct cy_arrival_t
     struct cy_topic_t*          topic;      ///< The specific topic that received the transfer.
     struct cy_transfer_owned_t* transfer;   ///< The actual received message and its metadata.
 
-    /// When a wildcard match occurs, the matcher will store the string substitutions that had to be made to
+    /// When a pattern match occurs, the matcher will store the string substitutions that had to be made to
     /// achieve the match. For example, if the pattern is "ins/?/data/*" and the key is "ins/0/data/foo/456",
     /// then the substitutions will be (together with their ordinals):
     ///  1. #0 "0"
@@ -310,7 +317,7 @@ typedef void (*cy_subscriber_callback_t)(const struct cy_arrival_t*);
 
 /// These parameters are used to configure the underlying transport layer implementation.
 /// These values shall not be changed by the user; the only way to set them is when a new subscription is created.
-/// They need to be stored per subscriber to support wildcard subscriptions, where the first subscription may
+/// They need to be stored per subscriber to support pattern subscriptions, where the first subscription may
 /// be created asynchronously wrt the user calling cy_subscribe().
 struct cy_subscription_params_t
 {
@@ -344,17 +351,25 @@ struct cy_subscriber_t
 /// The complexity is about linear in the number of subscriptions.
 cy_err_t               cy_subscribe_with_params(struct cy_t* const                    cy,
                                                 struct cy_subscriber_t* const         sub,
-                                                const char* const                     name,
+                                                const struct wkv_str_t                name,
                                                 const struct cy_subscription_params_t params,
                                                 const cy_subscriber_callback_t        callback);
-static inline cy_err_t cy_subscribe(struct cy_t* const             cy,
-                                    struct cy_subscriber_t* const  sub,
-                                    const char* const              name,
-                                    const size_t                   extent,
-                                    const cy_subscriber_callback_t callback)
+static inline cy_err_t cy_subscribe_with_params_c(struct cy_t* const                    cy,
+                                                  struct cy_subscriber_t* const         sub,
+                                                  const char* const                     name,
+                                                  const struct cy_subscription_params_t params,
+                                                  const cy_subscriber_callback_t        callback)
+{
+    return cy_subscribe_with_params(cy, sub, wkv_key(name), params, callback);
+}
+static inline cy_err_t cy_subscribe_c(struct cy_t* const             cy,
+                                      struct cy_subscriber_t* const  sub,
+                                      const char* const              name,
+                                      const size_t                   extent,
+                                      const cy_subscriber_callback_t callback)
 {
     const struct cy_subscription_params_t params = { extent, CY_TRANSFER_ID_TIMEOUT_DEFAULT_us };
-    return cy_subscribe_with_params(cy, sub, name, params, callback);
+    return cy_subscribe_with_params_c(cy, sub, name, params, callback);
 }
 void cy_unsubscribe(struct cy_t* const cy, struct cy_subscriber_t* const sub);
 
@@ -378,48 +393,11 @@ cy_err_t cy_respond(struct cy_t* const                  cy,
 void cy_subscriber_name(const struct cy_t* const cy, const struct cy_subscriber_t* const sub, char* const out_name);
 
 // =====================================================================================================================
-//                                                      TOPIC
+//                                                  NODE & TOPIC
 // =====================================================================================================================
 
-/// If the topic configuration is restored from non-volatile memory or elsewhere, it can be supplied to the library
-/// via this function immediately after the topic is first created. This function should not be invoked at any other
-/// moment except immediately after initialization.
-///
-/// If the hint is provided, it will be used as the initial allocation state, unless either a conflict or divergence
-/// are discovered, which will be treated normally, without any preference to the hint. This option allows the user
-/// to optionally save the network configuration in a non-volatile storage, such that the next time the network becomes
-/// operational immediately, without waiting for the CRDT consensus. Remember that the hint is discarded on conflict.
-///
-/// The hint will be silently ignored if it is invalid, inapplicable, or if the topic is not freshly created.
-void cy_topic_hint(struct cy_t* const cy, struct cy_topic_t* const topic, const uint16_t subject_id);
-
-/// Complexity is logarithmic in the number of topics. NULL if not found.
-/// In practical terms, these queries are very fast and efficient.
-struct cy_topic_t* cy_topic_find_by_name(const struct cy_t* const cy, const char* const name);
-struct cy_topic_t* cy_topic_find_by_hash(const struct cy_t* const cy, const uint64_t hash);
-struct cy_topic_t* cy_topic_find_by_subject_id(const struct cy_t* const cy, const uint16_t subject_id);
-
-/// Iterate over all topics in an unspecified order.
-/// This is useful when handling IO multiplexing (building the list of descriptors to read) and for introspection.
-/// The iteration stops when the returned topic is NULL.
-/// The set of topics SHALL NOT be mutated while iterating over it (a restart will be needed otherwise).
-/// Usage:
-///     for (struct cy_topic_t* topic = cy_topic_iter_first(cy); topic != NULL; topic = cy_topic_iter_next(topic)) {
-///         ...
-///     }
-struct cy_topic_t* cy_topic_iter_first(const struct cy_t* const cy);
-struct cy_topic_t* cy_topic_iter_next(struct cy_topic_t* const topic);
-
-/// Optionally, the application can use this to save the allocated subject-ID before shutting down/rebooting
-/// for instant recovery.
-uint16_t cy_topic_subject_id(const struct cy_topic_t* const topic);
-
-/// The name is NUL-terminated; pointer lifetime bound to the topic.
-struct wkv_str_t cy_topic_name(const struct cy_topic_t* const topic);
-
-// =====================================================================================================================
-//                                                      NODE
-// =====================================================================================================================
+/// A convenience wrapper that returns the current time in microseconds.
+cy_us_t cy_now(const struct cy_t* const cy);
 
 /// If a node-ID is given explicitly at startup, it will be used as-is and the node will become operational immediately.
 /// Otherwise, some initial node-ID autoconfiguration time will be needed before the local ID is available.
@@ -442,8 +420,53 @@ bool cy_joined(const struct cy_t* const cy);
 /// partition will be forced to adapt to the main network, thus enduring a brief period of instability.
 bool cy_ready(const struct cy_t* const cy);
 
-/// A convenience wrapper that returns the current time in microseconds.
-cy_us_t cy_now(const struct cy_t* const cy);
+/// If the topic configuration is restored from non-volatile memory or elsewhere, it can be supplied to the library
+/// via this function immediately after the topic is first created. This function should not be invoked at any other
+/// moment except immediately after initialization.
+///
+/// If the hint is provided, it will be used as the initial allocation state, unless either a conflict or divergence
+/// are discovered, which will be treated normally, without any preference to the hint. This option allows the user
+/// to optionally save the network configuration in a non-volatile storage, such that the next time the network becomes
+/// operational immediately, without waiting for the CRDT consensus. Remember that the hint is discarded on conflict.
+///
+/// The hint will be silently ignored if it is invalid, inapplicable, or if the topic is not freshly created.
+void cy_topic_hint(struct cy_t* const cy, struct cy_topic_t* const topic, const uint16_t subject_id);
+
+/// Complexity is logarithmic in the number of topics. NULL if not found.
+/// In practical terms, these queries are very fast and efficient.
+struct cy_topic_t*               cy_topic_find_by_name(const struct cy_t* const cy, const struct wkv_str_t name);
+static inline struct cy_topic_t* cy_topic_find_by_name_c(const struct cy_t* const cy, const char* const name)
+{
+    return cy_topic_find_by_name(cy, wkv_key(name));
+}
+struct cy_topic_t* cy_topic_find_by_hash(const struct cy_t* const cy, const uint64_t hash);
+struct cy_topic_t* cy_topic_find_by_subject_id(const struct cy_t* const cy, const uint16_t subject_id);
+
+/// Iterate over all topics in an unspecified order.
+/// This is useful when handling IO multiplexing (building the list of descriptors to read) and for introspection.
+/// The iteration stops when the returned topic is NULL.
+/// The set of topics SHALL NOT be mutated while iterating over it (a restart will be needed otherwise).
+/// Usage:
+///     for (struct cy_topic_t* topic = cy_topic_iter_first(cy); topic != NULL; topic = cy_topic_iter_next(topic)) {
+///         ...
+///     }
+struct cy_topic_t* cy_topic_iter_first(const struct cy_t* const cy);
+struct cy_topic_t* cy_topic_iter_next(struct cy_topic_t* const topic);
+
+/// Optionally, the application can use this to save the allocated subject-ID before shutting down/rebooting
+/// for instant recovery.
+uint16_t cy_topic_subject_id(const struct cy_topic_t* const topic);
+
+/// The name is NUL-terminated; pointer lifetime bound to the topic.
+struct wkv_str_t cy_topic_name(const struct cy_topic_t* const topic);
+
+/// Returns true iff the name can match more than one topic.
+/// This is useful for some applications that want to ensure that certain names can match only one topic.
+bool               cy_has_substitution_tokens(const struct wkv_str_t name);
+static inline bool cy_has_substitution_tokens_c(const char* const name)
+{
+    return cy_has_substitution_tokens(wkv_key(name));
+}
 
 // =====================================================================================================================
 //                                                      BUFFERS

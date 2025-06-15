@@ -276,7 +276,7 @@ typedef void (*cy_platform_topic_on_response_extent_update_t)(struct cy_t*, stru
 /// along with the error code returned by the subscription function.
 ///
 /// The callback is also used to report errors that occur when attempting to create a new topic that matches a
-/// wildcard subscriber; in this case, the topic pointer will be NULL.
+/// pattern subscriber; in this case, the topic pointer will be NULL.
 ///
 /// Normally, the error handler does not need to do anything specific aside from perhaps logging/reporting the error.
 /// Cy will keep attempting to repair the topic periodically when relevant heartbeats are received.
@@ -369,6 +369,7 @@ struct cy_t
     bool node_id_collision;
 
     /// Heartbeat topic and related items.
+    /// The heartbeat period can be changed at any time, but it must not exceed 1 second.
     struct cy_publisher_t  heartbeat_pub;
     struct cy_subscriber_t heartbeat_sub;
     cy_us_t                heartbeat_next;
@@ -380,13 +381,13 @@ struct cy_t
     struct cy_tree_t* topics_by_gossip_time;
     struct wkv_t      topics_by_name;
 
-    /// When a heartbeat is received, its topic name will be compared against the wildcards,
+    /// When a heartbeat is received, its topic name will be compared against the patterns,
     /// and if a match is found, a new subscription will be constructed automatically.
     /// The values of these tree nodes point to instances of cy_subscriber_root_t.
-    struct wkv_t subscribers_by_name;     ///< Both verbatim and wildcards.
-    struct wkv_t subscribers_by_wildcard; ///< Only wildcards for automatic subscriptions on heartbeat.
+    struct wkv_t subscribers_by_name;    ///< Both verbatim and patterns.
+    struct wkv_t subscribers_by_pattern; ///< Only patterns for automatic subscriptions on heartbeat.
 
-    /// Only for wildcard subscriptions.
+    /// Only for pattern subscriptions.
     struct cy_subscriber_root_t* next_scout;
 
     /// For detecting timed out futures. This index spans all topics.
@@ -406,13 +407,13 @@ struct cy_t
 /// the network; the rationale is that a manually assigned node-ID takes precedence over the auto-assigned one,
 /// thus forcing any squatters out of the way.
 ///
-/// The namespace may be NULL or empty, in which case it defaults to `/`.
+/// The namespace may be NULL or empty, in which case it defaults to `~`.
 /// It may begin with `~`, which expands into the node name.
 cy_err_t cy_new(struct cy_t* const                cy,
                 const struct cy_platform_t* const platform,
                 const uint64_t                    uid,
                 const uint16_t                    node_id,
-                const char* const                 namespace_);
+                const struct wkv_str_t            namespace_);
 void     cy_destroy(struct cy_t* const cy);
 
 /// This function must be invoked periodically to let the library publish heartbeats and handle response timeouts.

@@ -32,9 +32,7 @@
 /// The earliest representable time in microseconds.
 #define BIG_BANG INT64_MIN
 
-/// We chose it to be a prime number of microseconds closest to 1/3 of a second to avoid stable aliasing with any
-/// faster publisher on the network. This is not important by any margin but is nice to have.
-#define HEARTBEAT_DEFAULT_PERIOD_us 333331
+#define HEARTBEAT_DEFAULT_PERIOD_us (500 * KILO)
 #define HEARTBEAT_PUB_TIMEOUT_us    (1 * MEGA)
 
 /// Responses have an 8-byte prefix containing the topic hash that the response is for.
@@ -97,6 +95,7 @@ static void* wkv_cb_first(const struct wkv_event_t evt)
 // =====================================================================================================================
 
 /// TODO this is ugly and dirty
+/// TODO use wkv_str_t
 static bool compose_topic_name(const char* const ns,
                                const char* const user,
                                const char* const name,
@@ -138,18 +137,6 @@ static bool compose_topic_name(const char* const ns,
     }
     *out = '\0';
     return destination != out; // empty name is not allowed
-}
-
-/// Very fast single-pass check for valid substitution tokens in the name.
-/// "abc/*/def" is a wildcard, but "abc/x*/def" is not.
-static bool is_wildcard(const char* const name)
-{
-    const char* const sep = strchr(name, '/');
-    const size_t      len = (sep != NULL) ? (size_t)(sep - name) : strlen(name);
-    if ((len == 1) && ((name[0] == '?') || (name[0] == '*'))) {
-        return true;
-    }
-    return (sep == NULL) ? false : is_wildcard(sep + 1); // tail call
 }
 
 // =====================================================================================================================
@@ -319,15 +306,15 @@ static uint16_t pick_node_id(const struct cy_t* const cy, struct cy_bloom64_t* c
 struct cy_subscriber_root_t
 {
     struct wkv_node_t* index_name;
-    struct wkv_node_t* index_wildcard;
+    struct wkv_node_t* index_pattern;
 
-    /// If this is a wildcard subscriber, we will need to publish a scout message.
+    /// If this is a pattern subscriber, we will need to publish a scout message.
     struct cy_subscriber_root_t* next_scout;
 
     struct cy_subscriber_t* head;
 };
 
-/// A single topic may match multiple subscribers if wildcards are used.
+/// A single topic may match multiple subscribers if patterns are used.
 /// Each instance holds a pointer to the corresponding subscriber root and a pointer to the next match for this topic.
 struct cy_topic_coupling_t
 {
@@ -393,17 +380,17 @@ static void schedule_gossip(struct cy_t* const cy, struct cy_topic_t* const topi
 /// Returns CY_SUBJECT_ID_INVALID if the string is not a valid pinned subject-ID form.
 /// Pinned topic names must have only canonical names to ensure that no two topic names map to the same subject-ID.
 /// The only requirement to ensure this is that there must be no leading zeros in the number.
-static uint32_t parse_pinned(const char* s)
+static uint32_t parse_pinned(const struct wkv_str_t s)
 {
-    if ((s == NULL) || (*s == '\0') || (*s == '0')) { // Leading zeroes not allowed; only canonical form is accepted.
+    if ((s.len < 1) || (s.len > 4) || (s.str[0] == '0')) { // Leading zeroes not accepted; only canonical form
         return CY_SUBJECT_ID_INVALID;
     }
     uint32_t out = 0U;
-    while (*s != '\0') {
-        if ((*s < '0') || (*s > '9')) {
+    for (size_t i = 0; i < s.len; i++) {
+        if ((s.str[i] < '0') || (s.str[i] > '9')) {
             return CY_SUBJECT_ID_INVALID;
         }
-        out = (out * 10U) + (uint8_t)(*s++ - '0');
+        out = (out * 10U) + (uint8_t)(s.str[i] - '0');
         if (out >= CY_TOTAL_SUBJECT_COUNT) {
             return CY_SUBJECT_ID_INVALID;
         }
@@ -416,7 +403,7 @@ static uint32_t parse_pinned(const char* s)
 /// The probability of a random hash falling into the pinned range is ~4.44e-16, or about one in two quadrillion.
 static uint64_t topic_hash(const struct wkv_str_t name)
 {
-    uint64_t hash = parse_pinned(name.str);
+    uint64_t hash = parse_pinned(name);
     if (hash >= CY_TOTAL_SUBJECT_COUNT) {
         hash = rapidhash(name.str, name.len);
     }
@@ -592,15 +579,14 @@ static void topic_age(struct cy_topic_t* const topic, const cy_us_t now)
 
 /// UB if the topic under this name already exists.
 /// out_topic may be new if the reference is not immediately needed (it can be found later via indexes).
-static cy_err_t topic_new(struct cy_t* const cy, struct cy_topic_t** const out_topic, const char* const name)
+static cy_err_t topic_new(struct cy_t* const cy, struct cy_topic_t** const out_topic, const struct wkv_str_t name)
 {
-    assert((cy != NULL) && (name != NULL));
     struct cy_topic_t* const topic = cy->platform->topic_new(cy);
     if (topic == NULL) {
         return CY_ERR_MEMORY;
     }
     memset(topic, 0, sizeof(*topic));
-    if (!compose_topic_name(cy->namespace_, cy->name, name, topic->name)) {
+    if (!compose_topic_name(cy->namespace_, cy->name, name.str, topic->name)) {
         goto bad_name;
     }
     topic->name[CY_TOPIC_NAME_MAX] = '\0';
@@ -673,7 +659,7 @@ bad_name: // TODO correct deinitialization
     return CY_ERR_NAME;
 }
 
-static cy_err_t topic_ensure(struct cy_t* const cy, struct cy_topic_t** const out_topic, const char* const name)
+static cy_err_t topic_ensure(struct cy_t* const cy, struct cy_topic_t** const out_topic, const struct wkv_str_t name)
 {
     return (cy_topic_find_by_name(cy, name) == NULL) ? 0 : topic_new(cy, out_topic, name);
 }
@@ -732,28 +718,28 @@ static void* wkv_cb_couple_new_topic(const struct wkv_event_t evt)
     return (0 == res) ? NULL : "";
 }
 
-/// If there is a wildcard subscriber matching the name of this topic, attempt to create a new subscription.
+/// If there is a pattern subscriber matching the name of this topic, attempt to create a new subscription.
 static void topic_subscribe_if_matching(struct cy_t* const cy, const struct wkv_str_t name)
 {
     assert((cy != NULL) && (name.str != NULL));
     if (name.len == 0) {
         return; // Ensure the remote is not trying to feed us an empty name, that's bad.
     }
-    if (NULL == wkv_route(&cy->subscribers_by_wildcard, name, NULL, wkv_cb_first)) {
+    if (NULL == wkv_route(&cy->subscribers_by_pattern, name, NULL, wkv_cb_first)) {
         return; // No match.
     }
-    CY_TRACE(cy, "✨ Automatic wildcard subscription for '%s'", name.str);
+    CY_TRACE(cy, "✨ Automatic pattern subscription for '%s'", name.str);
     // Create the new topic.
     struct cy_topic_t* topic = NULL;
     {
-        const cy_err_t res = topic_new(cy, &topic, name.str);
+        const cy_err_t res = topic_new(cy, &topic, name);
         if (res != CY_OK) {
             cy->platform->topic_on_subscription_error(cy, NULL, res);
             return;
         }
     }
     // Attach subscriptions.
-    if (NULL != wkv_route(&cy->subscribers_by_wildcard, name, (void* [2]){ cy, topic }, wkv_cb_couple_new_topic)) {
+    if (NULL != wkv_route(&cy->subscribers_by_pattern, name, (void* [2]){ cy, topic }, wkv_cb_couple_new_topic)) {
         // TODO discard the topic!
         cy->platform->topic_on_subscription_error(cy, NULL, CY_ERR_MEMORY);
         return;
@@ -870,7 +856,8 @@ static void on_heartbeat(const struct cy_arrival_t* const evt)
     const uint64_t         other_age       = heartbeat.topic_flags8_age56 & ((1ULL << 56U) - 1U);
     const uint8_t          flags           = (uint8_t)(heartbeat.topic_flags8_age56 >> 56U);
     const bool             is_scout        = (flags & TOPIC_FLAG_SCOUT) != 0U;
-    const struct wkv_str_t key             = wkv_key(heartbeat.topic_name);
+    const struct wkv_str_t key             = { .len = heartbeat.topic_name_length8_reserved16_evictions40 >> 56U,
+                                               .str = heartbeat.topic_name };
     if (!is_scout) {
         // Find the topic in our local database.
         struct cy_topic_t* mine = cy_topic_find_by_hash(cy, other_hash);
@@ -996,12 +983,17 @@ static void retire_timed_out_futures(struct cy_t* cy, const cy_us_t now)
 
 cy_err_t cy_advertise(struct cy_t* const           cy,
                       struct cy_publisher_t* const pub,
-                      const char* const            name,
+                      const struct wkv_str_t       name,
                       const size_t                 response_extent)
 {
-    assert((pub != NULL) && (cy != NULL) && (name != NULL));
+    assert((pub != NULL) && (cy != NULL));
+    char name_buf[CY_TOPIC_NAME_MAX + 1U];
+    if (!compose_topic_name(cy->namespace_, cy->name, name.str, name_buf)) {
+        return CY_ERR_NAME;
+    }
+    const struct wkv_str_t resolved_name = wkv_key(name_buf);
     memset(pub, 0, sizeof(*pub));
-    const cy_err_t res = topic_ensure(cy, &pub->topic, name);
+    const cy_err_t res = topic_ensure(cy, &pub->topic, resolved_name);
     pub->priority      = cy_prio_nominal;
     pub->user          = NULL;
     if (res == CY_OK) {
@@ -1121,13 +1113,13 @@ void* wkv_cb_couple_new_subscription(const struct wkv_event_t evt)
 
 /// Either finds an existing subscriber root or creates a new one. NULL if OOM.
 static cy_err_t ensure_subscriber_root(struct cy_t* const                  cy,
-                                       const struct wkv_str_t              key,
+                                       const struct wkv_str_t              resolved_name,
                                        struct cy_subscriber_root_t** const out_root)
 {
-    assert((cy != NULL) && (key.str != NULL) && (key.len > 0U) && (out_root != NULL));
+    assert((cy != NULL) && (resolved_name.str != NULL) && (resolved_name.len > 0U) && (out_root != NULL));
 
     // Find or allocate a tree node.
-    struct wkv_node_t* const node = wkv_set(&cy->subscribers_by_name, key);
+    struct wkv_node_t* const node = wkv_set(&cy->subscribers_by_name, resolved_name);
     if (node == NULL) {
         return CY_ERR_MEMORY;
     }
@@ -1138,7 +1130,7 @@ static cy_err_t ensure_subscriber_root(struct cy_t* const                  cy,
         return CY_OK;
     }
 
-    CY_TRACE(cy, "✨ New subscriber root for '%s'", key.str);
+    CY_TRACE(cy, "✨ New subscriber root for '%s'", resolved_name.str);
 
     // Otherwise, allocate a new root, if possible.
     node->value = mem_alloc(cy, sizeof(struct cy_subscriber_root_t));
@@ -1150,20 +1142,20 @@ static cy_err_t ensure_subscriber_root(struct cy_t* const                  cy,
     memset(root, 0, sizeof(*root));
 
     // Insert the new root into the indexes.
-    const bool wc    = is_wildcard(key.str);
+    const bool wc    = cy_has_substitution_tokens(resolved_name);
     root->index_name = node;
     if (wc) {
-        root->index_wildcard = wkv_set(&cy->subscribers_by_wildcard, key);
-        if (root->index_wildcard == NULL) {
+        root->index_pattern = wkv_set(&cy->subscribers_by_pattern, resolved_name);
+        if (root->index_pattern == NULL) {
             wkv_del(&cy->subscribers_by_name, node);
             mem_free(cy, node->value);
             return CY_ERR_MEMORY;
         }
-        assert(root->index_wildcard->value == NULL);
-        root->index_wildcard->value = root;
+        assert(root->index_pattern->value == NULL);
+        root->index_pattern->value = root;
     } else {
-        root->index_wildcard = NULL;
-        const cy_err_t res   = topic_ensure(cy, NULL, key.str);
+        root->index_pattern = NULL;
+        const cy_err_t res  = topic_ensure(cy, NULL, resolved_name);
         if (res != CY_OK) {
             wkv_del(&cy->subscribers_by_name, node);
             mem_free(cy, node->value);
@@ -1190,25 +1182,25 @@ static cy_err_t ensure_subscriber_root(struct cy_t* const                  cy,
 
 cy_err_t cy_subscribe_with_params(struct cy_t* const                    cy,
                                   struct cy_subscriber_t* const         sub,
-                                  const char* const                     name,
+                                  const struct wkv_str_t                name,
                                   const struct cy_subscription_params_t params,
                                   const cy_subscriber_callback_t        callback)
 {
-    if ((sub == NULL) || (cy == NULL) || (name == NULL) || (params.transfer_id_timeout < 0) || (callback == NULL)) {
+    if ((sub == NULL) || (cy == NULL) || (params.transfer_id_timeout < 0) || (callback == NULL)) {
         return CY_ERR_ARGUMENT;
     }
     char name_buf[CY_TOPIC_NAME_MAX + 1U];
-    if (!compose_topic_name(cy->namespace_, cy->name, name, name_buf)) {
+    if (!compose_topic_name(cy->namespace_, cy->name, name.str, name_buf)) {
         return CY_ERR_NAME;
     }
-    const struct wkv_str_t key = wkv_key(name_buf);
+    const struct wkv_str_t resolved_name = wkv_key(name_buf);
     (void)memset(sub, 0, sizeof(*sub));
     CY_TRACE(cy,
              "✨ New subscriber '%s' extent=%zu tid_timeout=%lld",
-             key.str,
+             resolved_name.str,
              params.extent,
              (long long)params.transfer_id_timeout);
-    const cy_err_t res = ensure_subscriber_root(cy, key, &sub->root);
+    const cy_err_t res = ensure_subscriber_root(cy, resolved_name, &sub->root);
     if (res != CY_OK) {
         return res;
     }
@@ -1217,7 +1209,7 @@ cy_err_t cy_subscribe_with_params(struct cy_t* const                    cy,
     sub->callback   = callback;
     sub->next       = sub->root->head;
     sub->root->head = sub;
-    if (NULL != wkv_match(&cy->topics_by_name, key, (void* [2]){ cy, sub }, wkv_cb_couple_new_subscription)) {
+    if (NULL != wkv_match(&cy->topics_by_name, resolved_name, (void* [2]){ cy, sub }, wkv_cb_couple_new_subscription)) {
         cy_unsubscribe(cy, sub);
         return CY_ERR_MEMORY;
     }
@@ -1249,8 +1241,23 @@ void cy_subscriber_name(const struct cy_t* const cy, const struct cy_subscriber_
 }
 
 // =====================================================================================================================
-//                                                      TOPIC
+//                                                  NODE & TOPIC
 // =====================================================================================================================
+
+cy_us_t cy_now(const struct cy_t* const cy)
+{
+    return cy->platform->now(cy);
+}
+
+bool cy_joined(const struct cy_t* const cy)
+{
+    return cy->node_id <= cy->platform->node_id_max;
+}
+
+bool cy_ready(const struct cy_t* const cy)
+{
+    return cy_joined(cy) && ((cy_now(cy) - cy->last_event_ts) > (1 * MEGA));
+}
 
 void cy_topic_hint(struct cy_t* const cy, struct cy_topic_t* const topic, const uint16_t subject_id)
 {
@@ -1272,12 +1279,11 @@ void cy_topic_hint(struct cy_t* const cy, struct cy_topic_t* const topic, const 
     }
 }
 
-struct cy_topic_t* cy_topic_find_by_name(const struct cy_t* const cy, const char* const name)
+struct cy_topic_t* cy_topic_find_by_name(const struct cy_t* const cy, const struct wkv_str_t name)
 {
-    assert((cy != NULL) && (name != NULL));
-    const struct wkv_node_t* const node  = wkv_get(&cy->topics_by_name, wkv_key(name));
+    const struct wkv_node_t* const node  = wkv_get(&cy->topics_by_name, name);
     struct cy_topic_t* const       topic = (node != NULL) ? (struct cy_topic_t*)node->value : NULL;
-    assert(topic == cy_topic_find_by_hash(cy, topic_hash(wkv_key(name))));
+    assert(topic == cy_topic_find_by_hash(cy, topic_hash(name)));
     return topic;
 }
 
@@ -1324,15 +1330,65 @@ struct wkv_str_t cy_topic_name(const struct cy_topic_t* const topic)
     return (struct wkv_str_t){ .len = topic->index_name->key_len, .str = topic->name };
 }
 
+bool cy_has_substitution_tokens(const struct wkv_str_t name)
+{
+    struct wkv_t kv;
+    wkv_init(&kv, &wkv_realloc);
+    return wkv_has_substitution_tokens(&kv, name);
+}
+
 // =====================================================================================================================
-//                                                      NODE
+//                                                      BUFFERS
+// =====================================================================================================================
+
+void cy_buffer_owned_release(struct cy_t* const cy, struct cy_buffer_owned_t* const payload)
+{
+    if ((cy != NULL) && (payload != NULL) && (payload->origin.data != NULL)) {
+        cy->platform->buffer_release(cy, *payload);
+        // nullify the pointers to prevent double free
+        payload->base.next   = NULL;
+        payload->origin.size = 0;
+        payload->origin.data = NULL;
+    }
+}
+
+size_t cy_buffer_borrowed_size(const struct cy_buffer_borrowed_t payload)
+{
+    size_t                             out = 0;
+    const struct cy_buffer_borrowed_t* p   = &payload;
+    while (p != NULL) {
+        out += p->view.size;
+        p = p->next;
+    }
+    return out;
+}
+
+size_t cy_buffer_borrowed_gather(const struct cy_buffer_borrowed_t payload, const struct cy_bytes_mut_t dest)
+{
+    size_t offset = 0;
+    if (NULL != dest.data) {
+        const struct cy_buffer_borrowed_t* frag = &payload;
+        while ((frag != NULL) && (offset < dest.size)) {
+            assert(frag->view.data != NULL);
+            const size_t frag_size = smaller(frag->view.size, dest.size - offset);
+            (void)memmove(((char*)dest.data) + offset, frag->view.data, frag_size);
+            offset += frag_size;
+            assert(offset <= dest.size);
+            frag = frag->next;
+        }
+    }
+    return offset;
+}
+
+// =====================================================================================================================
+//                                              PLATFORM LAYER INTERFACE
 // =====================================================================================================================
 
 cy_err_t cy_new(struct cy_t* const                cy,
                 const struct cy_platform_t* const platform,
                 const uint64_t                    uid,
                 const uint16_t                    node_id,
-                const char* const                 namespace_)
+                const struct wkv_str_t            namespace_)
 {
     assert(cy != NULL);
     assert(uid != 0);
@@ -1354,18 +1410,21 @@ cy_err_t cy_new(struct cy_t* const                cy,
     assert(platform->topic_on_subscription_error != NULL);
     assert((platform->node_id_max > 0) && (platform->node_id_max < CY_NODE_ID_INVALID));
 
+    if (namespace_.len > CY_NAMESPACE_NAME_MAX) {
+        return CY_ERR_NAME;
+    }
+
     // Init the object.
     memset(cy, 0, sizeof(*cy));
     cy->platform = platform;
     cy->uid      = uid;
     cy->node_id  = (node_id <= platform->node_id_max) ? node_id : CY_NODE_ID_INVALID;
     // namespace
-    if ((namespace_ != NULL) && (namespace_[0] != '\0')) {
-        const size_t len = smaller(CY_NAMESPACE_NAME_MAX, strlen(namespace_));
-        memcpy(cy->namespace_, namespace_, len);
-        cy->namespace_[len] = '\0';
+    if (namespace_.len > 0) {
+        memcpy(cy->namespace_, namespace_.str, namespace_.len);
+        cy->namespace_[namespace_.len] = '\0';
     } else {
-        cy->namespace_[0] = '/'; // default namespace
+        cy->namespace_[0] = '~';
         cy->namespace_[1] = '\0';
     }
     // the default name is just derived from UID, can be overridden by the user later
@@ -1416,9 +1475,9 @@ cy_err_t cy_new(struct cy_t* const                cy,
 
     // Pub/sub on the heartbeat topic.
     if (res == CY_OK) {
-        res = cy_advertise(cy, &cy->heartbeat_pub, CY_CONFIG_HEARTBEAT_TOPIC_NAME, 0);
+        res = cy_advertise_c(cy, &cy->heartbeat_pub, CY_CONFIG_HEARTBEAT_TOPIC_NAME, 0);
         if (res == CY_OK) {
-            res = cy_subscribe(
+            res = cy_subscribe_c(
               cy, &cy->heartbeat_sub, CY_CONFIG_HEARTBEAT_TOPIC_NAME, sizeof(struct heartbeat_t), &on_heartbeat);
             if (res != CY_OK) {
                 cy_unadvertise(&cy->heartbeat_pub);
@@ -1427,68 +1486,6 @@ cy_err_t cy_new(struct cy_t* const                cy,
     }
     return res;
 }
-
-bool cy_joined(const struct cy_t* const cy)
-{
-    return cy->node_id <= cy->platform->node_id_max;
-}
-
-bool cy_ready(const struct cy_t* const cy)
-{
-    return cy_joined(cy) && ((cy_now(cy) - cy->last_event_ts) > (1 * MEGA));
-}
-
-cy_us_t cy_now(const struct cy_t* const cy)
-{
-    return cy->platform->now(cy);
-}
-
-// =====================================================================================================================
-//                                                      BUFFERS
-// =====================================================================================================================
-
-void cy_buffer_owned_release(struct cy_t* const cy, struct cy_buffer_owned_t* const payload)
-{
-    if ((cy != NULL) && (payload != NULL) && (payload->origin.data != NULL)) {
-        cy->platform->buffer_release(cy, *payload);
-        // nullify the pointers to prevent double free
-        payload->base.next   = NULL;
-        payload->origin.size = 0;
-        payload->origin.data = NULL;
-    }
-}
-
-size_t cy_buffer_borrowed_size(const struct cy_buffer_borrowed_t payload)
-{
-    size_t                             out = 0;
-    const struct cy_buffer_borrowed_t* p   = &payload;
-    while (p != NULL) {
-        out += p->view.size;
-        p = p->next;
-    }
-    return out;
-}
-
-size_t cy_buffer_borrowed_gather(const struct cy_buffer_borrowed_t payload, const struct cy_bytes_mut_t dest)
-{
-    size_t offset = 0;
-    if (NULL != dest.data) {
-        const struct cy_buffer_borrowed_t* frag = &payload;
-        while ((frag != NULL) && (offset < dest.size)) {
-            assert(frag->view.data != NULL);
-            const size_t frag_size = smaller(frag->view.size, dest.size - offset);
-            (void)memmove(((char*)dest.data) + offset, frag->view.data, frag_size);
-            offset += frag_size;
-            assert(offset <= dest.size);
-            frag = frag->next;
-        }
-    }
-    return offset;
-}
-
-// ====================================================================================================================
-// =================================================  END OF THE API  =================================================
-// ====================================================================================================================
 
 /// We snoop on all transfers to update the node-ID occupancy Bloom filter.
 /// If we don't have a node-ID and this is a new Bloom entry, follow CSMA/CD: add random wait.
