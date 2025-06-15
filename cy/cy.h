@@ -204,7 +204,7 @@ enum cy_future_state_t
     cy_future_response_timeout,
 };
 
-typedef void (*cy_future_callback_t)(struct cy_future_t*);
+typedef void (*cy_future_callback_t)(struct cy_t*, struct cy_future_t*);
 
 /// Register an expectation for a response to a message sent to the topic.
 /// The future shall not be moved or altered in any way except for the user and callback fields until its state is
@@ -249,7 +249,7 @@ static inline cy_err_t cy_advertise_c(struct cy_t* const           cy,
 {
     return cy_advertise(cy, pub, wkv_key(name), response_extent);
 }
-void cy_unadvertise(const struct cy_publisher_t* pub);
+void cy_unadvertise(struct cy_t* const cy, const struct cy_publisher_t* pub);
 
 /// Just a convenience function, nothing special.
 void cy_future_new(struct cy_future_t* const future, const cy_future_callback_t callback, void* const user);
@@ -295,9 +295,11 @@ struct cy_substitution_t
     size_t           ordinal; ///< Zero-based index of the substitution token as occurred in the pattern.
 };
 
+/// Optionally, the user handler can take ownership of the transfer payload by zeroing the origin pointer
+/// by setting transfer->payload.origin.data = NULL. However, this may cause undesirable interference with other
+/// subscribers that also match the same topic and are to receive the data after the current callback returns.
 struct cy_arrival_t
 {
-    struct cy_t*                cy;
     struct cy_subscriber_t*     subscriber; ///< Which subscriber matched on this topic by verbatim name or pattern.
     struct cy_topic_t*          topic;      ///< The specific topic that received the transfer.
     struct cy_transfer_owned_t* transfer;   ///< The actual received message and its metadata.
@@ -313,7 +315,7 @@ struct cy_arrival_t
     const struct cy_substitution_t* substitutions;      ///< A contiguous array of substitutions.
 };
 
-typedef void (*cy_subscriber_callback_t)(const struct cy_arrival_t*);
+typedef void (*cy_subscriber_callback_t)(struct cy_t*, const struct cy_arrival_t*);
 
 /// These parameters are used to configure the underlying transport layer implementation.
 /// These values shall not be changed by the user; the only way to set them is when a new subscription is created.

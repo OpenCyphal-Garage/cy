@@ -1,6 +1,6 @@
 // Add this file to your build to define cy_trace() that prints trace messages into stderr.
 
-#include "cy.h"
+#include "cy_platform.h"
 #include <time.h>
 #include <stdio.h>
 #include <stdarg.h>

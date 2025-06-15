@@ -154,6 +154,7 @@ static cy_us_t platform_now(const struct cy_t* const cy)
     return cy_udp_posix_now();
 }
 
+// ReSharper disable once CppParameterMayBeConstPtrOrRef
 static void* platform_realloc(struct cy_t* const cy, void* const ptr, const size_t new_size)
 {
     (void)cy;

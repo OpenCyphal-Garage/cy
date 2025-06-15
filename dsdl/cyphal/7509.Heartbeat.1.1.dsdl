@@ -57,12 +57,21 @@ uint56 topic_age
 # The logical age increases when the topic is gossiped, and when a valid transfer is received on it.
 # Topics with greater age win arbitration, thus ensuring stability of the network when new topics/nodes appear.
 
-bool topic_flag_publishing      # The sender is publishing on this topic.
-bool topic_flag_subscribed      # The sender is subscribed to this topic.
-bool topic_flag_scout           # This heartbeat is requesting everyone who has matching topics to gossip them ASAP.
+bool flag_publishing      # The sender is publishing on this topic.
+bool flag_subscribed      # The sender is subscribed to this topic.
+bool flag_scout           # Requesting everyone who has matching topics to gossip them ASAP.
 # Additional flags may be added in the future. Possible candidates:
-# - topic_flag_response_expected  # Publisher expects subscribers to respond to messages published on this topic.
-# - topic_flag_reliable
+#
+# flag_response_expected
+#   Publisher expects subscribers to respond to messages published on this topic.
+#
+# flag_reliable
+#   Reliable node expects/provides reliable transport on this topic.
+#
+# flag_multitenant
+#   The topic allows sharing its subject-ID with other multitenant topics.
+#   This is useful for low-criticality low-bandwidth topics.
+#   Non-multitenant topics arbitrate against multitenant topics as usual.
 void5
 
 @assert _offset_ == {32 * 8}

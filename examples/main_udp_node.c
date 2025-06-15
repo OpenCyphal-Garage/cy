@@ -57,11 +57,14 @@ static struct arg_kv_t arg_kv_next(const int argc, char* argv[])
     return out;
 }
 
-struct config_topic_t
+struct config_publication_t
 {
     const char* name;
-    bool        pub;
-    bool        sub;
+};
+
+struct config_subscription_t
+{
+    const char* name;
 };
 
 struct config_t
@@ -72,8 +75,11 @@ struct config_t
 
     const char* namespace;
 
-    size_t                 topic_count;
-    struct config_topic_t* topics;
+    size_t                       pub_count;
+    struct config_publication_t* pubs;
+
+    size_t                        sub_count;
+    struct config_subscription_t* subs;
 };
 
 static struct config_t load_config(const int argc, char* argv[])
@@ -83,8 +89,10 @@ static struct config_t load_config(const int argc, char* argv[])
         .local_uid                   = random_uid(),
         .tx_queue_capacity_per_iface = 1000,
         .namespace                   = NULL, // will use the default namespace by default.
-        .topic_count                 = 0,
-        .topics                      = calloc((size_t)(argc - 1), sizeof(struct config_topic_t)),
+        .pub_count                   = 0,
+        .pubs                        = calloc((size_t)(argc - 1), sizeof(struct config_publication_t)),
+        .sub_count                   = 0,
+        .subs                        = calloc((size_t)(argc - 1), sizeof(struct config_subscription_t)),
     };
 
     // Parse CLI args.
@@ -99,19 +107,24 @@ static struct config_t load_config(const int argc, char* argv[])
             cfg.tx_queue_capacity_per_iface = strtoul(arg.value, NULL, 0);
         } else if (arg_kv_hash("ns") == arg.key_hash) {
             cfg.namespace = arg.value;
-        } else if ((arg_kv_hash("pub") == arg.key_hash) || (arg_kv_hash("sub") == arg.key_hash)) {
-            struct config_topic_t* topic = NULL;
-            for (size_t i = 0; i < cfg.topic_count; i++) {
-                if (strcmp(cfg.topics[i].name, arg.value) == 0) {
-                    topic = &cfg.topics[i];
+        } else if (arg_kv_hash("pub") == arg.key_hash) {
+            struct config_publication_t* x = NULL;
+            for (size_t i = 0; i < cfg.pub_count; i++) {
+                if (strcmp(cfg.pubs[i].name, arg.value) == 0) {
+                    x = &cfg.pubs[i];
                 }
             }
-            if (topic == NULL) {
-                topic = &cfg.topics[cfg.topic_count++];
+            x       = (x == NULL) ? &cfg.pubs[cfg.pub_count++] : x;
+            x->name = arg.value;
+        } else if (arg_kv_hash("sub") == arg.key_hash) {
+            struct config_subscription_t* x = NULL;
+            for (size_t i = 0; i < cfg.sub_count; i++) {
+                if (strcmp(cfg.subs[i].name, arg.value) == 0) {
+                    x = &cfg.subs[i];
+                }
             }
-            topic->name = arg.value;
-            topic->pub  = topic->pub || (arg_kv_hash("pub") == arg.key_hash);
-            topic->sub  = topic->sub || (arg_kv_hash("sub") == arg.key_hash);
+            x       = (x == NULL) ? &cfg.subs[cfg.sub_count++] : x;
+            x->name = arg.value;
         } else {
             fprintf(stderr, "Unexpected key #%zu: '%s'\n", arg.index, arg.key);
             exit(1);
@@ -125,19 +138,22 @@ static struct config_t load_config(const int argc, char* argv[])
     }
     fprintf(stderr, "\nuid: 0x%016llx\n", (unsigned long long)cfg.local_uid);
     fprintf(stderr, "tx_queue_capacity: %zu\n", cfg.tx_queue_capacity_per_iface);
-    fprintf(stderr, "topics:\n");
-    for (size_t i = 0; i < cfg.topic_count; i++) {
-        fprintf(stderr, "\t%s\n", cfg.topics[i].name);
+    fprintf(stderr, "publications:\n");
+    for (size_t i = 0; i < cfg.pub_count; i++) {
+        fprintf(stderr, "\t%s\n", cfg.pubs[i].name);
+    }
+    fprintf(stderr, "subscriptions:\n");
+    for (size_t i = 0; i < cfg.sub_count; i++) {
+        fprintf(stderr, "\t%s\n", cfg.subs[i].name);
     }
     fprintf(stderr, "---\n");
     return cfg;
 }
 
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
-static void on_msg_trace(struct cy_subscriber_t* const subscription)
+static void on_msg_trace(struct cy_t* const cy, const struct cy_arrival_t* const arv)
 {
-    struct cy_transfer_owned_t* const transfer = &subscription->topic->sub_last_transfer;
-    CY_BUFFER_GATHER_ON_STACK(payload, transfer->payload.base)
+    CY_BUFFER_GATHER_ON_STACK(payload, arv->transfer->payload.base)
 
     // Convert linearized payload to hex.
     char hex[payload.size * 2 + 1];
@@ -154,40 +170,37 @@ static void on_msg_trace(struct cy_subscriber_t* const subscription)
     }
     ascii[payload.size] = '\0';
 
-    // Release the payload buffer memory.
-    // This memory comes all the way from the bottom layer of the stack with zero copying.
-    // If we don't release it now, it will be released only when the next message arrives, which is wasteful.
-    cy_buffer_owned_release(subscription->topic->cy, &transfer->payload);
-
     // Log the message.
-    CY_TRACE(subscription->topic->cy,
+    CY_TRACE(cy,
              "💬 [sid=%04x nid=%04x tid=%016llx sz=%06zu ts=%09llu] @ %s [age=%llu]:\n%s\n%s",
-             cy_topic_get_subject_id(subscription->topic),
-             transfer->metadata.remote_node_id,
-             (unsigned long long)transfer->metadata.transfer_id,
+             cy_topic_subject_id(arv->topic),
+             arv->transfer->metadata.remote_node_id,
+             (unsigned long long)arv->transfer->metadata.transfer_id,
              payload.size,
-             (unsigned long long)transfer->timestamp,
-             subscription->topic->name,
-             (unsigned long long)subscription->topic->age,
+             (unsigned long long)arv->transfer->timestamp,
+             cy_topic_name(arv->topic).str,
+             (unsigned long long)arv->topic->age,
              hex,
              ascii);
+    // TODO: log substitutions.
 
     // Optionally, send a direct p2p response to the publisher of this message.
-    if (cy_has_node_id(subscription->topic->cy) && ((rand() % 2) == 0)) {
-        const cy_err_t err = cy_respond(subscription->topic, //
-                                        transfer->timestamp + 1000000,
-                                        transfer->metadata,
+    if (cy_joined(cy) && ((rand() % 2) == 0)) {
+        const cy_err_t err = cy_respond(cy,
+                                        arv->topic, //
+                                        arv->transfer->timestamp + 1000000,
+                                        arv->transfer->metadata,
                                         (struct cy_buffer_borrowed_t){ .view = { .data = ":3", .size = 2 } });
-        if (err < 0) {
+        if (err != CY_OK) {
             fprintf(stderr, "cy_respond: %d\n", err);
         }
     }
 }
 
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
-static void on_response_trace(struct cy_future_t* const future)
+static void on_response_trace(struct cy_t* const cy, struct cy_future_t* const future)
 {
-    struct cy_topic_t* topic = future->topic;
+    struct cy_topic_t* topic = future->publisher->topic;
     if (future->state == cy_future_success) {
         struct cy_transfer_owned_t* const transfer = &future->last_response;
         CY_BUFFER_GATHER_ON_STACK(payload, transfer->payload.base)
@@ -210,12 +223,12 @@ static void on_response_trace(struct cy_future_t* const future)
         // Release the payload buffer memory.
         // This memory comes all the way from the bottom layer of the stack with zero copying.
         // If we don't release it now, it will be released only when the next response arrives, which is wasteful.
-        cy_buffer_owned_release(topic->cy, &transfer->payload);
+        cy_buffer_owned_release(cy, &transfer->payload);
 
         // Log the response.
-        CY_TRACE(topic->cy,
+        CY_TRACE(cy,
                  "↩️ [sid=%04x nid=%04x tid=%016llx sz=%06zu ts=%09llu] @ %s [age=%llu]:\n%s\n%s",
-                 cy_topic_get_subject_id(topic),
+                 cy_topic_subject_id(topic),
                  transfer->metadata.remote_node_id,
                  (unsigned long long)transfer->metadata.transfer_id,
                  payload.size,
@@ -224,10 +237,10 @@ static void on_response_trace(struct cy_future_t* const future)
                  (unsigned long long)topic->age,
                  hex,
                  ascii);
-    } else if (future->state == cy_future_failure) {
-        CY_TRACE(topic->cy,
+    } else if (future->state == cy_future_response_timeout) {
+        CY_TRACE(cy,
                  "↩️⌛ Response to %s tid %016llx (masked) has timed out",
-                 future->topic->name,
+                 future->publisher->topic->name,
                  (unsigned long long)future->transfer_id_masked);
     } else {
         assert(false);
@@ -243,12 +256,12 @@ int main(const int argc, char* argv[])
     // The rest of the API is platform- and transport-agnostic.
     struct cy_udp_posix_t cy_udp_posix;
     {
-        const cy_err_t res = cy_udp_posix_new(&cy_udp_posix, //
-                                              cfg.local_uid,
-                                              cfg.namespace,
-                                              cfg.iface_address,
-                                              cfg.tx_queue_capacity_per_iface);
-        if (res < 0) {
+        const cy_err_t res = cy_udp_posix_new_c(&cy_udp_posix, //
+                                                cfg.local_uid,
+                                                cfg.namespace,
+                                                cfg.iface_address,
+                                                cfg.tx_queue_capacity_per_iface);
+        if (res != CY_OK) {
             fprintf(stderr, "cy_udp_posix_new: %d\n", res);
             return 1;
         }
@@ -257,34 +270,34 @@ int main(const int argc, char* argv[])
 
     // ------------------------------  End of the platform- and transport-specific part  ------------------------------
 
-    // Create topics.
-    struct cy_topic_t*     topics[cfg.topic_count];
-    struct cy_subscriber_t subs[cfg.topic_count];
-    for (size_t i = 0; i < cfg.topic_count; i++) {
-        topics[i] = cy_topic_new(cy, cfg.topics[i].name);
-        if (topics[i] == NULL) {
-            fprintf(stderr, "cy_topic_new: %p\n", (void*)topics[i]);
+    // Create publishers.
+    struct cy_publisher_t publishers[cfg.pub_count];
+    struct cy_future_t    futures[cfg.pub_count];
+    for (size_t i = 0; i < cfg.pub_count; i++) {
+        cy_err_t res = cy_advertise_c(cy, &publishers[i], cfg.pubs[i].name, 1024 * 1024);
+        if (res != CY_OK) {
+            fprintf(stderr, "cy_topic_new: %u\n", res);
             return 1;
         }
-        if (cfg.topics[i].sub) {
-            const cy_err_t res = cy_subscribe(topics[i], &subs[i], 1024 * 1024, on_msg_trace);
-            if (res < 0) {
-                fprintf(stderr, "cy_subscribe: %d\n", res);
-                return 1;
-            }
-        }
+        cy_future_new(&futures[i], on_response_trace, NULL);
     }
-    struct cy_future_t* futures = calloc(cfg.topic_count, sizeof(struct cy_future_t));
-    for (size_t i = 0; i < cfg.topic_count; i++) {
-        futures->state    = cy_future_success;
-        futures->callback = on_response_trace;
+
+    // Create subscribers.
+    struct cy_subscriber_t subscribers[cfg.sub_count];
+    for (size_t i = 0; i < cfg.sub_count; i++) {
+        cy_err_t res = cy_subscribe_c(cy, &subscribers[i], cfg.subs[i].name, 1024 * 1024, on_msg_trace);
+        if (res != CY_OK) {
+            fprintf(stderr, "cy_subscribe: %d\n", res);
+            return 1;
+        }
     }
 
     // Spin the event loop and publish the topics.
     cy_us_t next_publish_at = cy_now(cy) + 1000000;
     while (true) {
+        // The event loop spin API is platform-specific, too.
         const cy_err_t err_spin = cy_udp_posix_spin_once(&cy_udp_posix);
-        if (err_spin < 0) {
+        if (err_spin != CY_OK) {
             fprintf(stderr, "cy_udp_posix_spin_once: %d\n", err_spin);
             break;
         }
@@ -294,9 +307,9 @@ int main(const int argc, char* argv[])
         // See https://github.com/Zubax/olga_scheduler
         const cy_us_t now = cy_now(cy);
         if (now >= next_publish_at) {
-            if (cy_has_node_id(cy)) {
-                for (size_t i = 0; i < cfg.topic_count; i++) {
-                    if ((!cfg.topics[i].pub) || (futures[i].state == cy_future_pending)) {
+            if (cy_joined(cy)) {
+                for (size_t i = 0; i < cfg.pub_count; i++) {
+                    if (futures[i].state == cy_future_pending) {
                         continue;
                     }
                     char msg[256];
@@ -305,23 +318,19 @@ int main(const int argc, char* argv[])
                             (unsigned long long)cy->uid,
                             (long long)now);
                     const cy_err_t pub_res =
-                      cy_publish(topics[i],
+                      cy_publish(cy,
+                                 &publishers[i],
                                  now + 100000,
                                  (struct cy_buffer_borrowed_t){ .view = { .data = msg, .size = strlen(msg) } },
                                  now + 1000000,
                                  &futures[i]);
-                    if (pub_res < 0) {
+                    if (pub_res != CY_OK) {
                         fprintf(stderr, "cy_publish: %d\n", pub_res);
                         break;
                     }
                 }
             }
             next_publish_at += 1000000U;
-
-            // CY_TRACE(cy,
-            //          "Heap: allocated %zu fragments, %llu OOMs",
-            //          cy_udp_posix.mem_allocated_fragments,
-            //          (unsigned long long)cy_udp_posix.mem_oom_count);
         }
     }
 

@@ -266,13 +266,13 @@ direction LR
     cy "1" o-- "*" _topic
     cy "1" o-- "*" _subscriber_root
     cy "1" --> "*" future
-    _topic "1" o-- "*" _linkage
+    _topic "1" o-- "*" _coupling
     _topic "1" <-- "*" publisher
     publisher "1" <-- "*" future
-    _linkage "*" --> "1" _subscriber_root
+    _coupling "*" --> "1" _subscriber_root
     _subscriber_root "1" o-- "*" subscriber
     note "Automatically managed private entities are prefixed with '_'"
-    note "Heap-allocated items are: _topic, _subscriber_root, _linkage"
+    note "Heap-allocated items are: _topic, _subscriber_root, _coupling"
 ```
 
 

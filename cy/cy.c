@@ -275,7 +275,7 @@ static uint16_t pick_node_id(const struct cy_t* const cy, struct cy_bloom64_t* c
     }
 
     // Now we have a word with at least one zero bit. Find a random zero bit in it.
-    uint8_t bit_index = (uint8_t)random_uint(cy, 0U, 63U);
+    uint_fast8_t bit_index = (uint_fast8_t)random_uint(cy, 0U, 63U);
     assert(word != UINT64_MAX);
     while ((word & (1ULL << bit_index)) != 0) { // guaranteed to terminate, see above.
         bit_index = (bit_index + 1U) % 64U;
@@ -387,7 +387,7 @@ static uint32_t parse_pinned(const struct wkv_str_t s)
         if ((s.str[i] < '0') || (s.str[i] > '9')) {
             return CY_SUBJECT_ID_INVALID;
         }
-        out = (out * 10U) + (uint8_t)(s.str[i] - '0');
+        out = (out * 10U) + (uint_fast8_t)(s.str[i] - '0');
         if (out >= CY_TOTAL_SUBJECT_COUNT) {
             return CY_SUBJECT_ID_INVALID;
         }
@@ -809,8 +809,8 @@ static cy_err_t publish_heartbeat_gossip(struct cy_t* const cy, struct cy_topic_
 {
     topic_age(topic, now);
     topic_ensure_subscribed(cy, topic); // use this opportunity to repair the subscription if broken
-    const uint8_t flags = ((topic->pub_count > 0) ? TOPIC_FLAG_PUBLISHING : 0U) | //
-                          ((topic->couplings != NULL) ? TOPIC_FLAG_SUBSCRIBED : 0U);
+    const uint_fast8_t flags = ((topic->pub_count > 0) ? TOPIC_FLAG_PUBLISHING : 0U) | //
+                               ((topic->couplings != NULL) ? TOPIC_FLAG_SUBSCRIBED : 0U);
     // Possible optimization: we don't have to transmit the topic name if the message is urgent, i.e.,
     // if it is published in response to a divergent allocation or possibly a collision.
     struct heartbeat_t msg = {
@@ -843,10 +843,9 @@ static cy_err_t publish_heartbeat_scout(struct cy_t* const cy, const cy_us_t now
 }
 
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
-static void on_heartbeat(const struct cy_arrival_t* const evt)
+static void on_heartbeat(struct cy_t* const cy, const struct cy_arrival_t* const evt)
 {
     assert((evt->subscriber != NULL) && (evt->topic != NULL) && (evt->transfer != NULL));
-    struct cy_t* const cy = evt->cy;
     // Deserialize the message. TODO: deserialize properly.
     struct heartbeat_t heartbeat = { 0 };
     const size_t       msg_size  = cy_buffer_owned_gather(
@@ -859,7 +858,7 @@ static void on_heartbeat(const struct cy_arrival_t* const evt)
     const uint64_t                       other_hash = heartbeat.topic_hash;
     const uint64_t         other_evictions = heartbeat.topic_name_length8_reserved16_evictions40 & ((1ULL << 40U) - 1U);
     const uint64_t         other_age       = heartbeat.topic_flags8_age56 & ((1ULL << 56U) - 1U);
-    const uint8_t          flags           = (uint8_t)(heartbeat.topic_flags8_age56 >> 56U);
+    const uint_fast8_t     flags           = (uint_fast8_t)(heartbeat.topic_flags8_age56 >> 56U);
     const bool             is_scout        = (flags & TOPIC_FLAG_SCOUT) != 0U;
     const struct wkv_str_t key             = { .len = heartbeat.topic_name_length8_reserved16_evictions40 >> 56U,
                                                .str = heartbeat.topic_name };
@@ -976,7 +975,7 @@ static void retire_timed_out_futures(struct cy_t* cy, const cy_us_t now)
         cavl2_remove(&fut->publisher->topic->futures_by_transfer_id, &fut->index_transfer_id);
         fut->state = cy_future_response_timeout;
         if (fut->callback != NULL) {
-            fut->callback(fut);
+            fut->callback(cy, fut);
         }
         // We could have trivially avoided having to search the tree again by replacing this with a
         // cavl2_next_greater(), which is very efficient, but the problem here is that the user callback may modify
@@ -1021,6 +1020,12 @@ cy_err_t cy_advertise(struct cy_t* const           cy,
              pub->topic->pub_count,
              res);
     return res;
+}
+
+void cy_unadvertise(struct cy_t* const cy, const struct cy_publisher_t* pub)
+{
+    (void)cy;
+    (void)pub;
 }
 
 void cy_future_new(struct cy_future_t* const future, const cy_future_callback_t callback, void* const user)
@@ -1219,6 +1224,12 @@ cy_err_t cy_subscribe_with_params(struct cy_t* const                    cy,
         return CY_ERR_MEMORY;
     }
     return CY_OK;
+}
+
+void cy_unsubscribe(struct cy_t* const cy, struct cy_subscriber_t* const sub)
+{
+    (void)cy;
+    (void)sub;
 }
 
 cy_err_t cy_respond(struct cy_t* const                  cy,
@@ -1485,7 +1496,7 @@ cy_err_t cy_new(struct cy_t* const                cy,
             res = cy_subscribe_c(
               cy, &cy->heartbeat_sub, CY_CONFIG_HEARTBEAT_TOPIC_NAME, sizeof(struct heartbeat_t), &on_heartbeat);
             if (res != CY_OK) {
-                cy_unadvertise(&cy->heartbeat_pub);
+                cy_unadvertise(cy, &cy->heartbeat_pub);
             }
         }
     }
@@ -1536,13 +1547,12 @@ void cy_ingest_topic_transfer(struct cy_t* const         cy,
         const struct cy_topic_coupling_t* const next_cpl = cpl->next;
         struct cy_subscriber_t* const           next_sub = sub->next;
         while (sub != NULL) {
-            const struct cy_arrival_t evt = { .cy                 = cy,
-                                              .subscriber         = sub,
+            const struct cy_arrival_t evt = { .subscriber         = sub,
                                               .topic              = topic,
                                               .transfer           = &transfer,
                                               .substitution_count = cpl->substitution_count,
                                               .substitutions      = cpl->substitutions };
-            sub->callback(&evt);
+            sub->callback(cy, &evt);
             sub = next_sub;
         }
         cpl = next_cpl;
@@ -1596,7 +1606,7 @@ void cy_ingest_topic_response_transfer(struct cy_t* const cy, struct cy_transfer
     cavl2_remove(&cy->futures_by_deadline, &fut->index_deadline);
     cavl2_remove(&topic->futures_by_transfer_id, &fut->index_transfer_id);
     if (fut->callback != NULL) {
-        fut->callback(fut);
+        fut->callback(cy, fut);
     }
 }
 
