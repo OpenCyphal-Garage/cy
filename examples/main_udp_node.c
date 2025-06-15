@@ -239,7 +239,7 @@ static void on_response_trace(struct cy_t* const cy, struct cy_future_t* const f
                  ascii);
     } else if (future->state == cy_future_response_timeout) {
         CY_TRACE(cy,
-                 "↩️⌛ Response to %s tid %016llx (masked) has timed out",
+                 "↩️⌛ Request to %s tid %016llx (masked) has timed out",
                  future->publisher->topic->name,
                  (unsigned long long)future->transfer_id_masked);
     } else {

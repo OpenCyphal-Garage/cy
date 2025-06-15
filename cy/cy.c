@@ -369,7 +369,7 @@ static void schedule_gossip(struct cy_t* const cy, struct cy_topic_t* const topi
         new_time++;
     }
     if (topic->last_gossip > new_time) { // Don't do anything if it's already scheduled.
-        CY_TRACE(cy, "'%s' #%016llx @%04x", topic->name, (unsigned long long)topic->hash, cy_topic_subject_id(topic));
+        CY_TRACE(cy, "⏱️'%s' #%016llx @%04x", topic->name, (unsigned long long)topic->hash, cy_topic_subject_id(topic));
         update_last_gossip_time(cy, topic, new_time);
     }
 }
@@ -449,7 +449,7 @@ static void topic_ensure_subscribed(struct cy_t* const cy, struct cy_topic_t* co
         const cy_err_t                        res    = cy->platform->topic_subscribe(cy, topic, params);
         topic->subscribed                            = res == CY_OK;
         CY_TRACE(cy,
-                 "Platform subscription for '%s' #%016llx @%04x extent=%zu tid_timeout=%lld result=%d",
+                 "🗞️'%s' #%016llx @%04x extent=%zu tid_timeout=%lld result=%d",
                  topic->name,
                  (unsigned long long)topic->hash,
                  cy_topic_subject_id(topic),
@@ -585,7 +585,7 @@ static cy_err_t topic_new(struct cy_t* const        cy,
         return CY_ERR_MEMORY;
     }
     memset(topic, 0, sizeof(*topic));
-    if (resolved_name.len > CY_TOPIC_NAME_MAX) {
+    if ((resolved_name.len == 0) || (resolved_name.len > CY_TOPIC_NAME_MAX)) {
         goto bad_name;
     }
     memcpy(topic->name, resolved_name.str, resolved_name.len);
@@ -596,8 +596,6 @@ static cy_err_t topic_new(struct cy_t* const        cy,
     topic->age       = 0;
     topic->aged_at   = cy_now(cy);
 
-    topic->response_extent_with_overhead = RESPONSE_PAYLOAD_OVERHEAD_BYTES;
-
     topic->pub_transfer_id = random_u64(cy); // https://forum.opencyphal.org/t/improve-the-transfer-id-timeout/2375
     topic->pub_count       = 0;
 
@@ -606,8 +604,7 @@ static cy_err_t topic_new(struct cy_t* const        cy,
 
     cy->last_event_ts = cy->last_local_event_ts = topic->last_event_ts = topic->last_local_event_ts = cy_now(cy);
 
-    if ((resolved_name.len == 0) || (resolved_name.len > CY_TOPIC_NAME_MAX) ||
-        (cy->topic_count >= CY_TOPIC_SUBJECT_COUNT)) {
+    if (cy->topic_count >= CY_TOPIC_SUBJECT_COUNT) {
         goto bad_name;
     }
 
@@ -643,7 +640,7 @@ static cy_err_t topic_new(struct cy_t* const        cy,
     }
     cy->topic_count++;
     CY_TRACE(cy,
-             "🆕'%s' #%016llx @%04x: topic_count=%zu",
+             "✨'%s' #%016llx @%04x: topic_count=%zu",
              topic->name,
              (unsigned long long)topic->hash,
              cy_topic_subject_id(topic),
@@ -663,7 +660,14 @@ static cy_err_t topic_ensure(struct cy_t* const        cy,
                              struct cy_topic_t** const out_topic,
                              const struct wkv_str_t    resolved_name)
 {
-    return (cy_topic_find_by_name(cy, resolved_name) == NULL) ? 0 : topic_new(cy, out_topic, resolved_name);
+    struct cy_topic_t* const topic = cy_topic_find_by_name(cy, resolved_name);
+    if (topic != NULL) {
+        if (out_topic != NULL) {
+            *out_topic = topic;
+        }
+        return 0;
+    }
+    return topic_new(cy, out_topic, resolved_name);
 }
 
 /// Create a new coupling between a topic and a subscriber.
@@ -680,7 +684,7 @@ static cy_err_t topic_couple(struct cy_t* const                 cy,
     char subr_name[CY_TOPIC_NAME_MAX + 1];
     wkv_get_key(&cy->subscribers_by_name, subr->index_name, subr_name);
     CY_TRACE(cy,
-             "Coupling '%s' #%016llx @%04x <=> '%s' substitutions=%zu",
+             "🔗'%s' #%016llx @%04x <=> '%s' substitutions=%zu",
              topic->name,
              (unsigned long long)topic->hash,
              cy_topic_subject_id(topic),
@@ -730,7 +734,7 @@ static void topic_subscribe_if_matching(struct cy_t* const cy, const struct wkv_
     if (NULL == wkv_route(&cy->subscribers_by_pattern, resolved_name, NULL, wkv_cb_first)) {
         return; // No match.
     }
-    CY_TRACE(cy, "✨ Automatic pattern subscription for '%s'", resolved_name.str);
+    CY_TRACE(cy, "✨'%s'", resolved_name.str);
     // Create the new topic.
     struct cy_topic_t* topic = NULL;
     {
@@ -757,11 +761,7 @@ static void* wkv_cb_topic_mark_scout_response(const struct wkv_event_t evt)
 {
     struct cy_t* const       cy    = (struct cy_t*)evt.context;
     struct cy_topic_t* const topic = (struct cy_topic_t*)evt.node->value;
-    CY_TRACE(cy,
-             "📢 Scout local match '%s' #%016llx @%04x",
-             topic->name,
-             (unsigned long long)(topic->hash),
-             cy_topic_subject_id(topic));
+    CY_TRACE(cy, "📢'%s' #%016llx @%04x", topic->name, (unsigned long long)(topic->hash), cy_topic_subject_id(topic));
     schedule_gossip(cy, topic, BIG_BANG + 10);
     return NULL;
 }
@@ -794,8 +794,8 @@ static cy_err_t publish_heartbeat(struct cy_t* const cy, const cy_us_t now, stru
     message->version = 1;
     message->uid     = cy->uid;
     const size_t message_size =
-      sizeof(*message) - (CY_TOPIC_NAME_MAX - (message->topic_name_length8_reserved16_evictions40 >> 56U));
-    assert(message_size <= sizeof(message));
+      sizeof(struct heartbeat_t) - (CY_TOPIC_NAME_MAX - (message->topic_name_length8_reserved16_evictions40 >> 56U));
+    assert(message_size <= sizeof(struct heartbeat_t));
     assert((message->topic_name_length8_reserved16_evictions40 >> 56U) <= CY_TOPIC_NAME_MAX);
     const struct cy_buffer_borrowed_t payload = { .next = NULL, .view = { .data = message, .size = message_size } };
     assert(cy->node_id <= cy->platform->node_id_max);
@@ -835,7 +835,7 @@ static cy_err_t publish_heartbeat_scout(struct cy_t* const cy, const cy_us_t now
     };
     wkv_get_key(&cy->subscribers_by_name, subr->index_name, msg.topic_name);
     const cy_err_t res = publish_heartbeat(cy, now, &msg);
-    CY_TRACE(cy, "📢 Published scout '%s' result=%d", msg.topic_name, res);
+    CY_TRACE(cy, "📢'%s' result=%d", msg.topic_name, res);
     if (res == CY_OK) {
         cy->next_scout = subr->next_scout; // delist the scout if publication succeeded
     }
@@ -871,7 +871,7 @@ static void on_heartbeat(struct cy_t* const cy, const struct cy_arrival_t* const
             const int_fast8_t other_lage = log2_floor(other_age);
             if (mine->evictions != other_evictions) {
                 CY_TRACE(cy,
-                         "Topic '%s' #%016llx divergent allocation discovered via gossip from uid=%016llx nid=%04x:\n"
+                         "🔀 Divergence on '%s' #%016llx discovered via gossip from uid=%016llx nid=%04x:\n"
                          "\t local  @%04x evict=%llu log2(age=%llu)=%+d\n"
                          "\t remote @%04x evict=%llu log2(age=%llu)=%+d",
                          mine->name,
@@ -918,9 +918,9 @@ static void on_heartbeat(struct cy_t* const cy, const struct cy_arrival_t* const
             assert(cy_topic_subject_id(mine) == topic_subject_id(other_hash, other_evictions));
             const bool win = left_wins(mine, other_age, other_hash);
             CY_TRACE(cy,
-                     "Topic collision 💥 @%04x discovered via gossip from uid=%016llx nid=%04x; we %s. Contestants:\n"
-                     "\t local  #%016llx evict=%llu log2(age=%llx)=%+d '%s'\n"
-                     "\t remote #%016llx evict=%llu log2(age=%llx)=%+d '%s'",
+                     "💥 Collision @%04x discovered via gossip from uid=%016llx nid=%04x; we %s. Contestants:\n"
+                     "\t local  #%016llx evict=%llu log2(age=%llu)=%+d '%s'\n"
+                     "\t remote #%016llx evict=%llu log2(age=%llu)=%+d '%s'",
                      cy_topic_subject_id(mine),
                      (unsigned long long)heartbeat.uid,
                      meta->remote_node_id,
@@ -1003,16 +1003,10 @@ cy_err_t cy_advertise(struct cy_t* const           cy,
     if (res == CY_OK) {
         assert(pub->topic != NULL);
         pub->topic->pub_count++;
-        // We use a simplified response extent handling here: simply store the maximum seen value without bothering
-        // to unroll it back when the largest publisher is removed. This is good enough in this case because the
-        // underlying platform layer is expected to use just a single P2P session for all incoming responses,
-        // meaning that the effective response extent is simply the maximum of all publishers of all local topics.
-        pub->topic->response_extent_with_overhead = larger(pub->topic->response_extent_with_overhead, //
-                                                           response_extent + RESPONSE_PAYLOAD_OVERHEAD_BYTES);
-        cy->platform->topic_on_response_extent_update(cy, pub->topic);
+        cy->platform->topic_advertise(cy, pub->topic, response_extent + RESPONSE_PAYLOAD_OVERHEAD_BYTES);
     }
     CY_TRACE(cy,
-             "✨ New publisher '%s' #%016llx @%04x: topic_count=%zu pub_count=%zu res=%d",
+             "✨'%s' #%016llx @%04x: topic_count=%zu pub_count=%zu res=%d",
              pub->topic->name,
              (unsigned long long)pub->topic->hash,
              cy_topic_subject_id(pub->topic),
@@ -1140,7 +1134,7 @@ static cy_err_t ensure_subscriber_root(struct cy_t* const                  cy,
         return CY_OK;
     }
 
-    CY_TRACE(cy, "✨ New subscriber root for '%s'", resolved_name.str);
+    CY_TRACE(cy, "✨'%s'", resolved_name.str);
 
     // Otherwise, allocate a new root, if possible.
     node->value = mem_alloc(cy, sizeof(struct cy_subscriber_root_t));
@@ -1206,7 +1200,7 @@ cy_err_t cy_subscribe_with_params(struct cy_t* const                    cy,
     const struct wkv_str_t resolved_name = wkv_key(name_buf);
     (void)memset(sub, 0, sizeof(*sub));
     CY_TRACE(cy,
-             "✨ New subscriber '%s' extent=%zu tid_timeout=%lld",
+             "✨'%s' extent=%zu tid_timeout=%lld",
              resolved_name.str,
              params.extent,
              (long long)params.transfer_id_timeout);
@@ -1422,7 +1416,7 @@ cy_err_t cy_new(struct cy_t* const                cy,
     assert(platform->topic_publish != NULL);
     assert(platform->topic_subscribe != NULL);
     assert(platform->topic_unsubscribe != NULL);
-    assert(platform->topic_on_response_extent_update != NULL);
+    assert(platform->topic_advertise != NULL);
     assert(platform->topic_on_subscription_error != NULL);
     assert((platform->node_id_max > 0) && (platform->node_id_max < CY_NODE_ID_INVALID));
 
@@ -1515,7 +1509,7 @@ static void mark_neighbor(struct cy_t* const cy, const uint16_t remote_node_id)
     // network). We can't remove them individually, so we purge the filter and start over.
     const bool bloom_congested = bloom->popcount > ((bloom->n_bits * 31ULL) / 32U);
     if (bloom_congested) {
-        CY_TRACE(cy, "Bloom filter congested: popcount=%zu; purging to remove tombstones", bloom->popcount);
+        CY_TRACE(cy, "🌻 Bloom filter congested: popcount=%zu; purging to remove tombstones", bloom->popcount);
         bloom64_purge(bloom);
         assert(bloom->popcount == 0);
     }
@@ -1618,7 +1612,7 @@ cy_err_t cy_update(struct cy_t* const cy)
     retire_timed_out_futures(cy, now);
 
     if (cy->node_id_collision) {
-        CY_TRACE(cy, "Processing the delayed node-ID collision event now.");
+        CY_TRACE(cy, "🧠 Processing the delayed node-ID collision event now.");
         cy->node_id_collision = false;
         if (cy->node_id <= cy->platform->node_id_max) {
             cy->node_id = CY_NODE_ID_INVALID;
@@ -1637,8 +1631,11 @@ cy_err_t cy_update(struct cy_t* const cy)
             cy->node_id = pick_node_id(cy, bloom, cy->platform->node_id_max);
             assert(cy->node_id <= cy->platform->node_id_max);
             res = cy->platform->node_id_set(cy);
-            CY_TRACE(
-              cy, "Picked own node-ID %04x; Bloom popcount %zu; node_id_set()->%d", cy->node_id, bloom->popcount, res);
+            CY_TRACE(cy,
+                     "☝️ Picked own node-ID %04x; Bloom popcount %zu; node_id_set()->%d",
+                     cy->node_id,
+                     bloom->popcount,
+                     res);
         }
         assert(cy->node_id <= cy->platform->node_id_max);
         if (res != CY_OK) {
@@ -1669,7 +1666,7 @@ void cy_notify_topic_hash_collision(struct cy_t* const cy, struct cy_topic_t* co
 {
     // Schedule the topic for gossiping ASAP, unless it is already scheduled.
     if ((topic != NULL) && (topic->last_gossip > 0)) {
-        CY_TRACE(cy, "💥 '%s'@%04x", topic->name, cy_topic_subject_id(topic));
+        CY_TRACE(cy, "💥'%s'@%04x", topic->name, cy_topic_subject_id(topic));
         // Topics with the same time will be ordered FIFO -- the tree is stable.
         schedule_gossip(cy, topic, BIG_BANG);
         // We could subtract the heartbeat period from the next heartbeat time to make it come out sooner,
@@ -1682,6 +1679,6 @@ void cy_notify_node_id_collision(struct cy_t* const cy)
     assert(cy != NULL);
     if (!cy->node_id_collision) {
         cy->node_id_collision = true;
-        CY_TRACE(cy, "💥 node-ID %04x", cy->node_id);
+        CY_TRACE(cy, "💥 %04x", cy->node_id);
     }
 }

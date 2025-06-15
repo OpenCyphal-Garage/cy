@@ -35,14 +35,14 @@ static void default_tx_sock_err_handler(struct cy_udp_posix_t* const cy_udp,
                                         const uint_fast8_t           iface_index,
                                         const uint32_t               err_no)
 {
-    CY_TRACE(&cy_udp->base, "TX socket error on iface #%u: %u", iface_index, (unsigned)err_no);
+    CY_TRACE(&cy_udp->base, "⚠️ TX socket error on iface #%u: %u", iface_index, (unsigned)err_no);
 }
 
 static void default_rpc_rx_sock_err_handler(struct cy_udp_posix_t* const cy_udp,
                                             const uint_fast8_t           iface_index,
                                             const uint32_t               err_no)
 {
-    CY_TRACE(&cy_udp->base, "RPC RX socket error on iface #%u: %u", iface_index, (unsigned)err_no);
+    CY_TRACE(&cy_udp->base, "⚠️ RPC RX socket error on iface #%u: %u", iface_index, (unsigned)err_no);
 }
 
 static void default_rx_sock_err_handler(struct cy_udp_posix_t*             cy_udp,
@@ -51,7 +51,7 @@ static void default_rx_sock_err_handler(struct cy_udp_posix_t*             cy_ud
                                         const uint32_t                     err_no)
 {
     CY_TRACE(
-      &cy_udp->base, "RX socket error on iface #%u topic '%s': %u", iface_index, topic->base.name, (unsigned)err_no);
+      &cy_udp->base, "⚠️ RX socket error on iface #%u topic '%s': %u", iface_index, topic->base.name, (unsigned)err_no);
 }
 
 static bool is_valid_ip(const uint32_t ip)
@@ -70,7 +70,6 @@ static void* mem_alloc(void* const user, const size_t size)
             cy_udp->mem_oom_count++;
         }
     }
-    // CY_TRACE(&cy_udp->base, "mem_alloc(%zu) -> %p", size, out);
     return out;
 }
 
@@ -78,7 +77,6 @@ static void mem_free(void* const user, const size_t size, void* const pointer)
 {
     struct cy_udp_posix_t* const cy_udp = (struct cy_udp_posix_t*)user;
     (void)size;
-    // CY_TRACE(&cy_udp->base, "mem_free(%zu, %p)", size, pointer);
     if (pointer != NULL) {
         assert(cy_udp->mem_allocated_fragments > 0);
         cy_udp->mem_allocated_fragments--;
@@ -108,6 +106,10 @@ static void rpc_listen(struct cy_udp_posix_t* const cy_udp)
     // https://github.com/pavel-kirienko/cy/issues/8
     // https://github.com/OpenCyphal/libudpard/issues/63 (applies to requests only in this case)
     cy_udp->rpc_rx_port_topic_response.port.transfer_id_timeout_usec = 0;
+    CY_TRACE(&cy_udp->base,
+             "🎧 RPC service_id=%04x extent=%zu",
+             cy_udp->rpc_rx_port_topic_response.service_id,
+             cy_udp->response_extent_with_overhead);
 }
 
 static void rpc_unlisten(struct cy_udp_posix_t* const cy_udp)
@@ -389,13 +391,16 @@ static void platform_topic_unsubscribe(struct cy_t* const cy, struct cy_topic_t*
 }
 
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
-static void platform_topic_on_response_extent_update(struct cy_t* const cy, struct cy_topic_t* const cy_topic)
+static void platform_topic_advertise(struct cy_t* const       cy,
+                                     struct cy_topic_t* const cy_topic,
+                                     const size_t             response_extent_with_overhead)
 {
+    (void)cy_topic;
     struct cy_udp_posix_t* const cy_udp = (struct cy_udp_posix_t*)cy;
-    if (cy_topic->response_extent_with_overhead > cy_udp->response_extent_with_overhead) {
-        cy_udp->response_extent_with_overhead = cy_topic->response_extent_with_overhead;
+    if (response_extent_with_overhead > cy_udp->response_extent_with_overhead) {
+        cy_udp->response_extent_with_overhead = response_extent_with_overhead;
         CY_TRACE(&cy_udp->base, //
-                 "Response (extent+overhead) increased to %zu bytes",
+                 "📏 Response (extent+overhead) increased to %zu bytes",
                  cy_udp->response_extent_with_overhead);
         if (cy_udp->base.node_id <= UDPARD_NODE_ID_MAX) {
             rpc_unlisten(cy_udp);
@@ -408,7 +413,7 @@ static void platform_topic_on_subscription_error(struct cy_t* const       cy,
                                                  struct cy_topic_t* const cy_topic,
                                                  const cy_err_t           error)
 {
-    CY_TRACE(cy, "Subscription error on topic '%s': %d", (cy_topic != NULL) ? cy_topic->name : "", error);
+    CY_TRACE(cy, "⚠️ Subscription error on topic '%s': %d", (cy_topic != NULL) ? cy_topic->name : "", error);
 }
 
 static const struct cy_platform_t g_platform = {
@@ -423,13 +428,13 @@ static const struct cy_platform_t g_platform = {
 
     .request = platform_request,
 
-    .topic_new                       = platform_topic_new,
-    .topic_destroy                   = platform_topic_destroy,
-    .topic_publish                   = platform_topic_publish,
-    .topic_subscribe                 = platform_topic_subscribe,
-    .topic_unsubscribe               = platform_topic_unsubscribe,
-    .topic_on_response_extent_update = platform_topic_on_response_extent_update,
-    .topic_on_subscription_error     = platform_topic_on_subscription_error,
+    .topic_new                   = platform_topic_new,
+    .topic_destroy               = platform_topic_destroy,
+    .topic_publish               = platform_topic_publish,
+    .topic_subscribe             = platform_topic_subscribe,
+    .topic_unsubscribe           = platform_topic_unsubscribe,
+    .topic_advertise             = platform_topic_advertise,
+    .topic_on_subscription_error = platform_topic_on_subscription_error,
 
     .node_id_max      = UDPARD_NODE_ID_MAX,
     .transfer_id_mask = UINT64_MAX,

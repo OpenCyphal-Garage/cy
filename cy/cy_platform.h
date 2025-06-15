@@ -159,15 +159,6 @@ struct cy_topic_t
     /// Used for matching futures against received responses.
     struct cy_tree_t* futures_by_transfer_id;
 
-    /// Computed as the maximum seen response extent among all publishers on this topic.
-    /// Used by the platform layer to automatically configure the extent for P2P response transfers.
-    /// The platform layer is expected to continuously track the maximum seen response extent whenever a
-    /// transfer is published on any topic, and if an increase is detected, it should reconfigure the P2P response
-    /// session to accommodate the new maximum.
-    /// As the name suggests, the 8-byte topic hash prefix size is included in this value, so the platform
-    /// layer doesn't need to adjust it.
-    size_t response_extent_with_overhead;
-
     /// Only used if the application publishes data on this topic.
     /// pub_count tracks the number of existing advertisements on this topic; when this number reaches zero
     /// and there are no live subscriptions, the topic will be garbage collected by Cy.
@@ -264,9 +255,11 @@ typedef cy_err_t (*cy_platform_topic_subscribe_t)(struct cy_t*, struct cy_topic_
 /// Instructs the underlying transport to destroy an existing subscription.
 typedef void (*cy_platform_topic_unsubscribe_t)(struct cy_t*, struct cy_topic_t*);
 
-/// Invoked when the response extent of a topic is updated (e.g., when a new publisher is created on the topic),
-/// or when the topic is created for the first time. It may also be invoked when the value is not actually changed.
-typedef void (*cy_platform_topic_on_response_extent_update_t)(struct cy_t*, struct cy_topic_t*);
+/// Invoked when a new publisher is created on the topic.
+/// The main purpose here is to communicate the response extent requested by this publisher to the platform layer,
+/// allowing it to configure the P2P session accordingly.
+/// The requested extent is adjusted for any protocol overheads, so that the platform layer does not have to handle it.
+typedef void (*cy_platform_topic_advertise_t)(struct cy_t*, struct cy_topic_t*, size_t response_extent_with_overhead);
 
 /// If a subject-ID collision or divergence are discovered, Cy may reassign the topic to a different subject-ID.
 /// To do that, it will first unsubscribe the topic using the corresponding function,
@@ -298,13 +291,13 @@ struct cy_platform_t
 
     cy_platform_request_t request;
 
-    cy_platform_topic_new_t                       topic_new;
-    cy_platform_topic_destroy_t                   topic_destroy;
-    cy_platform_topic_publish_t                   topic_publish;
-    cy_platform_topic_subscribe_t                 topic_subscribe;
-    cy_platform_topic_unsubscribe_t               topic_unsubscribe;
-    cy_platform_topic_on_response_extent_update_t topic_on_response_extent_update;
-    cy_platform_topic_on_subscription_error_t     topic_on_subscription_error;
+    cy_platform_topic_new_t                   topic_new;
+    cy_platform_topic_destroy_t               topic_destroy;
+    cy_platform_topic_publish_t               topic_publish;
+    cy_platform_topic_subscribe_t             topic_subscribe;
+    cy_platform_topic_unsubscribe_t           topic_unsubscribe;
+    cy_platform_topic_advertise_t             topic_advertise;
+    cy_platform_topic_on_subscription_error_t topic_on_subscription_error;
 
     /// 127 for Cyphal/CAN, 65534 for Cyphal/UDP and Cyphal/Serial, etc.
     /// This is used for the automatic node-ID allocation.
