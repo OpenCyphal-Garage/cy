@@ -197,8 +197,14 @@ struct cy_publisher_t
     void*              user;
 };
 
+/// Future lifecycle:
+///
+///     fresh ---> pending --+---> success
+///                          |
+///                          +---> response_timeout
 enum cy_future_state_t
 {
+    cy_future_fresh,
     cy_future_pending,
     cy_future_success,
     cy_future_response_timeout,
@@ -252,6 +258,7 @@ static inline cy_err_t cy_advertise_c(struct cy_t* const           cy,
 void cy_unadvertise(struct cy_t* const cy, const struct cy_publisher_t* pub);
 
 /// Just a convenience function, nothing special.
+/// The intial future state is cy_future_fresh.
 void cy_future_new(struct cy_future_t* const future, const cy_future_callback_t callback, void* const user);
 
 /// This needs not be done after a future completes normally. It is only needed if the future needs to be

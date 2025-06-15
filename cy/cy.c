@@ -717,10 +717,10 @@ static cy_err_t topic_couple(struct cy_t* const                 cy,
 /// Returns non-NULL on OOM.
 static void* wkv_cb_couple_new_topic(const struct wkv_event_t evt)
 {
-    struct cy_t* const                  cy    = (struct cy_t*)(((void**)evt.context)[0]);
-    struct cy_topic_t* const            topic = (struct cy_topic_t*)(((void**)evt.context)[1]);
-    const struct cy_subscriber_t* const sub   = (struct cy_subscriber_t*)evt.node->value;
-    const cy_err_t res = topic_couple(cy, topic, sub->root, evt.substitution_count, evt.substitutions);
+    struct cy_t* const                 cy    = (struct cy_t*)(((void**)evt.context)[0]);
+    struct cy_topic_t* const           topic = (struct cy_topic_t*)(((void**)evt.context)[1]);
+    struct cy_subscriber_root_t* const subr  = (struct cy_subscriber_root_t*)evt.node->value;
+    const cy_err_t                     res   = topic_couple(cy, topic, subr, evt.substitution_count, evt.substitutions);
     return (0 == res) ? NULL : "";
 }
 
@@ -1026,7 +1026,7 @@ void cy_future_new(struct cy_future_t* const future, const cy_future_callback_t 
 {
     assert(future != NULL);
     memset(future, 0, sizeof(*future));
-    future->state    = cy_future_pending;
+    future->state    = cy_future_fresh;
     future->callback = callback;
     future->user     = user;
 }
@@ -1456,6 +1456,9 @@ cy_err_t cy_new(struct cy_t* const                cy,
 
     wkv_init(&cy->subscribers_by_name, &wkv_realloc);
     cy->subscribers_by_name.context = cy;
+
+    wkv_init(&cy->subscribers_by_pattern, &wkv_realloc);
+    cy->subscribers_by_pattern.context = cy;
 
     // Postpone calling the functions until after the object is set up.
     cy->started_at = cy_now(cy);

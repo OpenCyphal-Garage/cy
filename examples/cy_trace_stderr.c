@@ -35,7 +35,7 @@ void cy_trace(struct cy_t* const  cy,
 
     // Update the longest seen file name and function name.
     static _Thread_local int longest_file_name = 15;
-    static _Thread_local int longest_func_name = 37; // based on the actual traced functions in cy.c
+    static _Thread_local int longest_func_name = 30;
     const int                file_name_length  = (int)strlen(file_name);
     const int                func_name_length  = (int)strlen(func);
     longest_file_name = (longest_file_name > file_name_length) ? longest_file_name : file_name_length;

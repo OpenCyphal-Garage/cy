@@ -172,7 +172,7 @@ static void on_msg_trace(struct cy_t* const cy, const struct cy_arrival_t* const
 
     // Log the message.
     CY_TRACE(cy,
-             "💬 [sid=%04x nid=%04x tid=%016llx sz=%06zu ts=%09llu] @ %s [age=%llu]:\n%s\n%s",
+             "💬 [sid=%04x nid=%04x tid=%016llx sz=%06zu ts=%09llu] @ '%s' [age=%llu]:\n%s\n%s",
              cy_topic_subject_id(arv->topic),
              arv->transfer->metadata.remote_node_id,
              (unsigned long long)arv->transfer->metadata.transfer_id,
@@ -239,7 +239,7 @@ static void on_response_trace(struct cy_t* const cy, struct cy_future_t* const f
                  ascii);
     } else if (future->state == cy_future_response_timeout) {
         CY_TRACE(cy,
-                 "↩️⌛ Request to %s tid %016llx (masked) has timed out",
+                 "↩️⌛ Request to '%s' tid=%016llx (masked) has timed out",
                  future->publisher->topic->name,
                  (unsigned long long)future->transfer_id_masked);
     } else {
