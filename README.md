@@ -14,10 +14,10 @@ The basic requirements are as follows:
 - Once a stable configuration is found, it should be possible to store it in the non-volatile memory per node for instant recovery after power cycling, bypassing the autoconfiguration stage. Obsolete or incorrect per-node configuration should not affect the rest of the network. This ensures that a vehicular network with named topics will perform identically to a fully statically configured one until its configuration is changed.
 - Scalability beyond a thousand of nodes and topics per network.
 - The solution should be implementable in under 1k lines of C without dynamic memory or undue computing costs for small nodes.
+- Support subscriptions with wildcard topic name matching / name substitution. See <https://forum.opencyphal.org/t/rfc-add-array-of-ports/1878>
 
 Stretch goals:
 
-- Support subscriptions with wildcard topic name matching / name substitution. See <https://forum.opencyphal.org/t/rfc-add-array-of-ports/1878>
 - Optional reliable transfers with ack/retry
 
 ## TL;DR
