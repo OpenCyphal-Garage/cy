@@ -23,13 +23,11 @@ static uint64_t random_uid(void)
 /// Response schema:
 ///     uint32      errno
 ///     byte[<=256] data
-void on_file_read_msg(struct cy_subscriber_t* const sub)
+void on_file_read_msg(struct cy_t* const cy, const struct cy_arrival_t* const arv)
 {
-    assert(sub != NULL);
-    struct cy_transfer_owned_t* const transfer = &sub->topic->sub_last_transfer;
-    CY_BUFFER_GATHER_ON_STACK(payload, transfer->payload.base)
+    CY_BUFFER_GATHER_ON_STACK(payload, arv->transfer->payload.base)
     if ((payload.size < 10) || (payload.size > (256 + 2 + 8))) {
-        CY_TRACE(sub->topic->cy, "Malformed request: Payload size %zu is invalid", payload.size);
+        CY_TRACE(cy, "Malformed request: Payload size %zu is invalid", payload.size);
         return;
     }
     assert(payload.data != NULL);
@@ -41,7 +39,7 @@ void on_file_read_msg(struct cy_subscriber_t* const sub)
     memcpy(&path_len, ((const char*)payload.data) + 8, 2);
     char file_name[257];
     if (path_len > 256) {
-        CY_TRACE(sub->topic->cy, "Malformed request: File path length %u is too long", path_len);
+        CY_TRACE(cy, "Malformed request: File path length %u is too long", path_len);
         return;
     }
     memcpy(file_name, ((const char*)payload.data) + 10, path_len);
@@ -66,15 +64,16 @@ void on_file_read_msg(struct cy_subscriber_t* const sub)
     (void)fclose(file);
 
     // Send the response.
-    CY_TRACE(sub->topic->cy,
+    CY_TRACE(cy,
              "Responding to file read request: %s, offset %llu, size %u, error %u",
              file_name,
              (unsigned long long)read_offset,
              response.data_len,
              response.error);
-    (void)cy_respond(sub->topic, //
-                     transfer->timestamp + 1000000,
-                     transfer->metadata,
+    (void)cy_respond(cy,
+                     arv->topic, //
+                     arv->transfer->timestamp + 1000000,
+                     arv->transfer->metadata,
                      (struct cy_buffer_borrowed_t){ .view = { .data = &response, .size = response.data_len + 6 } });
 }
 
@@ -85,31 +84,27 @@ int main(const int argc, char* argv[])
 
     // SET UP THE NODE. This is the only platform-specific part; the rest is platform- and transport-agnostic.
     struct cy_udp_posix_t cy_udp;
-    cy_err_t              res = cy_udp_posix_new(&cy_udp,
-                                    random_uid(),
-                                    (argc > 1) ? argv[1] : "~",
-                                    (uint32_t[3]){ udp_wrapper_parse_iface_address("127.0.0.1") },
-                                    1000);
-    if (res < 0) {
+    cy_err_t              res = cy_udp_posix_new_c(&cy_udp,
+                                      random_uid(),
+                                      (argc > 1) ? argv[1] : "~",
+                                      (uint32_t[3]){ udp_wrapper_parse_iface_address("127.0.0.1") },
+                                      1000);
+    if (res != CY_OK) {
         errx(res, "cy_udp_posix_new");
     }
     struct cy_t* const cy = &cy_udp.base;
 
-    // SET UP THE FILE READ TOPIC.
-    struct cy_topic_t* const topic_file_read = cy_topic_new(cy, "file/read");
-    if (topic_file_read == NULL) {
-        errx(0, "cy_udp_topic_new");
-    }
+    // SET UP THE FILE READ SUBSCRIBER.
     struct cy_subscriber_t sub_file_read;
-    res = cy_subscribe(topic_file_read, &sub_file_read, 1024, on_file_read_msg);
-    if (res < 0) {
-        errx(res, "cy_subscribe");
+    res = cy_subscribe_c(cy, &sub_file_read, "file/read", 1024, on_file_read_msg);
+    if (res != CY_OK) {
+        errx(res, "cy_subscribe_c");
     }
 
     // SPIN THE EVENT LOOP.
     while (1) {
         res = cy_udp_posix_spin_once(&cy_udp);
-        if (res < 0) {
+        if (res != CY_OK) {
             errx(res, "cy_udp_posix_spin_once");
         }
     }
