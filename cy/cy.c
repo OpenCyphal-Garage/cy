@@ -96,10 +96,7 @@ static void* wkv_cb_first(const struct wkv_event_t evt)
 
 /// TODO this is ugly and dirty
 /// TODO use wkv_str_t
-static bool compose_topic_name(const char* const ns,
-                               const char* const user,
-                               const char* const name,
-                               char* const       destination)
+static bool resolve_name(const char* const ns, const char* const user, const char* const name, char* const destination)
 {
     assert(ns != NULL);
     assert(name != NULL);
@@ -579,20 +576,22 @@ static void topic_age(struct cy_topic_t* const topic, const cy_us_t now)
 
 /// UB if the topic under this name already exists.
 /// out_topic may be new if the reference is not immediately needed (it can be found later via indexes).
-static cy_err_t topic_new(struct cy_t* const cy, struct cy_topic_t** const out_topic, const struct wkv_str_t name)
+static cy_err_t topic_new(struct cy_t* const        cy,
+                          struct cy_topic_t** const out_topic,
+                          const struct wkv_str_t    resolved_name)
 {
     struct cy_topic_t* const topic = cy->platform->topic_new(cy);
     if (topic == NULL) {
         return CY_ERR_MEMORY;
     }
     memset(topic, 0, sizeof(*topic));
-    if (!compose_topic_name(cy->namespace_, cy->name, name.str, topic->name)) {
+    if (resolved_name.len > CY_TOPIC_NAME_MAX) {
         goto bad_name;
     }
-    topic->name[CY_TOPIC_NAME_MAX] = '\0';
-    const struct wkv_str_t key     = wkv_key(topic->name);
+    memcpy(topic->name, resolved_name.str, resolved_name.len);
+    topic->name[resolved_name.len] = '\0';
 
-    topic->hash      = topic_hash(key);
+    topic->hash      = topic_hash(resolved_name);
     topic->evictions = 0; // starting from the preferred subject-ID.
     topic->age       = 0;
     topic->aged_at   = cy_now(cy);
@@ -607,11 +606,12 @@ static cy_err_t topic_new(struct cy_t* const cy, struct cy_topic_t** const out_t
 
     cy->last_event_ts = cy->last_local_event_ts = topic->last_event_ts = topic->last_local_event_ts = cy_now(cy);
 
-    if ((key.len == 0) || (key.len > CY_TOPIC_NAME_MAX) || (cy->topic_count >= CY_TOPIC_SUBJECT_COUNT)) {
+    if ((resolved_name.len == 0) || (resolved_name.len > CY_TOPIC_NAME_MAX) ||
+        (cy->topic_count >= CY_TOPIC_SUBJECT_COUNT)) {
         goto bad_name;
     }
 
-    topic->index_name = wkv_set(&cy->topics_by_name, key);
+    topic->index_name = wkv_set(&cy->topics_by_name, resolved_name);
     if (topic->index_name == NULL) {
         goto oom;
     }
@@ -659,9 +659,11 @@ bad_name: // TODO correct deinitialization
     return CY_ERR_NAME;
 }
 
-static cy_err_t topic_ensure(struct cy_t* const cy, struct cy_topic_t** const out_topic, const struct wkv_str_t name)
+static cy_err_t topic_ensure(struct cy_t* const        cy,
+                             struct cy_topic_t** const out_topic,
+                             const struct wkv_str_t    resolved_name)
 {
-    return (cy_topic_find_by_name(cy, name) == NULL) ? 0 : topic_new(cy, out_topic, name);
+    return (cy_topic_find_by_name(cy, resolved_name) == NULL) ? 0 : topic_new(cy, out_topic, resolved_name);
 }
 
 /// Create a new coupling between a topic and a subscriber.
@@ -719,27 +721,30 @@ static void* wkv_cb_couple_new_topic(const struct wkv_event_t evt)
 }
 
 /// If there is a pattern subscriber matching the name of this topic, attempt to create a new subscription.
-static void topic_subscribe_if_matching(struct cy_t* const cy, const struct wkv_str_t name)
+static void topic_subscribe_if_matching(struct cy_t* const cy, const struct wkv_str_t resolved_name)
 {
-    assert((cy != NULL) && (name.str != NULL));
-    if (name.len == 0) {
+    assert((cy != NULL) && (resolved_name.str != NULL));
+    if (resolved_name.len == 0) {
         return; // Ensure the remote is not trying to feed us an empty name, that's bad.
     }
-    if (NULL == wkv_route(&cy->subscribers_by_pattern, name, NULL, wkv_cb_first)) {
+    if (NULL == wkv_route(&cy->subscribers_by_pattern, resolved_name, NULL, wkv_cb_first)) {
         return; // No match.
     }
-    CY_TRACE(cy, "✨ Automatic pattern subscription for '%s'", name.str);
+    CY_TRACE(cy, "✨ Automatic pattern subscription for '%s'", resolved_name.str);
     // Create the new topic.
     struct cy_topic_t* topic = NULL;
     {
-        const cy_err_t res = topic_new(cy, &topic, name);
+        const cy_err_t res = topic_new(cy, &topic, resolved_name);
         if (res != CY_OK) {
             cy->platform->topic_on_subscription_error(cy, NULL, res);
             return;
         }
     }
     // Attach subscriptions.
-    if (NULL != wkv_route(&cy->subscribers_by_pattern, name, (void* [2]){ cy, topic }, wkv_cb_couple_new_topic)) {
+    if (NULL != wkv_route(&cy->subscribers_by_pattern, //
+                          resolved_name,
+                          (void* [2]){ cy, topic },
+                          wkv_cb_couple_new_topic)) {
         // TODO discard the topic!
         cy->platform->topic_on_subscription_error(cy, NULL, CY_ERR_MEMORY);
         return;
@@ -988,7 +993,7 @@ cy_err_t cy_advertise(struct cy_t* const           cy,
 {
     assert((pub != NULL) && (cy != NULL));
     char name_buf[CY_TOPIC_NAME_MAX + 1U];
-    if (!compose_topic_name(cy->namespace_, cy->name, name.str, name_buf)) {
+    if (!resolve_name(cy->namespace_, cy->name, name.str, name_buf)) {
         return CY_ERR_NAME;
     }
     const struct wkv_str_t resolved_name = wkv_key(name_buf);
@@ -1190,7 +1195,7 @@ cy_err_t cy_subscribe_with_params(struct cy_t* const                    cy,
         return CY_ERR_ARGUMENT;
     }
     char name_buf[CY_TOPIC_NAME_MAX + 1U];
-    if (!compose_topic_name(cy->namespace_, cy->name, name.str, name_buf)) {
+    if (!resolve_name(cy->namespace_, cy->name, name.str, name_buf)) {
         return CY_ERR_NAME;
     }
     const struct wkv_str_t resolved_name = wkv_key(name_buf);
