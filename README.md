@@ -265,6 +265,7 @@ direction LR
     }
     cy "1" o-- "*" _topic
     cy "1" o-- "*" _subscriber_root
+    cy "1" --> "*" future
     _topic "1" o-- "*" _linkage
     _topic "1" <-- "*" publisher
     publisher "1" <-- "*" future
