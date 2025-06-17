@@ -355,17 +355,9 @@ static bool is_pinned(const uint64_t hash)
 static bool left_wins(const struct cy_topic_t* const left, const uint64_t r_age, const uint64_t r_hash)
 {
     assert(left->hash != r_hash);
-    if (is_pinned(left->hash) != is_pinned(r_hash)) {
-        // We could replace this special case with an age advantage for pinned topics, but then we're reducing the
-        // effective range of the age by a factor of 2^32, which risks overflow.
-        return is_pinned(left->hash);
-    }
     const int_fast8_t l_lage = log2_floor(left->age);
     const int_fast8_t r_lage = log2_floor(r_age);
-    if (l_lage == r_lage) {
-        return left->hash < r_hash;
-    }
-    return l_lage > r_lage; // older topic wins
+    return (l_lage != r_lage) ? (l_lage > r_lage) : left->hash < r_hash; // older topic wins
 }
 
 /// log(N) index update requires removal and reinsertion.
