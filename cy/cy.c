@@ -296,6 +296,29 @@ static uint16_t pick_node_id(const struct cy_t* const cy, struct cy_bloom64_t* c
 
 // ReSharper restore CppParameterMayBeConstPtrOrRef
 
+/// If the local node still has no node-ID, this function will allocate one on the spot.
+/// May fail if the underlying platform->node_id_set() fails.
+static cy_err_t ensure_joined(struct cy_t* const cy)
+{
+    cy_err_t res = CY_OK;
+    if (cy->node_id >= cy->platform->node_id_max) {
+        struct cy_bloom64_t* const bloom = cy->platform->node_id_bloom(cy);
+        assert((bloom != NULL) && (bloom->n_bits > 0) && ((bloom->n_bits % 64) == 0) &&
+               (bloom->popcount <= bloom->n_bits));
+        cy->node_id = pick_node_id(cy, bloom, cy->platform->node_id_max);
+        assert(cy->node_id <= cy->platform->node_id_max);
+        res = cy->platform->node_id_set(cy);
+        if (res == CY_OK) {
+            CY_TRACE(cy, "☝️ Picked own node-ID %04x; bloom popcount %zu", cy->node_id, bloom->popcount);
+        } else {
+            CY_TRACE(cy, "☝️ Failed to set node-ID %04x with error %d; purge bloom to retry later", cy->node_id, res);
+            cy->node_id = cy->platform->node_id_max;
+            bloom64_purge(bloom);
+        }
+    }
+    return res;
+}
+
 // =====================================================================================================================
 //                                                  TOPIC UTILITIES
 // =====================================================================================================================
@@ -797,6 +820,12 @@ struct heartbeat_t
 
 static cy_err_t publish_heartbeat(struct cy_t* const cy, const cy_us_t now, struct heartbeat_t* const message)
 {
+    cy_err_t res = ensure_joined(cy);
+    if (res != CY_OK) {
+        return res;
+    }
+
+    // Fill and serialize the message.
     message->uptime  = (uint32_t)((now - cy->started_at) / MEGA);
     message->version = 1;
     message->uid     = cy->uid;
@@ -805,11 +834,17 @@ static cy_err_t publish_heartbeat(struct cy_t* const cy, const cy_us_t now, stru
     assert(message_size <= sizeof(struct heartbeat_t));
     assert((message->topic_name_length8_reserved16_evictions40 >> 56U) <= CY_TOPIC_NAME_MAX);
     const struct cy_buffer_borrowed_t payload = { .next = NULL, .view = { .data = message, .size = message_size } };
+
+    // Publish the message.
     assert(cy->node_id <= cy->platform->node_id_max);
-    const cy_err_t pub_res =
-      cy->platform->topic_publish(cy, &cy->heartbeat_pub, now + HEARTBEAT_PUB_TIMEOUT_us, payload);
+    res = cy->platform->topic_publish(cy, &cy->heartbeat_pub, now + HEARTBEAT_PUB_TIMEOUT_us, payload);
     cy->heartbeat_pub.topic->pub_transfer_id++;
-    return pub_res;
+
+    // Schedule the next heartbeat.
+    // If this heartbeat failed to publish, we simply give up and move on to try again in the next period.
+    cy->heartbeat_next += cy->heartbeat_period_max; // Do not accumulate heartbeat phase slip.
+    cy->heartbeat_last = now;
+    return res;
 }
 
 static cy_err_t publish_heartbeat_gossip(struct cy_t* const cy, struct cy_topic_t* const topic, const cy_us_t now)
@@ -1052,6 +1087,13 @@ cy_err_t cy_publish(struct cy_t* const                cy,
     assert(topic != NULL);
     assert(topic->pub_count > 0);
 
+    // If we still don't have a node-ID, force allocation right now.
+    // Normally, however, the application should wait for cy_join() to complete before publishing anything.
+    cy_err_t res = ensure_joined(cy);
+    if (res != CY_OK) {
+        return res;
+    }
+
     // Set up the response future first. If publication fails, we will have to undo it later.
     // The reason we can't do it afterward is that if the transport has a cyclic transfer-ID, insertion may fail if
     // we have exhausted the transfer-ID set.
@@ -1074,7 +1116,7 @@ cy_err_t cy_publish(struct cy_t* const                cy,
         }
     }
 
-    const cy_err_t res = cy->platform->topic_publish(cy, pub, tx_deadline, payload);
+    res = cy->platform->topic_publish(cy, pub, tx_deadline, payload);
 
     if (future != NULL) {
         if (res == CY_OK) {
@@ -1242,6 +1284,10 @@ cy_err_t cy_respond(struct cy_t* const                  cy,
                     const struct cy_buffer_borrowed_t   payload)
 {
     assert(topic != NULL);
+    const cy_err_t res = ensure_joined(cy);
+    if (res != CY_OK) {
+        return res;
+    }
     /// Yes, we send the response using a request transfer. In the future we may leverage this for reliable delivery.
     /// All responses are sent to the same RPC service-ID; they are discriminated by the topic hash.
     return cy->platform->request(cy,
@@ -1482,9 +1528,11 @@ cy_err_t cy_new(struct cy_t* const                cy,
     // and to claim the address; if it's already taken, we will want to cause a collision to move the other node,
     // because manually assigned addresses take precedence over auto-assigned ones.
     // If we are not given a node-ID, we need to first listen to the network.
-    cy->heartbeat_period = HEARTBEAT_DEFAULT_PERIOD_us;
-    cy->heartbeat_next   = cy->started_at;
-    cy_err_t res         = CY_OK;
+    cy->heartbeat_period_max = HEARTBEAT_DEFAULT_PERIOD_us;
+    cy->heartbeat_period_min = cy->heartbeat_period_max / 100;
+    cy->heartbeat_next       = cy->started_at;
+    cy->heartbeat_last       = BIG_BANG;
+    cy_err_t res             = CY_OK;
     if (cy->node_id > cy->platform->node_id_max) {
         cy->heartbeat_next += (cy_us_t)random_uint(cy, CY_START_DELAY_MIN_us, CY_START_DELAY_MAX_us);
         cy->last_event_ts = cy->last_local_event_ts = cy->started_at;
@@ -1521,13 +1569,13 @@ static void mark_neighbor(struct cy_t* const cy, const uint16_t remote_node_id)
     // network). We can't remove them individually, so we purge the filter and start over.
     const bool bloom_congested = bloom->popcount > ((bloom->n_bits * 31ULL) / 32U);
     if (bloom_congested) {
-        CY_TRACE(cy, "🌻 Bloom filter congested: popcount=%zu; purging to remove tombstones", bloom->popcount);
+        CY_TRACE(cy, "🌻 bloom filter congested: popcount=%zu; purging to remove tombstones", bloom->popcount);
         bloom64_purge(bloom);
         assert(bloom->popcount == 0);
     }
     if ((cy->node_id > cy->platform->node_id_max) && !bloom64_get(bloom, remote_node_id)) {
         cy->heartbeat_next += (cy_us_t)random_uint(cy, 0, 2 * MEGA);
-        CY_TRACE(cy, "🔭 Discovered neighbor %04x; new Bloom popcount %zu", remote_node_id, bloom->popcount + 1U);
+        CY_TRACE(cy, "🔭 Discovered neighbor %04x; new bloom popcount %zu", remote_node_id, bloom->popcount + 1U);
     }
     bloom64_set(bloom, remote_node_id);
 }
@@ -1625,51 +1673,30 @@ cy_err_t cy_update(struct cy_t* const cy)
 
     if (cy->node_id_collision) {
         CY_TRACE(cy, "🧠 Processing the delayed node-ID collision event now.");
+        assert(cy->node_id <= cy->platform->node_id_max);
         cy->node_id_collision = false;
-        if (cy->node_id <= cy->platform->node_id_max) {
-            cy->node_id = CY_NODE_ID_INVALID;
-            cy->platform->node_id_clear(cy);
-            cy->heartbeat_next = now;
-        }
+        cy->node_id           = CY_NODE_ID_INVALID;
+        cy->platform->node_id_clear(cy);
+        cy->heartbeat_next = now;
     }
 
-    if (now >= cy->heartbeat_next) {
-        // If it is time to publish a heartbeat but we still don't have a node-ID, it means that it is time to allocate!
-        if (cy->node_id >= cy->platform->node_id_max) {
-            struct cy_bloom64_t* const bloom = cy->platform->node_id_bloom(cy);
-            assert((bloom != NULL) && (bloom->n_bits > 0) && ((bloom->n_bits % 64) == 0) &&
-                   (bloom->popcount <= bloom->n_bits));
-            // Pick the node-ID using the most recent state of the Bloom filter.
-            cy->node_id = pick_node_id(cy, bloom, cy->platform->node_id_max);
-            assert(cy->node_id <= cy->platform->node_id_max);
-            res = cy->platform->node_id_set(cy);
-            CY_TRACE(cy,
-                     "☝️ Picked own node-ID %04x; Bloom popcount %zu; node_id_set()->%d",
-                     cy->node_id,
-                     bloom->popcount,
-                     res);
-        }
-        assert(cy->node_id <= cy->platform->node_id_max);
-        if (res != CY_OK) {
-            return res; // Failed to set node-ID, bail out. Will try again next time.
-        }
+    // Find the next topic to gossip. We always have at least the heartbeat topic, so the index is never empty.
+    // It is a bit wasteful to fetch the min node every update; consider switching from AVL to perhaps a heap?
+    struct cy_topic_t* const topic_next_gossip =
+      CAVL2_TO_OWNER(cavl2_min(cy->topics_by_gossip_time), struct cy_topic_t, index_gossip_time);
 
-        // Find the next topic to gossip.
-        const struct cy_tree_t* const t = cavl2_min(cy->topics_by_gossip_time);
-        assert(t != NULL); // We always have at least the heartbeat topic.
-        struct cy_topic_t* const tp = CAVL2_TO_OWNER(t, struct cy_topic_t, index_gossip_time);
+    // Decide if it is time to publish a heartbeat.
+    const bool due_normal = now >= cy->heartbeat_next;
+    const bool due_urgent = cy_joined(cy) &&                                            //
+                            ((now - cy->heartbeat_last) >= cy->heartbeat_period_min) && //
+                            ((topic_next_gossip->last_gossip < 0) || (cy->next_scout != NULL));
 
-        // Publish the heartbeat. If this is not an urgent gossip and we have pending scouts, prefer the scouts.
-        if ((tp->last_gossip <= 0) || (cy->next_scout == NULL)) {
-            res = publish_heartbeat_gossip(cy, tp, now);
+    if (due_normal || due_urgent) {
+        if ((topic_next_gossip->last_gossip <= 0) || (cy->next_scout == NULL)) {
+            res = publish_heartbeat_gossip(cy, topic_next_gossip, now);
         } else {
             res = publish_heartbeat_scout(cy, now);
         }
-
-        // Schedule the next one.
-        // If this heartbeat failed to publish, we simply give up and move on to try again in the next period.
-        assert(cy->topic_count > 0);                // we always have at least the heartbeat topic
-        cy->heartbeat_next += cy->heartbeat_period; // Do not accumulate heartbeat phase slip!
     }
     return res;
 }
@@ -1689,7 +1716,7 @@ void cy_notify_topic_hash_collision(struct cy_t* const cy, struct cy_topic_t* co
 void cy_notify_node_id_collision(struct cy_t* const cy)
 {
     assert(cy != NULL);
-    if (!cy->node_id_collision) {
+    if ((!cy->node_id_collision) && (cy->node_id <= cy->platform->node_id_max)) {
         cy->node_id_collision = true;
         CY_TRACE(cy, "💥 %04x", cy->node_id);
     }

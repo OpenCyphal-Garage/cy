@@ -129,7 +129,8 @@ static cy_err_t err_from_udpard(const int32_t e)
         case -UDPARD_ERROR_CAPACITY:
             return CY_ERR_CAPACITY;
         case -UDPARD_ERROR_ANONYMOUS:
-            return CY_ERR_JOIN;
+            assert(false); // this should never happen
+            return CY_ERR_MEDIA;
         default:
             assert(e >= 0);
             return CY_OK;

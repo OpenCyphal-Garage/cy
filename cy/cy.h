@@ -91,9 +91,8 @@ extern "C"
 #define CY_ERR_ARGUMENT 2
 #define CY_ERR_MEMORY   3
 #define CY_ERR_CAPACITY 4
-#define CY_ERR_JOIN     5
-#define CY_ERR_NAME     6
-#define CY_ERR_MEDIA    7
+#define CY_ERR_NAME     5
+#define CY_ERR_MEDIA    6
 
 typedef uint_fast8_t cy_err_t;
 typedef int64_t      cy_us_t; ///< Monotonic microsecond timestamp. Signed to permit arithmetics in the past.
