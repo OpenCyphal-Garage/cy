@@ -646,7 +646,7 @@ static cy_err_t topic_new(struct cy_t* const        cy,
     assert(res_tree == &topic->index_hash); // Cannot invoke this if such topic already exists!
 
     // Ensure the topic is in the gossip index. This is needed for allocation.
-    topic->last_gossip = 0;
+    topic->last_gossip = BIG_BANG;
     (void)cavl2_find_or_insert(&cy->topics_by_gossip_time,
                                &topic->last_gossip,
                                &cavl_comp_topic_gossip_time,
@@ -843,7 +843,6 @@ static cy_err_t publish_heartbeat(struct cy_t* const cy, const cy_us_t now, stru
     // Schedule the next heartbeat.
     // If this heartbeat failed to publish, we simply give up and move on to try again in the next period.
     cy->heartbeat_next += cy->heartbeat_period_max; // Do not accumulate heartbeat phase slip.
-    cy->heartbeat_last = now;
     return res;
 }
 
@@ -1531,7 +1530,6 @@ cy_err_t cy_new(struct cy_t* const                cy,
     cy->heartbeat_period_max = HEARTBEAT_DEFAULT_PERIOD_us;
     cy->heartbeat_period_min = cy->heartbeat_period_max / 100;
     cy->heartbeat_next       = cy->started_at;
-    cy->heartbeat_last       = BIG_BANG;
     cy_err_t res             = CY_OK;
     if (cy->node_id > cy->platform->node_id_max) {
         cy->heartbeat_next += (cy_us_t)random_uint(cy, CY_START_DELAY_MIN_us, CY_START_DELAY_MAX_us);
@@ -1687,12 +1685,12 @@ cy_err_t cy_update(struct cy_t* const cy)
 
     // Decide if it is time to publish a heartbeat.
     const bool due_normal = now >= cy->heartbeat_next;
-    const bool due_urgent = cy_joined(cy) &&                                            //
-                            ((now - cy->heartbeat_last) >= cy->heartbeat_period_min) && //
+    const bool due_urgent = cy_joined(cy) &&                                                                         //
+                            ((now - (cy->heartbeat_next - cy->heartbeat_period_max)) >= cy->heartbeat_period_min) && //
                             ((topic_next_gossip->last_gossip < 0) || (cy->next_scout != NULL));
 
     if (due_normal || due_urgent) {
-        if ((topic_next_gossip->last_gossip <= 0) || (cy->next_scout == NULL)) {
+        if ((topic_next_gossip->last_gossip < 0) || (cy->next_scout == NULL)) {
             res = publish_heartbeat_gossip(cy, topic_next_gossip, now);
         } else {
             res = publish_heartbeat_scout(cy, now);

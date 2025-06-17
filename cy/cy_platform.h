@@ -367,7 +367,6 @@ struct cy_t
     /// otherwise, the min period is used to throttle the heartbeat traffic.
     struct cy_publisher_t  heartbeat_pub;
     struct cy_subscriber_t heartbeat_sub;
-    cy_us_t                heartbeat_last;
     cy_us_t                heartbeat_next;
     cy_us_t                heartbeat_period_max; ///< Not greater than 1 second.
     cy_us_t                heartbeat_period_min; ///< Not greater than heartbeat_period_max.
