@@ -161,11 +161,16 @@ static int32_t cavl_comp_topic_subject_id(const void* const user, const struct c
 }
 
 /// Gossip times are not unique, so this comparator never returns 0.
-static int32_t cavl_comp_topic_gossip_time(const void* const user, const struct cy_tree_t* const node)
+/// Leftmost node has the highest priority, then the lowest gossip time.
+static int32_t cavl_comp_topic_gossip_order(const void* const user, const struct cy_tree_t* const node)
 {
     assert((user != NULL) && (node != NULL));
-    const struct cy_topic_t* const inner = CAVL2_TO_OWNER(node, struct cy_topic_t, index_gossip_time);
-    return ((*(cy_us_t*)user) >= inner->last_gossip) ? +1 : -1;
+    const struct cy_topic_t* const outer = (const struct cy_topic_t*)user;
+    const struct cy_topic_t* const inner = CAVL2_TO_OWNER(node, struct cy_topic_t, index_gossip_order);
+    if (outer->gossip_priority != inner->gossip_priority) {
+        return (outer->gossip_priority > inner->gossip_priority) ? -1 : +1;
+    }
+    return (outer->ts_gossiped >= inner->ts_gossiped) ? +1 : -1;
 }
 
 static int32_t cavl_comp_future_transfer_id_masked(const void* const user, const struct cy_tree_t* const node)
@@ -202,9 +207,9 @@ static struct cy_tree_t* cavl_factory_topic_subject_id(void* const user)
     return &((struct cy_topic_t*)user)->index_subject_id;
 }
 
-static struct cy_tree_t* cavl_factory_topic_gossip_time(void* const user)
+static struct cy_tree_t* cavl_factory_topic_gossip_order(void* const user)
 {
-    return &((struct cy_topic_t*)user)->index_gossip_time;
+    return &((struct cy_topic_t*)user)->index_gossip_order;
 }
 
 // =====================================================================================================================
@@ -370,31 +375,41 @@ static bool left_wins(const struct cy_topic_t* const left, const uint64_t r_age,
 }
 
 /// log(N) index update requires removal and reinsertion.
-static void update_last_gossip_time(struct cy_t* const cy, struct cy_topic_t* const topic, const cy_us_t ts)
+static void update_gossip_order(struct cy_t* const       cy,
+                                struct cy_topic_t* const topic,
+                                const cy_us_t            ts_gossiped,
+                                const uint_fast8_t       priority)
 {
     assert(cy->topics_by_gossip_time != NULL); // This index is never empty if we have topics
-    cavl2_remove(&cy->topics_by_gossip_time, &topic->index_gossip_time);
-    topic->last_gossip                 = ts;
+    cavl2_remove(&cy->topics_by_gossip_time, &topic->index_gossip_order);
+    topic->gossip_priority             = priority;
+    topic->ts_gossiped                 = ts_gossiped;
     const struct cy_tree_t* const tree = cavl2_find_or_insert(&cy->topics_by_gossip_time, //
-                                                              &ts,
-                                                              cavl_comp_topic_gossip_time,
                                                               topic,
-                                                              cavl_factory_topic_gossip_time);
-    assert(tree == &topic->index_gossip_time);
+                                                              cavl_comp_topic_gossip_order,
+                                                              topic,
+                                                              cavl_factory_topic_gossip_order);
+    assert(tree == &topic->index_gossip_order);
 }
 
-static void schedule_gossip(struct cy_t* const cy, struct cy_topic_t* const topic, cy_us_t new_time)
+static void prioritize_gossip(struct cy_t* const cy, struct cy_topic_t* const topic, uint_fast8_t priority)
 {
     assert(cy->topics_by_gossip_time != NULL); // This index is never empty if we have topics
-    // This is an optional optimization: if this is a pinned topic, it normally cannot collide with another one;
-    // we are publishing it just to announce that we have it; as such, the urgency of this action is a bit lower
-    // than that of an actual colliding topic announcement, so we choose next-greater time to deprioritize it.
-    if (is_pinned(topic->hash)) {
-        new_time++;
+    // Priority fine-tuning:
+    // - If this is a pinned topic, it normally cannot collide with another one; we are publishing it just to announce
+    // that we have it; as such, the urgency of this action is a bit lower than that of an actual colliding topic
+    // announcement, so we choose next-greater time to deprioritize it.
+    if (is_pinned(topic->hash) && (priority > 1)) {
+        --priority;
     }
-    if (topic->last_gossip > new_time) { // Don't do anything if it's already scheduled.
-        CY_TRACE(cy, "⏱️'%s' #%016llx @%04x", topic->name, (unsigned long long)topic->hash, cy_topic_subject_id(topic));
-        update_last_gossip_time(cy, topic, new_time);
+    if (topic->gossip_priority < priority) { // Don't do anything if it's already scheduled.
+        CY_TRACE(cy,
+                 "⏱️'%s' #%016llx @%04x prio=%d",
+                 topic->name,
+                 (unsigned long long)topic->hash,
+                 cy_topic_subject_id(topic),
+                 priority);
+        update_gossip_order(cy, topic, topic->ts_gossiped, priority);
     }
 }
 
@@ -414,7 +429,7 @@ static bool validate_is_mortal(const struct cy_topic_t* const topic)
     return true;
 }
 
-static bool is_mortal(struct cy_t* const cy, struct cy_topic_t* const topic)
+static bool is_mortal(const struct cy_t* const cy, const struct cy_topic_t* const topic)
 {
     assert((cy->mortal_head != NULL) == (cy->mortal_tail != NULL));
     const bool out = (topic->mortal_next != NULL) || (topic->mortal_prev != NULL) || (cy->mortal_head == topic);
@@ -444,7 +459,7 @@ static void mortal_delist(struct cy_t* const cy, struct cy_topic_t* const topic)
 }
 
 /// Add the topic to the head of doubly-linked list of mortal topics.
-/// The oldest mortal topic will be pushed to the tail of the list.
+/// The oldest mortal topic will be eventually pushed to the tail of the list.
 static void mortal_enlist(struct cy_t* const cy, struct cy_topic_t* const topic)
 {
     assert((topic->mortal_next == NULL) && (topic->mortal_prev == NULL));
@@ -461,23 +476,30 @@ static void mortal_enlist(struct cy_t* const cy, struct cy_topic_t* const topic)
     assert((cy->mortal_head != NULL) && (cy->mortal_tail != NULL));
 }
 
-/// Retires at most one at every call.
-static void retire_timed_out_mortal(struct cy_t* const cy, const cy_us_t now)
+/// Move the topic to the head of the doubly-linked list of mortal topics.
+/// The oldest mortal topic will be eventually pushed to the tail of the list.
+static void mortal_animate(struct cy_t* const cy, struct cy_topic_t* const topic)
 {
-    if ((cy->mortal_tail != NULL) && ((cy->mortal_tail->last_animation_ts + cy->mortal_topic_timeout) < now)) {
-        struct cy_topic_t* const topic = cy->mortal_tail;
-        mortal_delist(cy, topic);
-        CY_TRACE(cy, "⚰️'%s' #%016llx @%04x", topic->name, (unsigned long long)topic->hash, cy_topic_subject_id(topic));
-        topic_destroy(cy, topic);
-    }
-}
-
-static void topic_animate(struct cy_t* const cy, struct cy_topic_t* const topic, const cy_us_t now)
-{
-    topic->last_animation_ts = now;
     if (is_mortal(cy, topic)) {
         mortal_delist(cy, topic); // move to the head of the list
         mortal_enlist(cy, topic);
+    }
+}
+
+/// Retires at most one at every call.
+static void mortal_retire_timed_out(struct cy_t* const cy, const cy_us_t now)
+{
+    struct cy_topic_t* const topic = cy->mortal_tail;
+    if (topic != NULL) {
+        assert(is_mortal(cy, topic) && validate_is_mortal(topic));
+        const bool rx_feed_alive = (topic->ts_received + cy->mortal_topic_timeout) >= now;
+        const bool testifiable   = (topic->ts_testified + cy->mortal_topic_timeout) >= now;
+        if ((!rx_feed_alive) && (!testifiable)) {
+            mortal_delist(cy, topic);
+            CY_TRACE(
+              cy, "⚰️'%s' #%016llx @%04x", topic->name, (unsigned long long)topic->hash, cy_topic_subject_id(topic));
+            topic_destroy(cy, topic);
+        }
     }
 }
 
@@ -646,7 +668,7 @@ static void topic_allocate(struct cy_t* const       cy,
 
     // Whenever we alter a topic, we need to make sure that everyone knows about it.
     // Recursively we can alter a lot of topics like this.
-    schedule_gossip(cy, topic, BIG_BANG);
+    prioritize_gossip(cy, topic, 50);
 
     // If a subscription is needed, restore it. Notice that if this call failed in the past, we will retry here
     // as long as there is at least one live subscriber.
@@ -670,12 +692,12 @@ static void topic_allocate(struct cy_t* const       cy,
 
 static void topic_age(struct cy_topic_t* const topic, const cy_us_t now)
 {
-    const int32_t sec = (int32_t)((now - topic->aged_at) / MEGA);
+    const int32_t sec = (int32_t)((now - topic->ts_aged) / MEGA);
     assert(sec >= 0);
     if (sec > 0) {
         topic->age++; // We increment it at most once because we want to avoid large leaps.
     }
-    topic->aged_at += sec * MEGA;
+    topic->ts_aged += sec * MEGA;
 }
 
 /// UB if the topic under this name already exists.
@@ -700,11 +722,16 @@ static cy_err_t topic_new(struct cy_t* const        cy,
     topic->hash      = hash;
     topic->evictions = evictions;
     topic->age       = 0;
-    topic->aged_at   = cy_now(cy);
 
-    topic->last_animation_ts = topic->aged_at;
-    topic->mortal_next       = NULL;
-    topic->mortal_prev       = NULL;
+    topic->ts_aged      = cy_now(cy);
+    topic->ts_gossiped  = BIG_BANG;
+    topic->ts_received  = BIG_BANG;
+    topic->ts_testified = cy_now(cy);
+
+    topic->gossip_priority = 10; // Gossip ASAP because this is a new topic.
+
+    topic->mortal_next = NULL;
+    topic->mortal_prev = NULL;
 
     topic->pub_transfer_id = random_u64(cy); // https://forum.opencyphal.org/t/improve-the-transfer-id-timeout/2375
     topic->pub_count       = 0;
@@ -712,7 +739,7 @@ static cy_err_t topic_new(struct cy_t* const        cy,
     topic->couplings  = NULL;
     topic->subscribed = false;
 
-    cy->last_event_ts = cy->last_local_event_ts = cy_now(cy);
+    cy->ts_event = cy->ts_local_event = cy_now(cy);
 
     if (cy->topic_count >= CY_TOPIC_SUBJECT_COUNT) {
         goto bad_name;
@@ -731,12 +758,8 @@ static cy_err_t topic_new(struct cy_t* const        cy,
     assert(res_tree == &topic->index_hash); // Cannot invoke this if such topic already exists!
 
     // Ensure the topic is in the gossip index. This is needed for allocation.
-    topic->last_gossip = BIG_BANG;
-    (void)cavl2_find_or_insert(&cy->topics_by_gossip_time,
-                               &topic->last_gossip,
-                               &cavl_comp_topic_gossip_time,
-                               topic,
-                               &cavl_factory_topic_gossip_time);
+    (void)cavl2_find_or_insert(
+      &cy->topics_by_gossip_time, topic, &cavl_comp_topic_gossip_order, topic, &cavl_factory_topic_gossip_order);
 
     // Allocate a subject-ID for the topic and insert it into the subject index tree.
     // Pinned topics all have canonical names, and we have already ascertained that the name is unique,
@@ -885,12 +908,12 @@ static struct cy_topic_t* topic_subscribe_if_matching(struct cy_t* const     cy,
     return topic;
 }
 
-static void* wkv_cb_topic_mark_scout_response(const struct wkv_event_t evt)
+static void* wkv_cb_topic_scout_response(const struct wkv_event_t evt)
 {
     struct cy_t* const       cy    = (struct cy_t*)evt.context;
     struct cy_topic_t* const topic = (struct cy_topic_t*)evt.node->value;
     CY_TRACE(cy, "📢'%s' #%016llx @%04x", topic->name, (unsigned long long)(topic->hash), cy_topic_subject_id(topic));
-    schedule_gossip(cy, topic, BIG_BANG + 10 + (is_mortal(cy, topic) && (!topic->receiving)));
+    prioritize_gossip(cy, topic, 10);
     return NULL;
 }
 
@@ -925,7 +948,7 @@ static cy_err_t publish_heartbeat(struct cy_t* const cy, const cy_us_t now, stru
     }
 
     // Fill and serialize the message.
-    message->uptime  = (uint32_t)((now - cy->started_at) / MEGA);
+    message->uptime  = (uint32_t)((now - cy->ts_started) / MEGA);
     message->version = 1;
     message->uid     = cy->uid;
     const size_t message_size =
@@ -951,7 +974,7 @@ static cy_err_t publish_heartbeat_gossip(struct cy_t* const cy, struct cy_topic_
     topic_ensure_subscribed(cy, topic); // use this opportunity to repair the subscription if broken
     const uint_fast8_t flags = ((topic->pub_count > 0) ? TOPIC_FLAG_PUBLISHING : 0U) |     //
                                ((topic->couplings != NULL) ? TOPIC_FLAG_SUBSCRIBED : 0U) | //
-                               (topic->receiving ? TOPIC_FLAG_RECEIVING : 0U);
+                               ((topic->ts_received >= topic->ts_gossiped) ? TOPIC_FLAG_RECEIVING : 0U);
     // Possible optimization: we don't have to transmit the topic name if the message is urgent, i.e.,
     // if it is published in response to a divergent allocation or possibly a collision.
     struct heartbeat_t msg = {
@@ -960,8 +983,17 @@ static cy_err_t publish_heartbeat_gossip(struct cy_t* const cy, struct cy_topic_
         .topic_name_length8_reserved16_evictions40 = (((uint64_t)topic->index_name->key_len) << 56U) | topic->evictions,
     };
     memcpy(msg.topic_name, topic->name, topic->index_name->key_len);
+    if (topic->gossip_priority > 0) {
+        CY_TRACE(cy,
+                 "🗣️'%s' #%016llx @%04x prio=%d flags=0x%02x",
+                 topic->name,
+                 (unsigned long long)topic->hash,
+                 cy_topic_subject_id(topic),
+                 topic->gossip_priority,
+                 flags);
+    }
     // Update gossip time even if failed so we don't get stuck publishing same gossip if error reporting is broken.
-    update_last_gossip_time(cy, topic, now);
+    update_gossip_order(cy, topic, now, 0);
     return publish_heartbeat(cy, now, &msg);
 }
 
@@ -1012,7 +1044,8 @@ static void on_heartbeat(struct cy_t* const cy, const struct cy_arrival_t* const
                 mine = topic_subscribe_if_matching(cy, key, other_hash, other_evictions);
             }
             if (mine != NULL) {
-                topic_animate(cy, mine, ts);
+                mortal_animate(cy, mine);
+                mine->ts_testified = ts;
             }
         }
         if (mine != NULL) { // We have this topic! Check if we have consensus on the subject-ID.
@@ -1039,22 +1072,22 @@ static void on_heartbeat(struct cy_t* const cy, const struct cy_arrival_t* const
                 assert(mine->evictions != other_evictions);
                 if ((mine_lage > other_lage) || ((mine_lage == other_lage) && (mine->evictions > other_evictions))) {
                     CY_TRACE(cy, "We won, existing allocation not altered; expecting remote to adjust.");
-                    schedule_gossip(cy, mine, BIG_BANG);
+                    prioritize_gossip(cy, mine, 100);
                 } else {
                     assert((mine_lage <= other_lage) &&
                            ((mine_lage < other_lage) || (mine->evictions < other_evictions)));
                     assert(mine_lage <= other_lage);
                     CY_TRACE(cy,
                              "We lost, reallocating the topic to try and match the remote, or offer new alternative.");
-                    const cy_us_t old_last_gossip = mine->last_gossip;
-                    mine->age                     = max_u64(mine->age, other_age);
+                    const cy_us_t old_gossiped = mine->ts_gossiped;
+                    mine->age                  = max_u64(mine->age, other_age);
                     topic_allocate(cy, mine, other_evictions, false);
                     if (mine->evictions == other_evictions) { // perfect sync, no need to gossip
-                        update_last_gossip_time(cy, mine, old_last_gossip);
+                        update_gossip_order(cy, mine, old_gossiped, 0);
                     }
-                    cy->last_local_event_ts = ts;
+                    cy->ts_local_event = ts;
                 }
-                cy->last_event_ts = ts;
+                cy->ts_event = ts;
             } else {
                 topic_ensure_subscribed(cy, mine); // use this opportunity to repair the subscription if broken
             }
@@ -1091,11 +1124,11 @@ static void on_heartbeat(struct cy_t* const cy, const struct cy_arrival_t* const
             // Everyone needs to publish their own new allocation and then we will pick max subject-ID out of that.
             if (!win) {
                 topic_allocate(cy, mine, mine->evictions + 1U, false);
-                cy->last_local_event_ts = ts;
+                cy->ts_local_event = ts;
             } else {
-                schedule_gossip(cy, mine, BIG_BANG);
+                prioritize_gossip(cy, mine, 100);
             }
-            cy->last_event_ts = ts;
+            cy->ts_event = ts;
         }
     } else {
         // A scout message is simply asking us to check if we have any matching topics, and gossip them ASAP if so.
@@ -1107,7 +1140,7 @@ static void on_heartbeat(struct cy_t* const cy, const struct cy_arrival_t* const
                  (unsigned long long)other_hash,
                  (unsigned long long)other_evictions,
                  (unsigned long long)other_age);
-        (void)wkv_match(&cy->topics_by_name, key, cy, wkv_cb_topic_mark_scout_response);
+        (void)wkv_match(&cy->topics_by_name, key, cy, wkv_cb_topic_scout_response);
     }
 }
 
@@ -1162,7 +1195,7 @@ cy_err_t cy_advertise(struct cy_t* const           cy,
         }
         cy->platform->topic_advertise(cy, pub->topic, response_extent + RESPONSE_PAYLOAD_OVERHEAD_BYTES);
         // Announce change ASAP:
-        schedule_gossip(cy, pub->topic, BIG_BANG + 20);
+        prioritize_gossip(cy, pub->topic, 10);
     }
     CY_TRACE(cy,
              "✨'%s' #%016llx @%04x: topic_count=%zu pub_count=%zu res=%d",
@@ -1175,7 +1208,7 @@ cy_err_t cy_advertise(struct cy_t* const           cy,
     return res;
 }
 
-void cy_unadvertise(struct cy_t* const cy, const struct cy_publisher_t* pub)
+void cy_unadvertise(struct cy_t* const cy, struct cy_publisher_t* pub)
 {
     (void)cy;
     (void)pub;
@@ -1436,7 +1469,7 @@ bool cy_joined(const struct cy_t* const cy)
 
 bool cy_ready(const struct cy_t* const cy)
 {
-    return cy_joined(cy) && ((cy_now(cy) - cy->last_event_ts) > (1 * MEGA));
+    return cy_joined(cy) && ((cy_now(cy) - cy->ts_event) > (1 * MEGA));
 }
 
 void cy_topic_hint(struct cy_t* const cy, struct cy_topic_t* const topic, const uint16_t subject_id)
@@ -1631,7 +1664,7 @@ cy_err_t cy_new(struct cy_t* const                cy,
     cy->subscribers_by_pattern.context = cy;
 
     // Postpone calling the functions until after the object is set up.
-    cy->started_at = cy_now(cy);
+    cy->ts_started = cy_now(cy);
 
     cy->mortal_topic_timeout = MORTAL_TOPIC_DEFAULT_TIMEOUT_us;
     cy->mortal_head          = NULL;
@@ -1649,16 +1682,16 @@ cy_err_t cy_new(struct cy_t* const                cy,
     // If we are not given a node-ID, we need to first listen to the network.
     cy->heartbeat_period_max = HEARTBEAT_DEFAULT_PERIOD_us;
     cy->heartbeat_period_min = cy->heartbeat_period_max / 100;
-    cy->heartbeat_next       = cy->started_at;
+    cy->heartbeat_next       = cy->ts_started;
     cy_err_t res             = CY_OK;
     if (cy->node_id > cy->platform->node_id_max) {
         cy->heartbeat_next += (cy_us_t)random_uint(cy, CY_START_DELAY_MIN_us, CY_START_DELAY_MAX_us);
-        cy->last_event_ts = cy->last_local_event_ts = cy->started_at;
+        cy->ts_event = cy->ts_local_event = cy->ts_started;
     } else {
         bloom64_set(node_id_bloom, cy->node_id);
         assert(node_id_bloom->popcount == 1);
-        res               = cy->platform->node_id_set(cy);
-        cy->last_event_ts = cy->last_local_event_ts = 0;
+        res          = cy->platform->node_id_set(cy);
+        cy->ts_event = cy->ts_local_event = 0;
     }
 
     // Pub/sub on the heartbeat topic.
@@ -1709,10 +1742,10 @@ void cy_ingest_topic_transfer(struct cy_t* const         cy,
     // Experimental: age the topic with received transfers. Not with the published ones because we don't want
     // unconnected publishers to inflate the age.
     topic->age++;
-    topic->receiving = true; // FIXME
 
     // Record activity so that the topic is not retired.
-    topic_animate(cy, topic, transfer.timestamp);
+    mortal_animate(cy, topic);
+    topic->ts_received = transfer.timestamp;
 
     // Simply invoke all callbacks that match this topic name.
     // The callback may unsubscribe, so we have to store the next pointer early.
@@ -1792,7 +1825,7 @@ cy_err_t cy_update(struct cy_t* const cy)
     const cy_us_t now = cy_now(cy);
 
     retire_timed_out_futures(cy, now);
-    retire_timed_out_mortal(cy, now);
+    mortal_retire_timed_out(cy, now);
 
     if (cy->node_id_collision) {
         CY_TRACE(cy, "🧠 Processing the delayed node-ID collision event now.");
@@ -1806,15 +1839,15 @@ cy_err_t cy_update(struct cy_t* const cy)
     // Find the next topic to gossip. We always have at least the heartbeat topic, so the index is never empty.
     // It is a bit wasteful to fetch the min node every update; consider switching from AVL to perhaps a heap?
     struct cy_topic_t* const topic_next_gossip =
-      CAVL2_TO_OWNER(cavl2_min(cy->topics_by_gossip_time), struct cy_topic_t, index_gossip_time);
+      CAVL2_TO_OWNER(cavl2_min(cy->topics_by_gossip_time), struct cy_topic_t, index_gossip_order);
 
     // Decide if it is time to publish a heartbeat.
     const bool due_normal = now >= cy->heartbeat_next;
     const bool due_urgent = cy_joined(cy) &&                                                                         //
                             ((now - (cy->heartbeat_next - cy->heartbeat_period_max)) >= cy->heartbeat_period_min) && //
-                            ((topic_next_gossip->last_gossip < 0) || (cy->next_scout != NULL));
+                            ((topic_next_gossip->gossip_priority > 0) || (cy->next_scout != NULL));
     if (due_normal || due_urgent) {
-        if ((topic_next_gossip->last_gossip < 0) || (cy->next_scout == NULL)) {
+        if ((topic_next_gossip->gossip_priority > 0) || (cy->next_scout == NULL)) {
             res = publish_heartbeat_gossip(cy, topic_next_gossip, now);
         } else {
             res = publish_heartbeat_scout(cy, now);
@@ -1825,13 +1858,8 @@ cy_err_t cy_update(struct cy_t* const cy)
 
 void cy_notify_topic_hash_collision(struct cy_t* const cy, struct cy_topic_t* const topic)
 {
-    // Schedule the topic for gossiping ASAP, unless it is already scheduled.
-    if ((topic != NULL) && (topic->last_gossip > 0)) {
-        CY_TRACE(cy, "💥'%s'@%04x", topic->name, cy_topic_subject_id(topic));
-        // Topics with the same time will be ordered FIFO -- the tree is stable.
-        schedule_gossip(cy, topic, BIG_BANG);
-        // We could subtract the heartbeat period from the next heartbeat time to make it come out sooner,
-        // but this way we would generate unpredictable network loading. We probably don't want that.
+    if (topic != NULL) { // Topics with the same time will be ordered FIFO -- the tree is stable.
+        prioritize_gossip(cy, topic, 100);
     }
 }
 

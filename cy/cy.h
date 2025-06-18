@@ -253,7 +253,7 @@ static inline cy_err_t cy_advertise_c(struct cy_t* const           cy,
 {
     return cy_advertise(cy, pub, wkv_key(name), response_extent);
 }
-void cy_unadvertise(struct cy_t* const cy, const struct cy_publisher_t* pub);
+void cy_unadvertise(struct cy_t* const cy, struct cy_publisher_t* pub);
 
 /// Just a convenience function, nothing special.
 /// The initial future state is cy_future_fresh.

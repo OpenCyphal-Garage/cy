@@ -14,7 +14,7 @@ void cy_trace(struct cy_t* const  cy,
               ...)
 {
     // Capture the uptime timestamp ASAP.
-    const cy_us_t uptime_us = cy_now(cy) - cy->started_at;
+    const cy_us_t uptime_us = cy_now(cy) - cy->ts_started;
 
     // Get the current wall time and format it.
     struct timespec ts;
