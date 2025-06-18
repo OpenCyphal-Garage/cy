@@ -399,7 +399,7 @@ static void prioritize_gossip(struct cy_t* const cy, struct cy_topic_t* const to
     // - If this is a pinned topic, it normally cannot collide with another one; we are publishing it just to announce
     // that we have it; as such, the urgency of this action is a bit lower than that of an actual colliding topic
     // announcement, so we choose next-greater time to deprioritize it.
-    if (is_pinned(topic->hash) && (priority > 1)) {
+    if (is_pinned(topic->hash) && (priority > 2)) {
         --priority;
     }
     if (topic->gossip_priority < priority) { // Don't do anything if it's already scheduled.
@@ -504,15 +504,16 @@ static void mortal_retire_timed_out(struct cy_t* const cy, const cy_us_t now)
 }
 
 /// Returns UINT32_MAX if the string is not a valid pinned subject-ID form.
+/// A valid form is: "@/1234".
 /// Pinned topic names must have only canonical names to ensure that no two topic names map to the same subject-ID.
 /// The only requirement to ensure this is that there must be no leading zeros in the number.
 static uint32_t parse_pinned(const struct wkv_str_t s)
 {
-    if ((s.len < 1) || (s.len > 4) || (s.str[0] == '0')) { // Leading zeroes not accepted; only canonical form
-        return UINT32_MAX;
+    if ((s.len < 3) || (s.len > 6) || (s.str[0] != '@') || (s.str[1] != '/') || (s.str[2] == '0')) {
+        return UINT32_MAX; // Leading zeroes not accepted; only canonical form.
     }
     uint32_t out = 0U;
-    for (size_t i = 0; i < s.len; i++) {
+    for (size_t i = 2; i < s.len; i++) {
         if ((s.str[i] < '0') || (s.str[i] > '9')) {
             return UINT32_MAX;
         }
@@ -535,6 +536,7 @@ static uint64_t topic_hash(const struct wkv_str_t name)
 
 static uint16_t topic_subject_id(const uint64_t hash, const uint64_t evictions)
 {
+    // TODO: remove this special case for pinned topics once we switched to the new extended subject-ID space.
     if (is_pinned(hash)) {
         return (uint16_t)hash; // Pinned topics may exceed CY_TOPIC_SUBJECT_COUNT.
     }
@@ -1644,7 +1646,7 @@ cy_err_t cy_new(struct cy_t* const                cy,
     // the default name is just derived from UID, can be overridden by the user later
     (void)snprintf(cy->name,
                    sizeof(cy->name),
-                   "%04x/%04x/%08lx/",
+                   "@/%04x/%04x/%08lx/",
                    (unsigned)(uid >> 48U) & UINT16_MAX,
                    (unsigned)(uid >> 32U) & UINT16_MAX,
                    (unsigned long)(uid & UINT32_MAX));

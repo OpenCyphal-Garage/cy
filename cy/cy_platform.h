@@ -20,7 +20,7 @@
 /// Only for testing and debugging purposes.
 /// All nodes obviously must use the same heartbeat topic, which is why it is pinned.
 #ifndef CY_CONFIG_HEARTBEAT_TOPIC_NAME
-#define CY_CONFIG_HEARTBEAT_TOPIC_NAME "/7509"
+#define CY_CONFIG_HEARTBEAT_TOPIC_NAME "/@/7509"
 #endif
 
 /// Only for testing and debugging purposes.
