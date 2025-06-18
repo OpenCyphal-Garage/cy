@@ -296,7 +296,7 @@ int main(const int argc, char* argv[])
     }
 
     // Spin the event loop and publish the topics.
-    cy_us_t next_publish_at = cy_now(cy) + 1000000;
+    cy_us_t next_publish_at = cy_now(cy) + 10000000;
     while (true) {
         // The event loop spin API is platform-specific, too.
         const cy_err_t err_spin = cy_udp_posix_spin_once(&cy_udp_posix);

@@ -404,7 +404,7 @@ static void prioritize_gossip(struct cy_t* const cy, struct cy_topic_t* const to
     }
     if (topic->gossip_priority < priority) { // Don't do anything if it's already scheduled.
         CY_TRACE(cy,
-                 "⏱️'%s' #%016llx @%04x prio=%d",
+                 "⚖️'%s' #%016llx @%04x prio=%d",
                  topic->name,
                  (unsigned long long)topic->hash,
                  cy_topic_subject_id(topic),
@@ -965,6 +965,7 @@ static cy_err_t publish_heartbeat(struct cy_t* const cy, const cy_us_t now, stru
     // Schedule the next heartbeat.
     // If this heartbeat failed to publish, we simply give up and move on to try again in the next period.
     cy->heartbeat_next += cy->heartbeat_period_max; // Do not accumulate heartbeat phase slip.
+    cy->heartbeat_last = now;
     return res;
 }
 
@@ -1683,6 +1684,7 @@ cy_err_t cy_new(struct cy_t* const                cy,
     cy->heartbeat_period_max = HEARTBEAT_DEFAULT_PERIOD_us;
     cy->heartbeat_period_min = cy->heartbeat_period_max / 100;
     cy->heartbeat_next       = cy->ts_started;
+    cy->heartbeat_last       = BIG_BANG;
     cy_err_t res             = CY_OK;
     if (cy->node_id > cy->platform->node_id_max) {
         cy->heartbeat_next += (cy_us_t)random_uint(cy, CY_START_DELAY_MIN_us, CY_START_DELAY_MAX_us);
@@ -1843,8 +1845,8 @@ cy_err_t cy_update(struct cy_t* const cy)
 
     // Decide if it is time to publish a heartbeat.
     const bool due_normal = now >= cy->heartbeat_next;
-    const bool due_urgent = cy_joined(cy) &&                                                                         //
-                            ((now - (cy->heartbeat_next - cy->heartbeat_period_max)) >= cy->heartbeat_period_min) && //
+    const bool due_urgent = cy_joined(cy) &&                                            //
+                            (now >= (cy->heartbeat_last + cy->heartbeat_period_min)) && //
                             ((topic_next_gossip->gossip_priority > 0) || (cy->next_scout != NULL));
     if (due_normal || due_urgent) {
         if ((topic_next_gossip->gossip_priority > 0) || (cy->next_scout == NULL)) {
