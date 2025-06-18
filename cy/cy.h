@@ -61,8 +61,7 @@ extern "C"
 #define CY_SUBJECT_BITS        13U
 #define CY_TOTAL_SUBJECT_COUNT (1UL << CY_SUBJECT_BITS)
 
-#define CY_SUBJECT_ID_INVALID 0xFFFFU
-#define CY_NODE_ID_INVALID    0xFFFFU
+#define CY_NODE_ID_INVALID 0xFFFFU
 
 #define CY_PASTE_(a, b) a##b
 #define CY_PASTE(a, b)  CY_PASTE_(a, b)
@@ -257,7 +256,7 @@ static inline cy_err_t cy_advertise_c(struct cy_t* const           cy,
 void cy_unadvertise(struct cy_t* const cy, const struct cy_publisher_t* pub);
 
 /// Just a convenience function, nothing special.
-/// The intial future state is cy_future_fresh.
+/// The initial future state is cy_future_fresh.
 void cy_future_new(struct cy_future_t* const future, const cy_future_callback_t callback, void* const user);
 
 /// This needs not be done after a future completes normally. It is only needed if the future needs to be

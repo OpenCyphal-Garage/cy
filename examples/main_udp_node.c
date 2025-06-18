@@ -268,6 +268,9 @@ int main(const int argc, char* argv[])
     }
     struct cy_t* const cy = &cy_udp_posix.base;
 
+    // This is just for debugging purposes.
+    cy->mortal_topic_timeout = 10000000;
+
     // ------------------------------  End of the platform- and transport-specific part  ------------------------------
 
     // Create publishers.

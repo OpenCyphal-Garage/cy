@@ -40,7 +40,7 @@ uint64 uid
 uint64 topic_hash
 # The topic hash is computed as:
 #
-# - If the key names a pinned topic, which means it matches `^([1-9][0-9]{0,4})$`, where the capture group
+# - If the key names a pinned topic, which means it matches `^([1-9][0-9]{0,3})$`, where the capture group
 #   is the pinned subject-ID, then the hash is simply the pinned subject-ID. Pinned topic names always have the
 #   canonical form, which can be seen from the pattern, meaning that for any subject-ID there is exactly one
 #   pinned topic name encoding it.
@@ -49,7 +49,7 @@ uint64 topic_hash
 #
 # The reason the hash is here is that its computation is expensive, and we want to avoid recomputing it for every
 # received gossip message, since there is necessarily a large number of them. We still need to transmit the full
-# key because it is necessary for wildcard matching, and also for monitoring purposes.
+# key because it is necessary for pattern matching, and also for monitoring purposes.
 
 @assert _offset_ == {24 * 8}
 uint56 topic_age
@@ -57,9 +57,18 @@ uint56 topic_age
 # The logical age increases when the topic is gossiped, and when a valid transfer is received on it.
 # Topics with greater age win arbitration, thus ensuring stability of the network when new topics/nodes appear.
 
-bool flag_publishing      # The sender is publishing on this topic.
-bool flag_subscribed      # The sender is subscribed to this topic.
-bool flag_scout           # Requesting everyone who has matching topics to gossip them ASAP.
+bool flag_publishing
+# The sender is publishing on this topic.
+
+bool flag_subscribed
+# The sender is subscribed to this topic.
+
+bool flag_receiving
+# At least one transfer was received on this topic since it was last gossiped.
+
+bool flag_scout
+# Requesting everyone who has matching topics to gossip them ASAP.
+
 # Additional flags may be added in the future. Possible candidates:
 #
 # flag_response_expected
@@ -72,7 +81,7 @@ bool flag_scout           # Requesting everyone who has matching topics to gossi
 #   The topic allows sharing its subject-ID with other multitenant topics.
 #   This is useful for low-criticality low-bandwidth topics.
 #   Non-multitenant topics arbitrate against multitenant topics as usual.
-void5
+void4
 
 @assert _offset_ == {32 * 8}
 uint40 topic_evictions
