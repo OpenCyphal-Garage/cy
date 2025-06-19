@@ -108,7 +108,7 @@ The new node-ID autoconfiguration protocol does not require an allocator; instea
 
 1. When joining the network without a node-ID preconfigured, the node will listen for a random time interval ca. 1~3 seconds. The source node-ID of each received transfer (heartbeats or whatever else may occur) is marked as taken in a local bitmask. If the transport layer has a large node-ID space (which is the case for every transport except Cyphal/CAN), the bitmask is replaced with a Bloom filter, whose bit capacity defines the maximum number of nodes that can be autoconfigured in this way (e.g., a 512-byte Bloom filter allows allocating at least 4096 nodes).
 
-2. When a new node is discovered, the listening time is extended by a random penalty ca. 0~1 seconds. This is to reduce the likelihood of multiple nodes claiming an address at the same time.
+2. When a new node is discovered, the listening deadline is updated as `max(old_deadline, now + random_penalty)`, where `random_penalty` is in 0~1 seconds. This is to reduce the likelihood of multiple nodes claiming an address at the same time. The specifics of this step may need refinement.
 
 3. Once the initial delay has expired, an unoccupied node-ID is chosen from the bitmask/Bloom filter and marked as used. The first heartbeat is published immediately to claim the address.
 

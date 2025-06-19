@@ -62,7 +62,7 @@ static uint64_t pow2(const int_fast8_t exp)
     if (exp > 63) {
         return UINT64_MAX;
     }
-    return 1ULL << exp;
+    return 1ULL << (uint_fast8_t)exp;
 }
 
 static uint64_t random_u64(const cy_t* const cy)
@@ -608,7 +608,10 @@ static void topic_ensure_subscribed(cy_t* const cy, cy_topic_t* const topic)
 /// index tree on every iteration, and there may be as many iterations as there are local topics in the theoretical
 /// worst case. The amortized worst case is only O(log(N)) because the topics are sparsely distributed thanks to the
 /// topic hash function, unless there is a large number of topics (~>1000).
-static void topic_allocate(cy_t* const cy, cy_topic_t* const topic, const uint32_t new_evictions, const bool virgin)
+static void topic_allocate(cy_t* const       cy, // NOLINT(*-no-recursion)
+                           cy_topic_t* const topic,
+                           const uint32_t    new_evictions,
+                           const bool        virgin)
 {
     assert(cy->topic_count <= CY_TOPIC_SUBJECT_COUNT); // There is certain to be a free subject-ID!
 
@@ -1413,7 +1416,10 @@ cy_err_t cy_subscribe_with_params(cy_t* const                    cy,
     sub->callback   = callback;
     sub->next       = sub->root->head;
     sub->root->head = sub;
-    if (NULL != wkv_match(&cy->topics_by_name, resolved_name, (void* [2]){ cy, sub }, wkv_cb_couple_new_subscription)) {
+    if (NULL != wkv_match(&cy->topics_by_name, //
+                          resolved_name,
+                          (void*)(void* [2]){ cy, sub },
+                          wkv_cb_couple_new_subscription)) {
         cy_unsubscribe(cy, sub);
         return CY_ERR_MEMORY;
     }
@@ -1714,7 +1720,7 @@ cy_err_t cy_new(cy_t* const                cy,
 /// If we don't have a node-ID and this is a new Bloom entry, follow CSMA/CD: add random wait.
 /// The point is to reduce the chances of multiple nodes appearing simultaneously and claiming same node-IDs.
 /// We keep tracking neighbors even if we have a node-ID in case we encounter a collision later and need to move.
-static void mark_neighbor(cy_t* const cy, const uint16_t remote_node_id)
+static void mark_neighbor(cy_t* const cy, const uint16_t remote_node_id, const cy_us_t now)
 {
     cy_bloom64_t* const bloom = cy->platform->node_id_bloom(cy);
     assert((bloom != NULL) && (bloom->n_bits > 0) && ((bloom->n_bits % 64) == 0) && (bloom->popcount <= bloom->n_bits));
@@ -1727,7 +1733,7 @@ static void mark_neighbor(cy_t* const cy, const uint16_t remote_node_id)
         assert(bloom->popcount == 0);
     }
     if ((cy->node_id > cy->platform->node_id_max) && !bloom64_get(bloom, remote_node_id)) {
-        cy->heartbeat_next += (cy_us_t)random_uint(cy, 0, 2 * MEGA);
+        cy->heartbeat_next = max_i64(cy->heartbeat_next, now + (cy_us_t)random_uint(cy, 0, 1 * MEGA));
         CY_TRACE(cy, "🔭 Discovered neighbor %04x; new bloom popcount %zu", remote_node_id, bloom->popcount + 1U);
     }
     bloom64_set(bloom, remote_node_id);
@@ -1737,7 +1743,7 @@ void cy_ingest_topic_transfer(cy_t* const cy, cy_topic_t* const topic, cy_transf
 {
     assert(topic != NULL);
 
-    mark_neighbor(cy, transfer.metadata.remote_node_id);
+    mark_neighbor(cy, transfer.metadata.remote_node_id, transfer.timestamp);
 
     // Experimental: age the topic with received transfers. Not with the published ones because we don't want
     // unconnected publishers to inflate the age.
