@@ -53,9 +53,29 @@ typedef struct cy_platform_t cy_platform_t;
 #endif
 
 /// When a response to a received message is sent, it is delivered as a P2P transfer to this service-ID.
-/// The response user data is prefixed with 8 bytes of the full topic hash to which we are responding.
 /// The receiver of the response will be able to match the response with a specific request using the transfer-ID.
+/// The response user data is immediately prefixed with the following data (in DSDL notation):
+///
+///     uint64 topic_hash   # The hash of the topic that the response is for.
+///     uint64 transfer_id  # The masked transfer-ID of the message that this response is for.
+///     # Response payload follows immediately after this header.
 #define CY_P2P_SERVICE_ID_TOPIC_RESPONSE 510
+
+/// When a node sends a message over a reliable topic or sends a reliable response P2P transfer,
+/// it expects acknowledgments from the receivers to be sent to this service-ID.
+/// Acknowledgements are strictly single-frame transfers (except for the inherently limited Classic CAN transport).
+///
+/// The transfer-ID of the acknowledgment is the same as the transfer-ID of the original message/response.
+///
+/// Each acknowledgement transfer is sent twice to reduce the risk of loss, since the loss of an acknowledgment
+/// is costly in terms of bandwidth and latency.
+///
+/// The format of the acknowledgment message is as follows (in DSDL notation):
+///
+///     uint64 topic_hash   # Like in the topic response.
+///     uint64 transfer_id  # The masked transfer-ID of the transfer that this ack is for.
+///     uint8  kind         # 0 -- message positive ack; 1 -- response positive ack.
+#define CY_P2P_SERVICE_ID_RELIABLE_ACK 511
 
 /// An ordinary Bloom filter with 64-bit words.
 struct cy_bloom64_t

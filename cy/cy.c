@@ -1443,8 +1443,8 @@ cy_err_t cy_respond(cy_t* const                  cy,
     if (res != CY_OK) {
         return res;
     }
-    /// Yes, we send the response using a request transfer. In the future we may leverage this for reliable delivery.
-    /// All responses are sent to the same P2P service-ID; they are discriminated by the topic hash.
+    // All responses are sent to the same P2P service-ID; they are discriminated by the topic hash.
+    // TODO: the transfer-ID of the message shall be encoded in the payload; the metadata needs a new transfer-ID!
     return cy->platform->p2p(cy,
                              CY_P2P_SERVICE_ID_TOPIC_RESPONSE,
                              metadata,
@@ -1804,6 +1804,7 @@ void cy_ingest_topic_response_transfer(cy_t* const cy, cy_transfer_owned_t trans
     }
 
     // Find the matching pending response future -- log(N) lookup.
+    // TODO FIXME: the transfer ID comes from the message, not from the transfer metadata!
     const uint64_t   transfer_id_masked = transfer.metadata.transfer_id & cy->platform->transfer_id_mask;
     cy_tree_t* const tr =
       cavl2_find(topic->futures_by_transfer_id, &transfer_id_masked, &cavl_comp_future_transfer_id_masked);
@@ -1812,7 +1813,7 @@ void cy_ingest_topic_response_transfer(cy_t* const cy, cy_transfer_owned_t trans
         return; // Unexpected or duplicate response. TODO: Linger completed futures for multiple responses?
     }
     cy_future_t* const fut = CAVL2_TO_OWNER(tr, cy_future_t, index_transfer_id);
-    assert(fut->state == cy_future_pending); // TODO Linger completed futures for multiple responses?
+    assert(fut->state == cy_future_pending);
 
     // Finalize and retire the future.
     fut->state = cy_future_success;
