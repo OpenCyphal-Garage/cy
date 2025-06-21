@@ -95,10 +95,10 @@ struct cy_bloom64_t
 /// digits of the vendor ID, product ID, and instance ID of the node.
 /// Repeated and trailing slashes are removed.
 ///
-/// A topic that is only used by pattern subscriptions (like `ins/?/data/*`, without publishers or verbatim
-/// subscriptions) is called a mortal topic. Such topics are automatically retired when they see no traffic and
-/// no gossips from publishers or receiving subscribers for mortal_topic_timeout.
-/// This is needed to prevent automatic pattern subscriptions from lingering forever when all publishers are gone.
+/// A topic that is only used by pattern subscriptions (like `ins/?/data/*`, without publishers or explicit
+/// subscriptions) is called implicit. Such topics are automatically retired when they see no traffic and
+/// no gossips from publishers or receiving subscribers for implicit_topic_timeout.
+/// This is needed to prevent implicit pattern subscriptions from lingering forever when all explicit topics are gone.
 /// See https://github.com/pavel-kirienko/cy/issues/15.
 ///
 /// Notably, the last gossip time is NOT updated when we receive a gossip from another node.
@@ -166,20 +166,26 @@ struct cy_topic_t
     uint64_t age;
 
     /// Event timestamps used for state management.
-    cy_us_t ts_aged;      ///< Age last incremented at this time.
-    cy_us_t ts_gossiped;  ///< Gossip last published at this time.
-    cy_us_t ts_received;  ///< Transfer last received at this time.
-    cy_us_t ts_testified; ///< Gossip received at this time, except gossips from subscribers that receive no transfers.
+    cy_us_t ts_aged;     ///< Age last incremented at this time.
+    cy_us_t ts_gossiped; ///< Gossip last published at this time.
+    cy_us_t ts_animated; ///< Last time the topic saw activity that prevents it from being retired.
+
+    /// Flags propagated to the network from other gossips of this topic.
+    bool receiving;
+    bool proxy_publishing; ///< There is at least one publisher on this topic.
+    bool proxy_subscribed; ///< There is at least one subscriber on this topic.
+    bool proxy_receiving;  ///< There is some data being published on this topic.
+    bool proxy_explicit;   ///< The topic has live explicit users (as opposed to implicit pattern-matched instances).
 
     /// The next topic to gossip is chosen with the highest priority, then with the lowest ts_gossiped.
     /// Topics with zero priority are gossiped at the max gossip period; others force the min period.
     /// Once a gossip is published, the priority is reset to the minimum.
     uint_fast8_t gossip_priority;
 
-    /// Mortal topics are ordered by last animation time, which is used to determine which topic to retire next.
-    /// Mortal topics are distinguished from ordinary topics by being in the list.
-    cy_topic_t* mortal_next;
-    cy_topic_t* mortal_prev;
+    /// Implicit topics are ordered by last animation time, which is used to determine which topic to retire next.
+    /// Implicit topics are distinguished from ordinary topics by being in the list.
+    cy_topic_t* implicit_next;
+    cy_topic_t* implicit_prev;
 
     /// Used for matching futures against received responses.
     cy_tree_t* futures_by_transfer_id;
@@ -364,10 +370,10 @@ struct cy_t
     bool node_id_collision;
 
     /// See the topic definition.
-    /// Most recently animated mortal topics at at the head of the list.
-    cy_us_t     mortal_topic_timeout;
-    cy_topic_t* mortal_head;
-    cy_topic_t* mortal_tail;
+    /// Most recently animated implicit topics at at the head of the list.
+    cy_us_t     implicit_topic_timeout;
+    cy_topic_t* implicit_head;
+    cy_topic_t* implicit_tail;
 
     /// Heartbeat topic and related items.
     /// The heartbeat period can be changed at any time, but it must not exceed 1 second.
@@ -387,10 +393,12 @@ struct cy_t
     wkv_t      topics_by_name;
 
     /// When a heartbeat is received, its topic name will be compared against the patterns,
-    /// and if a match is found, a new subscription will be constructed automatically.
+    /// and if a match is found, a new subscription will be constructed automatically; if a new topic instance
+    /// has to be created for that, such instance is called implicit. Implicit instances are retired automatically
+    /// when there are no explicit counterparts left and there is no traffic on the topic for a while.
     /// The values of these tree nodes point to instances of cy_subscriber_root_t.
-    wkv_t subscribers_by_name;    ///< Both verbatim and patterns.
-    wkv_t subscribers_by_pattern; ///< Only patterns for automatic subscriptions on heartbeat.
+    wkv_t subscribers_by_name;    ///< Both explicit and patterns.
+    wkv_t subscribers_by_pattern; ///< Only patterns for implicit subscriptions on heartbeat.
 
     /// Only for pattern subscriptions.
     struct cy_subscriber_root_t* next_scout;

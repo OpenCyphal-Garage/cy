@@ -35,7 +35,7 @@
 #define HEARTBEAT_DEFAULT_PERIOD_us (500 * KILO)
 #define HEARTBEAT_PUB_TIMEOUT_us    (1 * MEGA)
 
-#define MORTAL_TOPIC_DEFAULT_TIMEOUT_us (3600 * MEGA)
+#define IMPLICIT_TOPIC_DEFAULT_TIMEOUT_us (3600 * MEGA)
 
 /// Responses have an 8-byte prefix containing the topic hash that the response is for.
 #define RESPONSE_PAYLOAD_OVERHEAD_BYTES 8U
@@ -424,8 +424,8 @@ static void prioritize_gossip(cy_t* const cy, cy_topic_t* const topic, uint_fast
     }
 }
 
-/// A first-principles check to see if the topic is mortal. Scans all couplings, slow.
-static bool validate_is_mortal(const cy_topic_t* const topic)
+/// A first-principles check to see if the topic is implicit. Scans all couplings, slow.
+static bool validate_is_implicit(const cy_topic_t* const topic)
 {
     if (topic->pub_count > 0) {
         return false;
@@ -433,80 +433,78 @@ static bool validate_is_mortal(const cy_topic_t* const topic)
     const cy_topic_coupling_t* cpl = topic->couplings;
     while (cpl != NULL) {
         if (cpl->root->index_pattern == NULL) {
-            return false; // This is a verbatim subscription, so the topic is not mortal.
+            return false; // This is a verbatim subscription, so the topic is not implicit.
         }
         cpl = cpl->next;
     }
     return true;
 }
 
-static bool is_mortal(const cy_t* const cy, const cy_topic_t* const topic)
+static bool is_implicit(const cy_t* const cy, const cy_topic_t* const topic)
 {
-    assert((cy->mortal_head != NULL) == (cy->mortal_tail != NULL));
-    const bool out = (topic->mortal_next != NULL) || (topic->mortal_prev != NULL) || (cy->mortal_head == topic);
+    assert((cy->implicit_head != NULL) == (cy->implicit_tail != NULL));
+    const bool out = (topic->implicit_next != NULL) || (topic->implicit_prev != NULL) || (cy->implicit_head == topic);
     return out;
 }
 
-/// Remove the topic from the doubly-linked list of mortal topics. Does nothing if the topic is not enlisted.
-/// Returns true if the topic was enlisted, false otherwise.
-static void mortal_delist(cy_t* const cy, cy_topic_t* const topic)
+/// Remove the topic from the doubly-linked list of implicit topics. Does nothing if the topic is not enlisted.
+static void implicit_delist(cy_t* const cy, cy_topic_t* const topic)
 {
-    assert(is_mortal(cy, topic));
-    if (topic->mortal_next != NULL) {
-        topic->mortal_next->mortal_prev = topic->mortal_prev;
+    assert(is_implicit(cy, topic));
+    if (topic->implicit_next != NULL) {
+        topic->implicit_next->implicit_prev = topic->implicit_prev;
     }
-    if (topic->mortal_prev != NULL) {
-        topic->mortal_prev->mortal_next = topic->mortal_next;
+    if (topic->implicit_prev != NULL) {
+        topic->implicit_prev->implicit_next = topic->implicit_next;
     }
-    if (cy->mortal_head == topic) {
-        cy->mortal_head = topic->mortal_next;
+    if (cy->implicit_head == topic) {
+        cy->implicit_head = topic->implicit_next;
     }
-    if (cy->mortal_tail == topic) {
-        cy->mortal_tail = topic->mortal_prev;
+    if (cy->implicit_tail == topic) {
+        cy->implicit_tail = topic->implicit_prev;
     }
-    topic->mortal_next = NULL;
-    topic->mortal_prev = NULL;
-    assert((cy->mortal_head != NULL) == (cy->mortal_tail != NULL));
+    topic->implicit_next = NULL;
+    topic->implicit_prev = NULL;
+    assert((cy->implicit_head != NULL) == (cy->implicit_tail != NULL));
 }
 
-/// Add the topic to the head of doubly-linked list of mortal topics.
-/// The oldest mortal topic will be eventually pushed to the tail of the list.
-static void mortal_enlist(cy_t* const cy, cy_topic_t* const topic)
+/// Add the topic to the head of doubly-linked list of implicit topics.
+/// The oldest implicit topic will be eventually pushed to the tail of the list.
+static void implicit_enlist(cy_t* const cy, cy_topic_t* const topic)
 {
-    assert((topic->mortal_next == NULL) && (topic->mortal_prev == NULL));
-    assert((cy->mortal_head != NULL) == (cy->mortal_tail != NULL));
-    assert(validate_is_mortal(topic));
-    topic->mortal_next = cy->mortal_head;
-    if (cy->mortal_head != NULL) {
-        cy->mortal_head->mortal_prev = topic;
+    assert((topic->implicit_next == NULL) && (topic->implicit_prev == NULL));
+    assert((cy->implicit_head != NULL) == (cy->implicit_tail != NULL));
+    assert(validate_is_implicit(topic));
+    topic->implicit_next = cy->implicit_head;
+    if (cy->implicit_head != NULL) {
+        cy->implicit_head->implicit_prev = topic;
     }
-    cy->mortal_head = topic;
-    if (cy->mortal_tail == NULL) {
-        cy->mortal_tail = topic;
+    cy->implicit_head = topic;
+    if (cy->implicit_tail == NULL) {
+        cy->implicit_tail = topic;
     }
-    assert((cy->mortal_head != NULL) && (cy->mortal_tail != NULL));
+    assert((cy->implicit_head != NULL) && (cy->implicit_tail != NULL));
 }
 
-/// Move the topic to the head of the doubly-linked list of mortal topics.
-/// The oldest mortal topic will be eventually pushed to the tail of the list.
-static void mortal_animate(cy_t* const cy, cy_topic_t* const topic)
+/// Move the topic to the head of the doubly-linked list of implicit topics.
+/// The oldest implicit topic will be eventually pushed to the tail of the list.
+static void implicit_animate(cy_t* const cy, cy_topic_t* const topic, const cy_us_t now)
 {
-    if (is_mortal(cy, topic)) {
-        mortal_delist(cy, topic); // move to the head of the list
-        mortal_enlist(cy, topic);
+    topic->ts_animated = now;
+    if (is_implicit(cy, topic)) {
+        implicit_delist(cy, topic); // move to the head of the list
+        implicit_enlist(cy, topic);
     }
 }
 
 /// Retires at most one at every call.
-static void mortal_retire_timed_out(cy_t* const cy, const cy_us_t now)
+static void retire_timed_out_implicit(cy_t* const cy, const cy_us_t now)
 {
-    cy_topic_t* const topic = cy->mortal_tail;
+    cy_topic_t* const topic = cy->implicit_tail;
     if (topic != NULL) {
-        assert(is_mortal(cy, topic) && validate_is_mortal(topic));
-        const bool rx_feed_alive = (topic->ts_received + cy->mortal_topic_timeout) >= now;
-        const bool testifiable   = (topic->ts_testified + cy->mortal_topic_timeout) >= now;
-        if ((!rx_feed_alive) && (!testifiable)) {
-            mortal_delist(cy, topic);
+        assert(is_implicit(cy, topic) && validate_is_implicit(topic));
+        if ((topic->ts_animated + cy->implicit_topic_timeout) < now) {
+            implicit_delist(cy, topic);
             CY_TRACE(
               cy, "⚰️'%s' #%016llx @%04x", topic->name, (unsigned long long)topic->hash, cy_topic_subject_id(topic));
             topic_destroy(cy, topic);
@@ -736,15 +734,19 @@ static cy_err_t topic_new(cy_t* const        cy,
     topic->evictions = evictions;
     topic->age       = 0;
 
-    topic->ts_aged      = cy_now(cy);
-    topic->ts_gossiped  = BIG_BANG;
-    topic->ts_received  = BIG_BANG;
-    topic->ts_testified = cy_now(cy);
+    topic->ts_aged     = cy_now(cy);
+    topic->ts_gossiped = BIG_BANG;
+
+    topic->receiving        = false;
+    topic->proxy_publishing = false;
+    topic->proxy_subscribed = false;
+    topic->proxy_receiving  = false;
+    topic->proxy_explicit   = false;
 
     topic->gossip_priority = 10; // Gossip ASAP because this is a new topic.
 
-    topic->mortal_next = NULL;
-    topic->mortal_prev = NULL;
+    topic->implicit_next = NULL;
+    topic->implicit_prev = NULL;
 
     topic->pub_transfer_id = random_u64(cy); // https://forum.opencyphal.org/t/improve-the-transfer-id-timeout/2375
     topic->pub_count       = 0;
@@ -786,8 +788,8 @@ static cy_err_t topic_new(cy_t* const        cy,
     }
     cy->topic_count++;
 
-    // Initially, all topics are considered mortal until proven otherwise.
-    mortal_enlist(cy, topic);
+    // Initially, all topics are considered implicit until proven otherwise.
+    implicit_enlist(cy, topic);
 
     CY_TRACE(cy,
              "✨'%s' #%016llx @%04x: topic_count=%zu",
@@ -857,11 +859,11 @@ static cy_err_t topic_couple(cy_t* const                 cy,
             cpl->substitutions[i] = (cy_substitution_t){ .str = s->str, .ordinal = s->ordinal };
             s                     = s->next;
         }
-        // If this is a verbatim subscriber, the topic is no (longer) mortal.
-        if ((subr->index_pattern == NULL) && is_mortal(cy, topic)) {
-            mortal_delist(cy, topic);
+        // If this is a verbatim subscriber, the topic is no (longer) implicit.
+        if ((subr->index_pattern == NULL) && is_implicit(cy, topic)) {
+            implicit_delist(cy, topic);
             CY_TRACE(cy,
-                     "🧛 Immortalized '%s' #%016llx @%04x",
+                     "🧛 Promoted to explicit '%s' #%016llx @%04x",
                      topic->name,
                      (unsigned long long)topic->hash,
                      cy_topic_subject_id(topic));
@@ -931,10 +933,10 @@ static void* wkv_cb_topic_scout_response(const wkv_event_t evt)
 //                                                      HEARTBEAT
 // =====================================================================================================================
 
-#define FLAG_PUBLISHING 1U ///< Source is actively publishing this topic.
-#define FLAG_SUBSCRIBED 2U ///< Source is subscribed to this topic.
-#define FLAG_RECEIVING  4U ///< At least one transfer was received on this topic since last gossip.
-#define FLAG_SCOUT      8U ///< Scout message requesting everyone who knows matching topics to respond.
+#define FLAG_PUBLISHING 1U
+#define FLAG_SUBSCRIBED 4U
+#define FLAG_RECEIVING  16U
+#define FLAG_EXPLICIT   64U
 
 /// We could have used Nunavut, but we only need a single message and it's very simple, so we do it manually.
 typedef struct
@@ -985,9 +987,19 @@ static cy_err_t publish_heartbeat_gossip(cy_t* const cy, cy_topic_t* const topic
 {
     topic_age(topic, now);
     topic_ensure_subscribed(cy, topic); // use this opportunity to repair the subscription if broken
-    const uint_fast8_t flags = ((topic->pub_count > 0) ? FLAG_PUBLISHING : 0U) |     //
-                               ((topic->couplings != NULL) ? FLAG_SUBSCRIBED : 0U) | //
-                               ((topic->ts_received >= topic->ts_gossiped) ? FLAG_RECEIVING : 0U);
+    const uint_fast8_t flags = ((topic->pub_count > 0) ? FLAG_PUBLISHING : 0U) |      //
+                               ((topic->couplings != NULL) ? FLAG_SUBSCRIBED : 0U) |  //
+                               (topic->receiving ? FLAG_RECEIVING : 0U) |             //
+                               (is_implicit(cy, topic) ? 0U : FLAG_EXPLICIT) |        //
+                               (topic->proxy_publishing ? 2 * FLAG_PUBLISHING : 0U) | //
+                               (topic->proxy_subscribed ? 2 * FLAG_SUBSCRIBED : 0U) | //
+                               (topic->proxy_receiving ? 2 * FLAG_RECEIVING : 0U) |
+                               (topic->proxy_explicit ? 2 * FLAG_EXPLICIT : 0U);
+    topic->receiving        = false;
+    topic->proxy_publishing = false;
+    topic->proxy_subscribed = false;
+    topic->proxy_receiving  = false;
+    topic->proxy_explicit   = false;
     // Possible optimization: we don't have to transmit the topic name if the message is urgent, i.e.,
     // if it is published in response to a divergent allocation or possibly a collision.
     heartbeat_t msg = { .topic_hash      = topic->hash,
@@ -1015,8 +1027,8 @@ static cy_err_t publish_heartbeat_scout(cy_t* const cy, const cy_us_t now)
 {
     const cy_subscriber_root_t* subr = cy->next_scout;
     assert(subr != NULL); // https://github.com/pavel-kirienko/cy/issues/12#issuecomment-2953184238
-    heartbeat_t msg = { .topic_hash     = 8185,
-                        .flags          = FLAG_SCOUT,
+    heartbeat_t msg = { .topic_log_age  = -2,
+                        .flags          = FLAG_SUBSCRIBED,
                         .topic_name_len = (uint_fast8_t)subr->index_name->key_len };
     wkv_get_key(&cy->subscribers_by_name, subr->index_name, msg.topic_name);
     const cy_err_t res = publish_heartbeat(cy, now, &msg);
@@ -1043,22 +1055,25 @@ static void on_heartbeat(cy_t* const cy, const cy_arrival_t* const evt)
     const uint64_t                other_hash      = heartbeat.topic_hash;
     const uint32_t                other_evictions = heartbeat.topic_evictions;
     const int_fast8_t             other_lage      = heartbeat.topic_log_age;
-    const bool                    is_scout        = (heartbeat.flags & FLAG_SCOUT) != 0U;
+    const bool                    is_scout        = heartbeat.topic_log_age < -1;
     const wkv_str_t               key             = { .len = heartbeat.topic_name_len, .str = heartbeat.topic_name };
     //
     if (!is_scout) {
-        // Find the topic in our local database.
-        cy_topic_t* mine = cy_topic_find_by_hash(cy, other_hash);
-        if ((heartbeat.flags & (FLAG_PUBLISHING | FLAG_RECEIVING)) != 0) {
-            if (mine == NULL) {
-                mine = topic_subscribe_if_matching(cy, key, other_hash, other_evictions);
-            }
-            if (mine != NULL) {
-                mortal_animate(cy, mine);
-                mine->ts_testified = ts;
-            }
+        // Find the topic in our local database. Create if there is a pattern match.
+        cy_topic_t* mine    = cy_topic_find_by_hash(cy, other_hash);
+        const bool  animate = ((heartbeat.flags | (heartbeat.flags >> 1U)) & // combine own with proxy flags
+                              (FLAG_PUBLISHING | FLAG_RECEIVING | FLAG_EXPLICIT)) != 0;
+        if (animate && (mine == NULL)) {
+            mine = topic_subscribe_if_matching(cy, key, other_hash, other_evictions);
         }
         if (mine != NULL) { // We have this topic! Check if we have consensus on the subject-ID.
+            if (animate) {
+                implicit_animate(cy, mine, ts);
+            }
+            mine->proxy_publishing = mine->proxy_publishing || (heartbeat.flags & FLAG_PUBLISHING) != 0;
+            mine->proxy_subscribed = mine->proxy_subscribed || (heartbeat.flags & FLAG_SUBSCRIBED) != 0;
+            mine->proxy_receiving  = mine->proxy_receiving || (heartbeat.flags & FLAG_RECEIVING) != 0;
+            mine->proxy_explicit   = mine->proxy_explicit || (heartbeat.flags & FLAG_EXPLICIT) != 0;
             assert(mine->hash == other_hash);
             const int_fast8_t mine_lage = log2_floor(mine->age);
             if (mine->evictions != other_evictions) {
@@ -1189,10 +1204,10 @@ cy_err_t cy_advertise(cy_t* const cy, cy_publisher_t* const pub, const wkv_str_t
     if (res == CY_OK) {
         assert(pub->topic != NULL);
         pub->topic->pub_count++;
-        if (is_mortal(cy, pub->topic)) {
-            mortal_delist(cy, pub->topic);
+        if (is_implicit(cy, pub->topic)) {
+            implicit_delist(cy, pub->topic);
             CY_TRACE(cy,
-                     "🧛 Immortalized '%s' #%016llx @%04x",
+                     "🧛 Promoted to explicit '%s' #%016llx @%04x",
                      pub->topic->name,
                      (unsigned long long)pub->topic->hash,
                      cy_topic_subject_id(pub->topic));
@@ -1673,9 +1688,9 @@ cy_err_t cy_new(cy_t* const                cy,
     // Postpone calling the functions until after the object is set up.
     cy->ts_started = cy_now(cy);
 
-    cy->mortal_topic_timeout = MORTAL_TOPIC_DEFAULT_TIMEOUT_us;
-    cy->mortal_head          = NULL;
-    cy->mortal_tail          = NULL;
+    cy->implicit_topic_timeout = IMPLICIT_TOPIC_DEFAULT_TIMEOUT_us;
+    cy->implicit_head          = NULL;
+    cy->implicit_tail          = NULL;
 
     cy_bloom64_t* const node_id_bloom = platform->node_id_bloom(cy);
     assert(node_id_bloom != NULL);
@@ -1750,8 +1765,8 @@ void cy_ingest_topic_transfer(cy_t* const cy, cy_topic_t* const topic, cy_transf
     topic->age++;
 
     // Record activity so that the topic is not retired.
-    mortal_animate(cy, topic);
-    topic->ts_received = transfer.timestamp;
+    implicit_animate(cy, topic, transfer.timestamp);
+    topic->receiving = true;
 
     // Simply invoke all callbacks that match this topic name.
     // The callback may unsubscribe, so we have to store the next pointer early.
@@ -1782,7 +1797,7 @@ void cy_ingest_topic_transfer(cy_t* const cy, cy_topic_t* const topic, cy_transf
 void cy_ingest_topic_response_transfer(cy_t* const cy, cy_transfer_owned_t transfer)
 {
     assert(cy != NULL);
-    mark_neighbor(cy, transfer.metadata.remote_node_id);
+    mark_neighbor(cy, transfer.metadata.remote_node_id, transfer.timestamp);
 
     // TODO: proper deserialization. This fails if the first <8 bytes are fragmented.
     if (transfer.payload.base.view.size < 8U) {
@@ -1832,7 +1847,7 @@ cy_err_t cy_update(cy_t* const cy)
     const cy_us_t now = cy_now(cy);
 
     retire_timed_out_futures(cy, now);
-    mortal_retire_timed_out(cy, now);
+    retire_timed_out_implicit(cy, now);
 
     if (cy->node_id_collision) {
         CY_TRACE(cy, "🧠 Processing the delayed node-ID collision event now.");

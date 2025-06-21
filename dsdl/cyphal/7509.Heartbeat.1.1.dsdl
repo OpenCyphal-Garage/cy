@@ -63,27 +63,36 @@ int7 topic_log_age
 # floor(log2(age)), where age is the approximate logical age of the topic; special case: floor(log2(0))=-1.
 # The logical age increases when the topic is gossiped, and when a valid transfer is received on it.
 # Topics with greater age win arbitration, thus ensuring stability of the network when new topics/nodes appear.
-# Valid values are in the range [-1, 63]; -1 represents a brand new topic.
+# Valid values are in the range [-1, 63].
+#
+# If the topic age is less than -1, then the current message is not a gossip but a scout message. The scout message
+# contains a topic name pattern and every other node is requested to check whether it has any topics matching
+# that pattern. If it does, it should gossip the matching topics ASAP, but such gossips should not be prioritized
+# before collision and divergence resolution gossips, if any.
 
 void1
 
-bool flag_publishing    # The sender is publishing on this topic.
-bool flag_subscribed    # The sender is subscribed to this topic.
-bool flag_receiving     # At least one transfer was received on this topic since it was last gossiped.
-bool flag_scout         # Requesting everyone who has matching topics to gossip them ASAP.
-# Additional flags may be added in the future. Possible candidates:
-#
-# flag_response_expected
-#   Publisher expects subscribers to respond to messages published on this topic.
-#
-# flag_reliable
-#   Reliable node expects/provides reliable transport on this topic.
-#
-# flag_multitenant
-#   The topic allows sharing its subject-ID with other multitenant topics.
-#   This is useful for low-criticality low-bandwidth topics.
-#   Non-multitenant topics arbitrate against multitenant topics as usual.
-void4
+bool flag_publishing
+bool flag_publishing_proxy
+# The sender has an active publisher on this topic, even if it is not actively publishing at the moment.
+
+bool flag_subscribed
+bool flag_subscribed_proxy
+# The sender is subscribed to this topic (regardless of whether it is receiving any transfers at the moment).
+
+bool flag_receiving
+bool flag_receiving_proxy
+# The sender has recently received a transfer on this topic.
+
+bool flag_explicit
+bool flag_explicit_proxy
+# The topic was created by the application rather than automatically by the network stack.
+# This flag is critical to allow the network to gradually retire automatically created topics based on pattern matching.
+
+# The proxy flags simply indicate whether the sender saw the corresponding flags set in any of the recently received
+# gossip messages for this topic. The recency is ultimately implementation-defined, but it should include at least
+# the time interval since the last gossip of this topic was published by the sender.
+# The purpose of the proxy flags is to accelerate the topic metadata propagation through the network.
 
 uint8 TOPIC_NAME_MAX = 88
 utf8[<=TOPIC_NAME_MAX] topic_name

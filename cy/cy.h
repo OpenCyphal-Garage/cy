@@ -38,18 +38,16 @@ extern "C"
 #define CY_TRANSFER_ID_TIMEOUT_DEFAULT_us 10000000L
 
 /// If a node-ID is provided by the user, it will be used as-is and the node will become operational immediately.
-///
 /// If no node-ID is given, the node will take some time after it is started before it starts sending transfers.
 /// While waiting, it will listen for heartbeats from other nodes to learn which addresses are available.
-/// If a collision is found, the local node will immediately cease publishing and restart the node-ID allocation.
+/// If a collision is found, the local node will immediately pick a new node-ID without ceasing network activity.
 ///
 /// Once a node-ID is allocated, it can be optionally saved in non-volatile memory so that the next startup is
 /// immediate, bypassing the allocation stage.
-///
 /// If a conflict is found, the current node-ID is reallocated regardless of whether it's been given explicitly or
 /// allocated automatically.
 #define CY_START_DELAY_MIN_us 1000000L
-#define CY_START_DELAY_MAX_us 3000000L
+#define CY_START_DELAY_MAX_us 2000000L
 
 /// The range of unregulated identifiers to use for CRDT topic allocation. The range must be the same for all
 /// applications.
