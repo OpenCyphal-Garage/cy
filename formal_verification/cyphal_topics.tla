@@ -199,6 +199,19 @@ AcceptGossip_Divergence(remote, topics) ==
         ELSE             <<[hash |-> hash, evictions |->  local.evictions, age |-> new_age]>> \o RemoveTopic(hash, topics)
     ELSE topics
 
+Check_AcceptGossip_Divergence ==
+    LET tp(h, e, a) == [hash |-> h, evictions |-> e, age |-> a] IN
+    \* Not our topic.
+    /\ AcceptGossip_Divergence(tp(3, 1, 4), <<>>) = <<>>
+    /\ AcceptGossip_Divergence(tp(3, 1, 4), <<tp(4, 1, 4)>>) = <<tp(4, 1, 4)>>
+    \* Update age only, no divergence.
+    /\ AcceptGossip_Divergence(tp(4, 1, 2), <<tp(4, 1, 4)>>) = <<tp(4, 1, 4)>>
+    /\ AcceptGossip_Divergence(tp(4, 1, 70), <<tp(4, 1, 4)>>) = <<tp(4, 1, 64)>>
+    \* Resolve divergence -- remote wins.
+    /\ AcceptGossip_Divergence(tp(4, 3, 70), <<tp(4, 1, 4)>>) = <<tp(4, 3, 64)>>
+    \* Resolve divergence -- local wins.
+    /\ AcceptGossip_Divergence(tp(4, 3, 2), <<tp(4, 1, 5)>>) = <<tp(4, 1, 5)>>
+
 \* Implementation of the collision resolution rule.
 AcceptGossip_Collision(remote, topics) ==
     LET local == GetBySubjectID(SubjectID(remote.hash, remote.evictions), topics)
@@ -206,8 +219,19 @@ AcceptGossip_Collision(remote, topics) ==
     THEN AllocateTopic([hash |-> local.hash, evictions |-> local.evictions + 1, age |-> local.age], topics)
     ELSE topics
 
+Check_AcceptGossip_Collision == 
+    LET tp(h, e, a) == [hash |-> h, evictions |-> e, age |-> a] IN
+    \* No collision.
+    /\ AcceptGossip_Collision(tp(3, 1, 4), <<>>) = <<>>
+    /\ AcceptGossip_Collision(tp(3, 1, 4), <<tp(4, 1, 4)>>) = <<tp(4, 1, 4)>>
+    \* Remote wins.
+    /\ AcceptGossip_Collision(tp(3, 2, 8), <<tp(4, 1, 4)>>) = <<tp(4, 2, 4)>>
+    \* Local wins.
+    /\ AcceptGossip_Collision(tp(3, 2, 4), <<tp(4, 1, 8)>>) = <<tp(4, 1, 8)>>
+
 \* An updated sequence of topics based on a received gossip message.
 AcceptGossip(remote, topics) == AcceptGossip_Collision(remote, AcceptGossip_Divergence(remote, topics))
+Check_AcceptGossip == Check_AcceptGossip_Divergence /\ Check_AcceptGossip_Collision
 
 \**********************************************************************************************************************
 \* Model self-check.
@@ -221,8 +245,9 @@ Check == /\ Check_FirstMatch
          /\ Check_GetBySubjectID
          /\ Check_AllocateTopic
          /\ Check_AllocateTopics
+         /\ Check_AcceptGossip
 
 =============================================================================
 \* Modification History
-\* Last modified Wed Jun 25 01:01:45 EEST 2025 by pavel
+\* Last modified Wed Jun 25 01:43:19 EEST 2025 by pavel
 \* Created Sun Jun 22 15:55:20 EEST 2025 by pavel
