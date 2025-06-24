@@ -175,7 +175,7 @@ Check_AllocateTopic ==
 
 \**********************************************************************************************************************
 \* Constructs a conflict-free topic sequence. This is meant for constructing the initial node state.
-\* Per the definition of AllocateTopic, the ordering of the elements do not affect the final allocation.
+\* Per the definition of AllocateTopic, the ordering of the elements does not affect the final allocation.
 \* Each hash can occur at most once.
 RECURSIVE AllocateTopics(_, _)
 AllocateTopics(new, topics) ==
@@ -224,5 +224,5 @@ Check == /\ Check_FirstMatch
 
 =============================================================================
 \* Modification History
-\* Last modified Tue Jun 24 23:51:38 EEST 2025 by pavel
+\* Last modified Wed Jun 25 01:01:45 EEST 2025 by pavel
 \* Created Sun Jun 22 15:55:20 EEST 2025 by pavel
