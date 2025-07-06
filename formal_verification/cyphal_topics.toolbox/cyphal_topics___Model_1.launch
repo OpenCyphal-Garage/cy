@@ -2,16 +2,16 @@
 <launchConfiguration type="org.lamport.tla.toolbox.tool.tlc.modelCheck">
     <stringAttribute key="configurationName" value="Model_1"/>
     <intAttribute key="distributedFPSetCount" value="0"/>
-    <stringAttribute key="distributedNetworkInterface" value="10.190.194.76"/>
+    <stringAttribute key="distributedNetworkInterface" value="192.168.1.231"/>
     <intAttribute key="distributedNodesCount" value="1"/>
     <stringAttribute key="distributedTLC" value="off"/>
-    <intAttribute key="fpIndex" value="126"/>
+    <intAttribute key="fpIndex" value="107"/>
     <intAttribute key="maxHeapSize" value="25"/>
     <stringAttribute key="modelBehaviorInit" value="Init"/>
     <stringAttribute key="modelBehaviorNext" value="Next"/>
     <stringAttribute key="modelBehaviorSpec" value=""/>
     <intAttribute key="modelBehaviorSpecType" value="2"/>
-    <stringAttribute key="modelBehaviorVars" value="pc, heartbeat_queue, pub_time, pub_dst"/>
+    <stringAttribute key="modelBehaviorVars" value="initial_topics, pc, heartbeat_queue, pub_time, topics, pub_dst"/>
     <stringAttribute key="modelComments" value=""/>
     <booleanAttribute key="modelCorrectnessCheckDeadlock" value="true"/>
     <listAttribute key="modelCorrectnessInvariants">
@@ -23,8 +23,12 @@
     <listAttribute key="modelParameterConstants">
         <listEntry value="Nothing;;Nothing;1;0"/>
         <listEntry value="Debug;;TRUE;0;0"/>
-        <listEntry value="NodeCount;;3;0;0"/>
+        <listEntry value="NodeCount;;2;0;0"/>
         <listEntry value="Duration;;3;0;0"/>
+        <listEntry value="InitialEvictionMax;;1;0;0"/>
+        <listEntry value="DistinctTopicCount;;2;0;0"/>
+        <listEntry value="InitialAgeMax;;1;0;0"/>
+        <listEntry value="TopicsPerNodeMax;;2;0;0"/>
     </listAttribute>
     <intAttribute key="modelVersion" value="20191005"/>
     <intAttribute key="numberOfWorkers" value="10"/>

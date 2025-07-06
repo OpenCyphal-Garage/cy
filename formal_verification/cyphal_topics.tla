@@ -1,11 +1,17 @@
 ------------------------------ MODULE cyphal_topics ------------------------------
 
-EXTENDS Integers, TLC, Sequences
+EXTENDS Integers, TLC, Sequences, FiniteSets
 
-CONSTANT Nothing, Debug, NodeCount, Duration
+CONSTANT Nothing, Debug, NodeCount, Duration, TopicsPerNodeMax, DistinctTopicCount, InitialEvictionMax, InitialAgeMax
+
 ASSUME Debug \in BOOLEAN
 ASSUME NodeCount \in Nat /\ NodeCount > 1
 ASSUME Duration \in Nat /\ Duration > 1
+
+ASSUME TopicsPerNodeMax \in Nat /\ TopicsPerNodeMax > 0 /\ TopicsPerNodeMax <= DistinctTopicCount
+ASSUME DistinctTopicCount \in Nat /\ DistinctTopicCount > 0
+ASSUME InitialEvictionMax \in Nat /\ InitialEvictionMax > 0
+ASSUME InitialAgeMax \in Nat /\ InitialAgeMax > 0
 
 \**********************************************************************************************************************
 \* General utilities and helpers.
@@ -31,6 +37,12 @@ FirstMatch(haystack, test(_)) ==
 Check_FirstMatch == FirstMatch(<<1,2,3>>, LAMBDA x: x = 2) = 2
                  /\ FirstMatch(<<1,2,3>>, LAMBDA x: x = 4) = Nothing
                  /\ FirstMatch(<<>>, LAMBDA x: x = 0) = Nothing
+
+SeqToSet(s) == {s[i] : i \in DOMAIN s}
+
+IsInjective(f) == \A a,b \in DOMAIN f : f[a] = f[b] => a = b
+
+SetToSeq(S) == CHOOSE f \in [1..Cardinality(S) -> S] : IsInjective(f)
 
 \**********************************************************************************************************************
 \* The core assumptions include that the hash function is perfect (no hash collisions) and the counters never overflow.
@@ -253,8 +265,27 @@ Check == /\ Check_FirstMatch
 \**********************************************************************************************************************
 Nodes == 1..NodeCount
 
+\* All possible initial topic states prior to local allocation and gossip.
+InitialTopicSpace == {
+    [hash |-> h, evictions |-> e, age |-> a]:
+        h \in 0..(DistinctTopicCount-1),
+        e \in 0..InitialEvictionMax,
+        a \in 0..InitialAgeMax
+}
+
+\* All possible initial local topic sets per node.
+\* We don't consider the case of zero local topics because this case is trivially correct.
+InitialTopicSets == { S \in SUBSET InitialTopicSpace : Cardinality(S) \in 1..TopicsPerNodeMax }
+
+\* A topic set, being a set, has no defined ordering. We need to choose *some* ordering to construct a sequence.
+InitialTopicSeqs == { SetToSeq(x): x \in InitialTopicSets }
+
 (* --algorithm node
 variables
+  \* Prior to start, each node will allocate the following topics locally. Divergences may result.
+  initial_topics \in [Nodes -> InitialTopicSeqs];
+  \* Local topics per node; mutable state. Initial local allocation is performed prior to launch.
+  topics = [n \in Nodes |-> AllocateTopics(initial_topics[n], <<>>)];
   \* (to) -> (from) -> queue
   heartbeat_queue = [destination \in Nodes |-> [source \in Nodes |-> <<>>]];
 
@@ -276,10 +307,11 @@ begin
   PubHeartbeat:
     while pub_dst <= NodeCount do
         if pub_dst # self /\ heartbeat_queue[pub_dst][self] = <<>> then
-            \* TODO: pick local topic to publish.
-            either heartbeat_queue[pub_dst][self] := Append(heartbeat_queue[pub_dst][self], self);
-            or skip;  \* MESSAGE LOSS
-            end either;
+            with tp \in SeqToSet(topics[self]) do
+                either heartbeat_queue[pub_dst][self] := Append(heartbeat_queue[pub_dst][self], tp);
+                or skip;  \* MESSAGE LOSS
+                end either;
+            end with;
         end if;
         pub_dst := pub_dst + 1;
     end while;
@@ -289,8 +321,8 @@ begin
     end if;
 end process;
 end algorithm; *)
-\* BEGIN TRANSLATION (chksum(pcal) = "5ae1280d" /\ chksum(tla) = "3395b063")
-VARIABLES heartbeat_queue, pc
+\* BEGIN TRANSLATION (chksum(pcal) = "900f3ba6" /\ chksum(tla) = "c59a74dd")
+VARIABLES initial_topics, topics, heartbeat_queue, pc
 
 (* define statement *)
 Invariant == PrintVal("heartbeat_queue", heartbeat_queue)
@@ -301,11 +333,13 @@ TerminationInvariant == AllProcDone => Check /\ Invariant
 
 VARIABLES pub_dst, pub_time
 
-vars == << heartbeat_queue, pc, pub_dst, pub_time >>
+vars == << initial_topics, topics, heartbeat_queue, pc, pub_dst, pub_time >>
 
 ProcSet == (Nodes)
 
 Init == (* Global variables *)
+        /\ initial_topics \in [Nodes -> InitialTopicSeqs]
+        /\ topics = [n \in Nodes |-> AllocateTopics(initial_topics[n], <<>>)]
         /\ heartbeat_queue = [destination \in Nodes |-> [source \in Nodes |-> <<>>]]
         (* Process pub *)
         /\ pub_dst = [self \in Nodes |-> 1]
@@ -315,14 +349,16 @@ Init == (* Global variables *)
 PubInit(self) == /\ pc[self] = "PubInit"
                  /\ pub_dst' = [pub_dst EXCEPT ![self] = 1]
                  /\ pc' = [pc EXCEPT ![self] = "PubHeartbeat"]
-                 /\ UNCHANGED << heartbeat_queue, pub_time >>
+                 /\ UNCHANGED << initial_topics, topics, heartbeat_queue, 
+                                 pub_time >>
 
 PubHeartbeat(self) == /\ pc[self] = "PubHeartbeat"
                       /\ IF pub_dst[self] <= NodeCount
                             THEN /\ IF pub_dst[self] # self /\ heartbeat_queue[pub_dst[self]][self] = <<>>
-                                       THEN /\ \/ /\ heartbeat_queue' = [heartbeat_queue EXCEPT ![pub_dst[self]][self] = Append(heartbeat_queue[pub_dst[self]][self], self)]
-                                               \/ /\ TRUE
-                                                  /\ UNCHANGED heartbeat_queue
+                                       THEN /\ \E tp \in SeqToSet(topics[self]):
+                                                 \/ /\ heartbeat_queue' = [heartbeat_queue EXCEPT ![pub_dst[self]][self] = Append(heartbeat_queue[pub_dst[self]][self], tp)]
+                                                 \/ /\ TRUE
+                                                    /\ UNCHANGED heartbeat_queue
                                        ELSE /\ TRUE
                                             /\ UNCHANGED heartbeat_queue
                                  /\ pub_dst' = [pub_dst EXCEPT ![self] = pub_dst[self] + 1]
@@ -334,6 +370,7 @@ PubHeartbeat(self) == /\ pc[self] = "PubHeartbeat"
                                        ELSE /\ pc' = [pc EXCEPT ![self] = "Done"]
                                             /\ UNCHANGED pub_time
                                  /\ UNCHANGED << heartbeat_queue, pub_dst >>
+                      /\ UNCHANGED << initial_topics, topics >>
 
 pub(self) == PubInit(self) \/ PubHeartbeat(self)
 
@@ -352,5 +389,5 @@ Termination == <>(\A self \in ProcSet: pc[self] = "Done")
 
 =============================================================================
 \* Modification History
-\* Last modified Sun Jul 06 15:56:37 EEST 2025 by pavel
+\* Last modified Sun Jul 06 21:27:25 EEST 2025 by pavel
 \* Created Sun Jun 22 15:55:20 EEST 2025 by pavel
