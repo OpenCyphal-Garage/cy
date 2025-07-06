@@ -330,7 +330,7 @@ begin
     end while;
     if pub_time < Duration then
         pub_time := pub_time + 1;
-        goto PubHeartbeat;
+        goto PubInit;
     end if;
   PubFinal:
     if Debug then
@@ -338,7 +338,7 @@ begin
     end if;
 end process;
 end algorithm; *)
-\* BEGIN TRANSLATION (chksum(pcal) = "cf21b14c" /\ chksum(tla) = "7fb4d324")
+\* BEGIN TRANSLATION (chksum(pcal) = "3fea74b2" /\ chksum(tla) = "407cc05f")
 VARIABLES initial_topics, topics, heartbeat_queue, pc
 
 (* define statement *)
@@ -381,7 +381,7 @@ PubHeartbeat(self) == /\ pc[self] = "PubHeartbeat"
                                  /\ UNCHANGED pub_time
                             ELSE /\ IF pub_time[self] < Duration
                                        THEN /\ pub_time' = [pub_time EXCEPT ![self] = pub_time[self] + 1]
-                                            /\ pc' = [pc EXCEPT ![self] = "PubHeartbeat"]
+                                            /\ pc' = [pc EXCEPT ![self] = "PubInit"]
                                        ELSE /\ pc' = [pc EXCEPT ![self] = "PubFinal"]
                                             /\ UNCHANGED pub_time
                                  /\ UNCHANGED << heartbeat_queue, pub_dst >>
@@ -412,5 +412,5 @@ Termination == <>(\A self \in ProcSet: pc[self] = "Done")
 
 =============================================================================
 \* Modification History
-\* Last modified Sun Jul 06 22:11:23 EEST 2025 by pavel
+\* Last modified Sun Jul 06 23:13:24 EEST 2025 by pavel
 \* Created Sun Jun 22 15:55:20 EEST 2025 by pavel
