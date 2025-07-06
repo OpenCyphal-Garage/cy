@@ -52,6 +52,13 @@ IsInjective(f) == \A a,b \in DOMAIN f : f[a] = f[b] => a = b
 
 SetToSeq(S) == CHOOSE f \in [1..Cardinality(S) -> S] : IsInjective(f)
 
+\* A new sequence that contains zero needles.
+SeqWithout(haystack, needle) == SelectSeq(haystack, LAMBDA x: x # needle)
+
+Check_SeqWithout == SeqWithout(<<>>, 1) = <<>>
+                 /\ SeqWithout(<<1, 2, 3>>, 2) = <<1, 3>>
+                 /\ SeqWithout(<<1, 2, 3>>, 4) = <<1, 2, 3>>
+
 \**********************************************************************************************************************
 \* The core assumptions include that the hash function is perfect (no hash collisions) and the counters never overflow.
 Topic == [hash : Nat, evictions : Nat, age : Nat]
@@ -264,6 +271,7 @@ Check_AcceptGossip == Check_AcceptGossip_Divergence /\ Check_AcceptGossip_Collis
 \* Model self-check.
 Check == /\ Check_FirstMatch
          /\ Check_Get
+         /\ Check_SeqWithout
          /\ Check_Log2Floor
          /\ Check_Pow2
          /\ Check_FloorToPow2
@@ -338,79 +346,8 @@ begin
     end if;
 end process;
 end algorithm; *)
-\* BEGIN TRANSLATION (chksum(pcal) = "3fea74b2" /\ chksum(tla) = "407cc05f")
-VARIABLES initial_topics, topics, heartbeat_queue, pc
-
-(* define statement *)
-Invariant == TRUE
-AllProcDone == \A p \in Nodes: pc[p] = "Done"
-TerminationInvariant == AllProcDone => Check /\ Invariant
-
-VARIABLES pub_dst, pub_time
-
-vars == << initial_topics, topics, heartbeat_queue, pc, pub_dst, pub_time >>
-
-ProcSet == (Nodes)
-
-Init == (* Global variables *)
-        /\ initial_topics \in [Nodes -> InitialTopicSets]
-        /\ topics = [n \in Nodes |-> AllocateTopics(initial_topics[n], {})]
-        /\ heartbeat_queue = [destination \in Nodes |-> [source \in Nodes |-> <<>>]]
-        (* Process pub *)
-        /\ pub_dst = [self \in Nodes |-> 1]
-        /\ pub_time = [self \in Nodes |-> 0]
-        /\ pc = [self \in ProcSet |-> "PubInit"]
-
-PubInit(self) == /\ pc[self] = "PubInit"
-                 /\ pub_dst' = [pub_dst EXCEPT ![self] = 1]
-                 /\ pc' = [pc EXCEPT ![self] = "PubHeartbeat"]
-                 /\ UNCHANGED << initial_topics, topics, heartbeat_queue, 
-                                 pub_time >>
-
-PubHeartbeat(self) == /\ pc[self] = "PubHeartbeat"
-                      /\ IF pub_dst[self] <= NodeCount
-                            THEN /\ IF pub_dst[self] # self /\ heartbeat_queue[pub_dst[self]][self] = <<>>
-                                       THEN /\ \E tp \in topics[self]:
-                                                 \/ /\ heartbeat_queue' = [heartbeat_queue EXCEPT ![pub_dst[self]][self] = Append(heartbeat_queue[pub_dst[self]][self], tp)]
-                                                 \/ /\ TRUE
-                                                    /\ UNCHANGED heartbeat_queue
-                                       ELSE /\ TRUE
-                                            /\ UNCHANGED heartbeat_queue
-                                 /\ pub_dst' = [pub_dst EXCEPT ![self] = pub_dst[self] + 1]
-                                 /\ pc' = [pc EXCEPT ![self] = "PubHeartbeat"]
-                                 /\ UNCHANGED pub_time
-                            ELSE /\ IF pub_time[self] < Duration
-                                       THEN /\ pub_time' = [pub_time EXCEPT ![self] = pub_time[self] + 1]
-                                            /\ pc' = [pc EXCEPT ![self] = "PubInit"]
-                                       ELSE /\ pc' = [pc EXCEPT ![self] = "PubFinal"]
-                                            /\ UNCHANGED pub_time
-                                 /\ UNCHANGED << heartbeat_queue, pub_dst >>
-                      /\ UNCHANGED << initial_topics, topics >>
-
-PubFinal(self) == /\ pc[self] = "PubFinal"
-                  /\ IF Debug
-                        THEN /\ PrintT(heartbeat_queue)
-                        ELSE /\ TRUE
-                  /\ pc' = [pc EXCEPT ![self] = "Done"]
-                  /\ UNCHANGED << initial_topics, topics, heartbeat_queue, 
-                                  pub_dst, pub_time >>
-
-pub(self) == PubInit(self) \/ PubHeartbeat(self) \/ PubFinal(self)
-
-(* Allow infinite stuttering to prevent deadlock on termination. *)
-Terminating == /\ \A self \in ProcSet: pc[self] = "Done"
-               /\ UNCHANGED vars
-
-Next == (\E self \in Nodes: pub(self))
-           \/ Terminating
-
-Spec == Init /\ [][Next]_vars
-
-Termination == <>(\A self \in ProcSet: pc[self] = "Done")
-
-\* END TRANSLATION 
 
 =============================================================================
 \* Modification History
-\* Last modified Sun Jul 06 23:13:24 EEST 2025 by pavel
+\* Last modified Mon Jul 07 00:38:43 EEST 2025 by pavel
 \* Created Sun Jun 22 15:55:20 EEST 2025 by pavel
