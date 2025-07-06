@@ -38,6 +38,14 @@ Check_FirstMatch == FirstMatch(<<1,2,3>>, LAMBDA x: x = 2) = 2
                  /\ FirstMatch(<<1,2,3>>, LAMBDA x: x = 4) = Nothing
                  /\ FirstMatch(<<>>, LAMBDA x: x = 0) = Nothing
 
+Get(haystack, test(_)) ==
+  LET matches == { x \in haystack : test(x) }
+  IN IF matches = {} THEN Nothing ELSE CHOOSE x \in matches : TRUE
+
+Check_Get == Get({1,2,3}, LAMBDA x: x = 2) = 2
+          /\ Get({1,2,3}, LAMBDA x: x = 4) = Nothing
+          /\ Get({}, LAMBDA x: x = 0) = Nothing
+
 SeqToSet(s) == {s[i] : i \in DOMAIN s}
 
 IsInjective(f) == \A a,b \in DOMAIN f : f[a] = f[b] => a = b
@@ -102,19 +110,21 @@ Check_LeftWinsDivergence == LeftWinsDivergence([age |-> 124, evictions |-> 5], [
 
 \**********************************************************************************************************************
 \* The result is Nothing if no such topic exists.
-GetByHash(hash, topics) == FirstMatch(topics, LAMBDA x: x.hash = hash)
-GetBySubjectID(subject_id, topics) == FirstMatch(topics, LAMBDA x: SubjectID(x.hash, x.evictions) = subject_id)
+\* Topics are stored in sets because all operations on them are ordering-invariant,
+\* which is a basic prerequisite for CRDT operations.
+GetByHash(hash, topics)            == Get(topics, LAMBDA x: x.hash = hash)
+GetBySubjectID(subject_id, topics) == Get(topics, LAMBDA x: SubjectID(x.hash, x.evictions) = subject_id)
 
-Check_GetByHash == GetByHash(123, <<[hash |-> 100], [hash |-> 123]>>).hash = 123
-                /\ GetByHash(100, <<[hash |-> 100], [hash |-> 123]>>).hash = 100
-                /\ GetByHash(200, <<[hash |-> 100], [hash |-> 123]>>) = Nothing
+Check_GetByHash == GetByHash(123, {[hash |-> 100], [hash |-> 123]}).hash = 123
+                /\ GetByHash(100, {[hash |-> 100], [hash |-> 123]}).hash = 100
+                /\ GetByHash(200, {[hash |-> 100], [hash |-> 123]}) = Nothing
 
-Check_GetBySubjectID == GetBySubjectID(6, <<[hash |-> 3, evictions |-> 0], [hash |-> 4, evictions |-> 2]>>).hash = 4
-                     /\ GetBySubjectID(4, <<[hash |-> 3, evictions |-> 1], [hash |-> 4, evictions |-> 2]>>).hash = 3
+Check_GetBySubjectID == GetBySubjectID(6, {[hash |-> 3, evictions |-> 0], [hash |-> 4, evictions |-> 2]}).hash = 4
+                     /\ GetBySubjectID(4, {[hash |-> 3, evictions |-> 1], [hash |-> 4, evictions |-> 2]}).hash = 3
 
 \**********************************************************************************************************************
-\* A sequence of topics without the specified one. Same sequence if the specified topic is not a member.
-RemoveTopic(hash, topics) == SelectSeq(topics, LAMBDA t: t.hash # hash)
+\* A set of topics without the specified one. Same set if the specified topic is not a member.
+RemoveTopic(hash, topics) == { t \in topics : t.hash # hash }
 
 \* A sequence of topics extended with the specified one, and the existing topics possibly altered.
 \* Uniqueness is guaranteed; if the topic is in the sequence already, it will be modified.
@@ -124,28 +134,28 @@ AllocateTopic(t, topics) ==
     LET ts == RemoveTopic(t.hash, topics)
         x == GetBySubjectID(SubjectID(t.hash, t.evictions), ts)
         Evicted(z) == [hash |-> z.hash, evictions |-> 1 + z.evictions, age |-> z.age]
-    IN   IF x = Nothing             THEN <<t>> \o ts
-    ELSE IF LeftWinsCollision(t, x) THEN AllocateTopic(Evicted(x), <<t>> \o ts)
+    IN   IF x = Nothing             THEN {t} \cup ts
+    ELSE IF LeftWinsCollision(t, x) THEN AllocateTopic(Evicted(x), {t} \cup ts)
     ELSE                                 AllocateTopic(Evicted(t), ts)          \* Retry with evictions+1
 
 Check_AllocateTopic ==
     LET tp(h, e, a) == [hash |-> h, evictions |-> e, age |-> a] IN
     \* Add topic to an empty sequence; succeeds immediately.
-    /\ AllocateTopic(tp(1000, 0, 3), <<>>) = <<tp(1000, 0, 3)>>
+    /\ AllocateTopic(tp(1000, 0, 3), {}) = {tp(1000, 0, 3)}
     \* The topic is already in the sequence, no-op.
-    /\ AllocateTopic(tp(1000, 0, 3), <<tp(1000, 0, 3)>>) = <<tp(1000, 0, 3)>>
+    /\ AllocateTopic(tp(1000, 0, 3), {tp(1000, 0, 3)}) = {tp(1000, 0, 3)}
     \* The topic is already in the sequence with different parameters; replaced.
-    /\ AllocateTopic(tp(1000, 1, 3), <<tp(1000, 0, 3)>>) = <<tp(1000, 1, 3)>>
-    /\ AllocateTopic(tp(1000, 0, 4), <<tp(1000, 0, 3)>>) = <<tp(1000, 0, 4)>>
+    /\ AllocateTopic(tp(1000, 1, 3), {tp(1000, 0, 3)}) = {tp(1000, 1, 3)}
+    /\ AllocateTopic(tp(1000, 0, 4), {tp(1000, 0, 3)}) = {tp(1000, 0, 4)}
     \* Loses arbitration to the only other topic with hash=3.
-    /\ AllocateTopic(tp(2, 1, 2), <<             tp(3, 0, 4)>>) = <<tp(2, 2, 2), tp(3, 0, 4)>>
-    /\ AllocateTopic(tp(2, 1, 2), <<tp(2, 0, 2), tp(3, 0, 4)>>) = <<tp(2, 2, 2), tp(3, 0, 4)>>
+    /\ AllocateTopic(tp(2, 1, 2), {             tp(3, 0, 4)}) = {tp(2, 2, 2), tp(3, 0, 4)}
+    /\ AllocateTopic(tp(2, 1, 2), {tp(2, 0, 2), tp(3, 0, 4)}) = {tp(2, 2, 2), tp(3, 0, 4)}
     \* Loses arbitration to hash=3, displaces hash=4.
-    /\ AllocateTopic(tp(2, 1, 2), <<             tp(3, 0, 4), tp(4, 0, 1)>>) = <<tp(4, 1, 1), tp(2, 2, 2), tp(3, 0, 4)>>
-    /\ AllocateTopic(tp(2, 1, 2), <<tp(2, 0, 2), tp(3, 0, 4), tp(4, 0, 1)>>) = <<tp(4, 1, 1), tp(2, 2, 2), tp(3, 0, 4)>>
+    /\ AllocateTopic(tp(2, 1, 2), {             tp(3, 0, 4), tp(4, 0, 1)}) = {tp(4, 1, 1), tp(2, 2, 2), tp(3, 0, 4)}
+    /\ AllocateTopic(tp(2, 1, 2), {tp(2, 0, 2), tp(3, 0, 4), tp(4, 0, 1)}) = {tp(4, 1, 1), tp(2, 2, 2), tp(3, 0, 4)}
     \* Cyclic displacement: hash=0 displaces hash=1, etc.
     /\ AllocateTopic(tp(0, 1, 1024),
-        <<tp(1, 0, 512),
+        { tp(1, 0, 512),
           tp(2, 0, 256),
           tp(3, 0, 128),
           tp(4, 0, 64),
@@ -153,8 +163,8 @@ Check_AllocateTopic ==
           tp(6, 0, 16),
           tp(7, 0, 8),
           tp(8, 0, 4),
-          tp(9, 0, 2)>>) =
-        <<tp(9, 1, 2),
+          tp(9, 0, 2) }) =
+        { tp(9, 1, 2),
           tp(8, 1, 4),
           tp(7, 1, 8),
           tp(6, 1, 16),
@@ -163,10 +173,10 @@ Check_AllocateTopic ==
           tp(3, 1, 128),
           tp(2, 1, 256),
           tp(1, 1, 512),
-          tp(0, 1, 1024)>>
+          tp(0, 1, 1024) }
     \* Cyclic displacement: hash=0 displaces hash=1, etc, skips a gap.
     /\ AllocateTopic(tp(0, 1, 1024),
-        <<tp(1, 0, 512),
+        { tp(1, 0, 512),
           tp(2, 0, 256),
           tp(3, 0, 128),
           tp(4, 0, 64),
@@ -174,8 +184,8 @@ Check_AllocateTopic ==
           tp(6, 0, 2048),
           tp(7, 0, 2048),
           tp(8, 0, 2048),
-          tp(9, 0, 2048)>>) =
-        <<tp(5, 5, 32),
+          tp(9, 0, 2048) }) =
+        { tp(5, 5, 32),
           tp(4, 1, 64),
           tp(3, 1, 128),
           tp(2, 1, 256),
@@ -184,9 +194,9 @@ Check_AllocateTopic ==
           tp(6, 0, 2048),
           tp(7, 0, 2048),
           tp(8, 0, 2048),
-          tp(9, 0, 2048)>>
+          tp(9, 0, 2048) }
     \* Allocation catchup: age goes up while the eviction counter goes down, forcing reordering. Subject-ID goes from 5 to 3.
-    /\ AllocateTopic(tp(2, 1, 16), <<tp(2, 3, 2), tp(3, 0, 8), tp(4, 0, 4)>>) = <<tp(4, 1, 4), tp(3, 1, 8), tp(2, 1, 16)>>
+    /\ AllocateTopic(tp(2, 1, 16), {tp(2, 3, 2), tp(3, 0, 8), tp(4, 0, 4)}) = {tp(4, 1, 4), tp(3, 1, 8), tp(2, 1, 16)}
 
 \**********************************************************************************************************************
 \* Constructs a conflict-free topic sequence. This is meant for constructing the initial node state.
@@ -194,11 +204,13 @@ Check_AllocateTopic ==
 \* Each hash can occur at most once.
 RECURSIVE AllocateTopics(_, _)
 AllocateTopics(new, topics) ==
-    IF Len(new) = 0 THEN topics ELSE AllocateTopics(Tail(new), AllocateTopic(Head(new), topics))
+    IF Cardinality(new) = 0 THEN topics
+    ELSE LET t == CHOOSE x \in new : TRUE
+         IN AllocateTopics(new \ {t}, AllocateTopic(t, topics))
 
 Check_AllocateTopics ==
     LET tp(h, e, a) == [hash |-> h, evictions |-> e, age |-> a] IN
-    AllocateTopics(<<tp(13, 0, 2), tp(3, 0, 8), tp(4, 0, 4)>>, <<>>) = <<tp(13, 2, 2), tp(4, 0, 4), tp(3, 0, 8)>>
+    AllocateTopics({tp(13, 0, 2), tp(3, 0, 8), tp(4, 0, 4)}, {}) = {tp(13, 2, 2), tp(4, 0, 4), tp(3, 0, 8)}
 
 \**********************************************************************************************************************
 \* Implementation of the divergence resolution rule with CRDT age merge.
@@ -211,21 +223,21 @@ AcceptGossip_Divergence(remote, topics) ==
     IF local # Nothing THEN
         IF local.evictions # remote.evictions /\ LeftWinsDivergence(remote, local)
         THEN AllocateTopic([hash |-> hash, evictions |-> remote.evictions, age |-> new_age], topics)
-        ELSE             <<[hash |-> hash, evictions |->  local.evictions, age |-> new_age]>> \o RemoveTopic(hash, topics)
+        ELSE              {[hash |-> hash, evictions |->  local.evictions, age |-> new_age]} \cup RemoveTopic(hash, topics)
     ELSE topics
 
 Check_AcceptGossip_Divergence ==
     LET tp(h, e, a) == [hash |-> h, evictions |-> e, age |-> a] IN
     \* Not our topic.
-    /\ AcceptGossip_Divergence(tp(3, 1, 4), <<>>) = <<>>
-    /\ AcceptGossip_Divergence(tp(3, 1, 4), <<tp(4, 1, 4)>>) = <<tp(4, 1, 4)>>
+    /\ AcceptGossip_Divergence(tp(3, 1, 4), {}) = {}
+    /\ AcceptGossip_Divergence(tp(3, 1, 4), {tp(4, 1, 4)}) = {tp(4, 1, 4)}
     \* Update age only, no divergence.
-    /\ AcceptGossip_Divergence(tp(4, 1, 2), <<tp(4, 1, 4)>>) = <<tp(4, 1, 4)>>
-    /\ AcceptGossip_Divergence(tp(4, 1, 70), <<tp(4, 1, 4)>>) = <<tp(4, 1, 64)>>
+    /\ AcceptGossip_Divergence(tp(4, 1, 2), {tp(4, 1, 4)}) = {tp(4, 1, 4)}
+    /\ AcceptGossip_Divergence(tp(4, 1, 70), {tp(4, 1, 4)}) = {tp(4, 1, 64)}
     \* Resolve divergence -- remote wins.
-    /\ AcceptGossip_Divergence(tp(4, 3, 70), <<tp(4, 1, 4)>>) = <<tp(4, 3, 64)>>
+    /\ AcceptGossip_Divergence(tp(4, 3, 70), {tp(4, 1, 4)}) = {tp(4, 3, 64)}
     \* Resolve divergence -- local wins.
-    /\ AcceptGossip_Divergence(tp(4, 3, 2), <<tp(4, 1, 5)>>) = <<tp(4, 1, 5)>>
+    /\ AcceptGossip_Divergence(tp(4, 3, 2), {tp(4, 1, 5)}) = {tp(4, 1, 5)}
 
 \* Implementation of the collision resolution rule.
 AcceptGossip_Collision(remote, topics) ==
@@ -237,12 +249,12 @@ AcceptGossip_Collision(remote, topics) ==
 Check_AcceptGossip_Collision == 
     LET tp(h, e, a) == [hash |-> h, evictions |-> e, age |-> a] IN
     \* No collision.
-    /\ AcceptGossip_Collision(tp(3, 1, 4), <<>>) = <<>>
-    /\ AcceptGossip_Collision(tp(3, 1, 4), <<tp(4, 1, 4)>>) = <<tp(4, 1, 4)>>
+    /\ AcceptGossip_Collision(tp(3, 1, 4), {}) = {}
+    /\ AcceptGossip_Collision(tp(3, 1, 4), {tp(4, 1, 4)}) = {tp(4, 1, 4)}
     \* Remote wins.
-    /\ AcceptGossip_Collision(tp(3, 2, 8), <<tp(4, 1, 4)>>) = <<tp(4, 2, 4)>>
+    /\ AcceptGossip_Collision(tp(3, 2, 8), {tp(4, 1, 4)}) = {tp(4, 2, 4)}
     \* Local wins.
-    /\ AcceptGossip_Collision(tp(3, 2, 4), <<tp(4, 1, 8)>>) = <<tp(4, 1, 8)>>
+    /\ AcceptGossip_Collision(tp(3, 2, 4), {tp(4, 1, 8)}) = {tp(4, 1, 8)}
 
 \* An updated sequence of topics based on a received gossip message.
 AcceptGossip(remote, topics) == AcceptGossip_Collision(remote, AcceptGossip_Divergence(remote, topics))
@@ -251,6 +263,7 @@ Check_AcceptGossip == Check_AcceptGossip_Divergence /\ Check_AcceptGossip_Collis
 \**********************************************************************************************************************
 \* Model self-check.
 Check == /\ Check_FirstMatch
+         /\ Check_Get
          /\ Check_Log2Floor
          /\ Check_Pow2
          /\ Check_FloorToPow2
@@ -272,28 +285,22 @@ InitialTopicSpace == {
         e \in 0..InitialEvictionMax,
         a \in 0..InitialAgeMax
 }
-
 \* All possible initial local topic sets per node.
 \* We don't consider the case of zero local topics because this case is trivially correct.
 InitialTopicSets == { S \in SUBSET InitialTopicSpace : Cardinality(S) \in 1..TopicsPerNodeMax }
 
-\* A topic set, being a set, has no defined ordering. We need to choose *some* ordering to construct a sequence.
-InitialTopicSeqs == { SetToSeq(x): x \in InitialTopicSets }
-
 (* --algorithm node
 variables
   \* Prior to start, each node will allocate the following topics locally. Divergences may result.
-  initial_topics \in [Nodes -> InitialTopicSeqs];
+  initial_topics \in [Nodes -> InitialTopicSets];
   \* Local topics per node; mutable state. Initial local allocation is performed prior to launch.
-  topics = [n \in Nodes |-> AllocateTopics(initial_topics[n], <<>>)];
-  \* (to) -> (from) -> queue
+  topics = [n \in Nodes |-> AllocateTopics(initial_topics[n], {})];
+  \* TODO FLATTEN AND SIMPLIFY!
   heartbeat_queue = [destination \in Nodes |-> [source \in Nodes |-> <<>>]];
 
 define
-  Invariant == PrintVal("heartbeat_queue", heartbeat_queue)
-
+  Invariant == TRUE
   AllProcDone == \A p \in Nodes: pc[p] = "Done"
-
   TerminationInvariant == AllProcDone => Check /\ Invariant
 end define;
 
@@ -307,7 +314,7 @@ begin
   PubHeartbeat:
     while pub_dst <= NodeCount do
         if pub_dst # self /\ heartbeat_queue[pub_dst][self] = <<>> then
-            with tp \in SeqToSet(topics[self]) do
+            with tp \in topics[self] do
                 either heartbeat_queue[pub_dst][self] := Append(heartbeat_queue[pub_dst][self], tp);
                 or skip;  \* MESSAGE LOSS
                 end either;
@@ -319,16 +326,18 @@ begin
         pub_time := pub_time + 1;
         goto PubHeartbeat;
     end if;
+  PubFinal:
+    if Debug then
+        print heartbeat_queue;
+    end if;
 end process;
 end algorithm; *)
-\* BEGIN TRANSLATION (chksum(pcal) = "900f3ba6" /\ chksum(tla) = "c59a74dd")
+\* BEGIN TRANSLATION (chksum(pcal) = "cf21b14c" /\ chksum(tla) = "7fb4d324")
 VARIABLES initial_topics, topics, heartbeat_queue, pc
 
 (* define statement *)
-Invariant == PrintVal("heartbeat_queue", heartbeat_queue)
-
+Invariant == TRUE
 AllProcDone == \A p \in Nodes: pc[p] = "Done"
-
 TerminationInvariant == AllProcDone => Check /\ Invariant
 
 VARIABLES pub_dst, pub_time
@@ -338,8 +347,8 @@ vars == << initial_topics, topics, heartbeat_queue, pc, pub_dst, pub_time >>
 ProcSet == (Nodes)
 
 Init == (* Global variables *)
-        /\ initial_topics \in [Nodes -> InitialTopicSeqs]
-        /\ topics = [n \in Nodes |-> AllocateTopics(initial_topics[n], <<>>)]
+        /\ initial_topics \in [Nodes -> InitialTopicSets]
+        /\ topics = [n \in Nodes |-> AllocateTopics(initial_topics[n], {})]
         /\ heartbeat_queue = [destination \in Nodes |-> [source \in Nodes |-> <<>>]]
         (* Process pub *)
         /\ pub_dst = [self \in Nodes |-> 1]
@@ -355,7 +364,7 @@ PubInit(self) == /\ pc[self] = "PubInit"
 PubHeartbeat(self) == /\ pc[self] = "PubHeartbeat"
                       /\ IF pub_dst[self] <= NodeCount
                             THEN /\ IF pub_dst[self] # self /\ heartbeat_queue[pub_dst[self]][self] = <<>>
-                                       THEN /\ \E tp \in SeqToSet(topics[self]):
+                                       THEN /\ \E tp \in topics[self]:
                                                  \/ /\ heartbeat_queue' = [heartbeat_queue EXCEPT ![pub_dst[self]][self] = Append(heartbeat_queue[pub_dst[self]][self], tp)]
                                                  \/ /\ TRUE
                                                     /\ UNCHANGED heartbeat_queue
@@ -367,12 +376,20 @@ PubHeartbeat(self) == /\ pc[self] = "PubHeartbeat"
                             ELSE /\ IF pub_time[self] < Duration
                                        THEN /\ pub_time' = [pub_time EXCEPT ![self] = pub_time[self] + 1]
                                             /\ pc' = [pc EXCEPT ![self] = "PubHeartbeat"]
-                                       ELSE /\ pc' = [pc EXCEPT ![self] = "Done"]
+                                       ELSE /\ pc' = [pc EXCEPT ![self] = "PubFinal"]
                                             /\ UNCHANGED pub_time
                                  /\ UNCHANGED << heartbeat_queue, pub_dst >>
                       /\ UNCHANGED << initial_topics, topics >>
 
-pub(self) == PubInit(self) \/ PubHeartbeat(self)
+PubFinal(self) == /\ pc[self] = "PubFinal"
+                  /\ IF Debug
+                        THEN /\ PrintT(heartbeat_queue)
+                        ELSE /\ TRUE
+                  /\ pc' = [pc EXCEPT ![self] = "Done"]
+                  /\ UNCHANGED << initial_topics, topics, heartbeat_queue, 
+                                  pub_dst, pub_time >>
+
+pub(self) == PubInit(self) \/ PubHeartbeat(self) \/ PubFinal(self)
 
 (* Allow infinite stuttering to prevent deadlock on termination. *)
 Terminating == /\ \A self \in ProcSet: pc[self] = "Done"
@@ -389,5 +406,5 @@ Termination == <>(\A self \in ProcSet: pc[self] = "Done")
 
 =============================================================================
 \* Modification History
-\* Last modified Sun Jul 06 21:27:25 EEST 2025 by pavel
+\* Last modified Sun Jul 06 22:07:09 EEST 2025 by pavel
 \* Created Sun Jun 22 15:55:20 EEST 2025 by pavel
