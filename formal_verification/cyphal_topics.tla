@@ -2,7 +2,8 @@
 
 EXTENDS Integers, TLC, Sequences
 
-CONSTANT Nothing
+CONSTANT Nothing, Debug
+ASSUME Debug \in BOOLEAN
 
 \**********************************************************************************************************************
 \* General utilities and helpers.
@@ -249,5 +250,5 @@ Check == /\ Check_FirstMatch
 
 =============================================================================
 \* Modification History
-\* Last modified Wed Jun 25 01:43:19 EEST 2025 by pavel
+\* Last modified Sun Jul 06 01:22:55 EEST 2025 by pavel
 \* Created Sun Jun 22 15:55:20 EEST 2025 by pavel

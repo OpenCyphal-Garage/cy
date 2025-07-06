@@ -5,7 +5,7 @@
     <stringAttribute key="distributedNetworkInterface" value="192.168.3.215"/>
     <intAttribute key="distributedNodesCount" value="1"/>
     <stringAttribute key="distributedTLC" value="off"/>
-    <intAttribute key="fpIndex" value="24"/>
+    <intAttribute key="fpIndex" value="128"/>
     <intAttribute key="maxHeapSize" value="25"/>
     <stringAttribute key="modelBehaviorInit" value=""/>
     <stringAttribute key="modelBehaviorNext" value=""/>
@@ -20,6 +20,7 @@
     <stringAttribute key="modelExpressionEval" value="Check"/>
     <listAttribute key="modelParameterConstants">
         <listEntry value="Nothing;;Nothing;1;0"/>
+        <listEntry value="Debug;;TRUE;0;0"/>
     </listAttribute>
     <intAttribute key="modelVersion" value="20191005"/>
     <intAttribute key="numberOfWorkers" value="10"/>
