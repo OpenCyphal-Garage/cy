@@ -2,8 +2,10 @@
 
 EXTENDS Integers, TLC, Sequences
 
-CONSTANT Nothing, Debug
+CONSTANT Nothing, Debug, NodeCount, Duration
 ASSUME Debug \in BOOLEAN
+ASSUME NodeCount \in Nat /\ NodeCount > 1
+ASSUME Duration \in Nat /\ Duration > 1
 
 \**********************************************************************************************************************
 \* General utilities and helpers.
@@ -248,7 +250,107 @@ Check == /\ Check_FirstMatch
          /\ Check_AllocateTopics
          /\ Check_AcceptGossip
 
+\**********************************************************************************************************************
+Nodes == 1..NodeCount
+
+(* --algorithm node
+variables
+  \* (to) -> (from) -> queue
+  heartbeat_queue = [destination \in Nodes |-> [source \in Nodes |-> <<>>]];
+
+define
+  Invariant == PrintVal("heartbeat_queue", heartbeat_queue)
+
+  AllProcDone == \A p \in Nodes: pc[p] = "Done"
+
+  TerminationInvariant == AllProcDone => Check /\ Invariant
+end define;
+
+process pub \in Nodes
+variable
+    pub_dst = 1;
+    pub_time = 0;
+begin
+  PubInit:
+    pub_dst := 1;
+  PubHeartbeat:
+    while pub_dst <= NodeCount do
+        if pub_dst # self /\ heartbeat_queue[pub_dst][self] = <<>> then
+            \* TODO: pick local topic to publish.
+            either heartbeat_queue[pub_dst][self] := Append(heartbeat_queue[pub_dst][self], self);
+            or skip;  \* MESSAGE LOSS
+            end either;
+        end if;
+        pub_dst := pub_dst + 1;
+    end while;
+    if pub_time < Duration then
+        pub_time := pub_time + 1;
+        goto PubHeartbeat;
+    end if;
+end process;
+end algorithm; *)
+\* BEGIN TRANSLATION (chksum(pcal) = "5ae1280d" /\ chksum(tla) = "3395b063")
+VARIABLES heartbeat_queue, pc
+
+(* define statement *)
+Invariant == PrintVal("heartbeat_queue", heartbeat_queue)
+
+AllProcDone == \A p \in Nodes: pc[p] = "Done"
+
+TerminationInvariant == AllProcDone => Check /\ Invariant
+
+VARIABLES pub_dst, pub_time
+
+vars == << heartbeat_queue, pc, pub_dst, pub_time >>
+
+ProcSet == (Nodes)
+
+Init == (* Global variables *)
+        /\ heartbeat_queue = [destination \in Nodes |-> [source \in Nodes |-> <<>>]]
+        (* Process pub *)
+        /\ pub_dst = [self \in Nodes |-> 1]
+        /\ pub_time = [self \in Nodes |-> 0]
+        /\ pc = [self \in ProcSet |-> "PubInit"]
+
+PubInit(self) == /\ pc[self] = "PubInit"
+                 /\ pub_dst' = [pub_dst EXCEPT ![self] = 1]
+                 /\ pc' = [pc EXCEPT ![self] = "PubHeartbeat"]
+                 /\ UNCHANGED << heartbeat_queue, pub_time >>
+
+PubHeartbeat(self) == /\ pc[self] = "PubHeartbeat"
+                      /\ IF pub_dst[self] <= NodeCount
+                            THEN /\ IF pub_dst[self] # self /\ heartbeat_queue[pub_dst[self]][self] = <<>>
+                                       THEN /\ \/ /\ heartbeat_queue' = [heartbeat_queue EXCEPT ![pub_dst[self]][self] = Append(heartbeat_queue[pub_dst[self]][self], self)]
+                                               \/ /\ TRUE
+                                                  /\ UNCHANGED heartbeat_queue
+                                       ELSE /\ TRUE
+                                            /\ UNCHANGED heartbeat_queue
+                                 /\ pub_dst' = [pub_dst EXCEPT ![self] = pub_dst[self] + 1]
+                                 /\ pc' = [pc EXCEPT ![self] = "PubHeartbeat"]
+                                 /\ UNCHANGED pub_time
+                            ELSE /\ IF pub_time[self] < Duration
+                                       THEN /\ pub_time' = [pub_time EXCEPT ![self] = pub_time[self] + 1]
+                                            /\ pc' = [pc EXCEPT ![self] = "PubHeartbeat"]
+                                       ELSE /\ pc' = [pc EXCEPT ![self] = "Done"]
+                                            /\ UNCHANGED pub_time
+                                 /\ UNCHANGED << heartbeat_queue, pub_dst >>
+
+pub(self) == PubInit(self) \/ PubHeartbeat(self)
+
+(* Allow infinite stuttering to prevent deadlock on termination. *)
+Terminating == /\ \A self \in ProcSet: pc[self] = "Done"
+               /\ UNCHANGED vars
+
+Next == (\E self \in Nodes: pub(self))
+           \/ Terminating
+
+Spec == Init /\ [][Next]_vars
+
+Termination == <>(\A self \in ProcSet: pc[self] = "Done")
+
+\* END TRANSLATION 
+
 =============================================================================
 \* Modification History
-\* Last modified Sun Jul 06 01:22:55 EEST 2025 by pavel
+\* Last modified Sun Jul 06 15:56:37 EEST 2025 by pavel
 \* Created Sun Jun 22 15:55:20 EEST 2025 by pavel
