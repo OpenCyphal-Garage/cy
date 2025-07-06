@@ -289,6 +289,12 @@ InitialTopicSpace == {
 \* We don't consider the case of zero local topics because this case is trivially correct.
 InitialTopicSets == { S \in SUBSET InitialTopicSpace : Cardinality(S) \in 1..TopicsPerNodeMax }
 
+\* TODO:
+\* - Sort out publication and age increment.
+\* - Implement the subscriber that invokes AcceptGossip.
+\* - Out-of-order gossips?
+\* - Message loss model?
+
 (* --algorithm node
 variables
   \* Prior to start, each node will allocate the following topics locally. Divergences may result.
@@ -406,5 +412,5 @@ Termination == <>(\A self \in ProcSet: pc[self] = "Done")
 
 =============================================================================
 \* Modification History
-\* Last modified Sun Jul 06 22:07:09 EEST 2025 by pavel
+\* Last modified Sun Jul 06 22:11:23 EEST 2025 by pavel
 \* Created Sun Jun 22 15:55:20 EEST 2025 by pavel
