@@ -5,13 +5,13 @@
     <stringAttribute key="distributedNetworkInterface" value="192.168.1.231"/>
     <intAttribute key="distributedNodesCount" value="1"/>
     <stringAttribute key="distributedTLC" value="off"/>
-    <intAttribute key="fpIndex" value="25"/>
+    <intAttribute key="fpIndex" value="67"/>
     <intAttribute key="maxHeapSize" value="25"/>
     <stringAttribute key="modelBehaviorInit" value="Init"/>
     <stringAttribute key="modelBehaviorNext" value="Next"/>
     <stringAttribute key="modelBehaviorSpec" value=""/>
     <intAttribute key="modelBehaviorSpecType" value="2"/>
-    <stringAttribute key="modelBehaviorVars" value="gossip_order, initial_topics, node_id, gossip_order_sets, pc, node_id_, heartbeat_queue, pub_time, pub_hash, topics, pub_dst"/>
+    <stringAttribute key="modelBehaviorVars" value="gossip_order, initial_topics, node_id, gossip_order_sets, pc, node_id_, time, pub_gossip, heartbeat_queue, topics, pub_dst"/>
     <stringAttribute key="modelComments" value=""/>
     <booleanAttribute key="modelCorrectnessCheckDeadlock" value="true"/>
     <listAttribute key="modelCorrectnessInvariants">
@@ -30,6 +30,8 @@
         <listEntry value="DistinctTopicCount;;2;0;0"/>
         <listEntry value="InitialAgeMax;;0;0;0"/>
         <listEntry value="TopicsPerNodeMax;;2;0;0"/>
+        <listEntry value="MaxTimeSkew;;1;0;0"/>
+        <listEntry value="defaultInitValue;;Nothing;0;0"/>
     </listAttribute>
     <intAttribute key="modelVersion" value="20191005"/>
     <intAttribute key="numberOfWorkers" value="10"/>
