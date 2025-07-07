@@ -218,7 +218,7 @@ Check_AllocateTopic ==
           tp(7, 0, 2048),
           tp(8, 0, 2048),
           tp(9, 0, 2048) }
-    \* Allocation catchup: age goes up while the eviction counter goes down, forcing reordering. Subject-ID goes from 5 to 3.
+    \* Allocation catchup: age goes up while the eviction counter goes down, forcing reordering. Subject-ID goes 5 => 3.
     /\ AllocateTopic(tp(2, 1, 16), {tp(2, 3, 2), tp(3, 0, 8), tp(4, 0, 4)}) = {tp(4, 1, 4), tp(3, 1, 8), tp(2, 1, 16)}
 
 \**********************************************************************************************************************
@@ -244,8 +244,8 @@ AcceptGossip_Divergence(remote, topics) ==
     IN
     IF local # Nothing THEN
         IF local.evictions # remote.evictions /\ LeftWinsDivergence(remote, local)
-        THEN AllocateTopic([hash |-> hash, evictions |-> remote.evictions, age |-> new_age], topics)
-        ELSE              {[hash |-> hash, evictions |->  local.evictions, age |-> new_age]} \cup RemoveTopic(hash, topics)
+        THEN AllocateTopic([hash|->hash, evictions|->remote.evictions, age|->new_age], topics)
+        ELSE              {[hash|->hash, evictions|-> local.evictions, age|->new_age]} \cup RemoveTopic(hash, topics)
     ELSE topics
 
 Check_AcceptGossip_Divergence ==
@@ -314,9 +314,8 @@ InitialTopicSpace == {
 InitialTopicSets == { S \in SUBSET InitialTopicSpace : Cardinality(S) \in 1..TopicsPerNodeMax }
 
 \* TODO:
-\* - Sort out publication and age increment.
-\* - Implement the subscriber that invokes AcceptGossip.
-\* - Out-of-order gossips?
+\* - Sort out age increment and duration.
+\* - Check final invariants.
 \* - Message loss model?
 
 (* --algorithm node
@@ -349,28 +348,30 @@ variables
 
 define
   Invariant == TRUE
-  AllProcDone == \A p \in Nodes: pc[p] = "Done"
+  AllProcDone == \A p \in Nodes: /\ pc[p + 1000] = "Done"
+                                 /\ pc[p + 2000] = "Done"
   TerminationInvariant == AllProcDone => Check /\ Invariant
 end define;
 
 \* PERIODIC HEARTBEAT PUBLISHER PROCESS.
-process pub \in Nodes
+process pub \in {n + 1000 : n \in Nodes}
 variable
+    node_id = self - 1000;
     pub_time = 0;
-    pub_dst = 0;
+    pub_dst  = 0;
     pub_hash = 0;
 begin
   PubInit:
     pub_dst := 1;
-    pub_hash           := Head(gossip_order[self]);
-    gossip_order[self] := SeqRotLeft(gossip_order[self]);
+    pub_hash              := Head(gossip_order[node_id]);
+    gossip_order[node_id] := SeqRotLeft(gossip_order[node_id]);
 
   PubSend:
     while pub_dst <= NodeCount do
-        if pub_dst # self then
-            \*await heartbeat_queue[pub_dst] = <<>>;
+        if pub_dst # node_id then
+            await heartbeat_queue[pub_dst] = <<>>;
             heartbeat_queue[pub_dst] := Append(heartbeat_queue[pub_dst],
-                                               GetByHash(pub_hash, topics[self]));
+                                               GetByHash(pub_hash, topics[node_id]));
         end if;
         pub_dst := pub_dst + 1;
     end while;
@@ -381,40 +382,42 @@ begin
 end process;
 
 \* HEARTBEAT SUBSCRIBER PROCESS.
-process sub \in Nodes
+process sub \in {n + 2000 : n \in Nodes}
 variable
-    sub_iter = 0;
+    node_id = self - 2000;
 begin
-  SubInit:
-    print <<self, sub_iter>>;
   SubRx:
-    while sub_iter < 10 do
-        sub_iter := sub_iter + 1;
-        if heartbeat_queue[self] # <<>> then
-            with gossip = Head(heartbeat_queue[self]) do
-                heartbeat_queue[self] := Tail(heartbeat_queue[self]);
-                print <<"RX", gossip>>;
+    while TRUE do
+        if heartbeat_queue[node_id] # <<>> then
+            with gossip = Head(heartbeat_queue[node_id]) do
+                heartbeat_queue[node_id] := Tail(heartbeat_queue[node_id]);
+                topics[node_id] := AcceptGossip(gossip, topics[node_id])
+                \* Here, we could update the schedule if the local replica won to speedup collision/divergence repair:
+                \* gossip_order[node_id] := SeqWithout(gossip_order[node_id], gossip.hash) \o <<gossip.hash>>
             end with;
         end if;
     end while;
 end process;
 
 end algorithm; *)
-\* BEGIN TRANSLATION (chksum(pcal) = "88ed40be" /\ chksum(tla) = "1842e1fb")
+\* BEGIN TRANSLATION (chksum(pcal) = "6778a464" /\ chksum(tla) = "33eabf8e")
+\* Process variable node_id of process pub at line 358 col 5 changed to node_id_
 VARIABLES initial_topics, topics, heartbeat_queue, gossip_order_sets, 
           gossip_order, pc
 
 (* define statement *)
 Invariant == TRUE
-AllProcDone == \A p \in Nodes: pc[p] = "Done"
+AllProcDone == \A p \in Nodes: /\ pc[p + 1000] = "Done"
+                               /\ pc[p + 2000] = "Done"
 TerminationInvariant == AllProcDone => Check /\ Invariant
 
-VARIABLES pub_time, pub_dst, pub_hash, sub_iter
+VARIABLES node_id_, pub_time, pub_dst, pub_hash, node_id
 
 vars == << initial_topics, topics, heartbeat_queue, gossip_order_sets, 
-           gossip_order, pc, pub_time, pub_dst, pub_hash, sub_iter >>
+           gossip_order, pc, node_id_, pub_time, pub_dst, pub_hash, node_id
+        >>
 
-ProcSet == (Nodes) \cup (Nodes)
+ProcSet == ({n + 1000 : n \in Nodes}) \cup ({n + 2000 : n \in Nodes})
 
 Init == (* Global variables *)
         /\ initial_topics \in [Nodes -> InitialTopicSets]
@@ -430,27 +433,30 @@ Init == (* Global variables *)
                                 }
                             }
         (* Process pub *)
-        /\ pub_time = [self \in Nodes |-> 0]
-        /\ pub_dst = [self \in Nodes |-> 0]
-        /\ pub_hash = [self \in Nodes |-> 0]
+        /\ node_id_ = [self \in {n + 1000 : n \in Nodes} |-> self - 1000]
+        /\ pub_time = [self \in {n + 1000 : n \in Nodes} |-> 0]
+        /\ pub_dst = [self \in {n + 1000 : n \in Nodes} |-> 0]
+        /\ pub_hash = [self \in {n + 1000 : n \in Nodes} |-> 0]
         (* Process sub *)
-        /\ sub_iter = [self \in Nodes |-> 0]
-        /\ pc = [self \in ProcSet |-> CASE self \in Nodes -> "PubInit"
-                                        [] self \in Nodes -> "SubInit"]
+        /\ node_id = [self \in {n + 2000 : n \in Nodes} |-> self - 2000]
+        /\ pc = [self \in ProcSet |-> CASE self \in {n + 1000 : n \in Nodes} -> "PubInit"
+                                        [] self \in {n + 2000 : n \in Nodes} -> "SubRx"]
 
 PubInit(self) == /\ pc[self] = "PubInit"
                  /\ pub_dst' = [pub_dst EXCEPT ![self] = 1]
-                 /\ pub_hash' = [pub_hash EXCEPT ![self] = Head(gossip_order[self])]
-                 /\ gossip_order' = [gossip_order EXCEPT ![self] = SeqRotLeft(gossip_order[self])]
+                 /\ pub_hash' = [pub_hash EXCEPT ![self] = Head(gossip_order[node_id_[self]])]
+                 /\ gossip_order' = [gossip_order EXCEPT ![node_id_[self]] = SeqRotLeft(gossip_order[node_id_[self]])]
                  /\ pc' = [pc EXCEPT ![self] = "PubSend"]
                  /\ UNCHANGED << initial_topics, topics, heartbeat_queue, 
-                                 gossip_order_sets, pub_time, sub_iter >>
+                                 gossip_order_sets, node_id_, pub_time, 
+                                 node_id >>
 
 PubSend(self) == /\ pc[self] = "PubSend"
                  /\ IF pub_dst[self] <= NodeCount
-                       THEN /\ IF pub_dst[self] # self
-                                  THEN /\ heartbeat_queue' = [heartbeat_queue EXCEPT ![pub_dst[self]] = Append(heartbeat_queue[pub_dst[self]],
-                                                                                                               GetByHash(pub_hash[self], topics[self]))]
+                       THEN /\ IF pub_dst[self] # node_id_[self]
+                                  THEN /\ heartbeat_queue[pub_dst[self]] = <<>>
+                                       /\ heartbeat_queue' = [heartbeat_queue EXCEPT ![pub_dst[self]] = Append(heartbeat_queue[pub_dst[self]],
+                                                                                                               GetByHash(pub_hash[self], topics[node_id_[self]]))]
                                   ELSE /\ TRUE
                                        /\ UNCHANGED heartbeat_queue
                             /\ pub_dst' = [pub_dst EXCEPT ![self] = pub_dst[self] + 1]
@@ -463,49 +469,31 @@ PubSend(self) == /\ pc[self] = "PubSend"
                                        /\ UNCHANGED pub_time
                             /\ UNCHANGED << heartbeat_queue, pub_dst >>
                  /\ UNCHANGED << initial_topics, topics, gossip_order_sets, 
-                                 gossip_order, pub_hash, sub_iter >>
+                                 gossip_order, node_id_, pub_hash, node_id >>
 
 pub(self) == PubInit(self) \/ PubSend(self)
 
-SubInit(self) == /\ pc[self] = "SubInit"
-                 /\ PrintT(<<self, sub_iter[self]>>)
-                 /\ pc' = [pc EXCEPT ![self] = "SubRx"]
-                 /\ UNCHANGED << initial_topics, topics, heartbeat_queue, 
-                                 gossip_order_sets, gossip_order, pub_time, 
-                                 pub_dst, pub_hash, sub_iter >>
-
 SubRx(self) == /\ pc[self] = "SubRx"
-               /\ IF sub_iter[self] < 10
-                     THEN /\ sub_iter' = [sub_iter EXCEPT ![self] = sub_iter[self] + 1]
-                          /\ IF heartbeat_queue[self] # <<>>
-                                THEN /\ LET gossip == Head(heartbeat_queue[self]) IN
-                                          /\ heartbeat_queue' = [heartbeat_queue EXCEPT ![self] = Tail(heartbeat_queue[self])]
-                                          /\ PrintT(<<"RX", gossip>>)
-                                ELSE /\ TRUE
-                                     /\ UNCHANGED heartbeat_queue
-                          /\ pc' = [pc EXCEPT ![self] = "SubRx"]
-                     ELSE /\ pc' = [pc EXCEPT ![self] = "Done"]
-                          /\ UNCHANGED << heartbeat_queue, sub_iter >>
-               /\ UNCHANGED << initial_topics, topics, gossip_order_sets, 
-                               gossip_order, pub_time, pub_dst, pub_hash >>
+               /\ IF heartbeat_queue[node_id[self]] # <<>>
+                     THEN /\ LET gossip == Head(heartbeat_queue[node_id[self]]) IN
+                               /\ heartbeat_queue' = [heartbeat_queue EXCEPT ![node_id[self]] = Tail(heartbeat_queue[node_id[self]])]
+                               /\ topics' = [topics EXCEPT ![node_id[self]] = AcceptGossip(gossip, topics[node_id[self]])]
+                     ELSE /\ TRUE
+                          /\ UNCHANGED << topics, heartbeat_queue >>
+               /\ pc' = [pc EXCEPT ![self] = "SubRx"]
+               /\ UNCHANGED << initial_topics, gossip_order_sets, gossip_order, 
+                               node_id_, pub_time, pub_dst, pub_hash, node_id >>
 
-sub(self) == SubInit(self) \/ SubRx(self)
+sub(self) == SubRx(self)
 
-(* Allow infinite stuttering to prevent deadlock on termination. *)
-Terminating == /\ \A self \in ProcSet: pc[self] = "Done"
-               /\ UNCHANGED vars
-
-Next == (\E self \in Nodes: pub(self))
-           \/ (\E self \in Nodes: sub(self))
-           \/ Terminating
+Next == (\E self \in {n + 1000 : n \in Nodes}: pub(self))
+           \/ (\E self \in {n + 2000 : n \in Nodes}: sub(self))
 
 Spec == Init /\ [][Next]_vars
-
-Termination == <>(\A self \in ProcSet: pc[self] = "Done")
 
 \* END TRANSLATION 
 
 =============================================================================
 \* Modification History
-\* Last modified Mon Jul 07 17:32:01 EEST 2025 by pavel
+\* Last modified Mon Jul 07 19:19:24 EEST 2025 by pavel
 \* Created Sun Jun 22 15:55:20 EEST 2025 by pavel
