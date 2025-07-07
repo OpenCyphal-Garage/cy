@@ -1,5 +1,7 @@
 ------------------------------ MODULE cyphal_topics ------------------------------
 
+\* Consider using REPL/scratchpad at https://will62794.github.io/spectacle
+
 EXTENDS Integers, TLC, Sequences, FiniteSets
 
 CONSTANT Nothing, Debug
@@ -292,6 +294,12 @@ AcceptGossip(remote, topics) == AcceptGossip_Collision(remote, AcceptGossip_Dive
 Check_AcceptGossip == Check_AcceptGossip_Divergence /\ Check_AcceptGossip_Collision
 
 \**********************************************************************************************************************
+\* Divergent allocation detector operating on a function node_id -> {topic_0, topic_1, ..., topic_n}
+\* A divergent allocation occurs when topic records with the same hash have distinct eviction counters.
+\* Returns an arbitrarily chosen divergent topic.
+FindDivergence(topics_per_node) == {}
+
+\**********************************************************************************************************************
 \* Model self-check.
 Check == /\ Check_FirstMatch
          /\ Check_Get
@@ -343,7 +351,6 @@ variables
     \* We cannot use the above form directly; first, we need to transform it into a form that can be
     \* used with the nondeterministic selection form \in:
     \*      { node->sequence_0, node->sequence_1, ..., node->sequence_n }
-    \* This is tricky. For debugging, consider using https://will62794.github.io/spectacle or a scratchpad.
     gossip_order \in {
         FunFromTupleSet(m) : m \in {
             S \in SUBSET (
@@ -535,5 +542,5 @@ Spec == Init /\ [][Next]_vars
 
 =============================================================================
 \* Modification History
-\* Last modified Mon Jul 07 22:59:35 EEST 2025 by pavel
+\* Last modified Mon Jul 07 23:14:44 EEST 2025 by pavel
 \* Created Sun Jun 22 15:55:20 EEST 2025 by pavel
