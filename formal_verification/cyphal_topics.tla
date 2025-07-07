@@ -133,8 +133,8 @@ Check_GetBySubjectID == GetBySubjectID(6, {[hash |-> 3, evictions |-> 0], [hash 
 \* A set of topics without the specified one. Same set if the specified topic is not a member.
 RemoveTopic(hash, topics) == { t \in topics : t.hash # hash }
 
-\* A sequence of topics extended with the specified one, and the existing topics possibly altered.
-\* Uniqueness is guaranteed; if the topic is in the sequence already, it will be modified.
+\* A set of topics extended with the specified one, and the existing topics possibly altered.
+\* Uniqueness is guaranteed; if the topic is in the set already, it will be modified.
 \* This can also be used to model state update of the local topic table.
 RECURSIVE AllocateTopic(_, _)
 AllocateTopic(t, topics) ==
@@ -147,11 +147,11 @@ AllocateTopic(t, topics) ==
 
 Check_AllocateTopic ==
     LET tp(h, e, a) == [hash |-> h, evictions |-> e, age |-> a] IN
-    \* Add topic to an empty sequence; succeeds immediately.
+    \* Add topic to an empty set; succeeds immediately.
     /\ AllocateTopic(tp(1000, 0, 3), {}) = {tp(1000, 0, 3)}
-    \* The topic is already in the sequence, no-op.
+    \* The topic is already in the set, no-op.
     /\ AllocateTopic(tp(1000, 0, 3), {tp(1000, 0, 3)}) = {tp(1000, 0, 3)}
-    \* The topic is already in the sequence with different parameters; replaced.
+    \* The topic is already in the set with different parameters; replaced.
     /\ AllocateTopic(tp(1000, 1, 3), {tp(1000, 0, 3)}) = {tp(1000, 1, 3)}
     /\ AllocateTopic(tp(1000, 0, 4), {tp(1000, 0, 3)}) = {tp(1000, 0, 4)}
     \* Loses arbitration to the only other topic with hash=3.
@@ -206,8 +206,7 @@ Check_AllocateTopic ==
     /\ AllocateTopic(tp(2, 1, 16), {tp(2, 3, 2), tp(3, 0, 8), tp(4, 0, 4)}) = {tp(4, 1, 4), tp(3, 1, 8), tp(2, 1, 16)}
 
 \**********************************************************************************************************************
-\* Constructs a conflict-free topic sequence. This is meant for constructing the initial node state.
-\* Per the definition of AllocateTopic, the ordering of the elements does not affect the final allocation.
+\* Constructs a conflict-free topic set. This is meant for constructing the initial node state.
 \* Each hash can occur at most once.
 RECURSIVE AllocateTopics(_, _)
 AllocateTopics(new, topics) ==
@@ -349,5 +348,5 @@ end algorithm; *)
 
 =============================================================================
 \* Modification History
-\* Last modified Mon Jul 07 00:38:43 EEST 2025 by pavel
+\* Last modified Mon Jul 07 13:42:31 EEST 2025 by pavel
 \* Created Sun Jun 22 15:55:20 EEST 2025 by pavel
