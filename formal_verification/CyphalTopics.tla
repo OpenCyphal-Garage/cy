@@ -1,4 +1,4 @@
------------------------------- MODULE cyphal_topics ------------------------------
+------------------------------ MODULE CyphalTopics ------------------------------
 
 \* Consider using REPL/scratchpad at https://will62794.github.io/spectacle
 
@@ -363,7 +363,7 @@ variables
 define
   Invariant == TRUE  \* TODO
   AllProcDone == \A p \in DOMAIN pc: pc[p] = "Done"
-  TerminationInvariant == AllProcDone => Check /\ Invariant
+  FinalInvariant == AllProcDone => Check /\ Invariant
 end define;
 
 \* PERIODIC GOSSIP PUBLISHER PROCESS.
@@ -423,8 +423,8 @@ begin
 end process;
 
 end algorithm; *) \****************************************************************************************************
-\* BEGIN TRANSLATION (chksum(pcal) = "b15951d7" /\ chksum(tla) = "5a326b5")
-\* Process variable node_id of process pub at line 365 col 5 changed to node_id_
+\* BEGIN TRANSLATION (chksum(pcal) = "114359ae" /\ chksum(tla) = "b532c614")
+\* Process variable node_id of process pub at line 372 col 5 changed to node_id_
 CONSTANT defaultInitValue
 VARIABLES initial_topics, topics, time, heartbeat_queue, gossip_order_sets, 
           gossip_order, pc
@@ -432,7 +432,7 @@ VARIABLES initial_topics, topics, time, heartbeat_queue, gossip_order_sets,
 (* define statement *)
 Invariant == TRUE
 AllProcDone == \A p \in DOMAIN pc: pc[p] = "Done"
-TerminationInvariant == AllProcDone => Check /\ Invariant
+FinalInvariant == AllProcDone => Check /\ Invariant
 
 VARIABLES node_id_, pub_dst, pub_gossip, node_id
 
@@ -542,5 +542,5 @@ Spec == Init /\ [][Next]_vars
 
 =============================================================================
 \* Modification History
-\* Last modified Mon Jul 07 23:14:44 EEST 2025 by pavel
+\* Last modified Mon Jul 07 23:38:21 EEST 2025 by pavel
 \* Created Sun Jun 22 15:55:20 EEST 2025 by pavel

@@ -7,4 +7,6 @@
 /*.toolbox/*.tex
 /*.toolbox/*.pdf
 /*.pdf
+/states/
 *.pmap
+*.old
