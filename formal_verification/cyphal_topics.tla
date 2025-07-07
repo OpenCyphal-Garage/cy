@@ -347,9 +347,8 @@ variables
     }
 
 define
-  Invariant == TRUE
-  AllProcDone == \A p \in Nodes: /\ pc[p + 1000] = "Done"
-                                 /\ pc[p + 2000] = "Done"
+  Invariant == TRUE  \* TODO
+  AllProcDone == \A p \in DOMAIN pc: pc[p] = "Done"
   TerminationInvariant == AllProcDone => Check /\ Invariant
 end define;
 
@@ -400,15 +399,14 @@ begin
 end process;
 
 end algorithm; *)
-\* BEGIN TRANSLATION (chksum(pcal) = "6778a464" /\ chksum(tla) = "33eabf8e")
+\* BEGIN TRANSLATION (chksum(pcal) = "d3c22f1e" /\ chksum(tla) = "1b5aff1c")
 \* Process variable node_id of process pub at line 358 col 5 changed to node_id_
 VARIABLES initial_topics, topics, heartbeat_queue, gossip_order_sets, 
           gossip_order, pc
 
 (* define statement *)
 Invariant == TRUE
-AllProcDone == \A p \in Nodes: /\ pc[p + 1000] = "Done"
-                               /\ pc[p + 2000] = "Done"
+AllProcDone == \A p \in DOMAIN pc: pc[p] = "Done"
 TerminationInvariant == AllProcDone => Check /\ Invariant
 
 VARIABLES node_id_, pub_time, pub_dst, pub_hash, node_id
@@ -495,5 +493,5 @@ Spec == Init /\ [][Next]_vars
 
 =============================================================================
 \* Modification History
-\* Last modified Mon Jul 07 19:19:24 EEST 2025 by pavel
+\* Last modified Mon Jul 07 22:10:25 EEST 2025 by pavel
 \* Created Sun Jun 22 15:55:20 EEST 2025 by pavel

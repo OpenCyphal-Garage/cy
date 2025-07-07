@@ -5,17 +5,18 @@
     <stringAttribute key="distributedNetworkInterface" value="192.168.1.231"/>
     <intAttribute key="distributedNodesCount" value="1"/>
     <stringAttribute key="distributedTLC" value="off"/>
-    <intAttribute key="fpIndex" value="9"/>
+    <intAttribute key="fpIndex" value="25"/>
     <intAttribute key="maxHeapSize" value="25"/>
     <stringAttribute key="modelBehaviorInit" value="Init"/>
     <stringAttribute key="modelBehaviorNext" value="Next"/>
     <stringAttribute key="modelBehaviorSpec" value=""/>
     <intAttribute key="modelBehaviorSpecType" value="2"/>
-    <stringAttribute key="modelBehaviorVars" value="gossip_order, initial_topics, gossip_order_sets, pc, heartbeat_queue, pub_time, pub_hash, topics, pub_dst"/>
+    <stringAttribute key="modelBehaviorVars" value="gossip_order, initial_topics, node_id, gossip_order_sets, pc, node_id_, heartbeat_queue, pub_time, pub_hash, topics, pub_dst"/>
     <stringAttribute key="modelComments" value=""/>
     <booleanAttribute key="modelCorrectnessCheckDeadlock" value="true"/>
     <listAttribute key="modelCorrectnessInvariants">
         <listEntry value="1TerminationInvariant"/>
+        <listEntry value="1Check"/>
     </listAttribute>
     <listAttribute key="modelCorrectnessProperties"/>
     <intAttribute key="modelEditorOpenTabs" value="8"/>
