@@ -100,10 +100,6 @@ begin
             time[node_id] := time[node_id] + 1;
             goto PubMain;
         end if;
-    PubFinal:
-        if Min(Range(time)) >= Duration /\ Debug then
-            skip;\*print <<"FINAL TOPICS", node_id, topics[node_id]>>;
-        end if;
 end process;
 
 \* GOSSIP SUBSCRIBER PROCESS.
@@ -125,7 +121,7 @@ begin
 end process;
 
 end algorithm; *)
-\* BEGIN TRANSLATION (chksum(pcal) = "c9124635" /\ chksum(tla) = "3db36866")
+\* BEGIN TRANSLATION (chksum(pcal) = "b147f4c5" /\ chksum(tla) = "5f1d53f8")
 \* Process variable node_id of process pub at line 79 col 5 changed to node_id_
 CONSTANT defaultInitValue
 VARIABLES initial_topics, topics, time, fabric, gossip_order_sets,
@@ -201,23 +197,13 @@ PubTime(self) == /\ pc[self] = "PubTime"
                  /\ IF time[node_id_[self]] < Duration
                        THEN /\ time' = [time EXCEPT ![node_id_[self]] = time[node_id_[self]] + 1]
                             /\ pc' = [pc EXCEPT ![self] = "PubMain"]
-                       ELSE /\ pc' = [pc EXCEPT ![self] = "PubFinal"]
+                       ELSE /\ pc' = [pc EXCEPT ![self] = "Done"]
                             /\ time' = time
                  /\ UNCHANGED << initial_topics, topics, fabric,
                                  gossip_order_sets, gossip_order, node_id_,
                                  peer, selected_hash, node_id >>
 
-PubFinal(self) == /\ pc[self] = "PubFinal"
-                  /\ IF Min(Range(time)) >= Duration /\ Debug
-                        THEN /\ TRUE
-                        ELSE /\ TRUE
-                  /\ pc' = [pc EXCEPT ![self] = "Done"]
-                  /\ UNCHANGED << initial_topics, topics, time, fabric,
-                                  gossip_order_sets, gossip_order, node_id_,
-                                  peer, selected_hash, node_id >>
-
 pub(self) == PubMain(self) \/ PubLoop(self) \/ PubTime(self)
-                \/ PubFinal(self)
 
 SubMain(self) == /\ pc[self] = "SubMain"
                  /\ IF ~AllPubDone \/ ~Silent
