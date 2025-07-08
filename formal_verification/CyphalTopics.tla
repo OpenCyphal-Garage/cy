@@ -1,7 +1,5 @@
 ------------------------------ MODULE CyphalTopics ------------------------------
 
-\* Consider using REPL/scratchpad at https://will62794.github.io/spectacle
-
 EXTENDS Integers, TLC, Sequences, FiniteSets
 
 CONSTANT Nothing, Debug
@@ -296,8 +294,32 @@ Check_AcceptGossip == Check_AcceptGossip_Divergence /\ Check_AcceptGossip_Collis
 \**********************************************************************************************************************
 \* Divergent allocation detector operating on a function node_id -> {topic_0, topic_1, ..., topic_n}
 \* A divergent allocation occurs when topic records with the same hash have distinct eviction counters.
-\* Returns an arbitrarily chosen divergent topic.
-FindDivergence(topics_per_node) == {}
+\* If no divergences are found, the result is an empty set.
+FindDivergent(node_topics) ==
+    LET hashes == { t.hash : t \in UNION Range(node_topics) }
+        flat == { [hash |-> t.hash, evictions |-> t.evictions] : t \in UNION Range(node_topics) }
+    IN { h \in hashes : Cardinality({ s \in flat : s.hash = h }) > 1 }
+
+Check_FindDivergent ==
+    LET tp(h, e) == [hash |-> h, evictions |-> e, age |-> 0] IN
+    /\ FindDivergent(1 :> {tp(4, 0), tp(2, 0)} @@ 2 :> {tp(3, 0), tp(6, 1)}) = {}
+    /\ FindDivergent(1 :> {tp(4, 0), tp(2, 0)} @@ 2 :> {tp(3, 0), tp(2, 1)}) = {2}
+
+\**********************************************************************************************************************
+\* Allocation collision detector operating on a function node_id -> {topic_0, topic_1, ..., topic_n}
+\* A collision occurs when topic records with distinct hashes have identical subject-ID.
+\* If no collisions are found, the result is an empty set.
+FindCollisions(node_topics) ==
+    LET flat == { [hash |-> t.hash, subject_id |-> SubjectID(t.hash, t.evictions)] : t \in UNION Range(node_topics) }
+        subject_ids == { t.subject_id : t \in flat }
+    IN { s \in subject_ids : Cardinality({ t \in flat : t.subject_id = s }) > 1 }
+
+Check_FindCollisions ==
+    LET tp(h, e) == [hash |-> h, evictions |-> e, age |-> 0] IN
+    /\ FindCollisions(1 :> {tp(2, 0), tp(3, 0)} @@ 2 :> {tp(3, 0), tp(4, 0)}) = {}
+    /\ FindCollisions(1 :> {tp(2, 0), tp(3, 1)} @@ 2 :> {tp(3, 0), tp(4, 0)}) = {4}
+    /\ FindCollisions(1 :> {tp(2, 2), tp(3, 1)} @@ 2 :> {tp(3, 0), tp(4, 0)}) = {4}
+    /\ FindCollisions(1 :> {tp(2, 1), tp(3, 3)} @@ 2 :> {tp(3, 0), tp(4, 2)}) = {3, 6}
 
 \**********************************************************************************************************************
 \* Model self-check.
@@ -315,6 +337,8 @@ Check == /\ Check_FirstMatch
          /\ Check_AllocateTopic
          /\ Check_AllocateTopics
          /\ Check_AcceptGossip
+         /\ Check_FindDivergent
+         /\ Check_FindCollisions
 
 \**********************************************************************************************************************
 Nodes == 1..NodeCount
@@ -423,8 +447,8 @@ begin
 end process;
 
 end algorithm; *) \****************************************************************************************************
-\* BEGIN TRANSLATION (chksum(pcal) = "114359ae" /\ chksum(tla) = "b532c614")
-\* Process variable node_id of process pub at line 372 col 5 changed to node_id_
+\* BEGIN TRANSLATION (chksum(pcal) = "114359ae" /\ chksum(tla) = "b32ee544")
+\* Process variable node_id of process pub at line 396 col 5 changed to node_id_
 CONSTANT defaultInitValue
 VARIABLES initial_topics, topics, time, heartbeat_queue, gossip_order_sets, 
           gossip_order, pc

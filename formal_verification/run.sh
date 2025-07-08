@@ -20,4 +20,5 @@ echo "Using $tla2tools"
 
 java -cp  "$tla2tools" pcal.trans $src || die "PlusCal translation failed"
 
-java -XX:+UseParallelGC -jar "$tla2tools" $src || die "TLA+ failed"
+# https://learntla.com/topics/cli.html
+java -XX:+UseParallelGC -jar "$tla2tools" -workers auto -fpmem 0.5 $src || die "TLA+ failed"
