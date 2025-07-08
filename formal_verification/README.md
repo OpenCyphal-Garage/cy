@@ -8,8 +8,8 @@ Use the `run.sh` script to run the PlusCal translator and the TLC model checker 
 ./run.sh CyphalTopics.tla
 ```
 
-To edit the model, use VS Code with the recommended extensions. The TLA+ extension also allows interactive model checking and limited REPLing. Be sure to enable font ligatures.
+To edit the model, use VS Code with the recommended extensions. The TLA<sup>+</sup> extension also allows interactive model checking and limited REPLing. Be sure to enable font ligatures.
 
 To run a local REPL in CLI, say `java -cp tla2tools.jar tlc2.REPL`. You can also use <https://will62794.github.io/spectacle> to the same end.
 
-TLA^+^ cheatsheet: <https://mbt.informal.systems/docs/tla_basics_tutorials/tla+cheatsheet.html>
+TLA<sup>+</sup> cheatsheet: <https://mbt.informal.systems/docs/tla_basics_tutorials/tla+cheatsheet.html>
