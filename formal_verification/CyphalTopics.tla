@@ -67,10 +67,10 @@ define
     AllPubDone == \A p \in PubProcs : pc[p] = "Done"
     Silent == fabric = [n \in DOMAIN fabric |-> <<>>]
 
-    AllProcDone == \A p \in DOMAIN pc: pc[p] = "Done"
+    AllDone == \A p \in DOMAIN pc: pc[p] = "Done"
 
-    NoDivergences  == AllProcDone => {} = FindDivergent(topics)
-    NoCollisions   == AllProcDone => {} = FindCollisions(topics)
+    NoDivergences  == AllDone => {} = FindDivergent(topics)
+    NoCollisions   == AllDone => {} = FindCollisions(topics)
 end define;
 
 \* PERIODIC GOSSIP PUBLISHER PROCESS.
