@@ -1,4 +1,4 @@
-# Formal verification
+# Model-based verification
 
 Download `tla2tools.jar` from <https://github.com/tlaplus/tlaplus/releases> and store it somewhere under `/opt`.
 
@@ -13,3 +13,9 @@ To edit the model, use VS Code with the recommended extensions. The TLA<sup>+</s
 To run a local REPL in CLI, say `java -cp tla2tools.jar tlc2.REPL`. You can also use <https://will62794.github.io/spectacle> to the same end.
 
 TLA<sup>+</sup> cheatsheet: <https://mbt.informal.systems/docs/tla_basics_tutorials/tla+cheatsheet.html>
+
+## TODO
+
+- Cleanup the duration/skew mechanics.
+- Introduce liveness and temporal properties.
+- Dynamic gossip schedule.
