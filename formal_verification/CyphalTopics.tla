@@ -567,6 +567,3 @@ Spec == Init /\ [][Next]_vars
 \* END TRANSLATION 
 
 =============================================================================
-\* Modification History
-\* Last modified Mon Jul 07 23:38:21 EEST 2025 by pavel
-\* Created Sun Jun 22 15:55:20 EEST 2025 by pavel
