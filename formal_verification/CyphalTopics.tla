@@ -127,7 +127,7 @@ begin
 end process;
 
 end algorithm; *)
-\* BEGIN TRANSLATION (chksum(pcal) = "50b57fd1" /\ chksum(tla) = "4305f4")
+\* BEGIN TRANSLATION (chksum(pcal) = "f03e24e5" /\ chksum(tla) = "5d848033")
 \* Process variable node_id of process pub at line 80 col 5 changed to node_id_
 CONSTANT defaultInitValue
 VARIABLES initial_topics, topics, time, fabric, gossip_order_sets,
@@ -136,7 +136,7 @@ VARIABLES initial_topics, topics, time, fabric, gossip_order_sets,
 (* define statement *)
 PubProcs == { n + 1000 : n \in Nodes }
 AllPubDone == \A p \in PubProcs : pc[p] = "Done"
-FabricEmpty == fabric = [n \in DOMAIN fabric |-> <<>>]
+Silent == fabric = [n \in DOMAIN fabric |-> <<>>]
 
 AllProcDone == \A p \in DOMAIN pc: pc[p] = "Done"
 
@@ -229,7 +229,7 @@ pub(self) == PubMain(self) \/ PubAge(self) \/ PubLoop(self)
                 \/ PubTime(self) \/ PubFinal(self)
 
 SubMain(self) == /\ pc[self] = "SubMain"
-                 /\ IF ~AllPubDone \/ ~FabricEmpty
+                 /\ IF ~AllPubDone \/ ~Silent
                        THEN /\ IF fabric[node_id[self]] # <<>>
                                   THEN /\ LET gossip == Head(fabric[node_id[self]]) IN
                                             /\ fabric' = [fabric EXCEPT ![node_id[self]] = Tail(fabric[node_id[self]])]
