@@ -77,23 +77,22 @@ end define;
 process pub \in {n + 1000 : n \in Nodes}
 variable
     node_id = self - 1000;
-    pub_dst;
-    pub_gossip;
+    peer;
+    selected_hash;  \* Which topic is due for gossiping in this cycle.
 begin
     PubMain:
-        pub_dst := 1;
-        pub_gossip := GetByHash(Head(gossip_order[node_id]), topics[node_id]);
+        peer := 1;
+        selected_hash := Head(gossip_order[node_id]);
         gossip_order[node_id] := SeqRotLeft(gossip_order[node_id]);
-    PubAge:
-        pub_gossip.age := pub_gossip.age + 1;
-        topics[node_id] := ReplaceTopic(pub_gossip, topics[node_id]);
+        topics[node_id] := ReplaceTopic(LET g == GetByHash(selected_hash, topics[node_id]) IN [g EXCEPT !.age = @ + 1],
+                                        topics[node_id]);
     PubLoop:
-        while pub_dst <= NodeCount do
-            if pub_dst # node_id then
-                await fabric[pub_dst] = <<>>;
-                fabric[pub_dst] := Append(fabric[pub_dst], pub_gossip);
+        while peer <= NodeCount do
+            if peer # node_id then
+                await fabric[peer] = <<>>;
+                fabric[peer] := Append(fabric[peer], GetByHash(selected_hash, topics[node_id]));
             end if;
-            pub_dst := pub_dst + 1;
+            peer := peer + 1;
         end while;
     PubTime:
         await time[node_id] - Min(Range(time)) < MaxTimeSkew;
@@ -126,7 +125,7 @@ begin
 end process;
 
 end algorithm; *)
-\* BEGIN TRANSLATION (chksum(pcal) = "9c6666b5" /\ chksum(tla) = "1e949ccd")
+\* BEGIN TRANSLATION (chksum(pcal) = "c9124635" /\ chksum(tla) = "3db36866")
 \* Process variable node_id of process pub at line 79 col 5 changed to node_id_
 CONSTANT defaultInitValue
 VARIABLES initial_topics, topics, time, fabric, gossip_order_sets,
@@ -142,10 +141,10 @@ AllProcDone == \A p \in DOMAIN pc: pc[p] = "Done"
 NoDivergences  == AllProcDone => {} = FindDivergent(topics)
 NoCollisions   == AllProcDone => {} = FindCollisions(topics)
 
-VARIABLES node_id_, pub_dst, pub_gossip, node_id
+VARIABLES node_id_, peer, selected_hash, node_id
 
 vars == << initial_topics, topics, time, fabric, gossip_order_sets,
-           gossip_order, pc, node_id_, pub_dst, pub_gossip, node_id >>
+           gossip_order, pc, node_id_, peer, selected_hash, node_id >>
 
 ProcSet == ({n + 1000 : n \in Nodes}) \cup ({n + 2000 : n \in Nodes})
 
@@ -165,43 +164,37 @@ Init == (* Global variables *)
                             }
         (* Process pub *)
         /\ node_id_ = [self \in {n + 1000 : n \in Nodes} |-> self - 1000]
-        /\ pub_dst = [self \in {n + 1000 : n \in Nodes} |-> defaultInitValue]
-        /\ pub_gossip = [self \in {n + 1000 : n \in Nodes} |-> defaultInitValue]
+        /\ peer = [self \in {n + 1000 : n \in Nodes} |-> defaultInitValue]
+        /\ selected_hash = [self \in {n + 1000 : n \in Nodes} |-> defaultInitValue]
         (* Process sub *)
         /\ node_id = [self \in {n + 2000 : n \in Nodes} |-> self - 2000]
         /\ pc = [self \in ProcSet |-> CASE self \in {n + 1000 : n \in Nodes} -> "PubMain"
                                         [] self \in {n + 2000 : n \in Nodes} -> "SubMain"]
 
 PubMain(self) == /\ pc[self] = "PubMain"
-                 /\ pub_dst' = [pub_dst EXCEPT ![self] = 1]
-                 /\ pub_gossip' = [pub_gossip EXCEPT ![self] = GetByHash(Head(gossip_order[node_id_[self]]), topics[node_id_[self]])]
+                 /\ peer' = [peer EXCEPT ![self] = 1]
+                 /\ selected_hash' = [selected_hash EXCEPT ![self] = Head(gossip_order[node_id_[self]])]
                  /\ gossip_order' = [gossip_order EXCEPT ![node_id_[self]] = SeqRotLeft(gossip_order[node_id_[self]])]
-                 /\ pc' = [pc EXCEPT ![self] = "PubAge"]
-                 /\ UNCHANGED << initial_topics, topics, time, fabric,
+                 /\ topics' = [topics EXCEPT ![node_id_[self]] = ReplaceTopic(LET g == GetByHash(selected_hash'[self], topics[node_id_[self]]) IN [g EXCEPT !.age = @ + 1],
+                                                                              topics[node_id_[self]])]
+                 /\ pc' = [pc EXCEPT ![self] = "PubLoop"]
+                 /\ UNCHANGED << initial_topics, time, fabric,
                                  gossip_order_sets, node_id_, node_id >>
 
-PubAge(self) == /\ pc[self] = "PubAge"
-                /\ pub_gossip' = [pub_gossip EXCEPT ![self].age = pub_gossip[self].age + 1]
-                /\ topics' = [topics EXCEPT ![node_id_[self]] = ReplaceTopic(pub_gossip'[self], topics[node_id_[self]])]
-                /\ pc' = [pc EXCEPT ![self] = "PubLoop"]
-                /\ UNCHANGED << initial_topics, time, fabric,
-                                gossip_order_sets, gossip_order, node_id_,
-                                pub_dst, node_id >>
-
 PubLoop(self) == /\ pc[self] = "PubLoop"
-                 /\ IF pub_dst[self] <= NodeCount
-                       THEN /\ IF pub_dst[self] # node_id_[self]
-                                  THEN /\ fabric[pub_dst[self]] = <<>>
-                                       /\ fabric' = [fabric EXCEPT ![pub_dst[self]] = Append(fabric[pub_dst[self]], pub_gossip[self])]
+                 /\ IF peer[self] <= NodeCount
+                       THEN /\ IF peer[self] # node_id_[self]
+                                  THEN /\ fabric[peer[self]] = <<>>
+                                       /\ fabric' = [fabric EXCEPT ![peer[self]] = Append(fabric[peer[self]], GetByHash(selected_hash[self], topics[node_id_[self]]))]
                                   ELSE /\ TRUE
                                        /\ UNCHANGED fabric
-                            /\ pub_dst' = [pub_dst EXCEPT ![self] = pub_dst[self] + 1]
+                            /\ peer' = [peer EXCEPT ![self] = peer[self] + 1]
                             /\ pc' = [pc EXCEPT ![self] = "PubLoop"]
                        ELSE /\ pc' = [pc EXCEPT ![self] = "PubTime"]
-                            /\ UNCHANGED << fabric, pub_dst >>
+                            /\ UNCHANGED << fabric, peer >>
                  /\ UNCHANGED << initial_topics, topics, time,
                                  gossip_order_sets, gossip_order, node_id_,
-                                 pub_gossip, node_id >>
+                                 selected_hash, node_id >>
 
 PubTime(self) == /\ pc[self] = "PubTime"
                  /\ time[node_id_[self]] - Min(Range(time)) < MaxTimeSkew
@@ -212,7 +205,7 @@ PubTime(self) == /\ pc[self] = "PubTime"
                             /\ time' = time
                  /\ UNCHANGED << initial_topics, topics, fabric,
                                  gossip_order_sets, gossip_order, node_id_,
-                                 pub_dst, pub_gossip, node_id >>
+                                 peer, selected_hash, node_id >>
 
 PubFinal(self) == /\ pc[self] = "PubFinal"
                   /\ IF Min(Range(time)) >= Duration /\ Debug
@@ -221,10 +214,10 @@ PubFinal(self) == /\ pc[self] = "PubFinal"
                   /\ pc' = [pc EXCEPT ![self] = "Done"]
                   /\ UNCHANGED << initial_topics, topics, time, fabric,
                                   gossip_order_sets, gossip_order, node_id_,
-                                  pub_dst, pub_gossip, node_id >>
+                                  peer, selected_hash, node_id >>
 
-pub(self) == PubMain(self) \/ PubAge(self) \/ PubLoop(self)
-                \/ PubTime(self) \/ PubFinal(self)
+pub(self) == PubMain(self) \/ PubLoop(self) \/ PubTime(self)
+                \/ PubFinal(self)
 
 SubMain(self) == /\ pc[self] = "SubMain"
                  /\ IF ~AllPubDone \/ ~Silent
@@ -238,7 +231,7 @@ SubMain(self) == /\ pc[self] = "SubMain"
                        ELSE /\ pc' = [pc EXCEPT ![self] = "Done"]
                             /\ UNCHANGED << topics, fabric >>
                  /\ UNCHANGED << initial_topics, time, gossip_order_sets,
-                                 gossip_order, node_id_, pub_dst, pub_gossip,
+                                 gossip_order, node_id_, peer, selected_hash,
                                  node_id >>
 
 sub(self) == SubMain(self)
