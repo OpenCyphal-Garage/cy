@@ -209,27 +209,34 @@ LOCAL Check_AcceptGossip_Collision ==
     /\ AcceptGossip_Collision(tp(3, 2, 8), {tp(4, 1, 4)}) = {tp(4, 2, 4)}
     \* Local wins.
     /\ AcceptGossip_Collision(tp(3, 2, 4), {tp(4, 1, 8)}) = {tp(4, 1, 8)}
-    \* Empirical issue.
-    /\ AcceptGossip_Collision(
-           [ hash |-> 11, evictions |-> 0, age |-> 6],
-           {[hash |-> 1,  evictions |-> 0, age |-> 6]}
-       ) = {[hash |-> 1,  evictions |-> 0, age |-> 6]}
-    /\ AcceptGossip_Collision(
-           [ hash |-> 11, evictions |-> 0, age |-> 6],
-           {[hash |-> 1,  evictions |-> 0, age |-> 3]}
-       ) = {[hash |-> 1,  evictions |-> 1, age |-> 3]}
-    /\ AcceptGossip_Collision(
-           [ hash |-> 1,  evictions |-> 0, age |-> 6],
-           {[hash |-> 11, evictions |-> 0, age |-> 6]}
-       ) = {[hash |-> 11, evictions |-> 1, age |-> 6]}
-    /\ AcceptGossip_Collision(
-           [ hash |-> 1,  evictions |-> 0, age |-> 6],
-           {[hash |-> 11, evictions |-> 0, age |-> 9]}
-       ) = {[hash |-> 11, evictions |-> 0, age |-> 9]}
 
 \* An updated sequence of topics based on a received gossip message.
 AcceptGossip(remote, topics) == AcceptGossip_Collision(remote, AcceptGossip_Divergence(remote, topics))
-LOCAL Check_AcceptGossip == Check_AcceptGossip_Divergence /\ Check_AcceptGossip_Collision
+LOCAL Check_AcceptGossip ==
+    /\ Check_AcceptGossip_Divergence
+    /\ Check_AcceptGossip_Collision
+    \* Empirical issue.
+    /\ AcceptGossip(
+           [ hash |-> 11, evictions |-> 0, age |-> 6],
+           {[hash |-> 1,  evictions |-> 0, age |-> 6]}
+       ) = {[hash |-> 1,  evictions |-> 0, age |-> 6]}
+    /\ AcceptGossip(
+           [ hash |-> 11, evictions |-> 0, age |-> 6],
+           {[hash |-> 1,  evictions |-> 0, age |-> 3]}
+       ) = {[hash |-> 1,  evictions |-> 1, age |-> 3]}
+    /\ AcceptGossip(
+           [ hash |-> 1,  evictions |-> 0, age |-> 6],
+           {[hash |-> 11, evictions |-> 0, age |-> 6]}
+       ) = {[hash |-> 11, evictions |-> 1, age |-> 6]}
+    /\ AcceptGossip(
+           [ hash |-> 1,  evictions |-> 0, age |-> 6],
+           {[hash |-> 11, evictions |-> 0, age |-> 9]}
+       ) = {[hash |-> 11, evictions |-> 0, age |-> 9]}
+    \* Empirical issue.
+    /\ AcceptGossip(
+           [hash |-> 1, evictions |-> 0, age |-> 2],
+           {[hash |-> 2, evictions |-> 0, age |-> 1], [hash |-> 11, evictions |-> 0, age |-> 2]}
+       ) = {[hash |-> 2, evictions |-> 1, age |-> 1], [hash |-> 11, evictions |-> 1, age |-> 2]}
 
 \***********************************************************************************************************************
 \* Divergent allocation detector operating on a function node_id -> {topic_0, topic_1, ..., topic_n}
