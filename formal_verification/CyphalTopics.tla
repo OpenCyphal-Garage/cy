@@ -6,10 +6,10 @@ EXTENDS Integers, TLC, Sequences, FiniteSets, Utils, TopicOps
 CONSTANT Debug
 ASSUME Debug \in BOOLEAN
 
-CONSTANT NodeCount, TopicsPerNodeMax, DistinctTopicCount, InitialEvictionMax, InitialAgeMax
+CONSTANT NodeCount, TopicHashes, TopicsPerNodeMax, InitialEvictionMax, InitialAgeMax
 ASSUME NodeCount \in Nat /\ NodeCount > 0
-ASSUME TopicsPerNodeMax \in Nat /\ TopicsPerNodeMax > 0 /\ TopicsPerNodeMax <= DistinctTopicCount
-ASSUME DistinctTopicCount \in Nat /\ DistinctTopicCount > 0
+ASSUME TopicsPerNodeMax \in Nat /\ TopicsPerNodeMax > 0
+ASSUME \A h \in TopicHashes: h \in Nat
 ASSUME InitialEvictionMax \in Nat
 ASSUME InitialAgeMax \in Nat
 
@@ -24,7 +24,7 @@ Nodes == 1..NodeCount
 \* All possible initial topic states prior to local allocation and gossip.
 InitialTopicSpace == {
     [hash |-> h, evictions |-> e, age |-> a]:
-        h \in 0..(DistinctTopicCount-1),
+        h \in TopicHashes,
         e \in 0..InitialEvictionMax,
         a \in 0..InitialAgeMax
 }
@@ -44,7 +44,7 @@ variables
     time = [n \in Nodes |-> 0];
 
     \* Each node has an independent queue of incoming gossips.
-    heartbeat_queue = [destination \in Nodes |-> <<>>];
+    fabric = [destination \in Nodes |-> <<>>];
 
     \* Topic gossip ordering per node. Each ordering contains a set of permutations of topic hashes.
     \* The function type is:
@@ -63,9 +63,14 @@ variables
     }
 
 define
-    NoDivergences == {} = FindDivergent(topics)
-    NoCollisions == {} = FindCollisions(topics)
+    PubProcs == { n + 1000 : n \in Nodes }
+    AllPubDone == \A p \in PubProcs : pc[p] = "Done"
+    Silent == fabric = [n \in DOMAIN fabric |-> <<>>]
+
     AllProcDone == \A p \in DOMAIN pc: pc[p] = "Done"
+
+    NoDivergences  == {} = FindDivergent(topics)
+    NoCollisions   == {} = FindCollisions(topics)
     FinalInvariant == AllProcDone => Check /\ NoDivergences /\ NoCollisions
 end define;
 
@@ -86,8 +91,8 @@ begin
     PubLoop:
         while pub_dst <= NodeCount do
             if pub_dst # node_id then
-                await heartbeat_queue[pub_dst] = <<>>;
-                heartbeat_queue[pub_dst] := Append(heartbeat_queue[pub_dst], pub_gossip);
+                await fabric[pub_dst] = <<>>;
+                fabric[pub_dst] := Append(fabric[pub_dst], pub_gossip);
             end if;
             pub_dst := pub_dst + 1;
         end while;
@@ -99,7 +104,7 @@ begin
         end if;
     PubFinal:
         if Min(Range(time)) >= Duration /\ Debug then
-            skip; \* print <<"FINAL TOPICS", topics>>;
+            skip;\*print <<"FINAL TOPICS", node_id, topics[node_id]>>;
         end if;
 end process;
 
@@ -109,11 +114,11 @@ variable
     node_id = self - 2000;
 begin
     SubMain:
-        while TRUE do
-            if heartbeat_queue[node_id] # <<>> then
-                with gossip = Head(heartbeat_queue[node_id]) do
-                    heartbeat_queue[node_id] := Tail(heartbeat_queue[node_id]);
-                    topics[node_id] := AcceptGossip(gossip, topics[node_id])
+        while ~AllPubDone \/ ~Silent do
+            if fabric[node_id] # <<>> then
+                with gossip = Head(fabric[node_id]) do
+                    fabric[node_id] := Tail(fabric[node_id]);
+                    topics[node_id] := AcceptGossip(gossip, topics[node_id]);
                     \* Update the schedule if the local replica won to speedup collision/divergence repair:
                     \* gossip_order[node_id] := SeqWithout(gossip_order[node_id], gossip.hash) \o <<gossip.hash>>
                 end with;
@@ -122,21 +127,26 @@ begin
 end process;
 
 end algorithm; *)
-\* BEGIN TRANSLATION (chksum(pcal) = "90a785df" /\ chksum(tla) = "254e7af")
-\* Process variable node_id of process pub at line 75 col 5 changed to node_id_
+\* BEGIN TRANSLATION (chksum(pcal) = "50b57fd1" /\ chksum(tla) = "4305f4")
+\* Process variable node_id of process pub at line 80 col 5 changed to node_id_
 CONSTANT defaultInitValue
-VARIABLES initial_topics, topics, time, heartbeat_queue, gossip_order_sets,
+VARIABLES initial_topics, topics, time, fabric, gossip_order_sets,
           gossip_order, pc
 
 (* define statement *)
-NoDivergences == {} = FindDivergent(topics)
-NoCollisions == {} = FindCollisions(topics)
+PubProcs == { n + 1000 : n \in Nodes }
+AllPubDone == \A p \in PubProcs : pc[p] = "Done"
+FabricEmpty == fabric = [n \in DOMAIN fabric |-> <<>>]
+
 AllProcDone == \A p \in DOMAIN pc: pc[p] = "Done"
+
+NoDivergences  == {} = FindDivergent(topics)
+NoCollisions   == {} = FindCollisions(topics)
 FinalInvariant == AllProcDone => Check /\ NoDivergences /\ NoCollisions
 
 VARIABLES node_id_, pub_dst, pub_gossip, node_id
 
-vars == << initial_topics, topics, time, heartbeat_queue, gossip_order_sets,
+vars == << initial_topics, topics, time, fabric, gossip_order_sets,
            gossip_order, pc, node_id_, pub_dst, pub_gossip, node_id >>
 
 ProcSet == ({n + 1000 : n \in Nodes}) \cup ({n + 2000 : n \in Nodes})
@@ -145,7 +155,7 @@ Init == (* Global variables *)
         /\ initial_topics \in [Nodes -> InitialTopicSets]
         /\ topics = [n \in Nodes |-> AllocateTopics(initial_topics[n], {})]
         /\ time = [n \in Nodes |-> 0]
-        /\ heartbeat_queue = [destination \in Nodes |-> <<>>]
+        /\ fabric = [destination \in Nodes |-> <<>>]
         /\ gossip_order_sets = [ n \in Nodes |-> SetToSeqs({ t.hash : t \in topics[n] }) ]
         /\ gossip_order \in                  {
                                 FunFromTupleSet(m) : m \in {
@@ -169,28 +179,28 @@ PubMain(self) == /\ pc[self] = "PubMain"
                  /\ pub_gossip' = [pub_gossip EXCEPT ![self] = GetByHash(Head(gossip_order[node_id_[self]]), topics[node_id_[self]])]
                  /\ gossip_order' = [gossip_order EXCEPT ![node_id_[self]] = SeqRotLeft(gossip_order[node_id_[self]])]
                  /\ pc' = [pc EXCEPT ![self] = "PubAge"]
-                 /\ UNCHANGED << initial_topics, topics, time, heartbeat_queue,
+                 /\ UNCHANGED << initial_topics, topics, time, fabric,
                                  gossip_order_sets, node_id_, node_id >>
 
 PubAge(self) == /\ pc[self] = "PubAge"
                 /\ pub_gossip' = [pub_gossip EXCEPT ![self].age = pub_gossip[self].age + 1]
                 /\ topics' = [topics EXCEPT ![node_id_[self]] = ReplaceTopic(pub_gossip'[self], topics[node_id_[self]])]
                 /\ pc' = [pc EXCEPT ![self] = "PubLoop"]
-                /\ UNCHANGED << initial_topics, time, heartbeat_queue,
+                /\ UNCHANGED << initial_topics, time, fabric,
                                 gossip_order_sets, gossip_order, node_id_,
                                 pub_dst, node_id >>
 
 PubLoop(self) == /\ pc[self] = "PubLoop"
                  /\ IF pub_dst[self] <= NodeCount
                        THEN /\ IF pub_dst[self] # node_id_[self]
-                                  THEN /\ heartbeat_queue[pub_dst[self]] = <<>>
-                                       /\ heartbeat_queue' = [heartbeat_queue EXCEPT ![pub_dst[self]] = Append(heartbeat_queue[pub_dst[self]], pub_gossip[self])]
+                                  THEN /\ fabric[pub_dst[self]] = <<>>
+                                       /\ fabric' = [fabric EXCEPT ![pub_dst[self]] = Append(fabric[pub_dst[self]], pub_gossip[self])]
                                   ELSE /\ TRUE
-                                       /\ UNCHANGED heartbeat_queue
+                                       /\ UNCHANGED fabric
                             /\ pub_dst' = [pub_dst EXCEPT ![self] = pub_dst[self] + 1]
                             /\ pc' = [pc EXCEPT ![self] = "PubLoop"]
                        ELSE /\ pc' = [pc EXCEPT ![self] = "PubTime"]
-                            /\ UNCHANGED << heartbeat_queue, pub_dst >>
+                            /\ UNCHANGED << fabric, pub_dst >>
                  /\ UNCHANGED << initial_topics, topics, time,
                                  gossip_order_sets, gossip_order, node_id_,
                                  pub_gossip, node_id >>
@@ -202,7 +212,7 @@ PubTime(self) == /\ pc[self] = "PubTime"
                             /\ pc' = [pc EXCEPT ![self] = "PubMain"]
                        ELSE /\ pc' = [pc EXCEPT ![self] = "PubFinal"]
                             /\ time' = time
-                 /\ UNCHANGED << initial_topics, topics, heartbeat_queue,
+                 /\ UNCHANGED << initial_topics, topics, fabric,
                                  gossip_order_sets, gossip_order, node_id_,
                                  pub_dst, pub_gossip, node_id >>
 
@@ -211,32 +221,41 @@ PubFinal(self) == /\ pc[self] = "PubFinal"
                         THEN /\ TRUE
                         ELSE /\ TRUE
                   /\ pc' = [pc EXCEPT ![self] = "Done"]
-                  /\ UNCHANGED << initial_topics, topics, time,
-                                  heartbeat_queue, gossip_order_sets,
-                                  gossip_order, node_id_, pub_dst, pub_gossip,
-                                  node_id >>
+                  /\ UNCHANGED << initial_topics, topics, time, fabric,
+                                  gossip_order_sets, gossip_order, node_id_,
+                                  pub_dst, pub_gossip, node_id >>
 
 pub(self) == PubMain(self) \/ PubAge(self) \/ PubLoop(self)
                 \/ PubTime(self) \/ PubFinal(self)
 
 SubMain(self) == /\ pc[self] = "SubMain"
-                 /\ IF heartbeat_queue[node_id[self]] # <<>>
-                       THEN /\ LET gossip == Head(heartbeat_queue[node_id[self]]) IN
-                                 /\ heartbeat_queue' = [heartbeat_queue EXCEPT ![node_id[self]] = Tail(heartbeat_queue[node_id[self]])]
-                                 /\ topics' = [topics EXCEPT ![node_id[self]] = AcceptGossip(gossip, topics[node_id[self]])]
-                       ELSE /\ TRUE
-                            /\ UNCHANGED << topics, heartbeat_queue >>
-                 /\ pc' = [pc EXCEPT ![self] = "SubMain"]
+                 /\ IF ~AllPubDone \/ ~FabricEmpty
+                       THEN /\ IF fabric[node_id[self]] # <<>>
+                                  THEN /\ LET gossip == Head(fabric[node_id[self]]) IN
+                                            /\ fabric' = [fabric EXCEPT ![node_id[self]] = Tail(fabric[node_id[self]])]
+                                            /\ topics' = [topics EXCEPT ![node_id[self]] = AcceptGossip(gossip, topics[node_id[self]])]
+                                  ELSE /\ TRUE
+                                       /\ UNCHANGED << topics, fabric >>
+                            /\ pc' = [pc EXCEPT ![self] = "SubMain"]
+                       ELSE /\ pc' = [pc EXCEPT ![self] = "Done"]
+                            /\ UNCHANGED << topics, fabric >>
                  /\ UNCHANGED << initial_topics, time, gossip_order_sets,
                                  gossip_order, node_id_, pub_dst, pub_gossip,
                                  node_id >>
 
 sub(self) == SubMain(self)
 
+(* Allow infinite stuttering to prevent deadlock on termination. *)
+Terminating == /\ \A self \in ProcSet: pc[self] = "Done"
+               /\ UNCHANGED vars
+
 Next == (\E self \in {n + 1000 : n \in Nodes}: pub(self))
            \/ (\E self \in {n + 2000 : n \in Nodes}: sub(self))
+           \/ Terminating
 
 Spec == Init /\ [][Next]_vars
+
+Termination == <>(\A self \in ProcSet: pc[self] = "Done")
 
 \* END TRANSLATION
 
