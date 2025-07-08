@@ -215,9 +215,17 @@ LOCAL Check_AcceptGossip_Collision ==
            {[hash |-> 1,  evictions |-> 0, age |-> 6]}
        ) = {[hash |-> 1,  evictions |-> 0, age |-> 6]}
     /\ AcceptGossip_Collision(
+           [ hash |-> 11, evictions |-> 0, age |-> 6],
+           {[hash |-> 1,  evictions |-> 0, age |-> 3]}
+       ) = {[hash |-> 1,  evictions |-> 1, age |-> 3]}
+    /\ AcceptGossip_Collision(
            [ hash |-> 1,  evictions |-> 0, age |-> 6],
            {[hash |-> 11, evictions |-> 0, age |-> 6]}
        ) = {[hash |-> 11, evictions |-> 1, age |-> 6]}
+    /\ AcceptGossip_Collision(
+           [ hash |-> 1,  evictions |-> 0, age |-> 6],
+           {[hash |-> 11, evictions |-> 0, age |-> 9]}
+       ) = {[hash |-> 11, evictions |-> 0, age |-> 9]}
 
 \* An updated sequence of topics based on a received gossip message.
 AcceptGossip(remote, topics) == AcceptGossip_Collision(remote, AcceptGossip_Divergence(remote, topics))

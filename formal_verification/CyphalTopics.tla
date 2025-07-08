@@ -69,9 +69,8 @@ define
 
     AllProcDone == \A p \in DOMAIN pc: pc[p] = "Done"
 
-    NoDivergences  == {} = FindDivergent(topics)
-    NoCollisions   == {} = FindCollisions(topics)
-    FinalInvariant == AllProcDone => Check /\ NoDivergences /\ NoCollisions
+    NoDivergences  == AllProcDone => {} = FindDivergent(topics)
+    NoCollisions   == AllProcDone => {} = FindCollisions(topics)
 end define;
 
 \* PERIODIC GOSSIP PUBLISHER PROCESS.
@@ -108,7 +107,7 @@ begin
         end if;
 end process;
 
-\* HEARTBEAT SUBSCRIBER PROCESS.
+\* GOSSIP SUBSCRIBER PROCESS.
 process sub \in {n + 2000 : n \in Nodes}
 variable
     node_id = self - 2000;
@@ -127,8 +126,8 @@ begin
 end process;
 
 end algorithm; *)
-\* BEGIN TRANSLATION (chksum(pcal) = "f03e24e5" /\ chksum(tla) = "5d848033")
-\* Process variable node_id of process pub at line 80 col 5 changed to node_id_
+\* BEGIN TRANSLATION (chksum(pcal) = "9c6666b5" /\ chksum(tla) = "1e949ccd")
+\* Process variable node_id of process pub at line 79 col 5 changed to node_id_
 CONSTANT defaultInitValue
 VARIABLES initial_topics, topics, time, fabric, gossip_order_sets,
           gossip_order, pc
@@ -140,9 +139,8 @@ Silent == fabric = [n \in DOMAIN fabric |-> <<>>]
 
 AllProcDone == \A p \in DOMAIN pc: pc[p] = "Done"
 
-NoDivergences  == {} = FindDivergent(topics)
-NoCollisions   == {} = FindCollisions(topics)
-FinalInvariant == AllProcDone => Check /\ NoDivergences /\ NoCollisions
+NoDivergences  == AllProcDone => {} = FindDivergent(topics)
+NoCollisions   == AllProcDone => {} = FindCollisions(topics)
 
 VARIABLES node_id_, pub_dst, pub_gossip, node_id
 
