@@ -385,9 +385,10 @@ variables
     }
 
 define
-  Invariant == TRUE  \* TODO
-  AllProcDone == \A p \in DOMAIN pc: pc[p] = "Done"
-  FinalInvariant == AllProcDone => Check /\ Invariant
+    NoDivergences == {} = FindDivergent(topics)
+    NoCollisions == {} = FindCollisions(topics)
+    AllProcDone == \A p \in DOMAIN pc: pc[p] = "Done"
+    FinalInvariant == AllProcDone => Check /\ NoDivergences /\ NoCollisions
 end define;
 
 \* PERIODIC GOSSIP PUBLISHER PROCESS.
@@ -447,16 +448,17 @@ begin
 end process;
 
 end algorithm; *) \****************************************************************************************************
-\* BEGIN TRANSLATION (chksum(pcal) = "114359ae" /\ chksum(tla) = "b32ee544")
-\* Process variable node_id of process pub at line 396 col 5 changed to node_id_
+\* BEGIN TRANSLATION (chksum(pcal) = "6fb1cc7d" /\ chksum(tla) = "91764bdf")
+\* Process variable node_id of process pub at line 397 col 5 changed to node_id_
 CONSTANT defaultInitValue
 VARIABLES initial_topics, topics, time, heartbeat_queue, gossip_order_sets, 
           gossip_order, pc
 
 (* define statement *)
-Invariant == TRUE
+NoDivergences == {} = FindDivergent(topics)
+NoCollisions == {} = FindCollisions(topics)
 AllProcDone == \A p \in DOMAIN pc: pc[p] = "Done"
-FinalInvariant == AllProcDone => Check /\ Invariant
+FinalInvariant == AllProcDone => Check /\ NoDivergences /\ NoCollisions
 
 VARIABLES node_id_, pub_dst, pub_gossip, node_id
 
