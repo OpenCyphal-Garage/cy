@@ -1,4 +1,4 @@
------------------------------- MODULE CyphalTopics ------------------------------
+------------------------------ MODULE CyphalTopics_1 ------------------------------
 \* Pavel Kirienko <pavel@opencyphal.org>, MIT license
 
 EXTENDS Integers, TLC, Sequences, FiniteSets, Utils, TopicOps
@@ -34,7 +34,7 @@ InitialTopicSets == { S \in SUBSET InitialTopicSpace : Cardinality(S) \in 1..Top
 (* --algorithm node
 variables
     \* Prior to start, each node will allocate the following topics locally. Divergences may result.
-    InitialTopics \in [Nodes -> InitialTopicSets];
+    initial_topics \in [Nodes -> InitialTopicSets];
 
     \* Local topics per node; mutable state. Initial local allocation is performed prior to launch.
     topics = [n \in Nodes |-> AllocateTopics(initial_topics[n], {})];
@@ -122,16 +122,16 @@ begin
 end process;
 
 end algorithm; *)
-\* BEGIN TRANSLATION (chksum(pcal) = "416e6d2d" /\ chksum(tla) = "f5cf434b")
+\* BEGIN TRANSLATION (chksum(pcal) = "ed5e1611" /\ chksum(tla) = "3881e7ce")
 \* Process variable node_id of process pub at line 80 col 5 changed to node_id_
 CONSTANT defaultInitValue
-VARIABLES initial_topics, topics, time, fabric, gossip_order_sets,
+VARIABLES initial_topics, topics, time, inbox, gossip_order_sets, 
           gossip_order, pc
 
 (* define statement *)
 PubProcs == { n + 1000 : n \in Nodes }
 AllPubDone == \A p \in PubProcs : pc[p] = "Done"
-Silent == fabric = [n \in DOMAIN fabric |-> <<>>]
+Silent == inbox = [n \in DOMAIN inbox |-> <<>>]
 
 AllDone == \A p \in DOMAIN pc: pc[p] = "Done"
 
@@ -142,7 +142,7 @@ MaxTimeSkew == Min(Range(time)) \div 4
 
 VARIABLES node_id_, peer, selected_hash, node_id
 
-vars == << initial_topics, topics, time, fabric, gossip_order_sets,
+vars == << initial_topics, topics, time, inbox, gossip_order_sets, 
            gossip_order, pc, node_id_, peer, selected_hash, node_id >>
 
 ProcSet == ({n + 1000 : n \in Nodes}) \cup ({n + 2000 : n \in Nodes})
@@ -151,7 +151,7 @@ Init == (* Global variables *)
         /\ initial_topics \in [Nodes -> InitialTopicSets]
         /\ topics = [n \in Nodes |-> AllocateTopics(initial_topics[n], {})]
         /\ time = [n \in Nodes |-> 0]
-        /\ fabric = [destination \in Nodes |-> <<>>]
+        /\ inbox = [destination \in Nodes |-> <<>>]
         /\ gossip_order_sets = [ n \in Nodes |-> SetToSeqs({ t.hash : t \in topics[n] }) ]
         /\ gossip_order \in                  {
                                 FunFromTupleSet(m) : m \in {
@@ -177,22 +177,22 @@ PubMain(self) == /\ pc[self] = "PubMain"
                  /\ topics' = [topics EXCEPT ![node_id_[self]] = ReplaceTopic(LET g == GetByHash(selected_hash'[self], topics[node_id_[self]]) IN [g EXCEPT !.age = @ + 1],
                                                                               topics[node_id_[self]])]
                  /\ pc' = [pc EXCEPT ![self] = "PubLoop"]
-                 /\ UNCHANGED << initial_topics, time, fabric,
+                 /\ UNCHANGED << initial_topics, time, inbox, 
                                  gossip_order_sets, node_id_, node_id >>
 
 PubLoop(self) == /\ pc[self] = "PubLoop"
                  /\ IF peer[self] <= NodeCount
                        THEN /\ IF peer[self] # node_id_[self]
-                                  THEN /\ fabric[peer[self]] = <<>>
-                                       /\ fabric' = [fabric EXCEPT ![peer[self]] = Append(fabric[peer[self]], GetByHash(selected_hash[self], topics[node_id_[self]]))]
+                                  THEN /\ inbox[peer[self]] = <<>>
+                                       /\ inbox' = [inbox EXCEPT ![peer[self]] = Append(inbox[peer[self]], GetByHash(selected_hash[self], topics[node_id_[self]]))]
                                   ELSE /\ TRUE
-                                       /\ UNCHANGED fabric
+                                       /\ inbox' = inbox
                             /\ peer' = [peer EXCEPT ![self] = peer[self] + 1]
                             /\ pc' = [pc EXCEPT ![self] = "PubLoop"]
                        ELSE /\ pc' = [pc EXCEPT ![self] = "PubTime"]
-                            /\ UNCHANGED << fabric, peer >>
-                 /\ UNCHANGED << initial_topics, topics, time,
-                                 gossip_order_sets, gossip_order, node_id_,
+                            /\ UNCHANGED << inbox, peer >>
+                 /\ UNCHANGED << initial_topics, topics, time, 
+                                 gossip_order_sets, gossip_order, node_id_, 
                                  selected_hash, node_id >>
 
 PubTime(self) == /\ pc[self] = "PubTime"
@@ -202,25 +202,25 @@ PubTime(self) == /\ pc[self] = "PubTime"
                             /\ pc' = [pc EXCEPT ![self] = "PubMain"]
                        ELSE /\ pc' = [pc EXCEPT ![self] = "Done"]
                             /\ time' = time
-                 /\ UNCHANGED << initial_topics, topics, fabric,
-                                 gossip_order_sets, gossip_order, node_id_,
+                 /\ UNCHANGED << initial_topics, topics, inbox, 
+                                 gossip_order_sets, gossip_order, node_id_, 
                                  peer, selected_hash, node_id >>
 
 pub(self) == PubMain(self) \/ PubLoop(self) \/ PubTime(self)
 
 SubMain(self) == /\ pc[self] = "SubMain"
                  /\ IF ~AllPubDone \/ ~Silent
-                       THEN /\ IF fabric[node_id[self]] # <<>>
-                                  THEN /\ LET gossip == Head(fabric[node_id[self]]) IN
-                                            /\ fabric' = [fabric EXCEPT ![node_id[self]] = Tail(fabric[node_id[self]])]
+                       THEN /\ IF inbox[node_id[self]] # <<>>
+                                  THEN /\ LET gossip == Head(inbox[node_id[self]]) IN
+                                            /\ inbox' = [inbox EXCEPT ![node_id[self]] = Tail(inbox[node_id[self]])]
                                             /\ topics' = [topics EXCEPT ![node_id[self]] = AcceptGossip(gossip, topics[node_id[self]])]
                                   ELSE /\ TRUE
-                                       /\ UNCHANGED << topics, fabric >>
+                                       /\ UNCHANGED << topics, inbox >>
                             /\ pc' = [pc EXCEPT ![self] = "SubMain"]
                        ELSE /\ pc' = [pc EXCEPT ![self] = "Done"]
-                            /\ UNCHANGED << topics, fabric >>
-                 /\ UNCHANGED << initial_topics, time, gossip_order_sets,
-                                 gossip_order, node_id_, peer, selected_hash,
+                            /\ UNCHANGED << topics, inbox >>
+                 /\ UNCHANGED << initial_topics, time, gossip_order_sets, 
+                                 gossip_order, node_id_, peer, selected_hash, 
                                  node_id >>
 
 sub(self) == SubMain(self)
