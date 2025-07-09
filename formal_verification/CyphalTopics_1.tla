@@ -1,7 +1,7 @@
 ------------------------------ MODULE CyphalTopics_1 ------------------------------
 \* Pavel Kirienko <pavel@opencyphal.org>, MIT license
 
-EXTENDS Integers, TLC, Sequences, FiniteSets, Utils, TopicOps
+EXTENDS Integers, TLC, Sequences, FiniteSets, Utils, Core
 
 CONSTANT Debug
 ASSUME Debug \in BOOLEAN
@@ -17,6 +17,9 @@ CONSTANT Duration
 ASSUME Duration \in Nat /\ Duration > 1
 
 Check == Check_Utils /\ Check_TopicOps
+
+\* https://learntla.com/topics/optimization.html
+Constraint == ~Debug \/ TLCGet("level") < 13
 
 Nodes == 1..NodeCount
 
@@ -122,8 +125,8 @@ begin
 end process;
 
 end algorithm; *)
-\* BEGIN TRANSLATION (chksum(pcal) = "ed5e1611" /\ chksum(tla) = "3881e7ce")
-\* Process variable node_id of process pub at line 80 col 5 changed to node_id_
+\* BEGIN TRANSLATION (chksum(pcal) = "ed5e1611" /\ chksum(tla) = "dadd2a26")
+\* Process variable node_id of process pub at line 83 col 5 changed to node_id_
 CONSTANT defaultInitValue
 VARIABLES initial_topics, topics, time, inbox, gossip_order_sets, 
           gossip_order, pc

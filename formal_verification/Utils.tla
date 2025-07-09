@@ -1,4 +1,5 @@
 ------------------------------ MODULE Utils ------------------------------
+\* General-purpose utilities not specific to this problem.
 \* There are a few utilities here copied over from https://github.com/tlaplus/CommunityModules (MIT license)
 
 LOCAL INSTANCE Integers

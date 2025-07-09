@@ -1,5 +1,5 @@
------------------------------- MODULE TopicOps ------------------------------
-\* Key operators defined on Cyphal named topics.
+------------------------------ MODULE Core ------------------------------
+\* Key operators defined on Cyphal named topics. This is the core part of the formal protocol specification.
 \* This is pure TLA+ without PlusCal.
 \* Pavel Kirienko <pavel@opencyphal.org>, MIT license
 
