@@ -12,7 +12,11 @@ All of them model the same algorithm using different approaches.
 
 ## TODO
 
-Add a temporal property that each topic of each node has non-decreasing age.
+Add a temporal property that each topic of each node has a non-decreasing age.
+
+Improve performance:
+- Use [symmetry sets](https://learntla.com/topics/optimization.html#use-symmetry-sets).
+- Reduce the number of labels in the processes.
 
 Introduce liveness and temporal properties. Requires fairness.
 Need a new operator for checking that the topic set is collision-free, divergence-free, and log-age-identical.
