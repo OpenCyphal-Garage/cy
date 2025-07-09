@@ -18,13 +18,12 @@ To run a local REPL in CLI, say `java -cp tla2tools.jar tlc2.REPL`.
 
 ## TODO
 
-- Add an option to run a reduced state space model quickly.
-- Cleanup the duration/skew mechanics.
-- Introduce liveness and temporal properties. Requires fairness.
-  - Need a new operator for checking that the topic set is collision-free, divergence-free, and log-age-identical.
-    We can call it `Converged`. Then, `<>[]Converged`.
-- Dynamic gossip schedule.
-- Prove that the topic with the higest log-age will never change its subject-ID.
+Introduce liveness and temporal properties. Requires fairness.
+Need a new operator for checking that the topic set is collision-free, divergence-free, and log-age-identical.
+We can call it `Converged`. Then, `<>[]Converged`.
+
+Prove that the topic with the higest log-age will never change its subject-ID.
+We need to handle the case of one topic overtaking another in age.
 
 ## TLA<sup>+</sup> resources
 

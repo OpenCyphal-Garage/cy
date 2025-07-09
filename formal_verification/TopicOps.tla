@@ -237,6 +237,11 @@ LOCAL Check_AcceptGossip ==
            [hash |-> 1, evictions |-> 0, age |-> 2],
            {[hash |-> 2, evictions |-> 0, age |-> 1], [hash |-> 11, evictions |-> 0, age |-> 2]}
        ) = {[hash |-> 2, evictions |-> 1, age |-> 1], [hash |-> 11, evictions |-> 1, age |-> 2]}
+    \* The gossip age is lower, but its (floor o log2) is the same, so it wins due to smaller hash.
+    /\ AcceptGossip(
+           [hash |-> 1, evictions |-> 2, age |-> 4],
+           {[hash |-> 2, evictions |-> 1, age |-> 5], [hash |-> 11, evictions |-> 3, age |-> 5]}
+       ) = {[hash |-> 2, evictions |-> 2, age |-> 5], [hash |-> 11, evictions |-> 4, age |-> 5]}
 
 \***********************************************************************************************************************
 \* Divergent allocation detector operating on a function node_id -> {topic_0, topic_1, ..., topic_n}

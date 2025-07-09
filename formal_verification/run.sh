@@ -18,7 +18,11 @@ echo "Using $tla2tools"
 
 [ -n "$src" ] || die "Source file not specified"
 
-java -cp  "$tla2tools" pcal.trans $src || die "PlusCal translation failed"
+if grep -q -- '--algorithm' "$src"; then
+    java -cp "$tla2tools" pcal.trans "$src" || die "PlusCal translation failed"
+else
+    echo "No “--algorithm” directive found -- skipping PlusCal translation"
+fi
 
 # https://learntla.com/topics/cli.html
 java -XX:+UseParallelGC -jar "$tla2tools" -workers auto -fpmem 0.5 $src || die "TLA+ failed"
