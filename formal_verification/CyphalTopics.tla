@@ -13,9 +13,8 @@ ASSUME \A h \in TopicHashes: h \in Nat
 ASSUME InitialEvictionMax \in Nat
 ASSUME InitialAgeMax \in Nat
 
-CONSTANT Duration, MaxTimeSkew
+CONSTANT Duration
 ASSUME Duration \in Nat /\ Duration > 1
-ASSUME MaxTimeSkew \in Nat
 
 Check == Check_Utils /\ Check_TopicOps
 
@@ -35,7 +34,7 @@ InitialTopicSets == { S \in SUBSET InitialTopicSpace : Cardinality(S) \in 1..Top
 (* --algorithm node
 variables
     \* Prior to start, each node will allocate the following topics locally. Divergences may result.
-    initial_topics \in [Nodes -> InitialTopicSets];
+    InitialTopics \in [Nodes -> InitialTopicSets];
 
     \* Local topics per node; mutable state. Initial local allocation is performed prior to launch.
     topics = [n \in Nodes |-> AllocateTopics(initial_topics[n], {})];
@@ -44,7 +43,7 @@ variables
     time = [n \in Nodes |-> 0];
 
     \* Each node has an independent queue of incoming gossips.
-    fabric = [destination \in Nodes |-> <<>>];
+    inbox = [destination \in Nodes |-> <<>>];
 
     \* Topic gossip ordering per node. Each ordering contains a set of permutations of topic hashes.
     \* The function type is:
@@ -65,12 +64,14 @@ variables
 define
     PubProcs == { n + 1000 : n \in Nodes }
     AllPubDone == \A p \in PubProcs : pc[p] = "Done"
-    Silent == fabric = [n \in DOMAIN fabric |-> <<>>]
+    Silent == inbox = [n \in DOMAIN inbox |-> <<>>]
 
     AllDone == \A p \in DOMAIN pc: pc[p] = "Done"
 
     NoDivergences  == AllDone => {} = FindDivergent(topics)
     NoCollisions   == AllDone => {} = FindCollisions(topics)
+
+    MaxTimeSkew == Min(Range(time)) \div 4
 end define;
 
 \* PERIODIC GOSSIP PUBLISHER PROCESS.
@@ -89,13 +90,13 @@ begin
     PubLoop:
         while peer <= NodeCount do
             if peer # node_id then
-                await fabric[peer] = <<>>;
-                fabric[peer] := Append(fabric[peer], GetByHash(selected_hash, topics[node_id]));
+                await inbox[peer] = <<>>;
+                inbox[peer] := Append(inbox[peer], GetByHash(selected_hash, topics[node_id]));
             end if;
             peer := peer + 1;
         end while;
     PubTime:
-        await time[node_id] - Min(Range(time)) < MaxTimeSkew;
+        await time[node_id] - Min(Range(time)) <= MaxTimeSkew;
         if time[node_id] < Duration then
             time[node_id] := time[node_id] + 1;
             goto PubMain;
@@ -109,9 +110,9 @@ variable
 begin
     SubMain:
         while ~AllPubDone \/ ~Silent do
-            if fabric[node_id] # <<>> then
-                with gossip = Head(fabric[node_id]) do
-                    fabric[node_id] := Tail(fabric[node_id]);
+            if inbox[node_id] # <<>> then
+                with gossip = Head(inbox[node_id]) do
+                    inbox[node_id] := Tail(inbox[node_id]);
                     topics[node_id] := AcceptGossip(gossip, topics[node_id]);
                     \* Update the schedule if the local replica won to speedup collision/divergence repair:
                     \* gossip_order[node_id] := SeqWithout(gossip_order[node_id], gossip.hash) \o <<gossip.hash>>
@@ -121,8 +122,8 @@ begin
 end process;
 
 end algorithm; *)
-\* BEGIN TRANSLATION (chksum(pcal) = "b147f4c5" /\ chksum(tla) = "5f1d53f8")
-\* Process variable node_id of process pub at line 79 col 5 changed to node_id_
+\* BEGIN TRANSLATION (chksum(pcal) = "416e6d2d" /\ chksum(tla) = "f5cf434b")
+\* Process variable node_id of process pub at line 80 col 5 changed to node_id_
 CONSTANT defaultInitValue
 VARIABLES initial_topics, topics, time, fabric, gossip_order_sets,
           gossip_order, pc
@@ -132,10 +133,12 @@ PubProcs == { n + 1000 : n \in Nodes }
 AllPubDone == \A p \in PubProcs : pc[p] = "Done"
 Silent == fabric = [n \in DOMAIN fabric |-> <<>>]
 
-AllProcDone == \A p \in DOMAIN pc: pc[p] = "Done"
+AllDone == \A p \in DOMAIN pc: pc[p] = "Done"
 
-NoDivergences  == AllProcDone => {} = FindDivergent(topics)
-NoCollisions   == AllProcDone => {} = FindCollisions(topics)
+NoDivergences  == AllDone => {} = FindDivergent(topics)
+NoCollisions   == AllDone => {} = FindCollisions(topics)
+
+MaxTimeSkew == Min(Range(time)) \div 4
 
 VARIABLES node_id_, peer, selected_hash, node_id
 
@@ -193,7 +196,7 @@ PubLoop(self) == /\ pc[self] = "PubLoop"
                                  selected_hash, node_id >>
 
 PubTime(self) == /\ pc[self] = "PubTime"
-                 /\ time[node_id_[self]] - Min(Range(time)) < MaxTimeSkew
+                 /\ time[node_id_[self]] - Min(Range(time)) <= MaxTimeSkew
                  /\ IF time[node_id_[self]] < Duration
                        THEN /\ time' = [time EXCEPT ![node_id_[self]] = time[node_id_[self]] + 1]
                             /\ pc' = [pc EXCEPT ![self] = "PubMain"]
