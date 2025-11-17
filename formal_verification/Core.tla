@@ -332,6 +332,15 @@ LOCAL Check_FindCollisions ==
     /\ FindCollisions(1 :> {tp(2, 1), tp(3, 3)} @@ 2 :> {tp(3, 0), tp(4, 2)}) = {3, 6}
 
 \***********************************************************************************************************************
+\* Whether the network has converged to a stable state.
+\* Once a stable state is reached, the topics that are involved in it will no longer be altered as long as
+\* no older topics are introduced to the network (such as in the event of network departitioning).
+\* Appearance of young topics will not affect the existing entries by design.
+Converged(node_topics) ==
+    /\ FindDivergent(node_topics) = {}
+    /\ FindCollisions(node_topics) = {}
+
+\***********************************************************************************************************************
 Check_Core ==
     /\ Check_Log2Floor
     /\ Check_Pow2
