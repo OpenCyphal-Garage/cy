@@ -274,7 +274,7 @@ LOCAL Check_FindCollisions ==
     /\ FindCollisions(1 :> {tp(2, 1), tp(3, 3)} @@ 2 :> {tp(3, 0), tp(4, 2)}) = {3, 6}
 
 \***********************************************************************************************************************
-Check_TopicOps ==
+Check_Core ==
     /\ Check_Log2Floor
     /\ Check_Pow2
     /\ Check_FloorToPow2

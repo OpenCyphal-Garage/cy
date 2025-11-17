@@ -16,7 +16,7 @@ ASSUME InitialAgeMax \in Nat
 CONSTANT Duration
 ASSUME Duration \in Nat /\ Duration > 1
 
-Check == Check_Utils /\ Check_TopicOps
+Check == Check_Utils /\ Check_Core
 
 \* https://learntla.com/topics/optimization.html
 Constraint == ~Debug \/ TLCGet("level") < 13
@@ -128,7 +128,7 @@ end algorithm; *)
 \* BEGIN TRANSLATION (chksum(pcal) = "ed5e1611" /\ chksum(tla) = "dadd2a26")
 \* Process variable node_id of process pub at line 83 col 5 changed to node_id_
 CONSTANT defaultInitValue
-VARIABLES initial_topics, topics, time, inbox, gossip_order_sets, 
+VARIABLES initial_topics, topics, time, inbox, gossip_order_sets,
           gossip_order, pc
 
 (* define statement *)
@@ -145,7 +145,7 @@ MaxTimeSkew == Min(Range(time)) \div 4
 
 VARIABLES node_id_, peer, selected_hash, node_id
 
-vars == << initial_topics, topics, time, inbox, gossip_order_sets, 
+vars == << initial_topics, topics, time, inbox, gossip_order_sets,
            gossip_order, pc, node_id_, peer, selected_hash, node_id >>
 
 ProcSet == ({n + 1000 : n \in Nodes}) \cup ({n + 2000 : n \in Nodes})
@@ -180,7 +180,7 @@ PubMain(self) == /\ pc[self] = "PubMain"
                  /\ topics' = [topics EXCEPT ![node_id_[self]] = ReplaceTopic(LET g == GetByHash(selected_hash'[self], topics[node_id_[self]]) IN [g EXCEPT !.age = @ + 1],
                                                                               topics[node_id_[self]])]
                  /\ pc' = [pc EXCEPT ![self] = "PubLoop"]
-                 /\ UNCHANGED << initial_topics, time, inbox, 
+                 /\ UNCHANGED << initial_topics, time, inbox,
                                  gossip_order_sets, node_id_, node_id >>
 
 PubLoop(self) == /\ pc[self] = "PubLoop"
@@ -194,8 +194,8 @@ PubLoop(self) == /\ pc[self] = "PubLoop"
                             /\ pc' = [pc EXCEPT ![self] = "PubLoop"]
                        ELSE /\ pc' = [pc EXCEPT ![self] = "PubTime"]
                             /\ UNCHANGED << inbox, peer >>
-                 /\ UNCHANGED << initial_topics, topics, time, 
-                                 gossip_order_sets, gossip_order, node_id_, 
+                 /\ UNCHANGED << initial_topics, topics, time,
+                                 gossip_order_sets, gossip_order, node_id_,
                                  selected_hash, node_id >>
 
 PubTime(self) == /\ pc[self] = "PubTime"
@@ -205,8 +205,8 @@ PubTime(self) == /\ pc[self] = "PubTime"
                             /\ pc' = [pc EXCEPT ![self] = "PubMain"]
                        ELSE /\ pc' = [pc EXCEPT ![self] = "Done"]
                             /\ time' = time
-                 /\ UNCHANGED << initial_topics, topics, inbox, 
-                                 gossip_order_sets, gossip_order, node_id_, 
+                 /\ UNCHANGED << initial_topics, topics, inbox,
+                                 gossip_order_sets, gossip_order, node_id_,
                                  peer, selected_hash, node_id >>
 
 pub(self) == PubMain(self) \/ PubLoop(self) \/ PubTime(self)
@@ -222,8 +222,8 @@ SubMain(self) == /\ pc[self] = "SubMain"
                             /\ pc' = [pc EXCEPT ![self] = "SubMain"]
                        ELSE /\ pc' = [pc EXCEPT ![self] = "Done"]
                             /\ UNCHANGED << topics, inbox >>
-                 /\ UNCHANGED << initial_topics, time, gossip_order_sets, 
-                                 gossip_order, node_id_, peer, selected_hash, 
+                 /\ UNCHANGED << initial_topics, time, gossip_order_sets,
+                                 gossip_order, node_id_, peer, selected_hash,
                                  node_id >>
 
 sub(self) == SubMain(self)

@@ -73,7 +73,7 @@ It will take a few more exchanges for the nodes to finally agree on the followin
 
 The protocol may temporarily fail to converge until the aging rate differential across nodes sharing the affected topics falls below the rate of $\lfloor{} \log_2 \text{age} \rfloor{}$ increment. To improve its performance, all involved nodes should attempt to increment the ages of their local topic replicas at approximately the same rate. Even low-cost microcontrollers clocked from an RC oscillator can easily achieve the optimal accuracy without any additional measures.
 
-A few extra evictions may not seem like a big deal, but given the finite subject-ID space they may cause a chain reaction, as a single evicted topic may step on a subject-ID allocation belonging to a remote node, potentially disrupting a large number of participants. This is why evictions must be minimized; in particular, upon detection of a collision, a node must not attempt to repair it if observes that the remote node causing the collision will have to increase its eviction count to catch up with the local replica.
+A few extra evictions may not seem like a big deal, but given the finite subject-ID space they may cause a chain reaction, as a single evicted topic may step on a subject-ID allocation belonging to a remote node, potentially disrupting a large number of participants. This is why evictions must be minimized; in particular, upon detection of a collision, a node must not attempt to repair it if it observes that the remote node causing the collision will have to increase its eviction count to catch up with the local replica.
 
 ### Collisions caused by divergent topics should be ignored unless the local node loses arbitration
 
