@@ -269,7 +269,21 @@ LOCAL Check_AcceptGossip_Collision ==
     /\ AcceptGossip_Collision(tp(3, 2, 4), {tp(4, 1, 8)}) = {tp(4, 1, 8)}
 
 \* An updated sequence of topics based on a received gossip message.
-AcceptGossip(remote, topics) == AcceptGossip_Collision(remote, AcceptGossip_Divergence(remote, topics))
+\* The sequence may be modified if the gossiped entry is observed to diverge or collide with a local entry,
+\* and the affected local entry loses arbitration to the gossiped one.
+\* The naive implementation is as simple as:
+\*
+\*      AcceptGossip_Collision(remote, AcceptGossip_Divergence(remote, topics))
+\*
+\* which is correct and converges eventually; however, it is not optimal because it may cause a local entry
+\* to lose a collision arbitration to a divergent remote entry, which will cause unnecessary eviction counter
+\* increments and thus delay convergence. To avoid this, we ignore collisions if the remote entry is seen to be
+\* divergent from a local entry and the local entry wins the divergence arbitration.
+AcceptGossip(remote, topics) ==
+    IF GetByHash(remote.hash, topics) # Nothing     \* If the topic exists locally
+    THEN AcceptGossip_Divergence(remote, topics)    \* Divergence resolver will ensure collision-freedom as well
+    ELSE AcceptGossip_Collision(remote, topics)     \* We don't know this topic, just ensure collision-freedom
+
 LOCAL Check_AcceptGossip ==
     /\ Check_AcceptGossip_Divergence
     /\ Check_AcceptGossip_Collision

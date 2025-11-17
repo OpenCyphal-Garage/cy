@@ -10,6 +10,22 @@ which can be relied on when working on new implementations.
 Complete verification models are defined in `CyphalTopics_*.tla`.
 All of them model the same algorithm using different approaches.
 
+## Usage
+
+Download `tla2tools.jar` from <https://github.com/tlaplus/tlaplus/releases> and store it somewhere under `/opt`.
+
+Use the `run.sh` helper script to run the PlusCal translator and the TLC model checker at once in CLI:
+
+```sh
+./run.sh CyphalTopics_1.tla
+```
+
+Other modules can be evaluated using the same script as well.
+
+To edit the model, use VS Code with the recommended extensions. The TLA<sup>+</sup> extension also allows interactive model checking and limited REPLing. Be sure to enable font ligatures. The TLA<sup>+</sup> Toolbox IDE does not offer the best user experience so its use is not recommended.
+
+To run a local REPL in CLI, say `java -cp tla2tools.jar tlc2.REPL`.
+
 ## TODO
 
 Add a temporal property that each topic of each node has a non-decreasing age.
@@ -92,22 +108,6 @@ This state is suboptimal because now the lower subject-IDs remain unused purely 
 
 1. (1, 2, 4), (11, 3, 4).
 2. (2, 0, 3), (11, 3, 4).
-
-## Usage
-
-Download `tla2tools.jar` from <https://github.com/tlaplus/tlaplus/releases> and store it somewhere under `/opt`.
-
-Use the `run.sh` script to run the PlusCal translator and the TLC model checker at once in CLI:
-
-```sh
-./run.sh CyphalTopics_1.tla
-```
-
-The utility modules can be evaluated using the same script as well.
-
-To edit the model, use VS Code with the recommended extensions. The TLA<sup>+</sup> extension also allows interactive model checking and limited REPLing. Be sure to enable font ligatures. The TLA<sup>+</sup> Toolbox IDE does not offer the best user experience so its use is not recommended.
-
-To run a local REPL in CLI, say `java -cp tla2tools.jar tlc2.REPL`.
 
 ## TLA<sup>+</sup> resources
 
