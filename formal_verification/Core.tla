@@ -1,6 +1,64 @@
 ------------------------------ MODULE Core ------------------------------
 \* Key operators defined on Cyphal named topics. This is the core part of the formal protocol specification.
 \* This is pure TLA+ without PlusCal.
+\*
+\* The decentralized topic subject-ID allocation protocol in Cyphal solves the problem of allocating unique subject-IDs
+\* per topic name. The objective is to find a bijective configuration that is conflict-free
+\* (one topic name per subject-ID) and non-divergent (one subject-ID per topic name).
+\*
+\* There is no central coordinator. Nodes eventually find the consensus by periodically broadcasting gossip messages.
+\* Each gossip message carries a single topic->subject allocation entry (nodes apply simple rules to choose which entry
+\* to gossip next). Every node only keeps the entries that it needs (publishers/subscribers that the application needs
+\* to use); no node is required to keep the full set of entries. Every node must be *eventually* able to receive and
+\* send gossip messages for the protocol to make progress; transient inability to do so will not break the protocol
+\* but may delay the consensus (resource-limited nodes may choose to drop some gossip messages to reduce processing
+\* burden; this does not violate the core assumptions of the protocol as long as such nodes are able to *eventually*
+\* receive each live allocation entry).
+\*
+\* The allocation protocol does not operate on topic names directly, substituting them with numerical hashes instead.
+\* The application layer is expected to attach names to hashes but this is of no relevance to the core protocol.
+\* From the standpoint of the protocol, "topic name" and "topic hash" can be used interchangeably.
+\*
+\* Each allocation entry contains three fields: the topic hash, the topic eviction count, and the topic age.
+\* A pair of entries can be compared to each other to determine if the pair constitutes a collision
+\* (different names, same subject) or a divergence (same name, different subjects);
+\* other comparison outcomes are of no interest.
+\*
+\* The subject-ID assigned to a topic is defined as some function of its hash and eviction count. One possible way
+\* to define the function is:
+\*
+\*      subject_id = 8187 + ((hash + evictions**2) % 57349)
+\*
+\* For the background on the subject of open addressing schemes and why the specific values were chosen this way, see:
+\* - https://en.wikipedia.org/wiki/Quadratic_probing
+\* - https://github.com/OpenCyphal-Garage/cy/issues/12
+\*
+\* The eviction count of a topic is incremented whenever the topic is involved in a collision and loses arbitration.
+\* Arbitration is defined as two functions, defined here as LeftWinsCollision and LeftWinsDivergence.
+\* The topic age is incremented monotonically as some kind of real or logical clock, such that each node that holds
+\* this topic is expected to increment its age at approximately the same rate (the protocol does not require the
+\* increment rate to match accurately, but better rate matching results in faster worst-case convergence).
+\* The age is used to determine which topic wins arbitration in the event of a collision or a divergence,
+\* with the core idea being that older topics win arbitration to avoid disturbances to established networks.
+\*
+\* The topic-subject allocation table described above is a kind of CRDT (conflict-free replicated data type).
+\* A CRDT only guarantees eventual convergence while the system is quiescent, which seemingly contradicts the
+\* use of the age counter that increments continuously. To work around this, the protocol uses the binary
+\* logarithm of topic ages for topic comparison instead of the actual age value, which naturally slows down
+\* the increment rate over time, approaching quiescence.
+\*
+\* When a node creates a new topic (i.e., when the local application creates a new subscription or publication),
+\* its age and eviction counter are set to zero; the initial subject-ID is obtained using the function above.
+\* The topic is commissioned to use immediately without the need to wait for the network to converge,
+\* despite the fact that it is known that the initial allocation may be conflicting or divergent.
+\* To avoid the risk of data misinterpretation should a collision occur, the transport layer carries the
+\* topic hash per transfer, and the transfer is rejected should the hash be incorrect.
+\* Each local topic is reconfigured as necessary should the allocation protocol require so, transparently for
+\* the application.
+\*
+\* Upon reception of a gossip, the age of the matching local topic, if there is one, is updated as:
+\* local_age = max(local_age, 2**remote_age_log2).
+\*
 \* Pavel Kirienko <pavel@opencyphal.org>, MIT license
 
 EXTENDS Utils
