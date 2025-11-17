@@ -71,12 +71,13 @@ define
 
     AllDone == \A p \in DOMAIN pc: pc[p] = "Done"
     ConvergenceReached == AllDone => Converged(topics)
+    Liveness == <>[]Converged(topics)
 
     MaxTimeSkew == Min(Range(time)) \div 4
 end define;
 
 \* PERIODIC GOSSIP PUBLISHER PROCESS.
-process pub \in {n + 1000 : n \in Nodes}
+fair process pub \in {n + 1000 : n \in Nodes}
 variable
     node_id = self - 1000;
     peer;
@@ -105,7 +106,7 @@ begin
 end process;
 
 \* GOSSIP SUBSCRIBER PROCESS.
-process sub \in {n + 2000 : n \in Nodes}
+fair process sub \in {n + 2000 : n \in Nodes}
 variable
     node_id = self - 2000;
 begin
@@ -123,8 +124,8 @@ begin
 end process;
 
 end algorithm; *)
-\* BEGIN TRANSLATION (chksum(pcal) = "c6cbe90c" /\ chksum(tla) = "f933fdfd")
-\* Process variable node_id of process pub at line 81 col 5 changed to node_id_
+\* BEGIN TRANSLATION (chksum(pcal) = "ab53de75" /\ chksum(tla) = "23aa7faf")
+\* Process variable node_id of process pub at line 82 col 5 changed to node_id_
 CONSTANT defaultInitValue
 VARIABLES initial_topics, topics, time, inbox, gossip_order_sets, 
           gossip_order, pc
@@ -136,6 +137,7 @@ Silent == inbox = [n \in DOMAIN inbox |-> <<>>]
 
 AllDone == \A p \in DOMAIN pc: pc[p] = "Done"
 ConvergenceReached == AllDone => Converged(topics)
+Liveness == <>[]Converged(topics)
 
 MaxTimeSkew == Min(Range(time)) \div 4
 
@@ -232,7 +234,9 @@ Next == (\E self \in {n + 1000 : n \in Nodes}: pub(self))
            \/ (\E self \in {n + 2000 : n \in Nodes}: sub(self))
            \/ Terminating
 
-Spec == Init /\ [][Next]_vars
+Spec == /\ Init /\ [][Next]_vars
+        /\ \A self \in {n + 1000 : n \in Nodes} : WF_vars(pub(self))
+        /\ \A self \in {n + 2000 : n \in Nodes} : WF_vars(sub(self))
 
 Termination == <>(\A self \in ProcSet: pc[self] = "Done")
 

@@ -18,10 +18,6 @@ Improve performance:
 - Use [symmetry sets](https://learntla.com/topics/optimization.html#use-symmetry-sets).
 - Reduce the number of labels in the processes.
 
-Introduce liveness and temporal properties. Requires fairness.
-Need a new operator for checking that the topic set is collision-free, divergence-free, and log-age-identical.
-We can call it `Converged`. Then, `<>[]Converged`.
-
 Prove that the topic with the highest log-age will never change its subject-ID.
 We need to handle the case of one topic overtaking another in age.
 
