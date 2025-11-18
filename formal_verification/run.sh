@@ -25,4 +25,4 @@ else
 fi
 
 # https://learntla.com/topics/cli.html
-java -XX:+UseParallelGC -jar "$tla2tools" -workers auto -fpmem 0.5 $src || die "TLA+ failed"
+java -XX:+UseParallelGC -jar "$tla2tools" -workers auto -fpmem 0.8 $src || die "TLA+ failed"
