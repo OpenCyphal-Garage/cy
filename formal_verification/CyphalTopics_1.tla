@@ -73,7 +73,7 @@ define
     ConvergenceReached == AllDone => Converged(topics)
     Liveness == <>[]Converged(topics)
 
-    MaxTimeSkew == Min(Range(time)) \div 4
+    MaxTimeSkew == Max({1, Min(Range(time)) \div 4})
 end define;
 
 \* PERIODIC GOSSIP PUBLISHER PROCESS.
@@ -124,7 +124,7 @@ begin
 end process;
 
 end algorithm; *)
-\* BEGIN TRANSLATION (chksum(pcal) = "ab53de75" /\ chksum(tla) = "23aa7faf")
+\* BEGIN TRANSLATION (chksum(pcal) = "ce9abcac" /\ chksum(tla) = "33450a0c")
 \* Process variable node_id of process pub at line 82 col 5 changed to node_id_
 CONSTANT defaultInitValue
 VARIABLES initial_topics, topics, time, inbox, gossip_order_sets, 
@@ -139,7 +139,7 @@ AllDone == \A p \in DOMAIN pc: pc[p] = "Done"
 ConvergenceReached == AllDone => Converged(topics)
 Liveness == <>[]Converged(topics)
 
-MaxTimeSkew == Min(Range(time)) \div 4
+MaxTimeSkew == Max({1, Min(Range(time)) \div 4})
 
 VARIABLES node_id_, peer, selected_hash, node_id
 
