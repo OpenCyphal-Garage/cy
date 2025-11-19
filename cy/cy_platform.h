@@ -219,14 +219,12 @@ typedef cy_us_t (*cy_platform_now_t)(const cy_t*);
 typedef void* (*cy_platform_realloc_t)(cy_t*, void*, size_t);
 
 /// Returns a PRNG hashing seed or a full pseudo-random 64-bit unsigned integer.
-/// A TRNG is preferred; if not available, a PRNG will suffice, but its initial state SHOULD be likely to be
-/// distinct across reboots happening in a quick succession. This condition does not apply if subsequent reboots are
-/// spaced apart by a long time.
+/// A TRNG is preferred; if not available, a PRNG will suffice, but its initial state should be distinct across reboots.
 ///
 /// The simplest compliant solution that can be implemented in an embedded system without TRNG is:
 ///
 ///     static uint64_t g_prng_state __attribute__ ((section (".noinit")));
-///     g_prng_state += 0xA0761D6478BD642FULL;  // add wyhash seed (64-bit prime)
+///     g_prng_state += 0xA0761D6478BD642FULL;  // add Wyhash seed (64-bit prime)
 ///     return g_prng_state;
 ///
 /// It is desirable to save the PRNG state in a battery-backed memory, if available; otherwise, in small MCUs one could

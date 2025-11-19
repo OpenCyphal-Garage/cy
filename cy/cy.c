@@ -364,7 +364,7 @@ typedef struct cy_topic_coupling_t
     cy_substitution_t substitutions[CY_TOPIC_NAME_MAX]; ///< Flex array.
 } cy_topic_coupling_t;
 
-void topic_destroy(cy_t* const cy, cy_topic_t* const topic)
+static void topic_destroy(cy_t* const cy, cy_topic_t* const topic)
 {
     assert(cy != NULL);
     assert(topic != NULL);
@@ -545,7 +545,6 @@ static uint64_t topic_hash(const wkv_str_t name)
 
 static uint16_t topic_subject_id(const uint64_t hash, const uint32_t evictions)
 {
-    // TODO: remove this special case for pinned topics once we switched to the new extended subject-ID space.
     if (is_pinned(hash)) {
         return (uint16_t)hash; // Pinned topics may exceed CY_TOPIC_SUBJECT_COUNT.
     }
@@ -913,7 +912,7 @@ static cy_topic_t* topic_subscribe_if_matching(cy_t* const     cy,
     // Attach subscriptions.
     if (NULL != wkv_route(&cy->subscribers_by_pattern, //
                           resolved_name,
-                          (void* [2]){ cy, topic },
+                          (void* [2]){ cy, topic }, // NOLINT(*-multi-level-implicit-pointer-conversion)
                           wkv_cb_couple_new_topic)) {
         // TODO discard the topic!
         cy->platform->topic_on_subscription_error(cy, NULL, CY_ERR_MEMORY);
@@ -1180,7 +1179,7 @@ static void retire_timed_out_futures(cy_t* cy, const cy_us_t now)
         assert(fut->state == cy_future_pending);
         cavl2_remove(&cy->futures_by_deadline, &fut->index_deadline);
         cavl2_remove(&fut->publisher->topic->futures_by_transfer_id, &fut->index_transfer_id);
-        fut->state = cy_future_response_timeout;
+        fut->state = cy_future_timeout_response;
         if (fut->callback != NULL) {
             fut->callback(cy, fut);
         }
@@ -1310,7 +1309,7 @@ cy_err_t cy_publish(cy_t* const                cy,
 // =====================================================================================================================
 
 /// Returns non-NULL on OOM, which aborts the traversal early.
-void* wkv_cb_couple_new_subscription(const wkv_event_t evt)
+static void* wkv_cb_couple_new_subscription(const wkv_event_t evt)
 {
     cy_t* const                  cy    = (cy_t*)(((void**)evt.context)[0]);
     const cy_subscriber_t* const sub   = (cy_subscriber_t*)(((void**)evt.context)[1]);
@@ -1738,7 +1737,7 @@ cy_err_t cy_new(cy_t* const                cy,
 /// If we don't have a node-ID and this is a new Bloom entry, follow CSMA/CD: add random wait.
 /// The point is to reduce the chances of multiple nodes appearing simultaneously and claiming same node-IDs.
 /// We keep tracking neighbors even if we have a node-ID in case we encounter a collision later and need to move.
-static void mark_neighbor(cy_t* const cy, const uint16_t remote_node_id, const cy_us_t now)
+static void mark_neighbor(cy_t* const cy, const uint16_t remote_node_id)
 {
     cy_bloom64_t* const bloom = cy->platform->node_id_bloom(cy);
     assert((bloom != NULL) && (bloom->n_bits > 0) && ((bloom->n_bits % 64) == 0) && (bloom->popcount <= bloom->n_bits));
@@ -1751,7 +1750,6 @@ static void mark_neighbor(cy_t* const cy, const uint16_t remote_node_id, const c
         assert(bloom->popcount == 0);
     }
     if ((cy->node_id > cy->platform->node_id_max) && !bloom64_get(bloom, remote_node_id)) {
-        cy->heartbeat_next = max_i64(cy->heartbeat_next, now + (cy_us_t)random_uint(cy, 0, 1 * MEGA));
         CY_TRACE(cy, "🔭 Discovered neighbor %04x; new bloom popcount %zu", remote_node_id, bloom->popcount + 1U);
     }
     bloom64_set(bloom, remote_node_id);
@@ -1761,7 +1759,7 @@ void cy_ingest_topic_transfer(cy_t* const cy, cy_topic_t* const topic, cy_transf
 {
     assert(topic != NULL);
 
-    mark_neighbor(cy, transfer.metadata.remote_node_id, transfer.timestamp);
+    mark_neighbor(cy, transfer.metadata.remote_node_id);
 
     // Experimental: age the topic with received transfers. Not with the published ones because we don't want
     // unconnected publishers to inflate the age.
@@ -1800,7 +1798,7 @@ void cy_ingest_topic_transfer(cy_t* const cy, cy_topic_t* const topic, cy_transf
 void cy_ingest_topic_response_transfer(cy_t* const cy, cy_transfer_owned_t transfer)
 {
     assert(cy != NULL);
-    mark_neighbor(cy, transfer.metadata.remote_node_id, transfer.timestamp);
+    mark_neighbor(cy, transfer.metadata.remote_node_id);
 
     // TODO: proper deserialization. This fails if the first 16 bytes are fragmented (although they can't be...).
     if (transfer.payload.base.view.size < RESPONSE_PAYLOAD_OVERHEAD_BYTES) {

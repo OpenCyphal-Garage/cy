@@ -9,6 +9,9 @@
 #include <unistd.h>
 #include <ctype.h>
 
+// ReSharper disable CppDFAMemoryLeak
+// NOLINTBEGIN(*-err33-c,*-core.NonNullParamChecker)
+
 static uint64_t random_uid(void)
 {
     const uint16_t vid = UINT16_MAX; // This is the reserved public VID.
@@ -156,9 +159,9 @@ static void on_msg_trace(cy_t* const cy, const cy_arrival_t* const arv)
     CY_BUFFER_GATHER_ON_STACK(payload, arv->transfer->payload.base)
 
     // Convert linearized payload to hex.
-    char hex[payload.size * 2 + 1];
+    char hex[(payload.size * 2) + 1];
     for (size_t i = 0; i < payload.size; i++) {
-        sprintf(hex + i * 2, "%02x", ((const uint8_t*)payload.data)[i]);
+        sprintf(hex + (i * 2), "%02x", ((const uint8_t*)payload.data)[i]);
     }
     hex[sizeof(hex) - 1] = '\0';
 
@@ -206,9 +209,9 @@ static void on_response_trace(cy_t* const cy, cy_future_t* const future)
         CY_BUFFER_GATHER_ON_STACK(payload, transfer->payload.base)
 
         // Convert payload to hex.
-        char hex[payload.size * 2 + 1];
+        char hex[(payload.size * 2) + 1];
         for (size_t i = 0; i < payload.size; i++) {
-            sprintf(hex + i * 2, "%02x", ((const uint8_t*)payload.data)[i]);
+            sprintf(hex + (i * 2), "%02x", ((const uint8_t*)payload.data)[i]);
         }
         hex[sizeof(hex) - 1] = '\0';
 
@@ -237,7 +240,7 @@ static void on_response_trace(cy_t* const cy, cy_future_t* const future)
                  (unsigned long long)topic->age,
                  hex,
                  ascii);
-    } else if (future->state == cy_future_response_timeout) {
+    } else if (future->state == cy_future_timeout_response) {
         CY_TRACE(cy,
                  "↩️⌛ Request to '%s' tid=%016llx (masked) has timed out",
                  future->publisher->topic->name,
@@ -277,7 +280,7 @@ int main(const int argc, char* argv[])
     cy_publisher_t publishers[cfg.pub_count];
     cy_future_t    futures[cfg.pub_count];
     for (size_t i = 0; i < cfg.pub_count; i++) {
-        cy_err_t res = cy_advertise_c(cy, &publishers[i], cfg.pubs[i].name, 1024 * 1024);
+        const cy_err_t res = cy_advertise_c(cy, &publishers[i], cfg.pubs[i].name, 1024UL * 1024UL);
         if (res != CY_OK) {
             fprintf(stderr, "cy_topic_new: %u\n", res);
             return 1;
@@ -288,7 +291,7 @@ int main(const int argc, char* argv[])
     // Create subscribers.
     cy_subscriber_t subscribers[cfg.sub_count];
     for (size_t i = 0; i < cfg.sub_count; i++) {
-        cy_err_t res = cy_subscribe_c(cy, &subscribers[i], cfg.subs[i].name, 1024 * 1024, on_msg_trace);
+        const cy_err_t res = cy_subscribe_c(cy, &subscribers[i], cfg.subs[i].name, 1024UL * 1024UL, on_msg_trace);
         if (res != CY_OK) {
             fprintf(stderr, "cy_subscribe: %d\n", res);
             return 1;
@@ -339,3 +342,5 @@ int main(const int argc, char* argv[])
 
     return 0;
 }
+
+// NOLINTEND(*-err33-c,*-core.NonNullParamChecker)

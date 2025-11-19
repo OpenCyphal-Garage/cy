@@ -121,13 +121,11 @@ This is a semi-manual approach based on pattern matching within a predefined set
 
 ### Node-ID autoconfiguration
 
-The new node-ID autoconfiguration protocol does not require an allocator; instead, a straightforward address claiming procedure is implemented:
+The new node-ID autoconfiguration protocol does not require an allocator; instead, a straightforward address claiming procedure is implemented.
 
-1. When joining the network without a node-ID preconfigured, the node will listen for a random time interval ca. 1~3 seconds. The source node-ID of each received transfer (heartbeats or whatever else may occur) is marked as taken in a local bitmask. If the transport layer has a large node-ID space (which is the case for every transport except Cyphal/CAN), the bitmask is replaced with a Bloom filter, whose bit capacity defines the maximum number of nodes that can be autoconfigured in this way (e.g., a 512-byte Bloom filter allows allocating at least 4096 nodes).
+When joining the network without a node-ID preconfigured, the node will listen for a random time interval ca. 1.5~3 seconds. The source node-ID of each received transfer (heartbeats or whatever else may occur) is marked as taken in a local bitmask. If the transport layer has a large node-ID space (which is the case for every transport except Cyphal/CAN), the bitmask is replaced with a Bloom filter, whose bit capacity defines the maximum number of nodes that can be autoconfigured in this way (e.g., a 512-byte Bloom filter allows allocating at least 4096 nodes).
 
-2. When a new node is discovered, the listening deadline is updated as `max(old_deadline, now + random_penalty)`, where `random_penalty` is in 0~1 seconds. This is to reduce the likelihood of multiple nodes claiming an address at the same time. The specifics of this step may need refinement.
-
-3. Once the initial delay has expired, an unoccupied node-ID is chosen from the bitmask/Bloom filter and marked as used. The first heartbeat is published immediately to claim the address.
+Once the initial delay has expired, an unoccupied node-ID is chosen from the bitmask/Bloom filter and marked as used. The first heartbeat is published immediately to claim the address. The application may force the stack to claim a node-ID early by attempting to emit traffic early before the initial delay expires (risking a transient collision).
 
 If a node-ID conflict is discovered at any later point, even if the node-ID was configured manually, we repeat step 3 only; i.e., simply pick a new node-ID from the Bloom/mask. In case of high node churn the Bloom/mask will eventually become congested; when the congestion is imminent, the entire filter state is dropped and then gradually rebuilt from scratch in the background.
 

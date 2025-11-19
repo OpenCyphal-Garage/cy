@@ -108,7 +108,7 @@ int main(const int argc, char* argv[])
                 errx(res, "cy_udp_posix_spin_once");
             }
         }
-        if (future.state == cy_future_response_timeout) {
+        if (future.state == cy_future_timeout_response) {
             errx(0, "Request timed out");
         }
         assert(future.state == cy_future_success);

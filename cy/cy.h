@@ -200,14 +200,15 @@ struct cy_publisher_t
 /// Future lifecycle:
 ///
 ///     fresh ---> pending --+---> success
-///                          |
-///                          +---> response_timeout
+///                          +---> timeout_ack
+///                          +---> timeout_response
 typedef enum cy_future_state_t
 {
     cy_future_fresh,
     cy_future_pending,
     cy_future_success,
-    cy_future_response_timeout,
+    cy_future_timeout_ack,      ///< Remote end did not confirm reception of the message.
+    cy_future_timeout_response, ///< Response was not received before the deadline.
 } cy_future_state_t;
 
 typedef void (*cy_future_callback_t)(cy_t*, cy_future_t*);

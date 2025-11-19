@@ -189,7 +189,9 @@ static void platform_buffer_release(cy_t* const cy, const cy_buffer_owned_t buf)
     static_assert(offsetof(struct UdpardFragment, next) == offsetof(cy_buffer_owned_t, base.next), "");
     static_assert(offsetof(struct UdpardFragment, view) == offsetof(cy_buffer_owned_t, base.view), "");
     static_assert(offsetof(struct UdpardFragment, origin) == offsetof(cy_buffer_owned_t, origin), "");
-    udpardRxFragmentFree(*(struct UdpardFragment*)&buf, cy_udp->rx_mem.fragment, cy_udp->rx_mem.payload);
+    struct UdpardFragment copy = { 0 };
+    memcpy(&copy, &buf, sizeof(struct UdpardFragment)); // respect strict aliasing
+    udpardRxFragmentFree(copy, cy_udp->rx_mem.fragment, cy_udp->rx_mem.payload);
 }
 
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
