@@ -339,16 +339,39 @@ There are at least three ways to implement it:
 
 A simple API feature to inform the glue layer when to invoke `cy_notify_node_id_collision`.
 
+### Inform the glue layer when to send a delivery ACK
+
+This has to be managed by the transport layer because only this layer can detect arrival of repeated transfer-IDs.
+See <https://github.com/OpenCyphal-Garage/cy/issues/21>.
+
 ### New frame headers
 
 See <https://github.com/OpenCyphal/specification/issues/143>.
 
-It is yet unclear if Cyphal/CAN also needs a new frame header.
-
 ### Extend each transfer with the topic hash
 
 Cyphal/UDP and Cyphal/serial will carry the topic hash [directly in the frame header](https://github.com/OpenCyphal/specification/issues/143).
-
-Cyphal/CAN will need a different approach; perhaps we could either seed the transfer CRC with some 16 bits of the topic hash, or add a part of the hash into the payload immediately before the CRC.
+It is important to attach the hash per frame rather than per transfer because frames may arrive out of order,  and the transport should be able to detect a mismatch before an attempt to reassemble the transfer is made.
 
 When the transport detects a topic hash mismatch, it has the option to notify the CRDT protocol so that it can assign a higher priority to the topic where the conflict is found. It is not essential because even if no such notification is delivered, CRDT will eventually reach a conflict-free consensus, but the time required may be longer.
+
+Cyphal/CAN will need a different approach; we will seed the transfer-CRC with 16 MSb of the topic hash, which scales up to ≈30 topics per network, enough for CAN --- further increase results in a growing probability of data misinterpretation:
+
+```python
+import math
+
+def bday(n: int, d: int) -> float:
+    """
+    Probability that at least two of n elements (chosen independently and uniformly at random from d states) are equal.
+    """
+    if n <= 1: return 0.0
+    if n > d:  return 1.0
+    log_p_no_collision = 0.0
+    for k in range(n):
+        log_p_no_collision += math.log(d - k) - math.log(d)
+    return 1.0 - math.exp(log_p_no_collision)
+
+N_NAMED_SUBJECTS  = 57349
+TRANSFER_CRC_BITS = 16
+bday(28, N_NAMED_SUBJECTS * 2**TRANSFER_CRC_BITS)  # ≈1.0e-7, or ≈1 in 10 million
+```
