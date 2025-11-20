@@ -5,12 +5,8 @@
 # while obsoleting the mode and health fields as they do not belong to its scope. New nodes should use
 # application-specific means of status reporting instead; Cyphal does not define the application layer.
 
-uint16 PUBLICATION_PERIOD_MAX_ms = 1000
-# The message shall not be published less frequently than once per second.
-# Any higher rate is acceptable.
-
-uint16 OFFLINE_TIMEOUT_ms = 3000
-# If the last message from the node was received more than this amount of time ago, it should be considered offline.
+uint16 PUBLICATION_PERIOD_MIN_ms =  100
+uint16 PUBLICATION_PERIOD_MAX_ms = 2000 - PUBLICATION_PERIOD_MIN_ms  # mean 1 s
 
 uint32 uptime  # [second]
 # One may detect that a remote node has restarted when this value leaps backward.
@@ -52,47 +48,20 @@ uint64 topic_hash
 # key because it is necessary for pattern matching, and also for monitoring purposes.
 
 @assert _offset_ == {24 * 8}
-uint32 topic_evictions
+uint40 topic_evictions
 # The number of times the topic had to be moved due to subject-ID collisions.
-# The allocated subject-ID for a topic is (hash+evictions)%6144,
-# unless it is a pinned topic, in which case the allocated subject-ID equals its hash.
 
-void8  # This may be used later if the eviction counter needs to be widened.
-
-int7 topic_log_age
-# floor(log2(age)), where age is the approximate logical age of the topic; special case: floor(log2(0))=-1.
-# The logical age increases when the topic is gossiped, and when a valid transfer is received on it.
-# Topics with greater age win arbitration, thus ensuring stability of the network when new topics/nodes appear.
-# Valid values are in the range [-1, 63].
+int8 topic_log_age
+# floor(log2(age)), where age is the number of seconds since the topic was first seen; special case: floor(log2(0))=-1.
+# Older topics win arbitration, thus ensuring stability of the network when new topics/nodes appear.
+# Valid lage values are in the range [-1, 63].
 #
-# If the topic age is less than -1, then the current message is not a gossip but a scout message. The scout message
+# Special case lage=-2 indicates the current message is not a gossip but a scout message. The scout message
 # contains a topic name pattern and every other node is requested to check whether it has any topics matching
-# that pattern. If it does, it should gossip the matching topics ASAP, but such gossips should not be prioritized
+# that pattern. On match, a node should gossip the matching topics ASAP, but such gossips should not be prioritized
 # before collision and divergence resolution gossips, if any.
 
-void1
-
-bool flag_publishing
-bool flag_publishing_proxy
-# The sender has an active publisher on this topic, even if it is not actively publishing at the moment.
-
-bool flag_subscribed
-bool flag_subscribed_proxy
-# The sender is subscribed to this topic (regardless of whether it is receiving any transfers at the moment).
-
-bool flag_receiving
-bool flag_receiving_proxy
-# The sender has recently received a transfer on this topic.
-
-bool flag_explicit
-bool flag_explicit_proxy
-# The topic was created by the application rather than automatically by the network stack.
-# This flag is critical to allow the network to gradually retire automatically created topics based on pattern matching.
-
-# The proxy flags simply indicate whether the sender saw the corresponding flags set in any of the recently received
-# gossip messages for this topic. The recency is ultimately implementation-defined, but it should include at least
-# the time interval since the last gossip of this topic was published by the sender.
-# The purpose of the proxy flags is to accelerate the topic metadata propagation through the network.
+void8
 
 uint8 TOPIC_NAME_MAX = 88
 utf8[<=TOPIC_NAME_MAX] topic_name

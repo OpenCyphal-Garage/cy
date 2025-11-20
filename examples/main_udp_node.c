@@ -175,14 +175,13 @@ static void on_msg_trace(cy_t* const cy, const cy_arrival_t* const arv)
 
     // Log the message.
     CY_TRACE(cy,
-             "💬 [sid=%04x nid=%04x tid=%016llx sz=%06zu ts=%09llu] @ '%s' [age=%llu]:\n%s\n%s",
+             "💬 [sid=%04x nid=%04x tid=%016llx sz=%06zu ts=%09llu] @ '%s':\n%s\n%s",
              cy_topic_subject_id(arv->topic),
              arv->transfer->metadata.remote_node_id,
              (unsigned long long)arv->transfer->metadata.transfer_id,
              payload.size,
              (unsigned long long)arv->transfer->timestamp,
              cy_topic_name(arv->topic).str,
-             (unsigned long long)arv->topic->age,
              hex,
              ascii);
     // TODO: log substitutions.
@@ -230,14 +229,13 @@ static void on_response_trace(cy_t* const cy, cy_future_t* const future)
 
         // Log the response.
         CY_TRACE(cy,
-                 "↩️ [sid=%04x nid=%04x tid=%016llx sz=%06zu ts=%09llu] @ %s [age=%llu]:\n%s\n%s",
+                 "↩️ [sid=%04x nid=%04x tid=%016llx sz=%06zu ts=%09llu] @ %s:\n%s\n%s",
                  cy_topic_subject_id(topic),
                  transfer->metadata.remote_node_id,
                  (unsigned long long)transfer->metadata.transfer_id,
                  payload.size,
                  (unsigned long long)transfer->timestamp,
                  topic->name,
-                 (unsigned long long)topic->age,
                  hex,
                  ascii);
     } else if (future->state == cy_future_timeout_response) {
