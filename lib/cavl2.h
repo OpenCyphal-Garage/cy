@@ -208,12 +208,18 @@ static inline CAVL2_T* cavl2_trivial_factory(void* const user)
 ///     if (tree_node_b == NULL) { ... }                // do something else
 ///     struct my_type_t* my_struct = CAVL2_TO_OWNER(tree_node_b, struct my_type_t, tree_b);
 ///
-/// The result is undefined if the tree_node_ptr is not a valid pointer to the tree node. Check for NULL first.
-#define CAVL2_TO_OWNER(tree_node_ptr, owner_type, owner_tree_node_field)                                     \
-    ((owner_type*)(void*)(((char*)(tree_node_ptr)) - offsetof(owner_type, owner_tree_node_field))) // NOLINT
+/// The result is undefined if the tree_node_ptr is not a valid pointer to the tree node.
+#define CAVL2_TO_OWNER(tree_node_ptr, owner_type, owner_tree_node_field)                                          \
+    ((owner_type*)_cavl2_to_owner_helper((tree_node_ptr), offsetof(owner_type, owner_tree_node_field))) // NOLINT
 
 // ----------------------------------------     END OF PUBLIC API SECTION      ----------------------------------------
 // ----------------------------------------      POLICE LINE DO NOT CROSS      ----------------------------------------
+
+/// INTERNAL USE ONLY.
+static inline void* _cavl2_to_owner_helper(const void* const tree_node_ptr, const size_t offset)
+{
+    return (tree_node_ptr == NULL) ? NULL : (void*)((char*)tree_node_ptr - offset);
+}
 
 /// INTERNAL USE ONLY. Makes the '!r' child of node 'x' its parent; i.e., rotates 'x' toward 'r'.
 static inline void _cavl2_rotate(CAVL2_T* const x, const bool r)

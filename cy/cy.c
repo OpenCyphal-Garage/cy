@@ -30,16 +30,11 @@
 #define MEGA 1000000LL
 
 /// The earliest representable time in microseconds.
-#define BIG_BANG INT64_MIN
+#define BIG_BANG   INT64_MIN
+#define HEAT_DEATH INT64_MAX
 
 /// A special log-age value that indicates that the gossip is a scout message (pattern match request).
 #define LAGE_SCOUT (-2)
-
-/// Urgent is used to throttle max publication rate when there are high-priority gossips to publish.
-/// Otherwise, the nominal rate used, which is dithered to facilitate redundant gossip suppression.
-#define HEARTBEAT_DEFAULT_PERIOD_URGENT_us  (100 * KILO)
-#define HEARTBEAT_DEFAULT_PERIOD_NOMINAL_us (1000 * KILO)
-#define HEARTBEAT_DEFAULT_PERIOD_DITHER_us  (100 * KILO)
 
 #define HEARTBEAT_PUB_TIMEOUT_us (1 * MEGA)
 
@@ -103,6 +98,10 @@ static int64_t random_int(const cy_t* const cy, const int64_t min, const int64_t
         return (int64_t)(random_u64(cy) % (uint64_t)(max - min)) + min;
     }
     return min;
+}
+static int64_t dither_int(const cy_t* const cy, const int64_t mean, const int64_t deviation)
+{
+    return mean + random_int(cy, -deviation, +deviation);
 }
 
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
@@ -942,11 +941,6 @@ static void* wkv_cb_topic_scout_response(const wkv_event_t evt)
 //                                                      HEARTBEAT
 // =====================================================================================================================
 
-#define FLAG_PUBLISHING 1U
-#define FLAG_SUBSCRIBED 4U
-#define FLAG_RECEIVING  16U
-#define FLAG_EXPLICIT   64U
-
 /// We could have used Nunavut, but we only need a single message and it's very simple, so we do it manually.
 typedef struct
 {
@@ -984,20 +978,12 @@ static cy_err_t publish_heartbeat(cy_t* const cy, const cy_us_t now, heartbeat_t
     assert(cy->node_id <= cy->platform->node_id_max);
     res = cy->platform->topic_publish(cy, &cy->heartbeat_pub, now + HEARTBEAT_PUB_TIMEOUT_us, payload);
     cy->heartbeat_pub.topic->pub_transfer_id++;
-
-    // Schedule the next heartbeat.
-    // If this heartbeat failed to publish, we simply give up and move on to try again in the next period.
-    cy->heartbeat_next += HEARTBEAT_DEFAULT_PERIOD_NOMINAL_us +
-                          random_int(cy, -HEARTBEAT_DEFAULT_PERIOD_DITHER_us, +HEARTBEAT_DEFAULT_PERIOD_DITHER_us);
-    cy->heartbeat_last = now;
     return res;
 }
 
 static cy_err_t publish_heartbeat_gossip(cy_t* const cy, cy_topic_t* const topic, const cy_us_t now)
 {
     topic_ensure_subscribed(cy, topic); // use this opportunity to repair the subscription if broken
-    // Possible optimization: we don't have to transmit the topic name if the message is urgent, i.e.,
-    // if it is published in response to a divergent allocation or possibly a collision.
     heartbeat_t msg = { .topic_hash          = topic->hash,
                         .topic_evictions     = topic->evictions & UINT32_MAX,
                         .topic_evictions_msb = (uint8_t)(topic->evictions >> 32U),
@@ -1038,12 +1024,12 @@ static void on_heartbeat(cy_t* const cy, const cy_arrival_t* const evt)
     if ((msg_size < offsetof(heartbeat_t, topic_name)) || (heartbeat.version != 1)) {
         return;
     }
-    const cy_us_t                 ts              = evt->transfer->timestamp;
-    const cy_transfer_metadata_t* meta            = &evt->transfer->metadata;
-    const uint64_t                other_hash      = heartbeat.topic_hash;
-    const uint32_t                other_evictions = heartbeat.topic_evictions;
-    const int_fast8_t             other_lage      = heartbeat.topic_lage;
-    const wkv_str_t               key             = { .len = heartbeat.topic_name_len, .str = heartbeat.topic_name };
+    const cy_us_t                 ts         = evt->transfer->timestamp;
+    const cy_transfer_metadata_t* meta       = &evt->transfer->metadata;
+    const uint64_t                other_hash = heartbeat.topic_hash;
+    const uint64_t    other_evictions = heartbeat.topic_evictions + (((uint64_t)heartbeat.topic_evictions_msb) << 32U);
+    const int_fast8_t other_lage      = heartbeat.topic_lage;
+    const wkv_str_t   key             = { .len = heartbeat.topic_name_len, .str = heartbeat.topic_name };
     //
     if (heartbeat.topic_lage >= -1) {
         // Find the topic in our local database. Create if there is a pattern match.
@@ -1661,7 +1647,8 @@ cy_err_t cy_new(cy_t* const                cy,
     cy->subscribers_by_pattern.context = cy;
 
     // Postpone calling the functions until after the object is set up.
-    cy->ts_started = cy_now(cy);
+    const cy_us_t now = cy_now(cy);
+    cy->ts_started    = now;
 
     cy->implicit_topic_timeout = IMPLICIT_TOPIC_DEFAULT_TIMEOUT_us;
     cy->implicit_head          = NULL;
@@ -1677,12 +1664,12 @@ cy_err_t cy_new(cy_t* const                cy,
     // and to claim the address; if it's already taken, we will want to cause a collision to move the other node,
     // because manually assigned addresses take precedence over auto-assigned ones.
     // If we are not given a node-ID, we need to first listen to the network.
-    cy->heartbeat_next = cy->ts_started;
-    cy->heartbeat_last = BIG_BANG;
-    cy_err_t res       = CY_OK;
+    cy->heartbeat_next        = now;
+    cy->heartbeat_next_urgent = HEAT_DEATH;
+    cy->heartbeat_period      = 3 * MEGA;
+    cy_err_t res              = CY_OK;
     if (cy->node_id > cy->platform->node_id_max) {
-        cy->heartbeat_next +=
-          random_int(cy, HEARTBEAT_DEFAULT_PERIOD_NOMINAL_us, 3 * HEARTBEAT_DEFAULT_PERIOD_NOMINAL_us);
+        cy->heartbeat_next += random_int(cy, cy->heartbeat_period, 4 * cy->heartbeat_period);
     } else {
         bloom64_set(node_id_bloom, cy->node_id);
         assert(node_id_bloom->popcount == 1);
@@ -1816,7 +1803,7 @@ cy_err_t cy_update(cy_t* const cy)
     retire_timed_out_implicit(cy, now);
 
     if (cy->node_id_collision) {
-        CY_TRACE(cy, "🧠 Processing the delayed node-ID collision event now.");
+        CY_TRACE(cy, "🧠 Processing a recent node-ID collision event now.");
         assert(cy->node_id <= cy->platform->node_id_max);
         cy->node_id_collision = false;
         cy->node_id           = CY_NODE_ID_INVALID;
@@ -1824,22 +1811,22 @@ cy_err_t cy_update(cy_t* const cy)
         cy->heartbeat_next = now;
     }
 
-    // Find the next topic to gossip. We always have at least the heartbeat topic, so the index is never empty.
-    // It is a bit wasteful to fetch the min node every update; consider switching from AVL to perhaps a heap?
-    cy_topic_t* const topic_next_gossip =
-      CAVL2_TO_OWNER(cavl2_min(cy->topics_by_gossip_time), cy_topic_t, index_gossip_order);
-
-    // Decide if it is time to publish a heartbeat.
-    const bool due_normal = now >= cy->heartbeat_next;
-    const bool due_urgent = cy_joined(cy) &&                                                      //
-                            (now >= (cy->heartbeat_last + HEARTBEAT_DEFAULT_PERIOD_URGENT_us)) && //
-                            ((topic_next_gossip->ts_gossip <= 0) || (cy->next_scout != NULL));
-    if (due_normal || due_urgent) {
-        if ((topic_next_gossip->ts_gossip <= 0) || (cy->next_scout == NULL)) {
-            res = publish_heartbeat_gossip(cy, topic_next_gossip, now);
-        } else {
-            res = publish_heartbeat_scout(cy, now);
+    // Decide if it is time to publish a heartbeat. We use a very simple minimal-state scheduler that runs two
+    // periods and offers an opportunity to publish a heartbeat every now and then.
+    const bool allow_normal = (now >= cy->heartbeat_next);
+    if (allow_normal || (now >= cy->heartbeat_next_urgent)) {
+        // Find the next topic to gossip. We always have at least the heartbeat topic, so the index is never empty.
+        cy_topic_t* const tg = CAVL2_TO_OWNER(cavl2_min(cy->topics_by_gossip_time), cy_topic_t, index_gossip_order);
+        const bool        is_urgent = (tg->ts_gossip < 0) || (cy->next_scout != NULL);
+        if (allow_normal || is_urgent) {
+            if ((tg->ts_gossip <= 0) || (cy->next_scout == NULL)) {
+                res = publish_heartbeat_gossip(cy, tg, now);
+            } else {
+                res = publish_heartbeat_scout(cy, now);
+            }
+            cy->heartbeat_next = now + dither_int(cy, cy->heartbeat_period, cy->heartbeat_period / 8);
         }
+        cy->heartbeat_next_urgent = now + cy->heartbeat_period / 16U;
     }
     return res;
 }

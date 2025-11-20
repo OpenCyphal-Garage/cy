@@ -33,6 +33,11 @@ static int64_t min_i64(const int64_t a, const int64_t b)
     return (a < b) ? a : b;
 }
 
+static int64_t min_i64_3(const int64_t a, const int64_t b, const int64_t c)
+{
+    return min_i64(a, min_i64(b, c));
+}
+
 static void default_tx_sock_err_handler(cy_udp_posix_t* const cy_udp,
                                         const uint_fast8_t    iface_index,
                                         const uint32_t        err_no)
@@ -783,7 +788,8 @@ cy_err_t cy_udp_posix_spin_until(cy_udp_posix_t* const cy_udp, const cy_us_t dea
 {
     cy_err_t res = CY_OK;
     while (res == CY_OK) {
-        res = spin_once_until(cy_udp, min_i64(deadline, cy_udp->base.heartbeat_next));
+        const cy_us_t dl = min_i64_3(deadline, cy_udp->base.heartbeat_next, cy_udp->base.heartbeat_next_urgent);
+        res              = spin_once_until(cy_udp, dl);
         if (deadline <= cy_udp_posix_now()) {
             break;
         }
@@ -794,5 +800,8 @@ cy_err_t cy_udp_posix_spin_until(cy_udp_posix_t* const cy_udp, const cy_us_t dea
 cy_err_t cy_udp_posix_spin_once(cy_udp_posix_t* const cy_udp)
 {
     assert(cy_udp != NULL);
-    return spin_once_until(cy_udp, min_i64(cy_udp_posix_now() + 1000, cy_udp->base.heartbeat_next));
+    const cy_us_t dl = min_i64_3(cy_udp_posix_now() + 1000, //
+                                 cy_udp->base.heartbeat_next,
+                                 cy_udp->base.heartbeat_next_urgent);
+    return spin_once_until(cy_udp, dl);
 }

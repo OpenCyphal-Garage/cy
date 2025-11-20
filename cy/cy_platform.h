@@ -119,6 +119,7 @@ struct cy_topic_t
     cy_topic_t* implicit_prev;
 
     /// Used for matching futures against received responses.
+    /// The platform layer can access this too if needed.
     cy_tree_t* futures_by_transfer_id;
 
     /// Only used if the application publishes data on this topic.
@@ -336,8 +337,9 @@ struct cy_t
     /// Heartbeat topic and related items.
     cy_publisher_t  heartbeat_pub;
     cy_subscriber_t heartbeat_sub;
+    cy_us_t         heartbeat_period;
     cy_us_t         heartbeat_next;
-    cy_us_t         heartbeat_last;
+    cy_us_t         heartbeat_next_urgent;
 
     /// Topics have multiple indexes.
     cy_tree_t* topics_by_hash;
