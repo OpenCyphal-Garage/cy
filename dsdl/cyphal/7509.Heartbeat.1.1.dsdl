@@ -33,19 +33,22 @@ uint64 uid
 
 # ----------------------------------------  TOPIC ALLOCATION CRDT GOSSIP  ----------------------------------------
 
+# If a node has no topics to gossip (which is the case when a node only uses pinned topics and/or implicit topics
+# that don't need repair), it will gossip the heartbeat topic as a placeholder.
+
 uint64 topic_hash
 # The topic hash is computed as:
 #
-# - If the key names a pinned topic, which means it matches `@/^([1-9][0-9]{0,3})$`, where the capture group
+# - If the name names a pinned topic, which means it matches `@/^([1-9][0-9]{0,3})$`, where the capture group
 #   is the pinned subject-ID, then the hash is simply the pinned subject-ID. Pinned topic names always have the
 #   canonical form, which can be seen from the pattern, meaning that for any subject-ID there is exactly one
 #   pinned topic name encoding it.
 #
-# - Otherwise, key_hash=rapidhash(key).
+# - Otherwise, key_hash=rapidhash(name).
 #
 # The reason the hash is here is that its computation is expensive, and we want to avoid recomputing it for every
 # received gossip message, since there is necessarily a large number of them. We still need to transmit the full
-# key because it is necessary for pattern matching, and also for monitoring purposes.
+# name because it is necessary for pattern matching, and also for monitoring purposes.
 
 @assert _offset_ == {24 * 8}
 uint40 topic_evictions

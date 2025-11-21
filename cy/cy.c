@@ -29,7 +29,7 @@
 #define KILO 1000L
 #define MEGA 1000000LL
 
-/// The earliest representable time in microseconds.
+/// The earliest and latest representable time in microseconds.
 #define BIG_BANG   INT64_MIN
 #define HEAT_DEATH INT64_MAX
 
@@ -175,6 +175,58 @@ static bool resolve_name(const char* const ns, const char* const user, const cha
 }
 
 // =====================================================================================================================
+//                                                    LIST UTILITIES
+// =====================================================================================================================
+
+static bool is_listed(const cy_list_t* const list, const cy_list_member_t* const member)
+{
+    return (member->next != NULL) || (member->prev != NULL) || (list->head == member);
+}
+
+/// No effect if not in the list.
+static void delist(cy_list_t* const list, cy_list_member_t* const member)
+{
+    if (member->next != NULL) {
+        member->next->prev = member->prev;
+    }
+    if (member->prev != NULL) {
+        member->prev->next = member->next;
+    }
+    if (list->head == member) {
+        list->head = member->next;
+    }
+    if (list->tail == member) {
+        list->tail = member->prev;
+    }
+    member->next = NULL;
+    member->prev = NULL;
+    assert((list->head != NULL) == (list->tail != NULL));
+}
+
+/// If the item is already in the list, it will be delisted first. Can be used for moving to the front.
+static void enlist_head(cy_list_t* const list, cy_list_member_t* const member)
+{
+    delist(list, member);
+    assert((member->next == NULL) && (member->prev == NULL));
+    assert((list->head != NULL) == (list->tail != NULL));
+    member->next = list->head;
+    if (list->head != NULL) {
+        list->head->prev = member;
+    }
+    list->head = member;
+    if (list->tail == NULL) {
+        list->tail = member;
+    }
+    assert((list->head != NULL) && (list->tail != NULL));
+}
+
+#define LIST_MEMBER(ptr, owner_type, owner_field) ((owner_type*)unbias_ptr((ptr), offsetof(owner_type, owner_field)))
+static void* unbias_ptr(const void* const ptr, const size_t offset)
+{
+    return (ptr == NULL) ? NULL : (void*)((char*)ptr - offset);
+}
+
+// =====================================================================================================================
 //                                                  AVL TREE UTILITIES
 // =====================================================================================================================
 
@@ -194,16 +246,6 @@ static int32_t cavl_comp_topic_subject_id(const void* const user, const cy_tree_
     assert((user != NULL) && (node != NULL));
     const cy_topic_t* const inner = CAVL2_TO_OWNER(node, cy_topic_t, index_subject_id);
     return (int32_t)(*(uint16_t*)user) - ((int32_t)cy_topic_subject_id(inner));
-}
-
-/// Gossip times are not unique, so this comparator never returns 0.
-/// Leftmost node has the lowest (oldest) gossip time.
-static int32_t cavl_comp_topic_gossip_order(const void* const user, const cy_tree_t* const node)
-{
-    assert((user != NULL) && (node != NULL));
-    const cy_topic_t* const outer = (const cy_topic_t*)user;
-    const cy_topic_t* const inner = CAVL2_TO_OWNER(node, cy_topic_t, index_gossip_order);
-    return (outer->ts_gossip >= inner->ts_gossip) ? +1 : -1;
 }
 
 static int32_t cavl_comp_future_transfer_id_masked(const void* const user, const cy_tree_t* const node)
@@ -238,11 +280,6 @@ static cy_tree_t* cavl_factory_future_deadline(void* const user)
 static cy_tree_t* cavl_factory_topic_subject_id(void* const user)
 {
     return &((cy_topic_t*)user)->index_subject_id;
-}
-
-static cy_tree_t* cavl_factory_topic_gossip_order(void* const user)
-{
-    return &((cy_topic_t*)user)->index_gossip_order;
 }
 
 /// For debug invariant checking only; linear complexity.
@@ -427,29 +464,6 @@ static bool left_wins(const cy_topic_t* const left, const cy_us_t now, const int
     return (l_lage != r_lage) ? (l_lage > r_lage) : left->hash < r_hash; // older topic wins
 }
 
-/// log(N) index update requires removal and reinsertion.
-static void update_gossip_order(cy_t* const cy, cy_topic_t* const topic, const cy_us_t ts_gossip)
-{
-    assert(cy->topics_by_gossip_time != NULL); // This index is never empty if we have topics
-    cavl2_remove(&cy->topics_by_gossip_time, &topic->index_gossip_order);
-    topic->ts_gossip            = ts_gossip;
-    const cy_tree_t* const tree = cavl2_find_or_insert(&cy->topics_by_gossip_time, //
-                                                       topic,
-                                                       cavl_comp_topic_gossip_order,
-                                                       topic,
-                                                       cavl_factory_topic_gossip_order);
-    assert(tree == &topic->index_gossip_order);
-}
-
-/// Urgent topics are gossiped sooner if there's more than one pending.
-static void prioritize_gossip(cy_t* const cy, cy_topic_t* const topic, const bool urgent)
-{
-    assert(cy->topics_by_gossip_time != NULL); // This index is never empty if we have topics
-    assert(!is_pinned(topic->hash));           // pinned topics don't need to be gossiped at all, they are untouchable
-    CY_TRACE(cy, "⚖️'%s' #%016llx @%04x", topic->name, (unsigned long long)topic->hash, cy_topic_subject_id(topic));
-    update_gossip_order(cy, topic, BIG_BANG + (cy_us_t)!urgent);
-}
-
 /// A first-principles check to see if the topic is implicit. Scans all couplings, slow.
 static bool validate_is_implicit(const cy_topic_t* const topic)
 {
@@ -468,48 +482,7 @@ static bool validate_is_implicit(const cy_topic_t* const topic)
 
 static bool is_implicit(const cy_t* const cy, const cy_topic_t* const topic)
 {
-    assert((cy->implicit_head != NULL) == (cy->implicit_tail != NULL));
-    const bool out = (topic->implicit_next != NULL) || (topic->implicit_prev != NULL) || (cy->implicit_head == topic);
-    return out;
-}
-
-/// Remove the topic from the doubly-linked list of implicit topics. Does nothing if the topic is not enlisted.
-static void implicit_delist(cy_t* const cy, cy_topic_t* const topic)
-{
-    assert(is_implicit(cy, topic));
-    if (topic->implicit_next != NULL) {
-        topic->implicit_next->implicit_prev = topic->implicit_prev;
-    }
-    if (topic->implicit_prev != NULL) {
-        topic->implicit_prev->implicit_next = topic->implicit_next;
-    }
-    if (cy->implicit_head == topic) {
-        cy->implicit_head = topic->implicit_next;
-    }
-    if (cy->implicit_tail == topic) {
-        cy->implicit_tail = topic->implicit_prev;
-    }
-    topic->implicit_next = NULL;
-    topic->implicit_prev = NULL;
-    assert((cy->implicit_head != NULL) == (cy->implicit_tail != NULL));
-}
-
-/// Add the topic to the head of doubly-linked list of implicit topics.
-/// The oldest implicit topic will be eventually pushed to the tail of the list.
-static void implicit_enlist(cy_t* const cy, cy_topic_t* const topic)
-{
-    assert((topic->implicit_next == NULL) && (topic->implicit_prev == NULL));
-    assert((cy->implicit_head != NULL) == (cy->implicit_tail != NULL));
-    assert(validate_is_implicit(topic));
-    topic->implicit_next = cy->implicit_head;
-    if (cy->implicit_head != NULL) {
-        cy->implicit_head->implicit_prev = topic;
-    }
-    cy->implicit_head = topic;
-    if (cy->implicit_tail == NULL) {
-        cy->implicit_tail = topic;
-    }
-    assert((cy->implicit_head != NULL) && (cy->implicit_tail != NULL));
+    return is_listed(&cy->list_implicit, &topic->list_implicit);
 }
 
 /// Move the topic to the head of the doubly-linked list of implicit topics.
@@ -518,19 +491,17 @@ static void implicit_animate(cy_t* const cy, cy_topic_t* const topic, const cy_u
 {
     topic->ts_animated = now;
     if (is_implicit(cy, topic)) {
-        implicit_delist(cy, topic); // move to the head of the list
-        implicit_enlist(cy, topic);
+        enlist_head(&cy->list_implicit, &topic->list_implicit); // move to the head of the list
     }
 }
 
 /// Retires at most one at every call.
-static void retire_timed_out_implicit(cy_t* const cy, const cy_us_t now)
+static void implicit_retire_timed_out(cy_t* const cy, const cy_us_t now)
 {
-    cy_topic_t* const topic = cy->implicit_tail;
+    cy_topic_t* const topic = LIST_MEMBER(cy->list_implicit.tail, cy_topic_t, list_implicit);
     if (topic != NULL) {
         assert(is_implicit(cy, topic) && validate_is_implicit(topic));
         if ((topic->ts_animated + cy->implicit_topic_timeout) < now) {
-            implicit_delist(cy, topic);
             CY_TRACE(
               cy, "⚰️'%s' #%016llx @%04x", topic->name, (unsigned long long)topic->hash, cy_topic_subject_id(topic));
             topic_destroy(cy, topic);
@@ -538,8 +509,26 @@ static void retire_timed_out_implicit(cy_t* const cy, const cy_us_t now)
     }
 }
 
-/// Returns UINT32_MAX if the string is not a valid pinned subject-ID form.
-/// A valid form is: "@/1234".
+static void schedule_gossip(cy_t* const cy, cy_topic_t* const topic, const bool important)
+{
+    const bool eligible = important || (!is_pinned(topic->hash) && !is_implicit(cy, topic));
+    if (eligible) {
+        if (important) {
+            delist(&cy->list_gossip, &topic->list_gossip);
+            enlist_head(&cy->list_gossip_urgent, &topic->list_gossip_urgent);
+            CY_TRACE(
+              cy, "⚖️'%s' #%016llx @%04x", topic->name, (unsigned long long)topic->hash, cy_topic_subject_id(topic));
+        } else {
+            delist(&cy->list_gossip_urgent, &topic->list_gossip_urgent);
+            enlist_head(&cy->list_gossip, &topic->list_gossip);
+        }
+    } else {
+        delist(&cy->list_gossip, &topic->list_gossip);
+        delist(&cy->list_gossip_urgent, &topic->list_gossip_urgent);
+    }
+}
+
+/// Returns UINT32_MAX if the string is not a valid pinned subject-ID form. A valid form is: "@/1234".
 /// Pinned topic names must have only canonical names to ensure that no two topic names map to the same subject-ID.
 /// The only requirement to ensure this is that there must be no leading zeros in the number.
 static uint32_t parse_pinned(const wkv_str_t s)
@@ -579,6 +568,20 @@ static uint16_t topic_subject_id(const uint64_t hash, const uint64_t evictions)
 #else
     return (uint16_t)((CY_CONFIG_PREFERRED_TOPIC_OVERRIDE + evictions) % CY_TOPIC_SUBJECT_COUNT);
 #endif
+}
+
+/// This will only search through topics that have auto-assigned subject-IDs;
+/// i.e., pinned topics will not be found by this function.
+static cy_topic_t* topic_find_by_subject_id(const cy_t* const cy, const uint16_t subject_id)
+{
+    assert(cy != NULL);
+    cy_tree_t* const t = cavl2_find(cy->topics_by_subject_id, &subject_id, &cavl_comp_topic_subject_id);
+    if (t == NULL) {
+        return NULL;
+    }
+    cy_topic_t* topic = CAVL2_TO_OWNER(t, cy_topic_t, index_subject_id);
+    assert(cy_topic_subject_id(topic) == subject_id);
+    return topic;
 }
 
 /// This is linear complexity but we expect to have few subscribers per topic, so it is acceptable.
@@ -706,7 +709,7 @@ static void topic_allocate(cy_t* const       cy, // NOLINT(*-no-recursion)
 
     // Whenever we alter a topic, we need to make sure that everyone knows about it.
     // Recursively we can alter a lot of topics like this.
-    prioritize_gossip(cy, topic, true);
+    schedule_gossip(cy, topic, true);
 
     // If a subscription is needed, restore it. Notice that if this call failed in the past, we will retry here
     // as long as there is at least one live subscriber.
@@ -753,11 +756,7 @@ static cy_err_t topic_new(cy_t* const        cy,
     topic->evictions = evictions;
 
     topic->ts_origin   = now;
-    topic->ts_gossip   = 0; // We don't want to prioritize the new topic before collision/divergence resolution.
     topic->ts_animated = now;
-
-    topic->implicit_next = NULL;
-    topic->implicit_prev = NULL;
 
     topic->pub_transfer_id = random_u64(cy); // https://forum.opencyphal.org/t/improve-the-transfer-id-timeout/2375
     topic->pub_count       = 0;
@@ -769,35 +768,36 @@ static cy_err_t topic_new(cy_t* const        cy,
         goto bad_name;
     }
 
+    // Insert the new topic into the name and hash indexes. TODO ensure uniqueness.
     topic->index_name = wkv_set(&cy->topics_by_name, resolved_name);
     if (topic->index_name == NULL) {
         goto oom;
     }
     assert(topic->index_name->value == NULL); // Cannot invoke this if such topic already exists!
     topic->index_name->value = topic;
-
-    // Insert the new topic into the name index tree. If it's not unique, bail out.
     const cy_tree_t* const res_tree =
       cavl2_find_or_insert(&cy->topics_by_hash, &topic->hash, &cavl_comp_topic_hash, topic, &cavl2_trivial_factory);
     assert(res_tree == &topic->index_hash); // Cannot invoke this if such topic already exists!
 
     // Ensure the topic is in the gossip index. This is needed for allocation.
-    (void)cavl2_find_or_insert(
-      &cy->topics_by_gossip_time, topic, &cavl_comp_topic_gossip_order, topic, &cavl_factory_topic_gossip_order);
-
-    // Allocate a subject-ID for the topic and insert it into the subject index tree.
-    // Pinned topics all have canonical names, and we have already ascertained that the name is unique,
-    // meaning that another pinned topic is not occupying the same subject-ID.
-    // Remember that topics arbitrate locally the same way they do externally, meaning that adding a new local topic
-    // may displace another local one.
-    topic_allocate(cy, topic, 0, true, now);
-
-    if (out_topic != NULL) {
-        *out_topic = topic;
+    // This does not apply to pinned topics, which are never gossiped.
+    if (!is_pinned(topic->hash)) {
+        // Allocate a subject-ID for the topic and insert it into the subject index tree.
+        // Pinned topics all have canonical names, and we have already ascertained that the name is unique,
+        // meaning that another pinned topic is not occupying the same subject-ID.
+        // Remember that topics arbitrate locally the same way they do externally, meaning that adding a new local topic
+        // may displace another local one.
+        topic_allocate(cy, topic, 0, true, now);
+        if (out_topic != NULL) {
+            *out_topic = topic;
+        }
+        // Initially, all non-pinned topics are considered implicit until proven otherwise.
+        enlist_head(&cy->list_implicit, &topic->list_implicit);
+    } else {
+        if (out_topic != NULL) {
+            *out_topic = topic;
+        }
     }
-
-    // Initially, all topics are considered implicit until proven otherwise.
-    implicit_enlist(cy, topic);
 
     CY_TRACE(cy,
              "✨'%s' #%016llx @%04x: topic_count=%zu",
@@ -869,7 +869,7 @@ static cy_err_t topic_couple(cy_t* const                 cy,
         }
         // If this is a verbatim subscriber, the topic is no (longer) implicit.
         if ((subr->index_pattern == NULL) && is_implicit(cy, topic)) {
-            implicit_delist(cy, topic);
+            delist(&cy->list_implicit, &topic->list_implicit);
             CY_TRACE(cy,
                      "🧛 Promoted to explicit '%s' #%016llx @%04x",
                      topic->name,
@@ -933,7 +933,7 @@ static void* wkv_cb_topic_scout_response(const wkv_event_t evt)
     cy_t* const       cy    = (cy_t*)evt.context;
     cy_topic_t* const topic = (cy_topic_t*)evt.node->value;
     CY_TRACE(cy, "📢'%s' #%016llx @%04x", topic->name, (unsigned long long)(topic->hash), cy_topic_subject_id(topic));
-    prioritize_gossip(cy, topic, false);
+    schedule_gossip(cy, topic, true);
     return NULL;
 }
 
@@ -991,11 +991,9 @@ static cy_err_t publish_heartbeat_gossip(cy_t* const cy, cy_topic_t* const topic
                         ._reserved_1_        = 0,
                         .topic_name_len      = (uint_fast8_t)topic->index_name->key_len };
     memcpy(msg.topic_name, topic->name, topic->index_name->key_len);
-    if (topic->ts_gossip <= 0) {
-        CY_TRACE(cy, "🗣️'%s' #%016llx @%04x", topic->name, (unsigned long long)topic->hash, cy_topic_subject_id(topic));
-    }
-    // Update gossip time even if failed so we don't get stuck publishing same gossip if error reporting is broken.
-    update_gossip_order(cy, topic, now);
+    CY_TRACE(cy, "🗣️'%s' #%016llx @%04x", topic->name, (unsigned long long)topic->hash, cy_topic_subject_id(topic));
+    // Update gossip even if failed so we don't get stuck publishing same gossip if error reporting is broken.
+    schedule_gossip(cy, topic, false);
     return publish_heartbeat(cy, now, &msg);
 }
 
@@ -1037,8 +1035,8 @@ static void on_heartbeat(cy_t* const cy, const cy_arrival_t* const evt)
         if (mine == NULL) {
             mine = topic_subscribe_if_matching(cy, key, other_hash, other_evictions);
         }
-        if (mine != NULL) {                    // We have this topic! Check if we have consensus on the subject-ID.
-            update_gossip_order(cy, mine, ts); // suppress next gossip
+        if (mine != NULL) {                   // We have this topic! Check if we have consensus on the subject-ID.
+            schedule_gossip(cy, mine, false); // suppress next gossip -- the network just heard about it
             implicit_animate(cy, mine, ts);
             assert(mine->hash == other_hash);
             const int_fast8_t mine_lage = topic_lage(mine, ts);
@@ -1059,18 +1057,18 @@ static void on_heartbeat(cy_t* const cy, const cy_arrival_t* const evt)
                          other_lage);
                 if ((mine_lage > other_lage) || ((mine_lage == other_lage) && (mine->evictions > other_evictions))) {
                     CY_TRACE(cy, "We won, existing allocation not altered; expecting remote to adjust.");
-                    prioritize_gossip(cy, mine, true);
+                    assert(!is_pinned(mine->hash));
+                    schedule_gossip(cy, mine, true);
                 } else {
                     assert((mine_lage <= other_lage) &&
                            ((mine_lage < other_lage) || (mine->evictions < other_evictions)));
                     assert(mine_lage <= other_lage);
                     CY_TRACE(cy,
                              "We lost, reallocating the topic to try and match the remote, or offer new alternative.");
-                    const cy_us_t old_gossiped = mine->ts_gossip;
                     topic_merge_lage(mine, ts, other_lage);
                     topic_allocate(cy, mine, other_evictions, false, ts);
-                    if (mine->evictions == other_evictions) { // perfect sync, no need to gossip
-                        update_gossip_order(cy, mine, old_gossiped);
+                    if (mine->evictions == other_evictions) { // perfect sync, lower the gossip priority
+                        schedule_gossip(cy, mine, false);
                     }
                 }
             } else {
@@ -1078,7 +1076,7 @@ static void on_heartbeat(cy_t* const cy, const cy_arrival_t* const evt)
             }
             topic_merge_lage(mine, ts, other_lage);
         } else { // We don't know this topic; check for a subject-ID collision and do auto-subscription.
-            mine = cy_topic_find_by_subject_id(cy, topic_subject_id(other_hash, other_evictions));
+            mine = topic_find_by_subject_id(cy, topic_subject_id(other_hash, other_evictions));
             if (mine == NULL) {
                 return; // We are not using this subject-ID, no collision.
             }
@@ -1108,7 +1106,8 @@ static void on_heartbeat(cy_t* const cy, const cy_arrival_t* const evt)
             if (!win) {
                 topic_allocate(cy, mine, mine->evictions + 1U, false, ts);
             } else {
-                prioritize_gossip(cy, mine, true);
+                assert(!is_pinned(mine->hash));
+                schedule_gossip(cy, mine, true);
             }
         }
     } else if (heartbeat.topic_lage == LAGE_SCOUT) {
@@ -1136,8 +1135,9 @@ static void on_heartbeat(cy_t* const cy, const cy_arrival_t* const evt)
 //                                                      PUBLISHER
 // =====================================================================================================================
 
-static void retire_timed_out_futures(cy_t* cy, const cy_us_t now)
+static void futures_retire_timed_out(cy_t* cy, const cy_us_t now)
 {
+    // TODO use list instead of AVL!
     cy_future_t* fut = (cy_future_t*)cavl2_min(cy->futures_by_deadline);
     while ((fut != NULL) && (fut->deadline < now)) {
         assert(fut->state == cy_future_pending);
@@ -1170,17 +1170,10 @@ cy_err_t cy_advertise(cy_t* const cy, cy_publisher_t* const pub, const wkv_str_t
     if (res == CY_OK) {
         assert(pub->topic != NULL);
         pub->topic->pub_count++;
-        if (is_implicit(cy, pub->topic)) {
-            implicit_delist(cy, pub->topic);
-            CY_TRACE(cy,
-                     "🧛 Promoted to explicit '%s' #%016llx @%04x",
-                     pub->topic->name,
-                     (unsigned long long)pub->topic->hash,
-                     cy_topic_subject_id(pub->topic));
-        }
+        delist(&cy->list_implicit, &pub->topic->list_implicit);
         cy->platform->topic_advertise(cy, pub->topic, response_extent + P2P_HEADER_BYTES);
         if (!is_pinned(pub->topic->hash)) {
-            prioritize_gossip(cy, pub->topic, false); // Announce change ASAP
+            schedule_gossip(cy, pub->topic, true); // Announce change ASAP
         }
     }
     CY_TRACE(cy,
@@ -1495,18 +1488,6 @@ cy_topic_t* cy_topic_find_by_hash(const cy_t* const cy, const uint64_t hash)
     return topic;
 }
 
-cy_topic_t* cy_topic_find_by_subject_id(const cy_t* const cy, const uint16_t subject_id)
-{
-    assert(cy != NULL);
-    cy_tree_t* const t = cavl2_find(cy->topics_by_subject_id, &subject_id, &cavl_comp_topic_subject_id);
-    if (t == NULL) {
-        return NULL;
-    }
-    cy_topic_t* topic = CAVL2_TO_OWNER(t, cy_topic_t, index_subject_id);
-    assert(cy_topic_subject_id(topic) == subject_id);
-    return topic;
-}
-
 cy_topic_t* cy_topic_iter_first(const cy_t* const cy)
 {
     return (cy_topic_t*)cavl2_min(cy->topics_by_hash);
@@ -1631,11 +1612,10 @@ cy_err_t cy_new(cy_t* const                cy,
                    (unsigned)(uid >> 48U) & UINT16_MAX,
                    (unsigned)(uid >> 32U) & UINT16_MAX,
                    (unsigned long)(uid & UINT32_MAX));
-    cy->topics_by_hash        = NULL;
-    cy->topics_by_subject_id  = NULL;
-    cy->topics_by_gossip_time = NULL;
-    cy->next_scout            = NULL;
-    cy->user                  = NULL;
+    cy->topics_by_hash       = NULL;
+    cy->topics_by_subject_id = NULL;
+    cy->next_scout           = NULL;
+    cy->user                 = NULL;
 
     wkv_init(&cy->topics_by_name, &wkv_realloc);
     cy->topics_by_name.context = cy;
@@ -1649,10 +1629,6 @@ cy_err_t cy_new(cy_t* const                cy,
     // Postpone calling the functions until after the object is set up.
     const cy_us_t now = cy_now(cy);
     cy->ts_started    = now;
-
-    cy->implicit_topic_timeout = IMPLICIT_TOPIC_DEFAULT_TIMEOUT_us;
-    cy->implicit_head          = NULL;
-    cy->implicit_tail          = NULL;
 
     cy_bloom64_t* const node_id_bloom = platform->node_id_bloom(cy);
     assert(node_id_bloom != NULL);
@@ -1669,12 +1645,14 @@ cy_err_t cy_new(cy_t* const                cy,
     cy->heartbeat_period      = 3 * MEGA;
     cy_err_t res              = CY_OK;
     if (cy->node_id > cy->platform->node_id_max) {
-        cy->heartbeat_next += random_int(cy, cy->heartbeat_period, 4 * cy->heartbeat_period);
+        cy->heartbeat_next += random_int(cy, cy->heartbeat_period, 3 * cy->heartbeat_period);
     } else {
         bloom64_set(node_id_bloom, cy->node_id);
         assert(node_id_bloom->popcount == 1);
         res = cy->platform->node_id_set(cy);
     }
+
+    cy->implicit_topic_timeout = IMPLICIT_TOPIC_DEFAULT_TIMEOUT_us;
 
     // Pub/sub on the heartbeat topic.
     if (res == CY_OK) {
@@ -1799,8 +1777,8 @@ cy_err_t cy_update(cy_t* const cy)
     cy_err_t      res = CY_OK;
     const cy_us_t now = cy_now(cy);
 
-    retire_timed_out_futures(cy, now);
-    retire_timed_out_implicit(cy, now);
+    futures_retire_timed_out(cy, now);
+    implicit_retire_timed_out(cy, now);
 
     if (cy->node_id_collision) {
         CY_TRACE(cy, "🧠 Processing a recent node-ID collision event now.");
@@ -1813,13 +1791,12 @@ cy_err_t cy_update(cy_t* const cy)
 
     // Decide if it is time to publish a heartbeat. We use a very simple minimal-state scheduler that runs two
     // periods and offers an opportunity to publish a heartbeat every now and then.
-    const bool allow_normal = (now >= cy->heartbeat_next);
-    if (allow_normal || (now >= cy->heartbeat_next_urgent)) {
-        // Find the next topic to gossip. We always have at least the heartbeat topic, so the index is never empty.
-        cy_topic_t* const tg = CAVL2_TO_OWNER(cavl2_min(cy->topics_by_gossip_time), cy_topic_t, index_gossip_order);
-        const bool        is_urgent = (tg->ts_gossip < 0) || (cy->next_scout != NULL);
-        if (allow_normal || is_urgent) {
-            if ((tg->ts_gossip <= 0) || (cy->next_scout == NULL)) {
+    if ((now >= cy->heartbeat_next) || (now >= cy->heartbeat_next_urgent)) {
+        cy_topic_t* tg = LIST_MEMBER(cy->list_gossip_urgent.tail, cy_topic_t, list_gossip);
+        if ((now >= cy->heartbeat_next) || (tg != NULL) || (cy->next_scout != NULL)) {
+            if ((tg != NULL) || (cy->next_scout == NULL)) {
+                tg  = (tg != NULL) ? tg : LIST_MEMBER(cy->list_gossip.tail, cy_topic_t, list_gossip);
+                tg  = (tg != NULL) ? tg : cy->heartbeat_pub.topic;
                 res = publish_heartbeat_gossip(cy, tg, now);
             } else {
                 res = publish_heartbeat_scout(cy, now);
@@ -1834,7 +1811,7 @@ cy_err_t cy_update(cy_t* const cy)
 void cy_notify_topic_collision(cy_t* const cy, cy_topic_t* const topic)
 {
     if (topic != NULL) { // Topics with the same time will be ordered FIFO -- the tree is stable.
-        prioritize_gossip(cy, topic, true);
+        schedule_gossip(cy, topic, true);
     }
 }
 

@@ -48,8 +48,10 @@ extern "C"
 #endif
 
 #ifndef __cplusplus
-typedef struct cy_bloom64_t  cy_bloom64_t;
-typedef struct cy_platform_t cy_platform_t;
+typedef struct cy_bloom64_t     cy_bloom64_t;
+typedef struct cy_list_t        cy_list_t;
+typedef struct cy_list_member_t cy_list_member_t;
+typedef struct cy_platform_t    cy_platform_t;
 #endif
 
 /// An ordinary Bloom filter with 64-bit words.
@@ -58,6 +60,17 @@ struct cy_bloom64_t
     size_t    n_bits;   ///< The total number of bits in the filter, a multiple of 64.
     size_t    popcount; ///< (popcount <= n_bits)
     uint64_t* storage;
+};
+
+struct cy_list_member_t
+{
+    cy_list_member_t* next;
+    cy_list_member_t* prev;
+};
+struct cy_list_t
+{
+    cy_list_member_t* head; ///< NULL if list empty
+    cy_list_member_t* tail; ///< NULL if list empty
 };
 
 /// This is the base type that is extended by the platform layer with transport- and platform-specific entities,
@@ -88,11 +101,15 @@ struct cy_bloom64_t
 /// Conflict resolution may result in a temporary jitter if it happens to occur near log2(age) integer boundary.
 struct cy_topic_t
 {
-    /// All indexes that this topic is a member of.
+    /// All indexes that this topic is a member of. Indexes are very fast log(N) lookup structures.
     cy_tree_t   index_hash; ///< Hash index handle MUST be the first field.
     cy_tree_t   index_subject_id;
-    cy_tree_t   index_gossip_order;
     wkv_node_t* index_name;
+
+    /// All lists that this topic is a member of. Lists are used for ordering with fast constant-time insertion/removal.
+    cy_list_member_t list_implicit;      ///< Last animated topic is at the end of the list.
+    cy_list_member_t list_gossip_urgent; ///< High-priority gossips. Fetch from the tail.
+    cy_list_member_t list_gossip;        ///< Normal-priority gossips. Fetch from the tail.
 
     /// The name length is stored in index_name.
     /// We need to store the full name to allow valid references from name substitutions during pattern matching.
@@ -110,13 +127,7 @@ struct cy_topic_t
 
     /// Event timestamps used for state management.
     cy_us_t ts_origin;   ///< An approximation of when the topic was first seen on the network.
-    cy_us_t ts_gossip;   ///< The network seen this topic gossiped at this time.
     cy_us_t ts_animated; ///< Last time the topic saw activity that prevents it from being retired.
-
-    /// Implicit topics are ordered by last animation time, which is used to determine which topic to retire next.
-    /// Implicit topics are distinguished from ordinary topics by being in the list.
-    cy_topic_t* implicit_next;
-    cy_topic_t* implicit_prev;
 
     /// Used for matching futures against received responses.
     /// The platform layer can access this too if needed.
@@ -328,12 +339,6 @@ struct cy_t
     /// Set from cy_notify_node_id_collision(). The actual handling is delayed.
     bool node_id_collision;
 
-    /// See the topic definition.
-    /// Most recently animated implicit topics at at the head of the list.
-    cy_us_t     implicit_topic_timeout;
-    cy_topic_t* implicit_head;
-    cy_topic_t* implicit_tail;
-
     /// Heartbeat topic and related items.
     cy_publisher_t  heartbeat_pub;
     cy_subscriber_t heartbeat_sub;
@@ -341,11 +346,19 @@ struct cy_t
     cy_us_t         heartbeat_next;
     cy_us_t         heartbeat_next_urgent;
 
-    /// Topics have multiple indexes.
-    cy_tree_t* topics_by_hash;
-    cy_tree_t* topics_by_subject_id;
-    cy_tree_t* topics_by_gossip_time;
-    wkv_t      topics_by_name;
+    cy_us_t implicit_topic_timeout;
+
+    /// Topics are indexed in multiple ways for various lookups.
+    /// Remember that pinned topics have small hash ≤8184, hence they are always on the left of the hash tree,
+    /// and can be traversed quickly if needed.
+    wkv_t      topics_by_name;       // Contains ALL topics, never empty since we always have at least the heartbeat.
+    cy_tree_t* topics_by_hash;       // ditto
+    cy_tree_t* topics_by_subject_id; // All except pinned, since they do not collide. May be empty.
+
+    /// Topic lists for ordering.
+    cy_list_t list_implicit;      ///< Most recently animated topic is at the head.
+    cy_list_t list_gossip_urgent; ///< High-priority gossips. Newest at the head.
+    cy_list_t list_gossip;        ///< Normal-priority gossips. Newest at the head.
 
     /// When a heartbeat is received, its topic name will be compared against the patterns,
     /// and if a match is found, a new subscription will be constructed automatically; if a new topic instance
@@ -359,6 +372,7 @@ struct cy_t
     struct cy_subscriber_root_t* next_scout;
 
     /// For detecting timed out futures. This index spans all topics.
+    /// TODO: use a list instead!
     cy_tree_t* futures_by_deadline;
 
     /// The user can use this field for arbitrary purposes.

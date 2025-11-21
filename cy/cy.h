@@ -425,9 +425,8 @@ static inline cy_topic_t* cy_topic_find_by_name_c(const cy_t* const cy, const ch
     return cy_topic_find_by_name(cy, wkv_key(name));
 }
 cy_topic_t* cy_topic_find_by_hash(const cy_t* const cy, const uint64_t hash);
-cy_topic_t* cy_topic_find_by_subject_id(const cy_t* const cy, const uint16_t subject_id);
 
-/// Iterate over all topics in an unspecified order.
+/// Iterate over all topics in an unspecified order except that pinned topic are listed first.
 /// This is useful when handling IO multiplexing (building the list of descriptors to read) and for introspection.
 /// The iteration stops when the returned topic is NULL.
 /// The set of topics SHALL NOT be mutated while iterating over it (a restart will be needed otherwise).
@@ -439,7 +438,7 @@ cy_topic_t* cy_topic_iter_first(const cy_t* const cy);
 cy_topic_t* cy_topic_iter_next(cy_topic_t* const topic);
 
 /// Optionally, the application can use this to save the allocated subject-ID before shutting down/rebooting
-/// for instant recovery.
+/// for instant recovery. Not needed for pinned topics since their IDs cannot change.
 uint16_t cy_topic_subject_id(const cy_topic_t* const topic);
 
 /// The name is NUL-terminated; pointer lifetime bound to the topic.
