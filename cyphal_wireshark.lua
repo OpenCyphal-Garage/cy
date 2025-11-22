@@ -17,7 +17,10 @@ local heartbeat_dst_ip = "239.0.29.85"
 local heartbeat_proto = Proto("cyphal_heartbeat", "Cyphal Heartbeat")
 
 local f_uptime          = ProtoField.uint32("heartbeat.uptime", "Uptime [s]", base.DEC, nil, nil, "[second]")
-local f_user_word       = ProtoField.uint24("heartbeat.user_word", "User word", base.HEX)
+local f_user            = ProtoField.uint24("heartbeat.user_word", "User word", base.HEX)
+local f_user_0          = ProtoField.uint8 ("heartbeat.user_word.byte0", "v1.0 health", base.DEC)
+local f_user_1          = ProtoField.uint8 ("heartbeat.user_word.byte1", "v1.0 mode", base.DEC)
+local f_user_2          = ProtoField.uint8 ("heartbeat.user_word.byte2", "v1.0 vendor-specific status code", base.DEC)
 local f_version         = ProtoField.uint8 ("heartbeat.version", "Version", base.DEC)
 local f_uid             = ProtoField.uint64("heartbeat.uid", "UID", base.HEX)
 local f_uid_vid         = ProtoField.uint16("heartbeat.uid.vid", "Vendor-ID (VID)",  base.HEX)
@@ -31,7 +34,10 @@ local f_topic_name      = ProtoField.string("heartbeat.topic_name", "Topic name"
 
 heartbeat_proto.fields = {
     f_uptime,
-    f_user_word,
+    f_user,
+    f_user_0,
+    f_user_1,
+    f_user_2,
     f_version,
     f_uid,
     f_uid_vid,
@@ -62,7 +68,7 @@ function heartbeat_proto.dissector(tvb, pinfo, tree)
     else
         return
     end
-    if tvb:len() < header_size + 8 then
+    if tvb:len() < header_size + 7 then
         return
     end
 
@@ -77,21 +83,27 @@ function heartbeat_proto.dissector(tvb, pinfo, tree)
     offset = offset + 4
 
     -- user word
-    subtree:add_le(f_user_word, tvb(offset, 3))
+    local user_tree = subtree:add_le(f_user, tvb(offset, 3))
     local user_word_val = tvb(offset, 3):le_uint()
+    user_tree:add_le(f_user_0, tvb(offset, 1))
+    user_tree:add_le(f_user_1, tvb(offset + 1, 1))
+    user_tree:add_le(f_user_2, tvb(offset + 2, 1))
     offset = offset + 3
 
-    -- version
-    local version = tvb(offset, 1):uint()
+    -- Default Info column
+    local info = string.format("⏳% 6us 👤%06x", uptime, user_word_val)
+    pinfo.cols.info = info
+
+    -- heartbeat version
+    if tvb:len() <= offset + 4 then
+        return  -- Cyphal v1.0 heartbeat, no further fields
+    end
+    local hb_version = tvb(offset, 1):le_uint()
     subtree:add(f_version, tvb(offset, 1))
     offset = offset + 1
 
-    -- Default Info column
-    local info = string.format("⏳% 6us %06x", uptime, user_word_val)
-    pinfo.cols.info = info
-
     -- Version-specific parts
-    if version ~= 1 then
+    if hb_version ~= 1 then
         return
     end
     if tvb:len() < offset + 24 then
@@ -143,7 +155,7 @@ function heartbeat_proto.dissector(tvb, pinfo, tree)
     end
 
     -- Update Info column
-    pinfo.cols.info = info..string.format(" 🆔%016x 🗣 %u %+d \"%s\"", uid, topic_evictions, topic_lage, topic_name)
+    pinfo.cols.info = info..string.format(" 🆔%016x 📢% 3u %+02d \"%s\"", uid, topic_evictions, topic_lage, topic_name)
 end
 
 -- Register dissector for UDP port 9382
