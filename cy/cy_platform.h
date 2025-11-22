@@ -352,6 +352,7 @@ struct cy_t
     cy_list_t list_implicit;      ///< Most recently animated topic is at the head.
     cy_list_t list_gossip_urgent; ///< High-priority gossips. Newest at the head.
     cy_list_t list_gossip;        ///< Normal-priority gossips. Newest at the head.
+    cy_list_t list_scout_pending; ///< Lists cy_subscriber_root_t that are due for gossiping.
 
     /// When a heartbeat is received, its topic name will be compared against the patterns,
     /// and if a match is found, a new subscription will be constructed automatically; if a new topic instance
@@ -360,9 +361,6 @@ struct cy_t
     /// The values of these tree nodes point to instances of cy_subscriber_root_t.
     wkv_t subscribers_by_name;    ///< Both explicit and patterns.
     wkv_t subscribers_by_pattern; ///< Only patterns for implicit subscriptions on heartbeat.
-
-    /// Only for pattern subscriptions.
-    struct cy_subscriber_root_t* next_scout;
 
     /// For detecting timed out futures. This index spans all topics.
     /// TODO: use a list instead!

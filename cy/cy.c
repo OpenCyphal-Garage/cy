@@ -132,8 +132,7 @@ static void* wkv_cb_first(const wkv_event_t evt)
 //                                                      NAMES
 // =====================================================================================================================
 
-/// TODO this is ugly and dirty
-/// TODO use wkv_str_t
+/// TODO this is ugly and dirty; use wkv_str_t
 static bool resolve_name(const char* const ns, const char* const user, const char* const name, char* const destination)
 {
     assert(ns != NULL);
@@ -225,6 +224,8 @@ static void* unbias_ptr(const void* const ptr, const size_t offset)
 {
     return (ptr == NULL) ? NULL : (void*)((char*)ptr - offset);
 }
+
+#define LIST_TAIL(list, owner_type, owner_field) LIST_MEMBER((list).tail, owner_type, owner_field)
 
 // =====================================================================================================================
 //                                                  AVL TREE UTILITIES
@@ -420,7 +421,8 @@ typedef struct cy_subscriber_root_t
     wkv_node_t* index_pattern; ///< NULL if this is a verbatim subscriber.
 
     /// If this is a pattern subscriber, we will need to publish a scout message.
-    struct cy_subscriber_root_t* next_scout;
+    /// The entry is delisted when it no longer requires publishing scout messages.
+    cy_list_member_t list_scout_pending;
 
     cy_subscriber_t* head;
 } cy_subscriber_root_t;
@@ -502,7 +504,7 @@ static void implicit_animate(cy_t* const cy, cy_topic_t* const topic, const cy_u
 /// Retires at most one at every call.
 static void implicit_retire_timed_out(cy_t* const cy, const cy_us_t now)
 {
-    cy_topic_t* const topic = LIST_MEMBER(cy->list_implicit.tail, cy_topic_t, list_implicit);
+    cy_topic_t* const topic = LIST_TAIL(cy->list_implicit, cy_topic_t, list_implicit);
     if (topic != NULL) {
         assert(is_implicit(cy, topic) && validate_is_implicit(topic));
         if ((topic->ts_animated + cy->implicit_topic_timeout) < now) {
@@ -999,16 +1001,15 @@ static cy_err_t publish_heartbeat_gossip(cy_t* const cy, cy_topic_t* const topic
     return publish_heartbeat(cy, now, &msg);
 }
 
-static cy_err_t publish_heartbeat_scout(cy_t* const cy, const cy_us_t now)
+static cy_err_t publish_heartbeat_scout(cy_t* const cy, cy_subscriber_root_t* const subr, const cy_us_t now)
 {
-    const cy_subscriber_root_t* subr = cy->next_scout;
     assert(subr != NULL); // https://github.com/pavel-kirienko/cy/issues/12#issuecomment-2953184238
     heartbeat_t msg = { .topic_lage = LAGE_SCOUT, .topic_name_len = (uint_fast8_t)subr->index_name->key_len };
     wkv_get_key(&cy->subscribers_by_name, subr->index_name, msg.topic_name);
     const cy_err_t res = publish_heartbeat(cy, now, &msg);
     CY_TRACE(cy, "📢'%s' result=%d", msg.topic_name, res);
     if (res == CY_OK) {
-        cy->next_scout = subr->next_scout; // delist the scout if publication succeeded
+        delist(&cy->list_scout_pending, &subr->list_scout_pending);
     }
     return res;
 }
@@ -1139,7 +1140,6 @@ static void on_heartbeat(cy_t* const cy, const cy_arrival_t* const evt)
 
 static void futures_retire_timed_out(cy_t* cy, const cy_us_t now)
 {
-    // TODO use list instead of AVL!
     cy_future_t* fut = (cy_future_t*)cavl2_min(cy->futures_by_deadline);
     while ((fut != NULL) && (fut->deadline < now)) {
         assert(fut->state == cy_future_pending);
@@ -1334,6 +1334,7 @@ static cy_err_t ensure_subscriber_root(cy_t* const                  cy,
         }
         assert(root->index_pattern->value == NULL);
         root->index_pattern->value = root;
+        enlist_head(&cy->list_scout_pending, &root->list_scout_pending);
     } else {
         root->index_pattern = NULL;
         const cy_err_t res  = topic_ensure(cy, NULL, resolved_name);
@@ -1341,19 +1342,6 @@ static cy_err_t ensure_subscriber_root(cy_t* const                  cy,
             wkv_del(&cy->subscribers_by_name, node);
             mem_free(cy, node->value);
             return res;
-        }
-    }
-
-    // Register the next pending scout. We do it strictly in the FIFO order. TODO use the list primitive instead.
-    if (wc) {
-        cy_subscriber_root_t* next_scout = cy->next_scout;
-        while ((next_scout != NULL) && (next_scout->next_scout != NULL)) {
-            next_scout = next_scout->next_scout;
-        }
-        if (next_scout == NULL) {
-            cy->next_scout = root;
-        } else {
-            next_scout->next_scout = root;
         }
     }
 
@@ -1609,7 +1597,6 @@ cy_err_t cy_new(cy_t* const                cy,
                    (unsigned long)(uid & UINT32_MAX));
     cy->topics_by_hash       = NULL;
     cy->topics_by_subject_id = NULL;
-    cy->next_scout           = NULL;
     cy->user                 = NULL;
 
     wkv_init(&cy->topics_by_name, &wkv_realloc);
@@ -1663,7 +1650,7 @@ cy_err_t cy_new(cy_t* const                cy,
     return res;
 }
 
-/// We snoop on all transfers to update the node-ID occupancy Bloom filter.
+/// We snoop on all transfers we have access to to update the node-ID occupancy Bloom filter.
 /// If we don't have a node-ID and this is a new Bloom entry, follow CSMA/CD: add random wait.
 /// The point is to reduce the chances of multiple nodes appearing simultaneously and claiming same node-IDs.
 /// We keep tracking neighbors even if we have a node-ID in case we encounter a collision later and need to move.
@@ -1845,14 +1832,15 @@ cy_err_t cy_update(cy_t* const cy)
     // Decide if it is time to publish a heartbeat. We use a very simple minimal-state scheduler that runs two
     // periods and offers an opportunity to publish a heartbeat every now and then.
     if ((now >= cy->heartbeat_next) || (now >= cy->heartbeat_next_urgent)) {
-        cy_topic_t* tg = LIST_MEMBER(cy->list_gossip_urgent.tail, cy_topic_t, list_gossip_urgent);
-        if ((now >= cy->heartbeat_next) || (tg != NULL) || (cy->next_scout != NULL)) {
-            if ((tg != NULL) || (cy->next_scout == NULL)) {
-                tg  = (tg != NULL) ? tg : LIST_MEMBER(cy->list_gossip.tail, cy_topic_t, list_gossip);
-                tg  = (tg != NULL) ? tg : cy->heartbeat_pub.topic;
-                res = publish_heartbeat_gossip(cy, tg, now);
+        cy_topic_t*                 topic = LIST_TAIL(cy->list_gossip_urgent, cy_topic_t, list_gossip_urgent);
+        cy_subscriber_root_t* const scout = LIST_TAIL(cy->list_scout_pending, cy_subscriber_root_t, list_scout_pending);
+        if ((now >= cy->heartbeat_next) || (topic != NULL) || (scout != NULL)) {
+            if ((topic != NULL) || (scout == NULL)) {
+                topic = (topic != NULL) ? topic : LIST_TAIL(cy->list_gossip, cy_topic_t, list_gossip);
+                topic = (topic != NULL) ? topic : cy->heartbeat_pub.topic;
+                res   = publish_heartbeat_gossip(cy, topic, now);
             } else {
-                res = publish_heartbeat_scout(cy, now);
+                res = publish_heartbeat_scout(cy, scout, now);
             }
             cy->heartbeat_next = now + dither_int(cy, cy->heartbeat_period, cy->heartbeat_period / 8);
         }

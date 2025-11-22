@@ -335,8 +335,6 @@ struct cy_subscriber_t
 /// The extent of all subscriptions should be the same, or the values of subscriptions added later should be less
 /// than those of subscriptions added earlier. Otherwise, the library will be forced to resubscribe,
 /// which may cause momentary data loss if there were transfers in the middle of reassembly, plus it is usually slow.
-///
-/// The complexity is about linear in the number of subscriptions.
 cy_err_t               cy_subscribe(cy_t* const                    cy,
                                     cy_subscriber_t* const         sub,
                                     const wkv_str_t                name,
