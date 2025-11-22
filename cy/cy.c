@@ -248,15 +248,15 @@ static int32_t cavl_comp_topic_subject_id(const void* const user, const cy_tree_
     return (int32_t)(*(uint16_t*)user) - ((int32_t)cy_topic_subject_id(inner));
 }
 
-static int32_t cavl_comp_future_transfer_id_masked(const void* const user, const cy_tree_t* const node)
+static int32_t cavl_comp_future_transfer_id(const void* const user, const cy_tree_t* const node)
 {
     assert((user != NULL) && (node != NULL));
     const uint64_t           outer = *(uint64_t*)user;
     const cy_future_t* const inner = CAVL2_TO_OWNER(node, cy_future_t, index_transfer_id);
-    if (outer == inner->transfer_id_masked) {
+    if (outer == inner->transfer_id) {
         return 0;
     }
-    return (outer >= inner->transfer_id_masked) ? +1 : -1;
+    return (outer >= inner->transfer_id) ? +1 : -1;
 }
 
 /// Deadlines are not unique, so this comparator never returns 0.
@@ -410,6 +410,10 @@ static cy_err_t ensure_joined(cy_t* const cy)
 //                                                  TOPIC UTILITIES
 // =====================================================================================================================
 
+/// For each topic we are subscribed to, there is a single subscriber root.
+/// The application can create an arbitrary number of subscribers per topic, which all go under the same root.
+/// If pattern subscriptions are used, a single root may match multiple topics; the matching is tracked using
+/// the coupling objects.
 typedef struct cy_subscriber_root_t
 {
     wkv_node_t* index_name;
@@ -1172,9 +1176,7 @@ cy_err_t cy_advertise(cy_t* const cy, cy_publisher_t* const pub, const wkv_str_t
         pub->topic->pub_count++;
         delist(&cy->list_implicit, &pub->topic->list_implicit);
         cy->platform->topic_advertise(cy, pub->topic, response_extent + P2P_HEADER_BYTES);
-        if (!is_pinned(pub->topic->hash)) {
-            schedule_gossip(cy, pub->topic, true); // Announce change ASAP
-        }
+        // We don't need to schedule gossip here because this is managed by topic_ensure et al.
     }
     CY_TRACE(cy,
              "✨'%s' #%016llx @%04x: topic_count=%zu pub_count=%zu res=%d",
@@ -1225,17 +1227,17 @@ cy_err_t cy_publish(cy_t* const                cy,
     // The reason we can't do it afterward is that if the transport has a cyclic transfer-ID, insertion may fail if
     // we have exhausted the transfer-ID set.
     if (future != NULL) {
-        future->index_deadline     = (cy_tree_t){ 0 };
-        future->index_transfer_id  = (cy_tree_t){ 0 };
-        future->publisher          = pub;
-        future->state              = cy_future_pending;
-        future->transfer_id_masked = topic->pub_transfer_id & cy->platform->transfer_id_mask;
-        future->deadline           = response_deadline;
-        future->last_response      = (cy_transfer_owned_t){ 0 };
+        future->index_deadline    = (cy_tree_t){ 0 };
+        future->index_transfer_id = (cy_tree_t){ 0 };
+        future->publisher         = pub;
+        future->state             = cy_future_pending;
+        future->transfer_id       = topic->pub_transfer_id;
+        future->deadline          = response_deadline;
+        future->last_response     = (cy_transfer_owned_t){ 0 };
         // NB: we don't touch the callback and the user pointer, as they are to be initialized by the user.
         const cy_tree_t* const tr = cavl2_find_or_insert(&topic->futures_by_transfer_id,
-                                                         &future->transfer_id_masked,
-                                                         &cavl_comp_future_transfer_id_masked,
+                                                         &future->transfer_id,
+                                                         &cavl_comp_future_transfer_id,
                                                          future,
                                                          &cavl_factory_future_transfer_id);
         if (tr != &future->index_transfer_id) {
@@ -1345,7 +1347,7 @@ static cy_err_t ensure_subscriber_root(cy_t* const                  cy,
         }
     }
 
-    // Register the next pending scout. We do it strictly in the FIFO order.
+    // Register the next pending scout. We do it strictly in the FIFO order. TODO use the list primitive instead.
     if (wc) {
         cy_subscriber_root_t* next_scout = cy->next_scout;
         while ((next_scout != NULL) && (next_scout->next_scout != NULL)) {
@@ -1725,42 +1727,45 @@ void cy_ingest(cy_t* const cy, cy_topic_t* const topic, cy_transfer_owned_t tran
     }
 }
 
-void cy_ingest_p2p(cy_t* const cy, cy_transfer_owned_t transfer)
+static void ingest_p2p_ack_message(cy_t* const       cy,
+                                   cy_topic_t* const topic,
+                                   const uint64_t    transfer_id,
+                                   const uint16_t    remote_node_id)
 {
-    assert(cy != NULL);
-    mark_neighbor(cy, transfer.metadata.remote_node_id);
+    (void)cy;
+    (void)topic;
+    (void)transfer_id;
+    (void)remote_node_id;
+    // TODO: implement reliable delivery https://github.com/OpenCyphal-Garage/cy/issues/21
+    // Specifically, find the pending future and mark it as completed.
+}
 
-    // TODO: proper deserialization.
-    if (transfer.payload.base.view.size < P2P_HEADER_BYTES) {
-        cy->platform->buffer_release(cy, transfer.payload);
-        return; // Malformed response -- missing header.
-    }
+static void ingest_p2p_ack_response(cy_t* const       cy,
+                                    cy_topic_t* const topic,
+                                    const uint64_t    transfer_id,
+                                    const uint16_t    remote_node_id)
+{
+    (void)cy;
+    (void)topic;
+    (void)transfer_id;
+    (void)remote_node_id;
+    // TODO: implement reliable delivery https://github.com/OpenCyphal-Garage/cy/issues/21
+    // Specifically, find the pending response state and delete it.
+}
 
-    // Deserialize the header. The rest of the payload is for the application.
-    uint64_t response_header[2];
-    memcpy(&response_header, transfer.payload.base.view.data, sizeof(response_header));
-    transfer.payload.base.view.size -= sizeof(response_header);
-    transfer.payload.base.view.data   = ((const char*)transfer.payload.base.view.data) + sizeof(response_header);
-    const uint64_t topic_hash         = response_header[0];
-    const uint64_t transfer_id_masked = response_header[1] & cy->platform->transfer_id_mask;
-
-    // Find the topic -- log(N) lookup.
-    cy_topic_t* const topic = cy_topic_find_by_hash(cy, topic_hash);
-    if (topic == NULL) {
-        cy->platform->buffer_release(cy, transfer.payload);
-        return; // We don't know this topic, ignore it.
-    }
-
+static void ingest_p2p_response(cy_t* const         cy,
+                                cy_topic_t* const   topic,
+                                const uint64_t      transfer_id,
+                                cy_transfer_owned_t transfer)
+{
     // Find the matching pending response future -- log(N) lookup.
-    cy_tree_t* const tr =
-      cavl2_find(topic->futures_by_transfer_id, &transfer_id_masked, &cavl_comp_future_transfer_id_masked);
+    cy_tree_t* const tr = cavl2_find(topic->futures_by_transfer_id, &transfer_id, &cavl_comp_future_transfer_id);
     if (tr == NULL) {
         cy->platform->buffer_release(cy, transfer.payload);
         return; // Unexpected or duplicate response. TODO: Linger completed futures for multiple responses?
     }
     cy_future_t* const fut = CAVL2_TO_OWNER(tr, cy_future_t, index_transfer_id);
     assert(fut->state == cy_future_pending);
-
     // Finalize and retire the future.
     fut->state = cy_future_success;
     cy_buffer_owned_release(cy, &fut->last_response.payload); // does nothing if already released
@@ -1769,6 +1774,61 @@ void cy_ingest_p2p(cy_t* const cy, cy_transfer_owned_t transfer)
     cavl2_remove(&topic->futures_by_transfer_id, &fut->index_transfer_id);
     if (fut->callback != NULL) {
         fut->callback(cy, fut);
+    }
+}
+
+void cy_ingest_p2p(cy_t* const cy, cy_transfer_owned_t transfer)
+{
+    assert(cy != NULL);
+    mark_neighbor(cy, transfer.metadata.remote_node_id);
+
+    // We require the first 24 bytes to be non-fragmented. This is trivially ensured because the MTU of all transports
+    // that fragment per-frame is much larger (UDP requires the MTU to be at least a few hundreds of bytes),
+    // while small-MTU transports reassemble the payload into a contiguous buffer anyway.
+    if (transfer.payload.base.view.size < P2P_HEADER_BYTES) {
+        cy->platform->buffer_release(cy, transfer.payload);
+        return; // Malformed response -- missing header.
+    }
+    // Deserialize the header. The rest of the payload is for the application.
+    uint64_t response_header[3];
+    static_assert(sizeof(response_header) == P2P_HEADER_BYTES, "P2P header size mismatch");
+    memcpy(&response_header, transfer.payload.base.view.data, P2P_HEADER_BYTES);
+    transfer.payload.base.view.size -= P2P_HEADER_BYTES;
+    transfer.payload.base.view.data = ((const char*)transfer.payload.base.view.data) + P2P_HEADER_BYTES;
+    const uint_fast8_t kind         = (uint_fast8_t)(response_header[0] & 0xFFU);
+    const uint64_t     topic_hash   = response_header[1];
+    const uint64_t     transfer_id  = response_header[2];
+
+    // Find the topic -- log(N) lookup.
+    cy_topic_t* const topic = cy_topic_find_by_hash(cy, topic_hash);
+    if (topic == NULL) { // We don't know this topic, ignore it.
+        cy->platform->buffer_release(cy, transfer.payload);
+        CY_TRACE(cy, "⚠️ Orphan P2P kind=%u topic #%016llx", (unsigned)kind, (unsigned long long)topic_hash);
+    } else {
+        switch (kind) {
+            case p2p_kind_ack_message: {
+                cy->platform->buffer_release(cy, transfer.payload);
+                ingest_p2p_ack_message(cy, topic, transfer_id, transfer.metadata.remote_node_id);
+                break;
+            }
+            case p2p_kind_ack_response: {
+                cy->platform->buffer_release(cy, transfer.payload);
+                ingest_p2p_ack_response(cy, topic, transfer_id, transfer.metadata.remote_node_id);
+                break;
+            }
+            case p2p_kind_response: {
+                ingest_p2p_response(cy, topic, transfer_id, transfer);
+                break;
+            }
+            default: {
+                cy->platform->buffer_release(cy, transfer.payload);
+                CY_TRACE(cy,
+                         "⚠️ Unknown P2P message kind=%u received for topic #%016llx",
+                         (unsigned)kind,
+                         (unsigned long long)topic_hash);
+                break;
+            }
+        }
     }
 }
 
@@ -1792,7 +1852,7 @@ cy_err_t cy_update(cy_t* const cy)
     // Decide if it is time to publish a heartbeat. We use a very simple minimal-state scheduler that runs two
     // periods and offers an opportunity to publish a heartbeat every now and then.
     if ((now >= cy->heartbeat_next) || (now >= cy->heartbeat_next_urgent)) {
-        cy_topic_t* tg = LIST_MEMBER(cy->list_gossip_urgent.tail, cy_topic_t, list_gossip);
+        cy_topic_t* tg = LIST_MEMBER(cy->list_gossip_urgent.tail, cy_topic_t, list_gossip_urgent);
         if ((now >= cy->heartbeat_next) || (tg != NULL) || (cy->next_scout != NULL)) {
             if ((tg != NULL) || (cy->next_scout == NULL)) {
                 tg  = (tg != NULL) ? tg : LIST_MEMBER(cy->list_gossip.tail, cy_topic_t, list_gossip);

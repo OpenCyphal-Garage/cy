@@ -185,9 +185,9 @@ struct cy_publisher_t
 };
 
 /// Future lifecycle:
-///     fresh ---> pending --+---> success
-///                          +---> timeout_ack
-///                          +---> timeout_response
+///     fresh --> pending --+--> success
+///                         +--> timeout_ack
+///                         +--> timeout_response
 typedef enum cy_future_state_t
 {
     cy_future_fresh,
@@ -210,8 +210,8 @@ struct cy_future_t
 
     cy_publisher_t*   publisher;
     cy_future_state_t state;
-    uint64_t          transfer_id_masked; ///< Masked as (platform->transfer_id_mask & transfer_id)
-    cy_us_t           deadline;           ///< We're indexing on this so it shall not be changed after insertion.
+    uint64_t          transfer_id; ///< Remember that transports with narrow transfer-ID should recover the full ID.
+    cy_us_t           deadline;    ///< We're indexing on this so it shall not be changed after insertion.
 
     /// These fields are populated once the response is received.
     /// The payload ownership is transferred to this structure.

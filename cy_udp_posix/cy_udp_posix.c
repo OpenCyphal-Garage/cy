@@ -454,8 +454,7 @@ static const cy_platform_t g_platform = {
     .topic_advertise             = platform_topic_advertise,
     .topic_on_subscription_error = platform_topic_on_subscription_error,
 
-    .node_id_max      = UDPARD_NODE_ID_MAX,
-    .transfer_id_mask = UINT64_MAX,
+    .node_id_max = UDPARD_NODE_ID_MAX,
 };
 
 // ----------------------------------------  END OF PLATFORM INTERFACE  ----------------------------------------

@@ -293,13 +293,6 @@ struct cy_platform_t
     /// 127 for Cyphal/CAN, 65534 for Cyphal/UDP and Cyphal/Serial, etc.
     /// This is used for the automatic node-ID allocation.
     uint16_t node_id_max;
-
-    /// The mask is used only for matching received responses with pending futures.
-    /// In Cyphal/CAN, the mask is 31, as we only have 5 bits for the cyclic transfer-ID counter.
-    /// In other transports, the mask is 2**64-1.
-    /// This shall always be one less than an integer power of two.
-    /// TODO: remove this; require the CAN transport to unroll the transfer-ID internally instead.
-    uint64_t transfer_id_mask;
 };
 
 /// There are only three functions (plus convenience wrappers) whose invocations may result in network traffic:

@@ -242,7 +242,7 @@ static void on_response_trace(cy_t* const cy, cy_future_t* const future)
         CY_TRACE(cy,
                  "↩️⌛ Request to '%s' tid=%016llx (masked) has timed out",
                  future->publisher->topic->name,
-                 (unsigned long long)future->transfer_id_masked);
+                 (unsigned long long)future->transfer_id);
     } else {
         assert(false);
     }
