@@ -1638,10 +1638,9 @@ cy_err_t cy_new(cy_t* const                cy,
 
     // Pub/sub on the heartbeat topic.
     if (res == CY_OK) {
-        res = cy_advertise_c(cy, &cy->heartbeat_pub, CY_CONFIG_HEARTBEAT_TOPIC_NAME, 0);
+        res = cy_advertise_c(cy, &cy->heartbeat_pub, CY_HEARTBEAT_TOPIC_NAME, 0);
         if (res == CY_OK) {
-            res = cy_subscribe_c(
-              cy, &cy->heartbeat_sub, CY_CONFIG_HEARTBEAT_TOPIC_NAME, sizeof(heartbeat_t), &on_heartbeat);
+            res = cy_subscribe_c(cy, &cy->heartbeat_sub, CY_HEARTBEAT_TOPIC_NAME, sizeof(heartbeat_t), &on_heartbeat);
             if (res != CY_OK) {
                 cy_unadvertise(cy, &cy->heartbeat_pub);
             }

@@ -25,6 +25,7 @@
 *.csv
 *.db
 *.profraw
+*.luarc*
 .scannerwork
 build/
 build_*/

@@ -375,3 +375,7 @@ N_NAMED_SUBJECTS  = 57349
 TRANSFER_CRC_BITS = 16
 bday(28, N_NAMED_SUBJECTS * 2**TRANSFER_CRC_BITS)  # ≈1.0e-7, or ≈1 in 10 million
 ```
+
+## Debugging tips
+
+Use Wireshark with the `cyphal_wireshark.lua` dissector plugin. Read the file for usage instructions.

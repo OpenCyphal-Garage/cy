@@ -17,11 +17,9 @@
 //                                              BUILD TIME CONFIG OPTIONS
 // =====================================================================================================================
 
-/// Only for testing and debugging purposes.
+/// Only for testing and debugging purposes; never redefine in production builds.
 /// All nodes obviously must use the same heartbeat topic, which is why it is pinned.
-#ifndef CY_CONFIG_HEARTBEAT_TOPIC_NAME
-#define CY_CONFIG_HEARTBEAT_TOPIC_NAME "/@/7509"
-#endif
+#define CY_HEARTBEAT_TOPIC_NAME "/@/7509"
 
 /// Only for testing and debugging purposes.
 /// Makes all non-pinned topics prefer the same subject-ID that equals the value of this macro,
