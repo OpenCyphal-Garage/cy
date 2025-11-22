@@ -75,5 +75,8 @@ utf8[<=TOPIC_NAME_MAX] topic_name
 # - does neither start nor end with /;
 # - does not contain consecutive /.
 # Implementation library APIs may impose additional restrictions and introduce new special characters.
+#
+# In the future, it is possible that nodes will be allowed to omit the topic name when gossiping to conserve bandwidth,
+# except when responding to scout messages. This behavior may be considered for a future specification revision.
 
 @extent 300 * 8

@@ -31,6 +31,8 @@ local f_topic_evictions = ProtoField.uint64("heartbeat.topic_evictions", "Topic 
 local f_topic_lage      = ProtoField.int8  ("heartbeat.topic_lage", "Topic age floor∘log", base.DEC)
 local f_topic_name_len  = ProtoField.uint8 ("heartbeat.topic_name_len", "Topic name length", base.DEC)
 local f_topic_name      = ProtoField.string("heartbeat.topic_name", "Topic name", base.ASCII)
+-- Computed synthetic fields
+local f_syn_topic_subject_id = ProtoField.uint16("heartbeat.topic_subject_id", "Subject-ID", base.DEC)
 
 heartbeat_proto.fields = {
     f_uptime,
@@ -47,7 +49,8 @@ heartbeat_proto.fields = {
     f_topic_evictions,
     f_topic_lage,
     f_topic_name_len,
-    f_topic_name
+    f_topic_name,
+    f_syn_topic_subject_id
 }
 
 function heartbeat_proto.dissector(tvb, pinfo, tree)
@@ -120,6 +123,7 @@ function heartbeat_proto.dissector(tvb, pinfo, tree)
     offset = offset + 8
 
     -- topic hash
+    local topic_hash = tvb(offset, 8):le_uint64():tonumber()
     subtree:add_le(f_topic_hash, tvb(offset, 8))
     offset = offset + 8
 
@@ -154,8 +158,20 @@ function heartbeat_proto.dissector(tvb, pinfo, tree)
         subtree:add(f_topic_name, name_range, topic_name)
     end
 
+    -- Computed synthetic field: subject-ID
+    local subject_id = topic_subject_id(topic_hash, topic_evictions)
+    subtree:add(f_syn_topic_subject_id, subject_id):set_generated()
+
     -- Update Info column
-    pinfo.cols.info = info..string.format(" 🆔%016x 📢% 3u %+02d \"%s\"", uid, topic_evictions, topic_lage, topic_name)
+    pinfo.cols.info = info..string.format(
+        " 🆔%016x 📢% 3u %+02d % 5u \"%s\"",
+        uid, topic_evictions, topic_lage, subject_id, topic_name
+    )
+end
+
+function topic_subject_id(hash, evictions)
+    -- https://github.com/OpenCyphal-Garage/cy/issues/12
+    return 8187 + (hash + evictions * evictions) % 57349
 end
 
 -- Register dissector for UDP port 9382
