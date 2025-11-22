@@ -453,7 +453,7 @@ static int_fast8_t topic_lage(const cy_topic_t* const topic, const cy_us_t now)
 /// CRDT merge operator on the topic log-age. Shift ts_origin into the past if needed.
 static void topic_merge_lage(cy_topic_t* const topic, const cy_us_t now, const int_fast8_t r_lage)
 {
-    topic->ts_origin = min_i64(topic->ts_origin, now - pow2us(r_lage));
+    topic->ts_origin = min_i64(topic->ts_origin, now - (pow2us(r_lage) * MEGA));
 }
 
 /// Pinned topic names are canonical, which ensures that one pinned topic cannot collide with another.
@@ -791,7 +791,7 @@ static cy_err_t topic_new(cy_t* const        cy,
         // meaning that another pinned topic is not occupying the same subject-ID.
         // Remember that topics arbitrate locally the same way they do externally, meaning that adding a new local topic
         // may displace another local one.
-        topic_allocate(cy, topic, 0, true, now);
+        topic_allocate(cy, topic, topic->evictions, true, now);
         if (out_topic != NULL) {
             *out_topic = topic;
         }
