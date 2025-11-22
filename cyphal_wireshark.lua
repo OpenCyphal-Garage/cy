@@ -117,9 +117,12 @@ function heartbeat_proto.dissector(tvb, pinfo, tree)
     local uid_range = tvb(offset, 8)
     local uid = uid_range:le_uint64():tonumber()
     local uid_tree = subtree:add_le(f_uid, uid_range)
-    uid_tree:add_le(f_uid_iid, tvb(offset, 4))
+    uid_tree:add_le(f_uid_iid, tvb(offset + 0, 4))
     uid_tree:add_le(f_uid_pid, tvb(offset + 4, 2))
     uid_tree:add_le(f_uid_vid, tvb(offset + 6, 2))
+    local vid = tvb(offset + 6, 2):le_uint()
+    local pid = tvb(offset + 4, 2):le_uint()
+    local iid = tvb(offset + 0, 4):le_uint()
     offset = offset + 8
 
     -- topic hash
@@ -164,8 +167,8 @@ function heartbeat_proto.dissector(tvb, pinfo, tree)
 
     -- Update Info column
     pinfo.cols.info = info..string.format(
-        " 🆔%016x 📢% 3u %+02d % 5u \"%s\"",
-        uid, topic_evictions, topic_lage, subject_id, topic_name
+        " 🆔%04x_%04x_%08x 📢% 3u %+02d % 5u \"%s\"",
+        vid, pid, iid, topic_evictions, topic_lage, subject_id, topic_name
     )
 end
 

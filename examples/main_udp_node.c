@@ -240,7 +240,7 @@ static void on_response_trace(cy_t* const cy, cy_future_t* const future)
                  ascii);
     } else if (future->state == cy_future_timeout_response) {
         CY_TRACE(cy,
-                 "↩️⌛ Request to '%s' tid=%016llx (masked) has timed out",
+                 "↩️⌛ Request to '%s' tid=%016llx has timed out",
                  future->publisher->topic->name,
                  (unsigned long long)future->transfer_id);
     } else {
