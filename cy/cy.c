@@ -1766,6 +1766,10 @@ void cy_ingest_p2p(cy_t* const cy, cy_transfer_owned_t transfer)
     // that fragment per-frame is much larger (UDP requires the MTU to be at least a few hundreds of bytes),
     // while small-MTU transports reassemble the payload into a contiguous buffer anyway.
     if (transfer.payload.base.view.size < P2P_HEADER_BYTES) {
+        CY_TRACE(cy,
+                 "⚠️ Malformed from nid=%04x: size=%zu bytes",
+                 transfer.metadata.remote_node_id,
+                 transfer.payload.base.view.size);
         cy->platform->buffer_release(cy, transfer.payload);
         return; // Malformed response -- missing header.
     }
@@ -1783,7 +1787,7 @@ void cy_ingest_p2p(cy_t* const cy, cy_transfer_owned_t transfer)
     cy_topic_t* const topic = cy_topic_find_by_hash(cy, topic_hash);
     if (topic == NULL) { // We don't know this topic, ignore it.
         cy->platform->buffer_release(cy, transfer.payload);
-        CY_TRACE(cy, "⚠️ Orphan P2P kind=%u topic #%016llx", (unsigned)kind, (unsigned long long)topic_hash);
+        CY_TRACE(cy, "⚠️ Orphan kind=%u #%016llx", (unsigned)kind, (unsigned long long)topic_hash);
     } else {
         switch (kind) {
             case p2p_kind_ack_message: {
@@ -1802,10 +1806,7 @@ void cy_ingest_p2p(cy_t* const cy, cy_transfer_owned_t transfer)
             }
             default: {
                 cy->platform->buffer_release(cy, transfer.payload);
-                CY_TRACE(cy,
-                         "⚠️ Unknown P2P message kind=%u received for topic #%016llx",
-                         (unsigned)kind,
-                         (unsigned long long)topic_hash);
+                CY_TRACE(cy, "⚠️ Unknown kind=%u #%016llx", (unsigned)kind, (unsigned long long)topic_hash);
                 break;
             }
         }
