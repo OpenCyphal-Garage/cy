@@ -34,9 +34,6 @@ extern "C"
 /// The max namespace length should also provide space for at least one separator and the one-character topic name.
 #define CY_NAMESPACE_NAME_MAX (CY_TOPIC_NAME_MAX - 2)
 
-/// If not sure, use this value for the transfer-ID timeout.
-#define CY_TRANSFER_ID_TIMEOUT_DEFAULT_us 10000000L
-
 /// The range of unregulated identifiers to use for CRDT topic allocation.
 /// Pinned topics (such as the ordinary topics with manually assigned IDs) can be pinned anywhere in [0, 8184].
 /// Subject-IDs in [8187, 65535] are managed by the named topic allocation protocol.
@@ -314,8 +311,7 @@ typedef void (*cy_subscriber_callback_t)(cy_t*, const cy_arrival_t*);
 /// be created asynchronously wrt the user calling cy_subscribe().
 struct cy_subscription_params_t
 {
-    size_t  extent;
-    cy_us_t transfer_id_timeout;
+    size_t extent;
 };
 
 /// Subscribers SHALL NOT be copied/moved after initialization until destroyed.
@@ -336,33 +332,23 @@ struct cy_subscriber_t
 
 /// It is allowed to remove the subscription from its own callback, but not from the callback of another subscription.
 ///
-/// The extent and transfer-ID timeout of all subscriptions should be the same, or these values of subscriptions
-/// added later should be less than the values of subscriptions added earlier. Otherwise, the library will be forced
-/// to resubscribe, which may cause momentary data loss if there were transfers in the middle of reassembly,
-/// plus it is usually slow.
+/// The extent of all subscriptions should be the same, or the values of subscriptions added later should be less
+/// than those of subscriptions added earlier. Otherwise, the library will be forced to resubscribe,
+/// which may cause momentary data loss if there were transfers in the middle of reassembly, plus it is usually slow.
 ///
 /// The complexity is about linear in the number of subscriptions.
-cy_err_t               cy_subscribe_with_params(cy_t* const                    cy,
-                                                cy_subscriber_t* const         sub,
-                                                const wkv_str_t                name,
-                                                const cy_subscription_params_t params,
-                                                const cy_subscriber_callback_t callback);
-static inline cy_err_t cy_subscribe_with_params_c(cy_t* const                    cy,
-                                                  cy_subscriber_t* const         sub,
-                                                  const char* const              name,
-                                                  const cy_subscription_params_t params,
-                                                  const cy_subscriber_callback_t callback)
-{
-    return cy_subscribe_with_params(cy, sub, wkv_key(name), params, callback);
-}
+cy_err_t               cy_subscribe(cy_t* const                    cy,
+                                    cy_subscriber_t* const         sub,
+                                    const wkv_str_t                name,
+                                    const size_t                   extent,
+                                    const cy_subscriber_callback_t callback);
 static inline cy_err_t cy_subscribe_c(cy_t* const                    cy,
                                       cy_subscriber_t* const         sub,
                                       const char* const              name,
                                       const size_t                   extent,
                                       const cy_subscriber_callback_t callback)
 {
-    const cy_subscription_params_t params = { extent, CY_TRANSFER_ID_TIMEOUT_DEFAULT_us };
-    return cy_subscribe_with_params_c(cy, sub, name, params, callback);
+    return cy_subscribe(cy, sub, wkv_key(name), extent, callback);
 }
 void cy_unsubscribe(cy_t* const cy, cy_subscriber_t* const sub);
 

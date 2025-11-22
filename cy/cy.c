@@ -592,7 +592,7 @@ static cy_topic_t* topic_find_by_subject_id(const cy_t* const cy, const uint16_t
 /// If this becomes a problem, we can simply store the subscription parameters in the topic fields.
 static cy_subscription_params_t deduce_subscription_params(const cy_topic_t* const topic)
 {
-    cy_subscription_params_t out = { 0, 0 };
+    cy_subscription_params_t out = { 0 };
     // Go over all couplings and all subscribers in each coupling.
     const cy_topic_coupling_t* cpl = topic->couplings;
     assert(cpl != NULL);
@@ -600,9 +600,8 @@ static cy_subscription_params_t deduce_subscription_params(const cy_topic_t* con
         const cy_subscriber_t* sub = cpl->root->head;
         assert(sub != NULL);
         while (sub != NULL) {
-            out.extent              = larger(out.extent, sub->params.extent);
-            out.transfer_id_timeout = max_i64(out.transfer_id_timeout, sub->params.transfer_id_timeout);
-            sub                     = sub->next;
+            out.extent = larger(out.extent, sub->params.extent);
+            sub        = sub->next;
         }
         cpl = cpl->next;
     }
@@ -618,12 +617,11 @@ static void topic_ensure_subscribed(cy_t* const cy, cy_topic_t* const topic)
         const cy_err_t                 res    = cy->platform->topic_subscribe(cy, topic, params);
         topic->subscribed                     = res == CY_OK;
         CY_TRACE(cy,
-                 "🗞️'%s' #%016llx @%04x extent=%zu tid_timeout=%lld result=%d",
+                 "🗞️'%s' #%016llx @%04x extent=%zu result=%d",
                  topic->name,
                  (unsigned long long)topic->hash,
                  cy_topic_subject_id(topic),
                  params.extent,
-                 (long long)params.transfer_id_timeout,
                  res);
         if (!topic->subscribed) {
             cy->platform->topic_on_subscription_error(cy, topic, res); // not our problem anymore
@@ -1279,8 +1277,7 @@ static void* wkv_cb_couple_new_subscription(const wkv_event_t evt)
     if (topic->subscribed) {
         const cy_subscription_params_t param_old = deduce_subscription_params(topic);
         const cy_subscription_params_t param_new = sub->params;
-        resubscribe = (param_new.extent > param_old.extent) || //-------------------------------------
-                      (param_new.transfer_id_timeout > param_old.transfer_id_timeout);
+        resubscribe                              = (param_new.extent > param_old.extent);
     }
     // Create the coupling.
     const cy_err_t res = topic_couple(cy, topic, sub->root, evt.substitution_count, evt.substitutions);
@@ -1364,13 +1361,13 @@ static cy_err_t ensure_subscriber_root(cy_t* const                  cy,
     return CY_OK;
 }
 
-cy_err_t cy_subscribe_with_params(cy_t* const                    cy,
-                                  cy_subscriber_t* const         sub,
-                                  const wkv_str_t                name,
-                                  const cy_subscription_params_t params,
-                                  const cy_subscriber_callback_t callback)
+cy_err_t cy_subscribe(cy_t* const                    cy,
+                      cy_subscriber_t* const         sub,
+                      const wkv_str_t                name,
+                      const size_t                   extent,
+                      const cy_subscriber_callback_t callback)
 {
-    if ((sub == NULL) || (cy == NULL) || (params.transfer_id_timeout < 0) || (callback == NULL)) {
+    if ((sub == NULL) || (cy == NULL) || (callback == NULL)) {
         return CY_ERR_ARGUMENT;
     }
     char name_buf[CY_TOPIC_NAME_MAX + 1U];
@@ -1379,17 +1376,13 @@ cy_err_t cy_subscribe_with_params(cy_t* const                    cy,
     }
     const wkv_str_t resolved_name = wkv_key(name_buf);
     (void)memset(sub, 0, sizeof(*sub));
-    CY_TRACE(cy,
-             "✨'%s' extent=%zu tid_timeout=%lld",
-             resolved_name.str,
-             params.extent,
-             (long long)params.transfer_id_timeout);
+    CY_TRACE(cy, "✨'%s' extent=%zu", resolved_name.str, extent);
     const cy_err_t res = ensure_subscriber_root(cy, resolved_name, &sub->root);
     if (res != CY_OK) {
         return res;
     }
     assert(sub->root != NULL);
-    sub->params     = params;
+    sub->params     = (cy_subscription_params_t){ .extent = extent };
     sub->callback   = callback;
     sub->next       = sub->root->head;
     sub->root->head = sub;
@@ -1870,7 +1863,7 @@ cy_err_t cy_update(cy_t* const cy)
 
 void cy_notify_topic_collision(cy_t* const cy, cy_topic_t* const topic)
 {
-    if (topic != NULL) { // Topics with the same time will be ordered FIFO -- the tree is stable.
+    if (topic != NULL) {
         schedule_gossip(cy, topic, true);
     }
 }

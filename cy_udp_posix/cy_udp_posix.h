@@ -55,10 +55,6 @@ struct cy_udp_posix_t
     /// Maximum seen value across all topics since initialization.
     size_t response_extent_with_overhead;
 
-    /// This can be overridden immediately after initialization if necessary.
-    /// Changing this after the node-ID is allocated may not have any effect.
-    cy_us_t rpc_transfer_id_timeout;
-
     size_t n_topics;
 
     uint64_t     node_id_bloom_storage[CY_UDP_POSIX_NODE_ID_BLOOM_64BIT_WORDS];

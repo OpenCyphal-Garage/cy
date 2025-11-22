@@ -28,6 +28,10 @@
 
 #define P2P_SERVICE_ID 511
 
+/// This parameter may disappear completely from the protocol in the future, see:
+/// https://github.com/OpenCyphal/specification/issues/139
+#define TRANSFER_ID_TIMEOUT_us (60 * 1000000LL)
+
 static int64_t min_i64(const int64_t a, const int64_t b)
 {
     return (a < b) ? a : b;
@@ -116,8 +120,7 @@ static void rpc_listen(cy_udp_posix_t* const cy_udp)
     // Now, the ordering of response transfer-ID values matches the ordering in which the responses are sent.
     // If interleaving is still present due to network effects, libudpard will handle it correctly because it
     // supports out-of-order frames even if they interleave between adjacent transfers.
-    cy_udp->rpc_rx_port_topic_response.port.transfer_id_timeout_usec =
-      (UdpardMicrosecond)cy_udp->rpc_transfer_id_timeout;
+    cy_udp->rpc_rx_port_topic_response.port.transfer_id_timeout_usec = (UdpardMicrosecond)TRANSFER_ID_TIMEOUT_us;
     CY_TRACE(&cy_udp->base,
              "🎧 RPC service_id=%04x extent=%zu",
              cy_udp->rpc_rx_port_topic_response.service_id,
@@ -377,7 +380,7 @@ static cy_err_t platform_topic_subscribe(cy_t* const                    cy,
     if (res != CY_OK) {
         return res; // No cleanup needed, no resources allocated yet.
     }
-    topic->sub.port.transfer_id_timeout_usec = (UdpardMicrosecond)params.transfer_id_timeout;
+    topic->sub.port.transfer_id_timeout_usec = (UdpardMicrosecond)TRANSFER_ID_TIMEOUT_us;
 
     // Open the sockets for this subscription.
     for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
@@ -477,7 +480,6 @@ cy_err_t cy_udp_posix_new(cy_udp_posix_t* const cy_udp,
     assert(cy_udp != NULL);
     memset(cy_udp, 0, sizeof(*cy_udp));
     cy_udp->response_extent_with_overhead = 64; // We start from an arbitrary value that just makes sense.
-    cy_udp->rpc_transfer_id_timeout       = CY_TRANSFER_ID_TIMEOUT_DEFAULT_us;
     cy_udp->n_topics                      = 0;
     // Set up the memory resources. We could use block pool allocator here as well!
     cy_udp->mem.allocate                  = mem_alloc;
