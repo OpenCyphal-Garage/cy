@@ -13,28 +13,32 @@
 --
 -- Copyright (c) Pavel Kirienko <pavel@opencyphal.org>
 
-local heartbeat_dst_ip = "239.0.29.85"
-local heartbeat_proto = Proto("cyphal_heartbeat", "Cyphal Heartbeat")
+local heartbeat_dst_ip       = "239.0.29.85"
+local heartbeat_proto        = Proto("cyphal_heartbeat", "Cyphal Heartbeat")
 
-local f_uptime          = ProtoField.uint32("heartbeat.uptime", "Uptime [s]", base.DEC, nil, nil, "[second]")
-local f_user            = ProtoField.uint24("heartbeat.user_word", "User word", base.HEX)
-local f_user_0          = ProtoField.uint8 ("heartbeat.user_word.byte0", "v1.0 health", base.DEC)
-local f_user_1          = ProtoField.uint8 ("heartbeat.user_word.byte1", "v1.0 mode", base.DEC)
-local f_user_2          = ProtoField.uint8 ("heartbeat.user_word.byte2", "v1.0 vendor-specific status code", base.DEC)
-local f_version         = ProtoField.uint8 ("heartbeat.version", "Version", base.DEC)
-local f_uid             = ProtoField.uint64("heartbeat.uid", "UID", base.HEX)
-local f_uid_vid         = ProtoField.uint16("heartbeat.uid.vid", "Vendor-ID (VID)",  base.HEX)
-local f_uid_pid         = ProtoField.uint16("heartbeat.uid.pid", "Product-ID (PID)", base.HEX)
-local f_uid_iid         = ProtoField.uint32("heartbeat.uid.iid", "Instance-ID (IID)", base.HEX)
-local f_topic_hash      = ProtoField.uint64("heartbeat.topic_hash", "Topic hash", base.HEX)
-local f_topic_evictions = ProtoField.uint64("heartbeat.topic_evictions", "Topic evictions", base.DEC)
-local f_topic_lage      = ProtoField.int8  ("heartbeat.topic_lage", "Topic age floor∘log", base.DEC)
-local f_topic_name_len  = ProtoField.uint8 ("heartbeat.topic_name_len", "Topic name length", base.DEC)
-local f_topic_name      = ProtoField.string("heartbeat.topic_name", "Topic name", base.ASCII)
+local f_uptime               = ProtoField.uint32("heartbeat.uptime", "Uptime [s]", base.DEC, nil, nil, "[second]")
+local f_user                 = ProtoField.uint24("heartbeat.user_word", "User word", base.HEX, nil, nil,
+"Formerly 3 separate fields: health, mode, vendor-specific status; now all 24 bits are opaque application-defined")
+local f_user_0               = ProtoField.uint8("heartbeat.user_word.byte0", "v1.0 health", base.DEC)
+local f_user_1               = ProtoField.uint8("heartbeat.user_word.byte1", "v1.0 mode", base.DEC)
+local f_user_2               = ProtoField.uint8("heartbeat.user_word.byte2", "v1.0 vendor-specific status", base.DEC)
+
+local f_version              = ProtoField.uint8("heartbeat.version", "Version", base.DEC)
+local f_uid                  = ProtoField.uint64("heartbeat.uid", "UID", base.HEX)
+local f_uid_vid              = ProtoField.uint16("heartbeat.uid.vid", "Vendor-ID (VID)", base.HEX)
+local f_uid_pid              = ProtoField.uint16("heartbeat.uid.pid", "Product-ID (PID)", base.HEX)
+local f_uid_iid              = ProtoField.uint32("heartbeat.uid.iid", "Instance-ID (IID)", base.HEX)
+local f_topic_hash           = ProtoField.uint64("heartbeat.topic_hash", "Topic hash", base.HEX)
+local f_topic_evictions      = ProtoField.uint64("heartbeat.topic_evictions", "Topic evictions", base.DEC)
+local f_topic_lage           = ProtoField.int8("heartbeat.topic_lage", "Topic age floor∘log", base.DEC)
+local f_topic_name_len       = ProtoField.uint8("heartbeat.topic_name_len", "Topic name length", base.DEC)
+local f_topic_name           = ProtoField.string("heartbeat.topic_name", "Topic name", base.ASCII)
+
 -- Computed synthetic fields
 local f_syn_topic_subject_id = ProtoField.uint16("heartbeat.topic_subject_id", "Subject-ID", base.DEC)
+local f_syn_topic_age_bracket= ProtoField.string("heartbeat.topic_age_bracket", "Topic age bracket", base.ACII)
 
-heartbeat_proto.fields = {
+heartbeat_proto.fields       = {
     f_uptime,
     f_user,
     f_user_0,
@@ -50,7 +54,9 @@ heartbeat_proto.fields = {
     f_topic_lage,
     f_topic_name_len,
     f_topic_name,
-    f_syn_topic_subject_id
+    -- synthetic
+    f_syn_topic_subject_id,
+    f_syn_topic_age_bracket
 }
 
 function heartbeat_proto.dissector(tvb, pinfo, tree)
@@ -64,6 +70,7 @@ function heartbeat_proto.dissector(tvb, pinfo, tree)
     -- Handle the Cyphal/UDP header.
     local header_version = tvb(0, 1):le_uint()
     local header_size = 0
+    local source_node_id = tvb(2, 2):le_uint()
     if header_version == 1 then
         header_size = 24
     elseif header_version == 2 then
@@ -99,7 +106,7 @@ function heartbeat_proto.dissector(tvb, pinfo, tree)
 
     -- heartbeat version
     if tvb:len() <= offset + 4 then
-        return  -- Cyphal v1.0 heartbeat, no further fields
+        return -- Cyphal v1.0 heartbeat, no further fields
     end
     local hb_version = tvb(offset, 1):le_uint()
     subtree:add(f_version, tvb(offset, 1))
@@ -114,9 +121,7 @@ function heartbeat_proto.dissector(tvb, pinfo, tree)
     end
 
     -- UID
-    local uid_range = tvb(offset, 8)
-    local uid = uid_range:le_uint64():tonumber()
-    local uid_tree = subtree:add_le(f_uid, uid_range)
+    local uid_tree = subtree:add_le(f_uid, tvb(offset, 8))
     uid_tree:add_le(f_uid_iid, tvb(offset + 0, 4))
     uid_tree:add_le(f_uid_pid, tvb(offset + 4, 2))
     uid_tree:add_le(f_uid_vid, tvb(offset + 6, 2))
@@ -127,6 +132,8 @@ function heartbeat_proto.dissector(tvb, pinfo, tree)
 
     -- topic hash
     local topic_hash = tvb(offset, 8):le_uint64():tonumber()
+    local topic_hash_lo = tvb(offset + 0, 4):le_uint()
+    local topic_hash_hi = tvb(offset + 4, 4):le_uint()
     subtree:add_le(f_topic_hash, tvb(offset, 8))
     offset = offset + 8
 
@@ -165,10 +172,18 @@ function heartbeat_proto.dissector(tvb, pinfo, tree)
     local subject_id = topic_subject_id(topic_hash, topic_evictions)
     subtree:add(f_syn_topic_subject_id, subject_id):set_generated()
 
+    -- Computed synthetic field: topic age range
+    local topic_age_bracket = "[0…1)s";
+    if topic_lage >= 0 then
+        topic_age_bracket = string.format("[%u…%u)s", 2^topic_lage, 2^(topic_lage + 1))
+    end
+    subtree:add(f_syn_topic_age_bracket, topic_age_bracket):set_generated()
+
     -- Update Info column
-    pinfo.cols.info = info..string.format(
-        " 🆔%04x_%04x_%08x 📢% 3u %+02d % 5u \"%s\"",
-        vid, pid, iid, topic_evictions, topic_lage, subject_id, topic_name
+    pinfo.cols.info = info .. string.format(
+        " N%04x_%04x_%08x@%04x 📢% 3u %+03d T%08x%08x@%04x \"%s\"",
+        vid, pid, iid, source_node_id, topic_evictions, topic_lage,
+        topic_hash_hi, topic_hash_lo, subject_id, topic_name
     )
 end
 

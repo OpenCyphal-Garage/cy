@@ -57,7 +57,7 @@ uint40 topic_evictions
 int8 topic_log_age
 # floor(log2(age)), where age is the number of seconds since the topic was first seen; special case: floor(log2(0))=-1.
 # Older topics win arbitration, thus ensuring stability of the network when new topics/nodes appear.
-# Valid lage values are in the range [-1, 63].
+# Valid lage values are in the range [-1, 32].
 #
 # Special case lage=-2 indicates the current message is not a gossip but a scout message. The scout message
 # contains a topic name pattern and every other node is requested to check whether it has any topics matching
