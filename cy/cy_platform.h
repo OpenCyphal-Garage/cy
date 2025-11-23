@@ -267,6 +267,13 @@ typedef void (*cy_platform_topic_on_subscription_error_t)(cy_t*, cy_topic_t*, co
 /// The platform- and transport-specific entities. These can be underpinned by libcanard, libudpard, libserard,
 /// or any other transport library, plus the platform-specific logic.
 /// None of the entities are mutable; instances of this struct are mostly intended to be static const singletons.
+///
+/// The platform layer implementations for cyclic-transfer-ID transports (specifically, Cyphal/CAN) must unroll
+/// the transfer-ID counters into monotonic 64-bit counters that do not overflow. This is trivial to do for topics
+/// but P2P ack/response transfers will contain transfer-ID values unrolled by the remote node, which may disagree
+/// with the values we unrolled locally; this must be addressed by the platform layer by fusing the least significant
+/// bits of the remote transfer-ID with the most significant bits of the local counter. To do that, the platform layer
+/// will search the local topics and futures for the closest transfer-ID to the received one.
 struct cy_platform_t
 {
     cy_platform_now_t            now;
