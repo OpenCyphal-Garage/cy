@@ -17,11 +17,9 @@
 //                                              BUILD TIME CONFIG OPTIONS
 // =====================================================================================================================
 
-/// Only for testing and debugging purposes.
+/// Only for testing and debugging purposes; never redefine in production builds.
 /// All nodes obviously must use the same heartbeat topic, which is why it is pinned.
-#ifndef CY_CONFIG_HEARTBEAT_TOPIC_NAME
-#define CY_CONFIG_HEARTBEAT_TOPIC_NAME "/@/7509"
-#endif
+#define CY_HEARTBEAT_TOPIC_NAME "/@/7509"
 
 /// Only for testing and debugging purposes.
 /// Makes all non-pinned topics prefer the same subject-ID that equals the value of this macro,
@@ -48,34 +46,11 @@ extern "C"
 #endif
 
 #ifndef __cplusplus
-typedef struct cy_bloom64_t  cy_bloom64_t;
-typedef struct cy_platform_t cy_platform_t;
+typedef struct cy_bloom64_t     cy_bloom64_t;
+typedef struct cy_list_t        cy_list_t;
+typedef struct cy_list_member_t cy_list_member_t;
+typedef struct cy_platform_t    cy_platform_t;
 #endif
-
-/// When a response to a received message is sent, it is delivered as an RPC transfer to this service-ID.
-/// The receiver of the response will be able to match the response with a specific request using the transfer-ID.
-/// The response user data is immediately prefixed with the following data (in DSDL notation):
-///
-///     uint64 topic_hash   # The hash of the topic that the response is for.
-///     uint64 transfer_id  # The masked transfer-ID of the message that this response is for.
-///     # Response payload follows immediately after this header.
-#define CY_RPC_SERVICE_ID_TOPIC_RESPONSE 510
-
-/// When a node sends a message over a reliable topic or sends a reliable response RPC transfer,
-/// it expects acknowledgments from the receivers to be sent to this service-ID.
-/// Acknowledgements are strictly single-frame transfers (except for the inherently limited Classic CAN transport).
-///
-/// The transfer-ID of the acknowledgment is the same as the transfer-ID of the original message/response.
-///
-/// Each acknowledgement transfer is sent twice to reduce the risk of loss, since the loss of an acknowledgment
-/// is costly in terms of bandwidth and latency.
-///
-/// The format of the acknowledgment message is as follows (in DSDL notation):
-///
-///     uint64 topic_hash   # Like in the topic response.
-///     uint64 transfer_id  # The masked transfer-ID of the transfer that this ack is for.
-///     uint8  kind         # 0 -- message positive ack; 1 -- response positive ack.
-#define CY_RPC_SERVICE_ID_RELIABLE_ACK 511
 
 /// An ordinary Bloom filter with 64-bit words.
 struct cy_bloom64_t
@@ -83,6 +58,17 @@ struct cy_bloom64_t
     size_t    n_bits;   ///< The total number of bits in the filter, a multiple of 64.
     size_t    popcount; ///< (popcount <= n_bits)
     uint64_t* storage;
+};
+
+struct cy_list_member_t
+{
+    cy_list_member_t* next;
+    cy_list_member_t* prev;
+};
+struct cy_list_t
+{
+    cy_list_member_t* head; ///< NULL if list empty
+    cy_list_member_t* tail; ///< NULL if list empty
 };
 
 /// This is the base type that is extended by the platform layer with transport- and platform-specific entities,
@@ -98,15 +84,8 @@ struct cy_bloom64_t
 /// A topic that is only used by pattern subscriptions (like `ins/?/data/*`, without publishers or explicit
 /// subscriptions) is called implicit. Such topics are automatically retired when they see no traffic and
 /// no gossips from publishers or receiving subscribers for implicit_topic_timeout.
-/// This is needed to prevent implicit pattern subscriptions from lingering forever when all explicit topics are gone.
+/// This is needed to prevent implicit pattern subscriptions from lingering forever when all publishers are gone.
 /// See https://github.com/pavel-kirienko/cy/issues/15.
-///
-/// Notably, the last gossip time is NOT updated when we receive a gossip from another node.
-/// While this approach can reduce redundant gossip traffic (no need to publish a gossip when the network just saw it),
-/// it can lead to issues if the network is semi-partitioned such that the local node straddles multiple partitions.
-/// This could occur in packet switched networks or if redundant interfaces are used. Such coordinated publishing
-/// can naturally settle on a stable state where some nodes become responsible for publishing specific topics,
-/// and nodes that happen to be in a different partition will never see those topics.
 ///
 /// CRDT merge rules, first rule takes precedence:
 /// - on collision (same subject-ID, different hash):
@@ -120,11 +99,15 @@ struct cy_bloom64_t
 /// Conflict resolution may result in a temporary jitter if it happens to occur near log2(age) integer boundary.
 struct cy_topic_t
 {
-    cy_tree_t index_hash; ///< Hash index handle MUST be the first field.
-    cy_tree_t index_subject_id;
-    cy_tree_t index_gossip_order;
-
+    /// All indexes that this topic is a member of. Indexes are very fast log(N) lookup structures.
+    cy_tree_t   index_hash; ///< Hash index handle MUST be the first field.
+    cy_tree_t   index_subject_id;
     wkv_node_t* index_name;
+
+    /// All lists that this topic is a member of. Lists are used for ordering with fast constant-time insertion/removal.
+    cy_list_member_t list_implicit;      ///< Last animated topic is at the end of the list.
+    cy_list_member_t list_gossip_urgent; ///< High-priority gossips. Fetch from the tail.
+    cy_list_member_t list_gossip;        ///< Normal-priority gossips. Fetch from the tail.
 
     /// The name length is stored in index_name.
     /// We need to store the full name to allow valid references from name substitutions during pattern matching.
@@ -135,69 +118,18 @@ struct cy_topic_t
     /// Higher clock wins because it implies that any lower value is non-viable since it has been known to cause
     /// at least one collision anywhere on the network. The counter MUST NOT BE CHANGED without removing the topic
     /// from the subject-ID index tree!
-    /// Remember that the subject-ID is (for non-pinned topics): (hash+evictions)%topic_count.
-    uint32_t evictions;
+    uint64_t evictions;
 
-    /// Assuming we have 1000 topics, the probability of a topic name hash collision is:
-    /// >>> from decimal import Decimal
-    /// >>> n = 1000
-    /// >>> d = Decimal(2**64)
-    /// >>> 1 - ((d-1)/d) ** ((n*(n-1))//2)
-    /// About 2.7e-14, or one in 37 trillion.
-    /// For pinned topics, the name hash equals the subject-ID.
+    /// hash=rapidhash(topic_name). For a pinned topic, the hash equals its subject-ID.
     uint64_t hash;
 
-    /// Currently, the age is increased locally as follows:
-    ///
-    /// 1. When the topic is gossiped, but not more often than once per second.
-    ///
-    /// 2. Experimental and optional: When a transfer is received on the topic.
-    ///    Not transmitted, though, to prevent unconnected publishers from inflating their own age.
-    ///    Subscription-driven ageing is a robust choice because it implies that the topic is actually used.
-    ///    All nodes except the publishers will locally adjust the age; the publisher will eventually learn
-    ///    that during CRDT merge. If the publisher loses allocation in the meantime, its subscribers will prevent
-    ///    it from losing their allocation and force it to move back in eventually.
-    ///
-    /// The age is NOT reset when a topic loses arbitration; otherwise, it would not be able to convince other nodes
-    /// on the same topic to follow suit.
-    ///
-    /// We use max(x,y) for CRDT merge, which is commutative [max(x,y)==max(y,x)], associative
-    /// [max(x,max(y,z))==max(max(x,y),z)], and idempotent [max(x,x)==x], making it a valid merge operation.
-    uint64_t age;
-
     /// Event timestamps used for state management.
-    cy_us_t ts_aged;     ///< Age last incremented at this time.
-    cy_us_t ts_gossiped; ///< Gossip last published at this time.
+    cy_us_t ts_origin;   ///< An approximation of when the topic was first seen on the network.
     cy_us_t ts_animated; ///< Last time the topic saw activity that prevents it from being retired.
 
-    /// Flags propagated to the network from other gossips of this topic.
-    bool receiving;
-    bool proxy_publishing; ///< There is at least one publisher on this topic.
-    bool proxy_subscribed; ///< There is at least one subscriber on this topic.
-    bool proxy_receiving;  ///< There is some data being published on this topic.
-    bool proxy_explicit;   ///< The topic has live explicit users (as opposed to implicit pattern-matched instances).
-
-    /// The next topic to gossip is chosen with the highest priority, then with the lowest ts_gossiped.
-    /// Topics with zero priority are gossiped at the max gossip period; others force the min period.
-    /// Once a gossip is published, the priority is reset to the minimum.
-    uint_fast8_t gossip_priority;
-
-    /// Implicit topics are ordered by last animation time, which is used to determine which topic to retire next.
-    /// Implicit topics are distinguished from ordinary topics by being in the list.
-    cy_topic_t* implicit_next;
-    cy_topic_t* implicit_prev;
-
     /// Used for matching futures against received responses.
+    /// The platform layer can access this too if needed.
     cy_tree_t* futures_by_transfer_id;
-
-    /// Currently, we use a shared response transfer-ID counter for all publishers. We could store an independent
-    /// counter per remote publisher, but it requires dynamic memory and also lookups while bringing little practical
-    /// benefit, because responses do not care about transfer-ID contiguity.
-    /// See https://github.com/OpenCyphal/libudpard/issues/66.
-    /// This would create issues if we were using negative acknowledgments like in PGM et al because the response
-    /// receiver (i.e., publisher of the original message that we are responding to) would see gaps in the transfer-ID
-    /// and assume that some transfers were lost, but we use positive acknowledgments here only.
-    uint64_t response_transfer_id;
 
     /// Only used if the application publishes data on this topic.
     /// pub_count tracks the number of existing advertisements on this topic; when this number reaches zero
@@ -219,19 +151,17 @@ typedef cy_us_t (*cy_platform_now_t)(const cy_t*);
 typedef void* (*cy_platform_realloc_t)(cy_t*, void*, size_t);
 
 /// Returns a PRNG hashing seed or a full pseudo-random 64-bit unsigned integer.
-/// A TRNG is preferred; if not available, a PRNG will suffice, but its initial state SHOULD be likely to be
-/// distinct across reboots happening in a quick succession. This condition does not apply if subsequent reboots are
-/// spaced apart by a long time.
+/// A TRNG is preferred; if not available, a PRNG will suffice, but its initial state should be distinct across reboots.
 ///
 /// The simplest compliant solution that can be implemented in an embedded system without TRNG is:
 ///
 ///     static uint64_t g_prng_state __attribute__ ((section (".noinit")));
-///     g_prng_state += 0xA0761D6478BD642FULL;  // add wyhash seed (64-bit prime)
+///     g_prng_state += 0xA0761D6478BD642FULL;  // add Wyhash seed (64-bit prime)
 ///     return g_prng_state;
 ///
 /// It is desirable to save the PRNG state in a battery-backed memory, if available; otherwise, in small MCUs one could
 /// hash the entire RAM contents at startup to scavenge as much entropy as possible, or use ADC or clock noise.
-/// If RTC is available, then the following is sufficient:
+/// If an RTC is available, then the following is sufficient:
 ///
 ///     static uint_fast16_t g_counter = 0;
 ///     return ((uint64_t)rtc_get_time() << 16U) + ++g_counter;
@@ -270,12 +200,34 @@ typedef void (*cy_platform_node_id_clear_t)(cy_t*);
 /// Every invocation returns a mutable borrowed reference to the filter, which outlives the Cy instance.
 typedef cy_bloom64_t* (*cy_platform_node_id_bloom_t)(cy_t*);
 
-/// Instructs the underlying transport layer to send a peer-to-peer transfer with the specified transfer-ID etc.
+/// Instructs the underlying transport layer to send a peer-to-peer transfer to the specified node-ID.
+/// The transfer-ID is managed by the glue library internally; it is expected that the glue layer may need
+/// access to the specific topic that this P2P transfer pertains to, so the reference to the topic is also provided.
+///
+/// The named topic protocol uses a single RPC endpoint for all peer-to-peer communications.
+/// Acknowledgements are strictly single-frame transfers (except for the inherently limited Classic CAN transport).
+/// Each acknowledgement transfer can be sent twice to reduce the risk of loss, since the loss of an acknowledgment
+/// is costly in terms of bandwidth and latency.
+///
+/// The transfer-ID of ack/response has no relation to the transfer-ID of the original message;
+/// the coupling of the transfer-IDs was a design mistake in Cyphal v1.0 that is being corrected in Cyphal v1.1.
+///
+/// The ack/response transfer payload is prefixed with a fixed-size header shown below in DSDL notation:
+///
+///     uint8  kind         # 0 -- message ack; 1 -- response ack; 2 -- response data.
+///     void56              # Reserved
+///     uint64 topic_hash   # The hash of the topic that the ack/response is for.
+///     uint64 transfer_id  # The transfer-ID of the message that this ack/response is for.
+///     # If this is a response, the payload follows immediately after this header.
+///     # Acks have no payload beyond the header.
+///
+/// Transfers with invalid kind shall be dropped.
 typedef cy_err_t (*cy_platform_p2p_t)(cy_t*,
-                                      uint16_t                     service_id,
-                                      const cy_transfer_metadata_t metadata,
-                                      cy_us_t                      tx_deadline,
-                                      cy_buffer_borrowed_t         payload);
+                                      cy_topic_t*,
+                                      cy_prio_t            priority,
+                                      uint16_t             dst_node_id,
+                                      cy_us_t              tx_deadline,
+                                      cy_buffer_borrowed_t payload);
 
 /// Allocates a new topic. NULL if out of memory.
 typedef cy_topic_t* (*cy_platform_topic_new_t)(cy_t*);
@@ -315,6 +267,13 @@ typedef void (*cy_platform_topic_on_subscription_error_t)(cy_t*, cy_topic_t*, co
 /// The platform- and transport-specific entities. These can be underpinned by libcanard, libudpard, libserard,
 /// or any other transport library, plus the platform-specific logic.
 /// None of the entities are mutable; instances of this struct are mostly intended to be static const singletons.
+///
+/// The platform layer implementations for cyclic-transfer-ID transports (specifically, Cyphal/CAN) must unroll
+/// the transfer-ID counters into monotonic 64-bit counters that do not overflow. This is trivial to do for topics
+/// but P2P ack/response transfers will contain transfer-ID values unrolled by the remote node, which may disagree
+/// with the values we unrolled locally; this must be addressed by the platform layer by fusing the least significant
+/// bits of the remote transfer-ID with the most significant bits of the local counter. To do that, the platform layer
+/// will search the local topics and futures for the closest transfer-ID to the received one.
 struct cy_platform_t
 {
     cy_platform_now_t            now;
@@ -339,12 +298,6 @@ struct cy_platform_t
     /// 127 for Cyphal/CAN, 65534 for Cyphal/UDP and Cyphal/Serial, etc.
     /// This is used for the automatic node-ID allocation.
     uint16_t node_id_max;
-
-    /// The mask is used only for matching received responses with pending futures.
-    /// In Cyphal/CAN, the mask is 31, as we only have 5 bits for the cyclic transfer-ID counter.
-    /// In other transports, the mask is 2**64-1.
-    /// This shall always be one less than an integer power of two.
-    uint64_t transfer_id_mask;
 };
 
 /// There are only three functions (plus convenience wrappers) whose invocations may result in network traffic:
@@ -352,6 +305,15 @@ struct cy_platform_t
 /// - cy_publish() -- user transfers only.
 /// - cy_respond() -- user transfers only.
 /// Creation of a new topic may cause resubscription of any existing topics (all in the worst case).
+///
+/// If a node-ID is provided by the user, it will be used as-is and the node will become operational immediately.
+/// If no node-ID is given, the node will take some time after it is started before it starts sending transfers.
+/// While waiting, it will listen for heartbeats from other nodes to learn which addresses are available.
+/// If a collision is found, the local node will immediately pick a new node-ID without ceasing network activity.
+///
+/// Once a node-ID is allocated, it can be optionally saved in non-volatile memory so that the next startup is
+/// immediate, bypassing the allocation stage. If a conflict is found, the current node-ID is reallocated regardless
+/// of whether it's been given explicitly or allocated automatically.
 struct cy_t
 {
     const cy_platform_t* platform; ///< Never NULL.
@@ -370,36 +332,32 @@ struct cy_t
     uint64_t uid;
     uint16_t node_id;
 
-    /// Various timestamps used for state management.
     cy_us_t ts_started;
-    cy_us_t ts_event;
-    cy_us_t ts_local_event;
 
     /// Set from cy_notify_node_id_collision(). The actual handling is delayed.
     bool node_id_collision;
 
-    /// See the topic definition.
-    /// Most recently animated implicit topics at at the head of the list.
-    cy_us_t     implicit_topic_timeout;
-    cy_topic_t* implicit_head;
-    cy_topic_t* implicit_tail;
-
     /// Heartbeat topic and related items.
-    /// The heartbeat period can be changed at any time, but it must not exceed 1 second.
-    /// The max period is used when there are no urgent gossips or scout responses to publish;
-    /// otherwise, the min period is used to throttle the heartbeat traffic.
     cy_publisher_t  heartbeat_pub;
     cy_subscriber_t heartbeat_sub;
+    cy_us_t         heartbeat_period;
     cy_us_t         heartbeat_next;
-    cy_us_t         heartbeat_last;
-    cy_us_t         heartbeat_period_max; ///< Not greater than 1 second.
-    cy_us_t         heartbeat_period_min; ///< Not greater than heartbeat_period_max.
+    cy_us_t         heartbeat_next_urgent;
 
-    /// Topics have multiple indexes.
-    cy_tree_t* topics_by_hash;
-    cy_tree_t* topics_by_subject_id;
-    cy_tree_t* topics_by_gossip_time;
-    wkv_t      topics_by_name;
+    cy_us_t implicit_topic_timeout;
+
+    /// Topics are indexed in multiple ways for various lookups.
+    /// Remember that pinned topics have small hash ≤8184, hence they are always on the left of the hash tree,
+    /// and can be traversed quickly if needed.
+    wkv_t      topics_by_name;       // Contains ALL topics, never empty since we always have at least the heartbeat.
+    cy_tree_t* topics_by_hash;       // ditto
+    cy_tree_t* topics_by_subject_id; // All except pinned, since they do not collide. May be empty.
+
+    /// Topic lists for ordering.
+    cy_list_t list_implicit;      ///< Most recently animated topic is at the head.
+    cy_list_t list_gossip_urgent; ///< High-priority gossips. Newest at the head.
+    cy_list_t list_gossip;        ///< Normal-priority gossips. Newest at the head.
+    cy_list_t list_scout_pending; ///< Lists cy_subscriber_root_t that are due for gossiping.
 
     /// When a heartbeat is received, its topic name will be compared against the patterns,
     /// and if a match is found, a new subscription will be constructed automatically; if a new topic instance
@@ -409,14 +367,9 @@ struct cy_t
     wkv_t subscribers_by_name;    ///< Both explicit and patterns.
     wkv_t subscribers_by_pattern; ///< Only patterns for implicit subscriptions on heartbeat.
 
-    /// Only for pattern subscriptions.
-    struct cy_subscriber_root_t* next_scout;
-
     /// For detecting timed out futures. This index spans all topics.
+    /// TODO: use a list instead!
     cy_tree_t* futures_by_deadline;
-
-    /// This is to ensure we don't exhaust the subject-ID space.
-    size_t topic_count;
 
     /// The user can use this field for arbitrary purposes.
     void* user;
@@ -445,9 +398,6 @@ void     cy_destroy(cy_t* const cy);
 /// This is the only function that generates heartbeat -- the only kind of auxiliary traffic needed by the protocol.
 /// The returned value indicates the success of the heartbeat publication, if any took place, or zero.
 ///
-/// If this is invoked together with cy_ingest(), then cy_update() must be invoked AFTER cy_ingest() to ensure
-/// that the latest state updates are reflected in the heartbeat message.
-///
 /// This function is also responsible for handling the local node-ID allocation.
 ///
 /// Excluding the transport_publish dependency, the time complexity is logarithmic in the number of topics.
@@ -464,8 +414,8 @@ cy_err_t cy_update(cy_t* const cy);
 /// If the transport library is unable to efficiently find the topic when a collision is found, use
 /// cy_topic_find_by_subject_id(). The function has no effect if the topic is NULL; it is not an error to call it
 /// with NULL to simplify chaining like:
-///     cy_notify_topic_hash_collision(cy_topic_find_by_subject_id(cy, collision_subject_id));
-void cy_notify_topic_hash_collision(cy_t* const cy, cy_topic_t* const topic);
+///     cy_notify_topic_collision(cy, cy_topic_find_by_subject_id(cy, collision_subject_id));
+void cy_notify_topic_collision(cy_t* const cy, cy_topic_t* const topic);
 
 /// When the transport library detects an incoming transport frame with the same source node-ID as the local node-ID,
 /// it must notify Cy about it to let it rectify the problem.
@@ -483,17 +433,10 @@ void cy_notify_node_id_collision(cy_t* const cy);
 /// The library will dispatch it to the appropriate subscriber callbacks.
 /// Excluding the callbacks, the time complexity is constant.
 /// The transfer payload ownership is taken by this function.
-///
-/// If this is invoked together with cy_update(), then cy_ingest() must be invoked BEFORE cy_update()
-/// to ensure that the latest state updates are reflected in the next heartbeat message.
-void cy_ingest_topic_transfer(cy_t* const cy, cy_topic_t* const topic, cy_transfer_owned_t transfer);
+void cy_ingest(cy_t* const cy, cy_topic_t* const topic, cy_transfer_owned_t transfer);
 
-/// Cy does not manage RPC endpoints explicitly; it is the responsibility of the transport-specific glue logic.
-/// Currently, the following RPC endpoints must be implemented in the glue logic:
-///
-///     - CY_RPC_SERVICE_ID_TOPIC_RESPONSE
-///     - CY_RPC_SERVICE_ID_RELIABLE_ACK
-void cy_ingest_topic_response_transfer(cy_t* const cy, cy_transfer_owned_t transfer);
+/// Report arrival of a P2P transfer from another node.
+void cy_ingest_p2p(cy_t* const cy, cy_transfer_owned_t transfer);
 
 /// For diagnostics and logging only. Do not use in embedded and real-time applications.
 /// This function is only required if CY_CONFIG_TRACE is defined and is nonzero; otherwise it should be left undefined.

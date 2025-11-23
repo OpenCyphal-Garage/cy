@@ -70,10 +70,10 @@ int main(const int argc, char* argv[])
     }
 
     // WAIT FOR THE NODE TO JOIN THE NETWORK.
-    // We consider the node joined when it has a node-ID and there have been no topic conflicts/divergences
-    // for some time. This stage can be skipped if we have a configuration hint recovered from nonvolatile storage.
+    // We consider the node joined when it has a node-ID.
+    // This stage is skipped if we have a configuration hint recovered from nonvolatile storage.
     fprintf(stderr, "Waiting for the node to join the network...\n");
-    while (!cy_ready(&cy_udp.base)) {
+    while (!cy_joined(&cy_udp.base)) {
         res = cy_udp_posix_spin_once(&cy_udp);
         if (res != CY_OK) {
             errx(res, "cy_udp_posix_spin_once");
@@ -108,7 +108,7 @@ int main(const int argc, char* argv[])
                 errx(res, "cy_udp_posix_spin_once");
             }
         }
-        if (future.state == cy_future_response_timeout) {
+        if (future.state == cy_future_timeout_response) {
             errx(0, "Request timed out");
         }
         assert(future.state == cy_future_success);

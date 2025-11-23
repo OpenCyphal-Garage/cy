@@ -33,8 +33,7 @@ endif ()
 # Build options
 set(CMAKE_COMPILE_WARNING_AS_ERROR ON)
 set(c_cxx_flags "\
--Wall -Wextra -pedantic -fstrict-aliasing -Wundef -Wconversion -Wsign-promo -Wsign-conversion \
--Wmissing-declarations -Wtype-limits \
+-Wall -Wextra -pedantic -fstrict-aliasing -Wundef -Wconversion -Wsign-conversion -Wmissing-declarations -Wtype-limits \
 ")
 # C
 set(CMAKE_C_STANDARD 11)
@@ -45,7 +44,7 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${c_cxx_flags}")
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${c_cxx_flags} -Wzero-as-null-pointer-constant")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${c_cxx_flags} -Wsign-promo -Wzero-as-null-pointer-constant")
 
 include_directories(${CMAKE_SOURCE_DIR}/lib ${CMAKE_SOURCE_DIR}/lib/wild_key_value)
 
@@ -54,7 +53,6 @@ include_directories(${CMAKE_SOURCE_DIR}/lib ${CMAKE_SOURCE_DIR}/lib/wild_key_val
 # increasing the random pick collision probability to 100%.
 add_compile_definitions(
         CY_CONFIG_TRACE=1
-        CY_CONFIG_HEARTBEAT_TOPIC_NAME="/@/8191"
         CY_CONFIG_PREFERRED_TOPIC_OVERRIDE=0
 )
 

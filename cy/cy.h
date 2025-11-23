@@ -34,27 +34,10 @@ extern "C"
 /// The max namespace length should also provide space for at least one separator and the one-character topic name.
 #define CY_NAMESPACE_NAME_MAX (CY_TOPIC_NAME_MAX - 2)
 
-/// If not sure, use this value for the transfer-ID timeout.
-#define CY_TRANSFER_ID_TIMEOUT_DEFAULT_us 10000000L
-
-/// If a node-ID is provided by the user, it will be used as-is and the node will become operational immediately.
-/// If no node-ID is given, the node will take some time after it is started before it starts sending transfers.
-/// While waiting, it will listen for heartbeats from other nodes to learn which addresses are available.
-/// If a collision is found, the local node will immediately pick a new node-ID without ceasing network activity.
-///
-/// Once a node-ID is allocated, it can be optionally saved in non-volatile memory so that the next startup is
-/// immediate, bypassing the allocation stage.
-/// If a conflict is found, the current node-ID is reallocated regardless of whether it's been given explicitly or
-/// allocated automatically.
-#define CY_START_DELAY_MIN_us 1000000L
-#define CY_START_DELAY_MAX_us 2000000L
-
-/// The range of unregulated identifiers to use for CRDT topic allocation. The range must be the same for all
-/// applications.
-/// Pinned topics (such as the ordinary topics with manually assigned IDs) can be pinned anywhere in [0, 8192);
-/// however, if they are used to communicate with old nodes that are not capable of the named topic protocol,
-/// they should be placed in [6144, 8192), because if for whatever reason only the old nodes are left using those
-/// topics, no irreparable collisions occur.
+/// The range of unregulated identifiers to use for CRDT topic allocation.
+/// Pinned topics (such as the ordinary topics with manually assigned IDs) can be pinned anywhere in [0, 8184].
+/// Subject-IDs in [8187, 65535] are managed by the named topic allocation protocol.
+/// Subject-IDs 8185 and 8186 are reserved.
 #define CY_TOPIC_SUBJECT_COUNT 6144
 #define CY_SUBJECT_BITS        13U
 #define CY_TOTAL_SUBJECT_COUNT (1UL << CY_SUBJECT_BITS)
@@ -140,15 +123,15 @@ struct cy_bytes_mut_t
 ///
 /// The view points to the useful payload; DO NOT attempt to deallocate the view.
 /// The origin can only be used to deallocate the payload; that address shall not be accessed in any way.
-/// Normally, view and origin are identical, but this is not always the case depending on the transport library.
+/// Normally, the view and origin are identical, but this is not always the case depending on the transport library.
 /// The view is usually inside the origin, but even that is not guaranteed; e.g., if memory mapping is used.
 ///
 /// The head of the payload chain is always passed by value and thus does not require freeing; the following chain
 /// elements are also allocated from some memory resource and thus shall be freed with the payload.
 ///
-/// Warning: It is required that the first 8 bytes of the payload are NOT fragmented. Otherwise, Cy may refuse to
+/// Warning: It is required that the first 24 bytes of the payload are NOT fragmented. Otherwise, Cy may refuse to
 /// accept the transfer. This requirement is trivial to meet because the MTU of all transports that supply fragmented
-/// payloads is much larger than 8 bytes.
+/// payloads is much larger than this.
 ///
 /// The size of a payload fragment may be zero.
 struct cy_buffer_borrowed_t
@@ -194,20 +177,21 @@ struct cy_publisher_t
 {
     cy_topic_t* topic;    ///< Many-to-one relationship, never NULL; the topic is reference counted.
     cy_prio_t   priority; ///< Defaults to cy_prio_nominal; can be overridden by the user at any time.
-    void*       user;
+    // TODO: add `bool fec`
+    void* user;
 };
 
 /// Future lifecycle:
-///
-///     fresh ---> pending --+---> success
-///                          |
-///                          +---> response_timeout
+///     fresh --> pending --+--> success
+///                         +--> timeout_ack
+///                         +--> timeout_response
 typedef enum cy_future_state_t
 {
     cy_future_fresh,
     cy_future_pending,
     cy_future_success,
-    cy_future_response_timeout,
+    cy_future_timeout_ack,      ///< Remote end did not confirm reception of the message.
+    cy_future_timeout_response, ///< Response was not received before the deadline.
 } cy_future_state_t;
 
 typedef void (*cy_future_callback_t)(cy_t*, cy_future_t*);
@@ -223,8 +207,8 @@ struct cy_future_t
 
     cy_publisher_t*   publisher;
     cy_future_state_t state;
-    uint64_t          transfer_id_masked; ///< Masked as (platform->transfer_id_mask & transfer_id)
-    cy_us_t           deadline;           ///< We're indexing on this so it shall not be changed after insertion.
+    uint64_t          transfer_id; ///< Remember that transports with narrow transfer-ID should recover the full ID.
+    cy_us_t           deadline;    ///< We're indexing on this so it shall not be changed after insertion.
 
     /// These fields are populated once the response is received.
     /// The payload ownership is transferred to this structure.
@@ -314,7 +298,7 @@ struct cy_arrival_t
     ///  1. #0 "0"
     ///  2. #1 "foo"
     ///  3. #1 "456"
-    /// The lifetime of the substitutions is the same as the lifetime of the topic or subscriber, whichever is shorter.
+    /// The lifetime of the substitutions is at least as long as that of the subscriber.
     size_t                   substitution_count; ///< The size of the following substitutions array.
     const cy_substitution_t* substitutions;      ///< A contiguous array of substitutions.
 };
@@ -327,8 +311,7 @@ typedef void (*cy_subscriber_callback_t)(cy_t*, const cy_arrival_t*);
 /// be created asynchronously wrt the user calling cy_subscribe().
 struct cy_subscription_params_t
 {
-    size_t  extent;
-    cy_us_t transfer_id_timeout;
+    size_t extent;
 };
 
 /// Subscribers SHALL NOT be copied/moved after initialization until destroyed.
@@ -349,33 +332,21 @@ struct cy_subscriber_t
 
 /// It is allowed to remove the subscription from its own callback, but not from the callback of another subscription.
 ///
-/// The extent and transfer-ID timeout of all subscriptions should be the same, or these values of subscriptions
-/// added later should be less than the values of subscriptions added earlier. Otherwise, the library will be forced
-/// to resubscribe, which may cause momentary data loss if there were transfers in the middle of reassembly,
-/// plus it is usually slow.
-///
-/// The complexity is about linear in the number of subscriptions.
-cy_err_t               cy_subscribe_with_params(cy_t* const                    cy,
-                                                cy_subscriber_t* const         sub,
-                                                const wkv_str_t                name,
-                                                const cy_subscription_params_t params,
-                                                const cy_subscriber_callback_t callback);
-static inline cy_err_t cy_subscribe_with_params_c(cy_t* const                    cy,
-                                                  cy_subscriber_t* const         sub,
-                                                  const char* const              name,
-                                                  const cy_subscription_params_t params,
-                                                  const cy_subscriber_callback_t callback)
-{
-    return cy_subscribe_with_params(cy, sub, wkv_key(name), params, callback);
-}
+/// The extent of all subscriptions should be the same, or the values of subscriptions added later should be less
+/// than those of subscriptions added earlier. Otherwise, the library will be forced to resubscribe,
+/// which may cause momentary data loss if there were transfers in the middle of reassembly, plus it is usually slow.
+cy_err_t               cy_subscribe(cy_t* const                    cy,
+                                    cy_subscriber_t* const         sub,
+                                    const wkv_str_t                name,
+                                    const size_t                   extent,
+                                    const cy_subscriber_callback_t callback);
 static inline cy_err_t cy_subscribe_c(cy_t* const                    cy,
                                       cy_subscriber_t* const         sub,
                                       const char* const              name,
                                       const size_t                   extent,
                                       const cy_subscriber_callback_t callback)
 {
-    const cy_subscription_params_t params = { extent, CY_TRANSFER_ID_TIMEOUT_DEFAULT_us };
-    return cy_subscribe_with_params_c(cy, sub, name, params, callback);
+    return cy_subscribe(cy, sub, wkv_key(name), extent, callback);
 }
 void cy_unsubscribe(cy_t* const cy, cy_subscriber_t* const sub);
 
@@ -418,17 +389,6 @@ cy_us_t cy_now(const cy_t* const cy);
 /// publishing anything.
 bool cy_joined(const cy_t* const cy);
 
-/// A heuristical prediction of whether the local node is ready to fully participate in the network.
-/// The joining process will be bypassed if the node-ID and all topic allocations are recovered from non-volatile
-/// storage. This flag can briefly flip back to false if a topic allocation conflict or a divergence are detected;
-/// it will return back to true automatically once the network is repaired.
-///
-/// Since the network fundamentally relies on an eventual consistency model, it is not possible to guarantee that
-/// any given state is final. It is always possible, for example, that while our network segment looks stable,
-/// it could actually be a partition of a larger network; when the partitions are rejoined, the younger and/or smaller
-/// partition will be forced to adapt to the main network, thus enduring a brief period of instability.
-bool cy_ready(const cy_t* const cy);
-
 /// If the topic configuration is restored from non-volatile memory or elsewhere, it can be supplied to the library
 /// via this function immediately after the topic is first created. This function should not be invoked at any other
 /// moment except immediately after initialization.
@@ -449,9 +409,8 @@ static inline cy_topic_t* cy_topic_find_by_name_c(const cy_t* const cy, const ch
     return cy_topic_find_by_name(cy, wkv_key(name));
 }
 cy_topic_t* cy_topic_find_by_hash(const cy_t* const cy, const uint64_t hash);
-cy_topic_t* cy_topic_find_by_subject_id(const cy_t* const cy, const uint16_t subject_id);
 
-/// Iterate over all topics in an unspecified order.
+/// Iterate over all topics in an unspecified order except that pinned topic are listed first.
 /// This is useful when handling IO multiplexing (building the list of descriptors to read) and for introspection.
 /// The iteration stops when the returned topic is NULL.
 /// The set of topics SHALL NOT be mutated while iterating over it (a restart will be needed otherwise).
@@ -463,7 +422,7 @@ cy_topic_t* cy_topic_iter_first(const cy_t* const cy);
 cy_topic_t* cy_topic_iter_next(cy_topic_t* const topic);
 
 /// Optionally, the application can use this to save the allocated subject-ID before shutting down/rebooting
-/// for instant recovery.
+/// for instant recovery. Not needed for pinned topics since their IDs cannot change.
 uint16_t cy_topic_subject_id(const cy_topic_t* const topic);
 
 /// The name is NUL-terminated; pointer lifetime bound to the topic.

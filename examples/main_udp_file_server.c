@@ -23,7 +23,7 @@ static uint64_t random_uid(void)
 /// Response schema:
 ///     uint32      errno
 ///     byte[<=256] data
-void on_file_read_msg(cy_t* const cy, const cy_arrival_t* const arv)
+static void on_file_read_msg(cy_t* const cy, const cy_arrival_t* const arv)
 {
     CY_BUFFER_GATHER_ON_STACK(payload, arv->transfer->payload.base)
     if ((payload.size < 10) || (payload.size > (256 + 2 + 8))) {

@@ -121,13 +121,11 @@ This is a semi-manual approach based on pattern matching within a predefined set
 
 ### Node-ID autoconfiguration
 
-The new node-ID autoconfiguration protocol does not require an allocator; instead, a straightforward address claiming procedure is implemented:
+The new node-ID autoconfiguration protocol does not require an allocator; instead, a straightforward address claiming procedure is implemented.
 
-1. When joining the network without a node-ID preconfigured, the node will listen for a random time interval ca. 1~3 seconds. The source node-ID of each received transfer (heartbeats or whatever else may occur) is marked as taken in a local bitmask. If the transport layer has a large node-ID space (which is the case for every transport except Cyphal/CAN), the bitmask is replaced with a Bloom filter, whose bit capacity defines the maximum number of nodes that can be autoconfigured in this way (e.g., a 512-byte Bloom filter allows allocating at least 4096 nodes).
+When joining the network without a node-ID preconfigured, the node will listen for a random time interval ca. 1.5~3 seconds. The source node-ID of each received transfer (heartbeats or whatever else may occur) is marked as taken in a local bitmask. If the transport layer has a large node-ID space (which is the case for every transport except Cyphal/CAN), the bitmask is replaced with a Bloom filter, whose bit capacity defines the maximum number of nodes that can be autoconfigured in this way (e.g., a 512-byte Bloom filter allows allocating at least 4096 nodes).
 
-2. When a new node is discovered, the listening deadline is updated as `max(old_deadline, now + random_penalty)`, where `random_penalty` is in 0~1 seconds. This is to reduce the likelihood of multiple nodes claiming an address at the same time. The specifics of this step may need refinement.
-
-3. Once the initial delay has expired, an unoccupied node-ID is chosen from the bitmask/Bloom filter and marked as used. The first heartbeat is published immediately to claim the address.
+Once the initial delay has expired, an unoccupied node-ID is chosen from the bitmask/Bloom filter and marked as used. The first heartbeat is published immediately to claim the address. The application may force the stack to claim a node-ID early by attempting to emit traffic early before the initial delay expires (risking a transient collision).
 
 If a node-ID conflict is discovered at any later point, even if the node-ID was configured manually, we repeat step 3 only; i.e., simply pick a new node-ID from the Bloom/mask. In case of high node churn the Bloom/mask will eventually become congested; when the congestion is imminent, the entire filter state is dropped and then gradually rebuilt from scratch in the background.
 
@@ -341,16 +339,43 @@ There are at least three ways to implement it:
 
 A simple API feature to inform the glue layer when to invoke `cy_notify_node_id_collision`.
 
+### Inform the glue layer when to send a delivery ACK
+
+This has to be managed by the transport layer because only this layer can detect arrival of repeated transfer-IDs.
+See <https://github.com/OpenCyphal-Garage/cy/issues/21>.
+
 ### New frame headers
 
 See <https://github.com/OpenCyphal/specification/issues/143>.
 
-It is yet unclear if Cyphal/CAN also needs a new frame header.
-
 ### Extend each transfer with the topic hash
 
 Cyphal/UDP and Cyphal/serial will carry the topic hash [directly in the frame header](https://github.com/OpenCyphal/specification/issues/143).
-
-Cyphal/CAN will need a different approach; perhaps we could either seed the transfer CRC with some 16 bits of the topic hash, or add a part of the hash into the payload immediately before the CRC.
+It is important to attach the hash per frame rather than per transfer because frames may arrive out of order,  and the transport should be able to detect a mismatch before an attempt to reassemble the transfer is made.
 
 When the transport detects a topic hash mismatch, it has the option to notify the CRDT protocol so that it can assign a higher priority to the topic where the conflict is found. It is not essential because even if no such notification is delivered, CRDT will eventually reach a conflict-free consensus, but the time required may be longer.
+
+Cyphal/CAN will need a different approach; we will seed the transfer-CRC with 16 MSb of the topic hash, which scales up to ≈30 topics per network, enough for CAN --- further increase results in a growing probability of data misinterpretation:
+
+```python
+import math
+
+def bday(n: int, d: int) -> float:
+    """
+    Probability that at least two of n elements (chosen independently and uniformly at random from d states) are equal.
+    """
+    if n <= 1: return 0.0
+    if n > d:  return 1.0
+    log_p_no_collision = 0.0
+    for k in range(n):
+        log_p_no_collision += math.log(d - k) - math.log(d)
+    return 1.0 - math.exp(log_p_no_collision)
+
+N_NAMED_SUBJECTS  = 57349
+TRANSFER_CRC_BITS = 16
+bday(28, N_NAMED_SUBJECTS * 2**TRANSFER_CRC_BITS)  # ≈1.0e-7, or ≈1 in 10 million
+```
+
+## Debugging tips
+
+Use Wireshark with the `cyphal_wireshark.lua` dissector plugin. Read the file for usage instructions.

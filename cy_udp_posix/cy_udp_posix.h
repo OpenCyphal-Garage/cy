@@ -32,6 +32,11 @@ struct cy_udp_posix_topic_t
     struct UdpardRxSubscription sub;
     udp_wrapper_rx_t            sock_rx[CY_UDP_POSIX_IFACE_COUNT_MAX];
 
+    /// Use a simplified transfer-ID counting policy where we just have a shared counter per topic.
+    /// An alternative would be to keep a separate counter per remote node, but it's impractical.
+    /// https://github.com/OpenCyphal/libudpard/issues/66
+    uint64_t p2p_transfer_id;
+
     /// The count of out-of-memory errors that occurred while processing this topic.
     /// Every OOM implies that either a frame or a full transfer were lost.
     uint64_t rx_oom_count;
@@ -50,9 +55,7 @@ struct cy_udp_posix_t
     /// Maximum seen value across all topics since initialization.
     size_t response_extent_with_overhead;
 
-    /// This can be overridden immediately after initialization if necessary.
-    /// Changing this after the node-ID is allocated may not have any effect.
-    cy_us_t rpc_transfer_id_timeout;
+    size_t n_topics;
 
     uint64_t     node_id_bloom_storage[CY_UDP_POSIX_NODE_ID_BLOOM_64BIT_WORDS];
     cy_bloom64_t node_id_bloom;

@@ -8,7 +8,7 @@
 # Implementations do not have to support the full set of features, since there are many use cases where some of the
 # more complex features do not make sense.
 # E.g., if this is used to configure small embedded nodes, then new/rename commands may not make sense.
-# The following support tiers are defined, but strict adherence is not expected:
+# The following support tiers are defined:
 #   0. Read existing entries at seek=0. This is the bare minimum level.
 #   1. Read existing entries at seek=0 and list directories.
 #   2. Read and write existing entries at seek=0, list directories.
@@ -62,9 +62,7 @@ void14
 byte[<=1024] data
 
 utf8[<256] path
-# Names that start with zero byte "\x00" are reserved. Some of the defined names are:
-#   "\x00\x00" -- data is interpreted by the command shell with implementation-defined semantics.
-#   "\x00\x01" -- node info: UID u64, software version (major u8, minor u8, patch u16, vcs u32), revision hash u64.
+# Names that start with zero byte "\x00" are reserved.
 
 @sealed
 

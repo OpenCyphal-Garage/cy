@@ -4,7 +4,7 @@
 Monte‑Carlo simulation for the Optimistic DAD node-ID assignment protocol.
 Node-IDs are integers in the range [0, M]. There are N nodes.
 Whenever two or more nodes share the same ID, any individual member of that collision group redraws with independent
-probability q in (0 < q ≤ 1).
+probability q in (0 < q <= 1).
 A redraw means picking a fresh ID uniformly at random from [0, M].
 
 The adjustable parameter q affects the convergence speed of the protocol.
@@ -98,7 +98,7 @@ def _cli():
     parser.add_argument("--N", type=int, required=True, help="number of nodes")
     parser.add_argument("--M", type=int, required=True, help="node-ID range [0,M]")
     parser.add_argument("--q", type=float, default=0.5, help="redraw probability for a colliding node (0<q≤1)")
-    parser.add_argument("--K", type=int, default=None, help="report probability that convergence ≤ K steps")
+    parser.add_argument("--K", type=int, default=None, help="report probability that convergence ≤K steps")
     parser.add_argument("--seed", type=int, default=None, help="PRNG seed for reproducibility")
     args = parser.parse_args()
 
