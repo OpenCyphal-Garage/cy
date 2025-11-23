@@ -33,6 +33,9 @@
 #define BIG_BANG   INT64_MIN
 #define HEAT_DEATH INT64_MAX
 
+/// The log-age of a newly created topic.
+#define LAGE_MIN (-1)
+
 /// A special log-age value that indicates that the gossip is a scout message (pattern match request).
 #define LAGE_SCOUT (-2)
 
@@ -737,11 +740,14 @@ static void topic_allocate(cy_t* const       cy, // NOLINT(*-no-recursion)
 
 /// UB if the topic under this name already exists.
 /// out_topic may be new if the reference is not immediately needed (it can be found later via indexes).
+/// The log-age is -1 for newly created topics, as opposed to auto-subscription on pattern match,
+/// where the lage is taken from the gossip message.
 static cy_err_t topic_new(cy_t* const        cy,
                           cy_topic_t** const out_topic,
                           const wkv_str_t    resolved_name,
                           const uint64_t     hash,
-                          const uint64_t     evictions)
+                          const uint64_t     evictions,
+                          const int_fast8_t  lage)
 {
     cy_topic_t* const topic = cy->platform->topic_new(cy);
     if (topic == NULL) {
@@ -759,7 +765,7 @@ static cy_err_t topic_new(cy_t* const        cy,
     topic->hash      = hash;
     topic->evictions = evictions;
 
-    topic->ts_origin   = now;
+    topic->ts_origin   = now - (pow2us(lage) * MEGA);
     topic->ts_animated = now;
 
     topic->pub_transfer_id = random_u64(cy); // https://forum.opencyphal.org/t/improve-the-transfer-id-timeout/2375
@@ -829,7 +835,7 @@ static cy_err_t topic_ensure(cy_t* const cy, cy_topic_t** const out_topic, const
         }
         return 0;
     }
-    return topic_new(cy, out_topic, resolved_name, topic_hash(resolved_name), 0);
+    return topic_new(cy, out_topic, resolved_name, topic_hash(resolved_name), 0, LAGE_MIN);
 }
 
 /// Create a new coupling between a topic and a subscriber.
@@ -896,10 +902,11 @@ static void* wkv_cb_couple_new_topic(const wkv_event_t evt)
 
 /// If there is a pattern subscriber matching the name of this topic, attempt to create a new subscription.
 /// If a new subscription is created, the new topic will be returned.
-static cy_topic_t* topic_subscribe_if_matching(cy_t* const     cy,
-                                               const wkv_str_t resolved_name,
-                                               const uint64_t  hash,
-                                               const uint64_t  evictions)
+static cy_topic_t* topic_subscribe_if_matching(cy_t* const       cy,
+                                               const wkv_str_t   resolved_name,
+                                               const uint64_t    hash,
+                                               const uint64_t    evictions,
+                                               const int_fast8_t lage)
 {
     assert((cy != NULL) && (resolved_name.str != NULL));
     if (resolved_name.len == 0) {
@@ -912,7 +919,7 @@ static cy_topic_t* topic_subscribe_if_matching(cy_t* const     cy,
     // Create the new topic.
     cy_topic_t* topic = NULL;
     {
-        const cy_err_t res = topic_new(cy, &topic, resolved_name, hash, evictions);
+        const cy_err_t res = topic_new(cy, &topic, resolved_name, hash, evictions, lage);
         if (res != CY_OK) {
             cy->platform->topic_on_subscription_error(cy, NULL, res);
             return NULL;
@@ -1036,7 +1043,7 @@ static void on_heartbeat(cy_t* const cy, const cy_arrival_t* const evt)
         // Find the topic in our local database. Create if there is a pattern match.
         cy_topic_t* mine = cy_topic_find_by_hash(cy, other_hash);
         if (mine == NULL) {
-            mine = topic_subscribe_if_matching(cy, key, other_hash, other_evictions);
+            mine = topic_subscribe_if_matching(cy, key, other_hash, other_evictions, other_lage);
         }
         if (mine != NULL) {                   // We have this topic! Check if we have consensus on the subject-ID.
             schedule_gossip(cy, mine, false); // suppress next gossip -- the network just heard about it
