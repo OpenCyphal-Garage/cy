@@ -512,7 +512,7 @@ static void implicit_retire_timed_out(cy_t* const cy, const cy_us_t now)
         assert(is_implicit(cy, topic) && validate_is_implicit(topic));
         if ((topic->ts_animated + cy->implicit_topic_timeout) < now) {
             CY_TRACE(
-              cy, "⚰️ t%016llx@%04x '%s'", (unsigned long long)topic->hash, cy_topic_subject_id(topic), topic->name);
+              cy, "⚰️ T%016llx@%04x '%s'", (unsigned long long)topic->hash, cy_topic_subject_id(topic), topic->name);
             topic_destroy(cy, topic);
         }
     }
@@ -530,7 +530,7 @@ static void schedule_gossip(cy_t* const cy, cy_topic_t* const topic, const bool 
             delist(&cy->list_gossip, &topic->list_gossip);
             enlist_head(&cy->list_gossip_urgent, &topic->list_gossip_urgent);
             CY_TRACE(
-              cy, "⚖️ t%016llx@%04x '%s'", (unsigned long long)topic->hash, cy_topic_subject_id(topic), topic->name);
+              cy, "⏰ T%016llx@%04x '%s'", (unsigned long long)topic->hash, cy_topic_subject_id(topic), topic->name);
         } else {
             delist(&cy->list_gossip_urgent, &topic->list_gossip_urgent);
             enlist_head(&cy->list_gossip, &topic->list_gossip);
@@ -626,7 +626,7 @@ static void topic_ensure_subscribed(cy_t* const cy, cy_topic_t* const topic)
         const cy_err_t                 res    = cy->platform->topic_subscribe(cy, topic, params);
         topic->subscribed                     = res == CY_OK;
         CY_TRACE(cy,
-                 "🗞️ t%016llx@%04x '%s' extent=%zu result=%d",
+                 "🗞️ T%016llx@%04x '%s' extent=%zu result=%d",
                  (unsigned long long)topic->hash,
                  cy_topic_subject_id(topic),
                  topic->name,
@@ -652,14 +652,12 @@ static void topic_allocate(cy_t* const       cy, // NOLINT(*-no-recursion)
                            const cy_us_t     now)
 {
     assert(cavl_count(cy->topics_by_hash) <= CY_TOPIC_SUBJECT_COUNT); // There is certain to be a free subject-ID!
-
-    // Consider extracting everything prior to the loop into topic_allocate_prologue() and everything after the loop
-    // into topic_allocate_epilogue() to focus on the main logic.
+#if CY_CONFIG_TRACE
     static const int         call_depth_indent = 2;
     static _Thread_local int call_depth        = 0U;
     call_depth++;
     CY_TRACE(cy,
-             "🔜%*s t%016llx@%04x '%s' evict=%llu->%llu lage=%+d subscribed=%d couplings=%p",
+             "🔍%*s T%016llx@%04x '%s' evict=%llu->%llu lage=%+d subscribed=%d couplings=%p",
              (call_depth - 1) * call_depth_indent,
              "",
              (unsigned long long)topic->hash,
@@ -670,6 +668,7 @@ static void topic_allocate(cy_t* const       cy, // NOLINT(*-no-recursion)
              topic_lage(topic, now),
              (int)topic->subscribed,
              (void*)topic->couplings);
+#endif
 
     // We need to make sure no underlying resources are sitting on this topic before we move it.
     // Otherwise, changing the subject-ID field on the go may break something underneath.
@@ -684,51 +683,58 @@ static void topic_allocate(cy_t* const       cy, // NOLINT(*-no-recursion)
         cavl2_remove(&cy->topics_by_subject_id, &topic->index_subject_id);
     }
 
-    // Find a free slot. Every time we find an occupied slot, we have to arbitrate against its current tenant.
-    // Note that it is possible that (hash+old_evictions)%6144 == (hash+new_evictions)%6144, which means that we
-    // stay with the same subject-ID. No special case is required for this, we handle this normally.
-    topic->evictions  = new_evictions;
-    size_t iter_count = 0;
-    while (true) {
-        iter_count++;
-        const uint16_t   sid = topic_subject_id(topic->hash, topic->evictions);
-        cy_tree_t* const t   = cavl2_find_or_insert(
-          &cy->topics_by_subject_id, &sid, &cavl_comp_topic_subject_id, topic, &cavl_factory_topic_subject_id);
-        assert(t != NULL); // we will create it if not found, meaning allocation succeeded
-        if (t == &topic->index_subject_id) {
-            break; // Done!
+    // This mirrors the formal specification of AllocateTopic(t, topics) given in Core.tla.
+    // Note that it is possible that subject_id(hash,old_evictions) == subject_id(hash,new_evictions),
+    // meaning that we stay with the same subject-ID. No special case is required to handle this.
+    const uint16_t    new_sid = topic_subject_id(topic->hash, new_evictions);
+    cy_topic_t* const that    = CAVL2_TO_OWNER(
+      cavl2_find(cy->topics_by_subject_id, &new_sid, &cavl_comp_topic_subject_id), cy_topic_t, index_subject_id);
+    assert((that == NULL) || (topic->hash != that->hash)); // This would mean that we inserted the same topic twice
+    const bool victory = (that == NULL) || left_wins(topic, now, topic_lage(that, now), that->hash);
+
+#if CY_CONFIG_TRACE
+    if (that != NULL) {
+        CY_TRACE(cy,
+                 "🎲%*s T%016llx@%04x %s T%016llx@%04x",
+                 (call_depth - 1) * call_depth_indent,
+                 "",
+                 (unsigned long long)topic->hash,
+                 new_sid,
+                 victory ? "wins 👑 over" : "loses 💀 to",
+                 (that != NULL) ? (unsigned long long)that->hash : UINT64_MAX,
+                 (that != NULL) ? cy_topic_subject_id(that) : UINT16_MAX);
+    }
+#endif
+
+    if (victory) {
+        if (that != NULL) {
+            cavl2_remove(&cy->topics_by_subject_id, &that->index_subject_id);
         }
-        // Someone else is sitting on that subject-ID. We need to arbitrate.
-        cy_topic_t* const other = CAVL2_TO_OWNER(t, cy_topic_t, index_subject_id);
-        assert(topic->hash != other->hash); // This would mean that we inserted the same topic twice, impossible
-        if (left_wins(topic, now, topic_lage(other, now), other->hash)) {
-            // This is our slot now! The other topic has to move.
-            // This can trigger a chain reaction that in the worst case can leave no topic unturned.
-            // One issue is that the worst-case recursive call depth equals the number of topics in the system.
-            topic_allocate(cy, other, other->evictions + 1U, false, now);
-            // Remember that we're still out of tree at the moment. We pushed the other topic out of its slot,
-            // but it is possible that there was a chain reaction that caused someone else to occupy this slot.
-            // Since that someone else was ultimately pushed out by the topic that just lost arbitration to us,
-            // we know that the new squatter will lose arbitration to us again.
-            // We will handle it in the exact same way on the next iteration, so we just continue with the loop.
-            // Now, moving that one could also cause a chain reaction, but we know that eventually we will run
-            // out of low-rank topics to move and will succeed.
-        } else {
-            topic->evictions++; // We lost arbitration, keep looking.
+        topic->evictions       = new_evictions;
+        cy_topic_t* const self = CAVL2_TO_OWNER(cavl2_find_or_insert(&cy->topics_by_subject_id, //
+                                                                     &new_sid,
+                                                                     &cavl_comp_topic_subject_id,
+                                                                     topic,
+                                                                     &cavl_factory_topic_subject_id),
+                                                cy_topic_t,
+                                                index_subject_id);
+        assert(self == topic);
+        assert(!topic->subscribed);
+        // Allocation done (end of the recursion chain), schedule gossip and resubscribe if needed.
+        // If a resubscription failed in the past, we will retry here as long as there is at least one live subscriber.
+        schedule_gossip(cy, topic, true);
+        topic_ensure_subscribed(cy, topic);
+        // Re-allocate the defeated topic with incremented eviction counter.
+        if (that != NULL) {
+            topic_allocate(cy, that, that->evictions + 1U, true, now);
         }
+    } else {
+        topic_allocate(cy, topic, new_evictions + 1U, true, now);
     }
 
-    // Whenever we alter a topic, we need to make sure that everyone knows about it.
-    // Recursively we can alter a lot of topics like this.
-    schedule_gossip(cy, topic, true);
-
-    // If a subscription is needed, restore it. Notice that if this call failed in the past, we will retry here
-    // as long as there is at least one live subscriber.
-    assert(!topic->subscribed);
-    topic_ensure_subscribed(cy, topic);
-
+#if CY_CONFIG_TRACE
     CY_TRACE(cy,
-             "🔚%*s t%016llx@%04x '%s' evict=%llu lage=%+d subscribed=%d iters=%zu",
+             "🔎%*s T%016llx@%04x '%s' evict=%llu lage=%+d subscribed=%d",
              (call_depth - 1) * call_depth_indent,
              "",
              (unsigned long long)topic->hash,
@@ -736,10 +742,10 @@ static void topic_allocate(cy_t* const       cy, // NOLINT(*-no-recursion)
              topic->name,
              (unsigned long long)topic->evictions,
              topic_lage(topic, now),
-             (int)topic->subscribed,
-             iter_count);
+             (int)topic->subscribed);
     assert(call_depth > 0);
     call_depth--;
+#endif
 }
 
 /// UB if the topic under this name already exists.
@@ -814,7 +820,7 @@ static cy_err_t topic_new(cy_t* const        cy,
     }
 
     CY_TRACE(cy,
-             "✨ t%016llx@%04x '%s': topic_count=%zu",
+             "✨ T%016llx@%04x '%s': topic_count=%zu",
              (unsigned long long)topic->hash,
              cy_topic_subject_id(topic),
              topic->name,
@@ -856,7 +862,7 @@ static cy_err_t topic_couple(cy_t* const                 cy,
     char subr_name[CY_TOPIC_NAME_MAX + 1];
     wkv_get_key(&cy->subscribers_by_name, subr->index_name, subr_name);
     CY_TRACE(cy,
-             "🔗 t%016llx@%04x '%s' <=> '%s' substitutions=%zu",
+             "🔗 T%016llx@%04x '%s' <=> '%s' substitutions=%zu",
              (unsigned long long)topic->hash,
              cy_topic_subject_id(topic),
              topic->name,
@@ -885,7 +891,7 @@ static cy_err_t topic_couple(cy_t* const                 cy,
         if ((subr->index_pattern == NULL) && is_implicit(cy, topic)) {
             delist(&cy->list_implicit, &topic->list_implicit);
             CY_TRACE(cy,
-                     "🧛 Promoted to explicit t%016llx@%04x '%s'",
+                     "🧛 Promoted to explicit T%016llx@%04x '%s'",
                      (unsigned long long)topic->hash,
                      cy_topic_subject_id(topic),
                      topic->name);
@@ -947,7 +953,7 @@ static void* wkv_cb_topic_scout_response(const wkv_event_t evt)
 {
     cy_t* const       cy    = (cy_t*)evt.context;
     cy_topic_t* const topic = (cy_topic_t*)evt.node->value;
-    CY_TRACE(cy, "📢 t%016llx@%04x '%s'", (unsigned long long)(topic->hash), cy_topic_subject_id(topic), topic->name);
+    CY_TRACE(cy, "📢 T%016llx@%04x '%s'", (unsigned long long)(topic->hash), cy_topic_subject_id(topic), topic->name);
     schedule_gossip(cy, topic, true);
     return NULL;
 }
@@ -1006,7 +1012,7 @@ static cy_err_t publish_heartbeat_gossip(cy_t* const cy, cy_topic_t* const topic
                         ._reserved_1_        = 0,
                         .topic_name_len      = (uint_fast8_t)topic->index_name->key_len };
     memcpy(msg.topic_name, topic->name, topic->index_name->key_len);
-    CY_TRACE(cy, "🗣️ t%016llx@%04x '%s'", (unsigned long long)topic->hash, cy_topic_subject_id(topic), topic->name);
+    CY_TRACE(cy, "🗣️ T%016llx@%04x '%s'", (unsigned long long)topic->hash, cy_topic_subject_id(topic), topic->name);
     // Update gossip even if failed so we don't get stuck publishing same gossip if error reporting is broken.
     schedule_gossip(cy, topic, false);
     return publish_heartbeat(cy, now, &msg);
@@ -1058,7 +1064,7 @@ static void on_heartbeat(cy_t* const cy, const cy_arrival_t* const evt)
                 const bool win =
                   (mine_lage > other_lage) || ((mine_lage == other_lage) && (mine->evictions > other_evictions));
                 CY_TRACE(cy,
-                         "🔀 Divergence on '%s' t%016llx discovered via gossip from n%016llx@%04x:\n"
+                         "🔀 Divergence on '%s' T%016llx discovered via gossip from N%016llx@%04x:\n"
                          "\t local  %s @%04x evict=%llu lage=%+d\n"
                          "\t remote %s @%04x evict=%llu lage=%+d",
                          mine->name,
@@ -1098,9 +1104,9 @@ static void on_heartbeat(cy_t* const cy, const cy_arrival_t* const evt)
             assert(cy_topic_subject_id(mine) == topic_subject_id(other_hash, other_evictions));
             const bool win = left_wins(mine, ts, other_lage, other_hash);
             CY_TRACE(cy,
-                     "💥 Collision @%04x discovered via gossip from n%016llx@%04x:\n"
-                     "\t local  %s t%016llx evict=%llu lage=%+d '%s'\n"
-                     "\t remote %s t%016llx evict=%llu lage=%+d '%s'",
+                     "💥 Collision @%04x discovered via gossip from N%016llx@%04x:\n"
+                     "\t local  %s T%016llx evict=%llu lage=%+d '%s'\n"
+                     "\t remote %s T%016llx evict=%llu lage=%+d '%s'",
                      cy_topic_subject_id(mine),
                      (unsigned long long)heartbeat.uid,
                      meta->remote_node_id,
@@ -1129,7 +1135,7 @@ static void on_heartbeat(cy_t* const cy, const cy_arrival_t* const evt)
     } else if (heartbeat.topic_lage == LAGE_SCOUT) {
         // A scout message is simply asking us to check if we have any matching topics, and gossip them ASAP if so.
         CY_TRACE(cy,
-                 "📢 Scout from n%016llx@%04x: t%016llx evict=%llu lage=%+d '%s'",
+                 "📢 Scout from N%016llx@%04x: T%016llx evict=%llu lage=%+d '%s'",
                  (unsigned long long)heartbeat.uid,
                  meta->remote_node_id,
                  (unsigned long long)other_hash,
@@ -1139,7 +1145,7 @@ static void on_heartbeat(cy_t* const cy, const cy_arrival_t* const evt)
         (void)wkv_match(&cy->topics_by_name, key, cy, wkv_cb_topic_scout_response);
     } else {
         CY_TRACE(cy,
-                 "⚠️ Invalid heartbeat message version=%d from n%016llx@%04x: lage=%+d",
+                 "⚠️ Invalid heartbeat message version=%d from N%016llx@%04x: lage=%+d",
                  (int)heartbeat.version,
                  (unsigned long long)heartbeat.uid,
                  meta->remote_node_id,
@@ -1190,7 +1196,7 @@ cy_err_t cy_advertise(cy_t* const cy, cy_publisher_t* const pub, const wkv_str_t
         // We don't need to schedule gossip here because this is managed by topic_ensure et al.
     }
     CY_TRACE(cy,
-             "✨ t%016llx@%04x '%s': topic_count=%zu pub_count=%zu res=%d",
+             "✨ T%016llx@%04x '%s': topic_count=%zu pub_count=%zu res=%d",
              (unsigned long long)pub->topic->hash,
              cy_topic_subject_id(pub->topic),
              pub->topic->name,
@@ -1799,7 +1805,7 @@ void cy_ingest_p2p(cy_t* const cy, cy_transfer_owned_t transfer)
     cy_topic_t* const topic = cy_topic_find_by_hash(cy, topic_hash);
     if (topic == NULL) { // We don't know this topic, ignore it.
         cy->platform->buffer_release(cy, transfer.payload);
-        CY_TRACE(cy, "⚠️ Orphan kind=%u t%016llx", (unsigned)kind, (unsigned long long)topic_hash);
+        CY_TRACE(cy, "⚠️ Orphan kind=%u T%016llx", (unsigned)kind, (unsigned long long)topic_hash);
     } else {
         switch (kind) {
             case p2p_kind_ack_message: {
@@ -1818,7 +1824,7 @@ void cy_ingest_p2p(cy_t* const cy, cy_transfer_owned_t transfer)
             }
             default: {
                 cy->platform->buffer_release(cy, transfer.payload);
-                CY_TRACE(cy, "⚠️ Unknown kind=%u t%016llx", (unsigned)kind, (unsigned long long)topic_hash);
+                CY_TRACE(cy, "⚠️ Unknown kind=%u T%016llx", (unsigned)kind, (unsigned long long)topic_hash);
                 break;
             }
         }
