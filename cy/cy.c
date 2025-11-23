@@ -1064,22 +1064,28 @@ static void on_heartbeat(cy_t* const cy, const cy_arrival_t* const evt)
                 const bool win =
                   (mine_lage > other_lage) || ((mine_lage == other_lage) && (mine->evictions > other_evictions));
                 CY_TRACE(cy,
-                         "🔀 Divergence on '%s' T%016llx discovered via gossip from N%016llx@%04x:\n"
-                         "\t local  %s @%04x evict=%llu lage=%+d\n"
-                         "\t remote %s @%04x evict=%llu lage=%+d",
+                         "🔀 Divergence on '%s' discovered via gossip from N%016llx@%04x:\n"
+                         "\t local  %s T%016llx@%04x evict=%llu lage=%+d\n"
+                         "\t remote %s T%016llx@%04x evict=%llu lage=%+d",
                          mine->name,
-                         (unsigned long long)mine->hash,
                          (unsigned long long)heartbeat.uid,
                          meta->remote_node_id,
                          win ? "✅" : "❌",
+                         (unsigned long long)mine->hash,
                          cy_topic_subject_id(mine),
                          (unsigned long long)mine->evictions,
                          mine_lage,
                          win ? "❌" : "✅",
+                         (unsigned long long)mine->hash,
                          topic_subject_id(other_hash, other_evictions),
                          (unsigned long long)other_evictions,
                          other_lage);
                 if (win) {
+                    // Critically, if we win, we ignore possible allocation collisions. Even if the remote sits on
+                    // a subject-ID that is currently used by another topic that we have, which could even lose
+                    // arbitration, we ignore it because the remote will have to move to catch up with us anyway,
+                    // thus resolving the collision.
+                    // See https://github.com/OpenCyphal-Garage/cy/issues/28 and AcceptGossip() in Core.tla.
                     assert(!is_pinned(mine->hash));
                     schedule_gossip(cy, mine, true);
                 } else {
@@ -1104,19 +1110,21 @@ static void on_heartbeat(cy_t* const cy, const cy_arrival_t* const evt)
             assert(cy_topic_subject_id(mine) == topic_subject_id(other_hash, other_evictions));
             const bool win = left_wins(mine, ts, other_lage, other_hash);
             CY_TRACE(cy,
-                     "💥 Collision @%04x discovered via gossip from N%016llx@%04x:\n"
-                     "\t local  %s T%016llx evict=%llu lage=%+d '%s'\n"
-                     "\t remote %s T%016llx evict=%llu lage=%+d '%s'",
-                     cy_topic_subject_id(mine),
+                     "💥 Collision on '%s' discovered via gossip from N%016llx@%04x:\n"
+                     "\t local  %s T%016llx@%04x evict=%llu lage=%+d '%s'\n"
+                     "\t remote %s T%016llx@%04x evict=%llu lage=%+d '%s'",
+                     mine->name,
                      (unsigned long long)heartbeat.uid,
                      meta->remote_node_id,
                      win ? "✅" : "❌",
                      (unsigned long long)mine->hash,
+                     cy_topic_subject_id(mine),
                      (unsigned long long)mine->evictions,
                      topic_lage(mine, ts),
                      mine->name,
                      win ? "❌" : "✅",
                      (unsigned long long)other_hash,
+                     topic_subject_id(other_hash, other_evictions),
                      (unsigned long long)other_evictions,
                      other_lage,
                      heartbeat.topic_name);
