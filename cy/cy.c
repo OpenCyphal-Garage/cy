@@ -1110,10 +1110,10 @@ static void on_heartbeat(cy_t* const cy, const cy_arrival_t* const evt)
             assert(cy_topic_subject_id(mine) == topic_subject_id(other_hash, other_evictions));
             const bool win = left_wins(mine, ts, other_lage, other_hash);
             CY_TRACE(cy,
-                     "💥 Collision on '%s' discovered via gossip from N%016llx@%04x:\n"
+                     "💥 Collision on @%04x discovered via gossip from N%016llx@%04x:\n"
                      "\t local  %s T%016llx@%04x evict=%llu lage=%+d '%s'\n"
                      "\t remote %s T%016llx@%04x evict=%llu lage=%+d '%s'",
-                     mine->name,
+                     cy_topic_subject_id(mine),
                      (unsigned long long)heartbeat.uid,
                      meta->remote_node_id,
                      win ? "✅" : "❌",
