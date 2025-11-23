@@ -522,6 +522,10 @@ static void schedule_gossip(cy_t* const cy, cy_topic_t* const topic, const bool 
 {
     const bool eligible = important || (!is_pinned(topic->hash) && !is_implicit(cy, topic));
     if (eligible) {
+        // It is conceivable that large networks may encounter transient gossip storms when multiple nodes
+        // trigger collisions on a topic in a short time window, forcing the local node to send multiple
+        // urgent gossips on the same topic back-to-back. If this becomes a problem, we can store the last
+        // gossip time per topic to throttle the gossiping rate here.
         if (important) {
             delist(&cy->list_gossip, &topic->list_gossip);
             enlist_head(&cy->list_gossip_urgent, &topic->list_gossip_urgent);
