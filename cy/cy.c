@@ -512,7 +512,7 @@ static void implicit_retire_timed_out(cy_t* const cy, const cy_us_t now)
         assert(is_implicit(cy, topic) && validate_is_implicit(topic));
         if ((topic->ts_animated + cy->implicit_topic_timeout) < now) {
             CY_TRACE(
-              cy, "⚰️'%s' #%016llx @%04x", topic->name, (unsigned long long)topic->hash, cy_topic_subject_id(topic));
+              cy, "⚰️ t%016llx@%04x '%s'", (unsigned long long)topic->hash, cy_topic_subject_id(topic), topic->name);
             topic_destroy(cy, topic);
         }
     }
@@ -526,7 +526,7 @@ static void schedule_gossip(cy_t* const cy, cy_topic_t* const topic, const bool 
             delist(&cy->list_gossip, &topic->list_gossip);
             enlist_head(&cy->list_gossip_urgent, &topic->list_gossip_urgent);
             CY_TRACE(
-              cy, "⚖️'%s' #%016llx @%04x", topic->name, (unsigned long long)topic->hash, cy_topic_subject_id(topic));
+              cy, "⚖️ t%016llx@%04x '%s'", (unsigned long long)topic->hash, cy_topic_subject_id(topic), topic->name);
         } else {
             delist(&cy->list_gossip_urgent, &topic->list_gossip_urgent);
             enlist_head(&cy->list_gossip, &topic->list_gossip);
@@ -622,10 +622,10 @@ static void topic_ensure_subscribed(cy_t* const cy, cy_topic_t* const topic)
         const cy_err_t                 res    = cy->platform->topic_subscribe(cy, topic, params);
         topic->subscribed                     = res == CY_OK;
         CY_TRACE(cy,
-                 "🗞️'%s' #%016llx @%04x extent=%zu result=%d",
-                 topic->name,
+                 "🗞️ t%016llx@%04x '%s' extent=%zu result=%d",
                  (unsigned long long)topic->hash,
                  cy_topic_subject_id(topic),
+                 topic->name,
                  params.extent,
                  res);
         if (!topic->subscribed) {
@@ -655,12 +655,12 @@ static void topic_allocate(cy_t* const       cy, // NOLINT(*-no-recursion)
     static _Thread_local int call_depth        = 0U;
     call_depth++;
     CY_TRACE(cy,
-             "🔜%*s'%s' #%016llx @%04x evict=%llu->%llu lage=%+d subscribed=%d couplings=%p",
+             "🔜%*s t%016llx@%04x '%s' evict=%llu->%llu lage=%+d subscribed=%d couplings=%p",
              (call_depth - 1) * call_depth_indent,
              "",
-             topic->name,
              (unsigned long long)topic->hash,
              cy_topic_subject_id(topic),
+             topic->name,
              (unsigned long long)topic->evictions,
              (unsigned long long)new_evictions,
              topic_lage(topic, now),
@@ -724,12 +724,12 @@ static void topic_allocate(cy_t* const       cy, // NOLINT(*-no-recursion)
     topic_ensure_subscribed(cy, topic);
 
     CY_TRACE(cy,
-             "🔚%*s'%s' #%016llx @%04x evict=%llu lage=%+d subscribed=%d iters=%zu",
+             "🔚%*s t%016llx@%04x '%s' evict=%llu lage=%+d subscribed=%d iters=%zu",
              (call_depth - 1) * call_depth_indent,
              "",
-             topic->name,
              (unsigned long long)topic->hash,
              cy_topic_subject_id(topic),
+             topic->name,
              (unsigned long long)topic->evictions,
              topic_lage(topic, now),
              (int)topic->subscribed,
@@ -810,10 +810,10 @@ static cy_err_t topic_new(cy_t* const        cy,
     }
 
     CY_TRACE(cy,
-             "✨'%s' #%016llx @%04x: topic_count=%zu",
-             topic->name,
+             "✨ t%016llx@%04x '%s': topic_count=%zu",
              (unsigned long long)topic->hash,
              cy_topic_subject_id(topic),
+             topic->name,
              cavl_count(cy->topics_by_hash));
     return 0;
 
@@ -852,10 +852,10 @@ static cy_err_t topic_couple(cy_t* const                 cy,
     char subr_name[CY_TOPIC_NAME_MAX + 1];
     wkv_get_key(&cy->subscribers_by_name, subr->index_name, subr_name);
     CY_TRACE(cy,
-             "🔗'%s' #%016llx @%04x <=> '%s' substitutions=%zu",
-             topic->name,
+             "🔗 t%016llx@%04x '%s' <=> '%s' substitutions=%zu",
              (unsigned long long)topic->hash,
              cy_topic_subject_id(topic),
+             topic->name,
              subr_name,
              substitution_count);
 #endif
@@ -881,10 +881,10 @@ static cy_err_t topic_couple(cy_t* const                 cy,
         if ((subr->index_pattern == NULL) && is_implicit(cy, topic)) {
             delist(&cy->list_implicit, &topic->list_implicit);
             CY_TRACE(cy,
-                     "🧛 Promoted to explicit '%s' #%016llx @%04x",
-                     topic->name,
+                     "🧛 Promoted to explicit t%016llx@%04x '%s'",
                      (unsigned long long)topic->hash,
-                     cy_topic_subject_id(topic));
+                     cy_topic_subject_id(topic),
+                     topic->name);
         }
     }
     return (cpl == NULL) ? CY_ERR_MEMORY : CY_OK;
@@ -943,7 +943,7 @@ static void* wkv_cb_topic_scout_response(const wkv_event_t evt)
 {
     cy_t* const       cy    = (cy_t*)evt.context;
     cy_topic_t* const topic = (cy_topic_t*)evt.node->value;
-    CY_TRACE(cy, "📢'%s' #%016llx @%04x", topic->name, (unsigned long long)(topic->hash), cy_topic_subject_id(topic));
+    CY_TRACE(cy, "📢 t%016llx@%04x '%s'", (unsigned long long)(topic->hash), cy_topic_subject_id(topic), topic->name);
     schedule_gossip(cy, topic, true);
     return NULL;
 }
@@ -1002,7 +1002,7 @@ static cy_err_t publish_heartbeat_gossip(cy_t* const cy, cy_topic_t* const topic
                         ._reserved_1_        = 0,
                         .topic_name_len      = (uint_fast8_t)topic->index_name->key_len };
     memcpy(msg.topic_name, topic->name, topic->index_name->key_len);
-    CY_TRACE(cy, "🗣️'%s' #%016llx @%04x", topic->name, (unsigned long long)topic->hash, cy_topic_subject_id(topic));
+    CY_TRACE(cy, "🗣️ t%016llx@%04x '%s'", (unsigned long long)topic->hash, cy_topic_subject_id(topic), topic->name);
     // Update gossip even if failed so we don't get stuck publishing same gossip if error reporting is broken.
     schedule_gossip(cy, topic, false);
     return publish_heartbeat(cy, now, &msg);
@@ -1051,30 +1051,31 @@ static void on_heartbeat(cy_t* const cy, const cy_arrival_t* const evt)
             assert(mine->hash == other_hash);
             const int_fast8_t mine_lage = topic_lage(mine, ts);
             if (mine->evictions != other_evictions) {
+                const bool win =
+                  (mine_lage > other_lage) || ((mine_lage == other_lage) && (mine->evictions > other_evictions));
                 CY_TRACE(cy,
-                         "🔀 Divergence on '%s' #%016llx discovered via gossip from uid=%016llx nid=%04x:\n"
-                         "\t local  @%04x evict=%llu lage=%+d\n"
-                         "\t remote @%04x evict=%llu lage=%+d",
+                         "🔀 Divergence on '%s' t%016llx discovered via gossip from n%016llx@%04x:\n"
+                         "\t local  %s @%04x evict=%llu lage=%+d\n"
+                         "\t remote %s @%04x evict=%llu lage=%+d",
                          mine->name,
                          (unsigned long long)mine->hash,
                          (unsigned long long)heartbeat.uid,
                          meta->remote_node_id,
+                         win ? "✅" : "❌",
                          cy_topic_subject_id(mine),
                          (unsigned long long)mine->evictions,
                          mine_lage,
+                         win ? "❌" : "✅",
                          topic_subject_id(other_hash, other_evictions),
                          (unsigned long long)other_evictions,
                          other_lage);
-                if ((mine_lage > other_lage) || ((mine_lage == other_lage) && (mine->evictions > other_evictions))) {
-                    CY_TRACE(cy, "We won, existing allocation not altered; expecting remote to adjust.");
+                if (win) {
                     assert(!is_pinned(mine->hash));
                     schedule_gossip(cy, mine, true);
                 } else {
                     assert((mine_lage <= other_lage) &&
                            ((mine_lage < other_lage) || (mine->evictions < other_evictions)));
                     assert(mine_lage <= other_lage);
-                    CY_TRACE(cy,
-                             "We lost, reallocating the topic to try and match the remote, or offer new alternative.");
                     topic_merge_lage(mine, ts, other_lage);
                     topic_allocate(cy, mine, other_evictions, false, ts);
                     if (mine->evictions == other_evictions) { // perfect sync, lower the gossip priority
@@ -1093,17 +1094,18 @@ static void on_heartbeat(cy_t* const cy, const cy_arrival_t* const evt)
             assert(cy_topic_subject_id(mine) == topic_subject_id(other_hash, other_evictions));
             const bool win = left_wins(mine, ts, other_lage, other_hash);
             CY_TRACE(cy,
-                     "💥 Collision @%04x discovered via gossip from uid=%016llx nid=%04x; we %s. Contestants:\n"
-                     "\t local  #%016llx evict=%llu lage=%+d '%s'\n"
-                     "\t remote #%016llx evict=%llu lage=%+d '%s'",
+                     "💥 Collision @%04x discovered via gossip from n%016llx@%04x:\n"
+                     "\t local  %s t%016llx evict=%llu lage=%+d '%s'\n"
+                     "\t remote %s t%016llx evict=%llu lage=%+d '%s'",
                      cy_topic_subject_id(mine),
                      (unsigned long long)heartbeat.uid,
                      meta->remote_node_id,
-                     (win ? "WIN" : "LOSE"),
+                     win ? "✅" : "❌",
                      (unsigned long long)mine->hash,
                      (unsigned long long)mine->evictions,
                      topic_lage(mine, ts),
                      mine->name,
+                     win ? "❌" : "✅",
                      (unsigned long long)other_hash,
                      (unsigned long long)other_evictions,
                      other_lage,
@@ -1123,17 +1125,17 @@ static void on_heartbeat(cy_t* const cy, const cy_arrival_t* const evt)
     } else if (heartbeat.topic_lage == LAGE_SCOUT) {
         // A scout message is simply asking us to check if we have any matching topics, and gossip them ASAP if so.
         CY_TRACE(cy,
-                 "📢 Scout from uid=%016llx nid=%04x: query='%s' hash=%016llx evict=%llu lage=%+d",
+                 "📢 Scout from n%016llx@%04x: t%016llx evict=%llu lage=%+d '%s'",
                  (unsigned long long)heartbeat.uid,
                  meta->remote_node_id,
-                 heartbeat.topic_name,
                  (unsigned long long)other_hash,
                  (unsigned long long)other_evictions,
-                 other_lage);
+                 other_lage,
+                 heartbeat.topic_name);
         (void)wkv_match(&cy->topics_by_name, key, cy, wkv_cb_topic_scout_response);
     } else {
         CY_TRACE(cy,
-                 "⚠️ Invalid heartbeat message version=%d from uid=%016llx nid=%04x: lage=%+d",
+                 "⚠️ Invalid heartbeat message version=%d from n%016llx@%04x: lage=%+d",
                  (int)heartbeat.version,
                  (unsigned long long)heartbeat.uid,
                  meta->remote_node_id,
@@ -1184,10 +1186,10 @@ cy_err_t cy_advertise(cy_t* const cy, cy_publisher_t* const pub, const wkv_str_t
         // We don't need to schedule gossip here because this is managed by topic_ensure et al.
     }
     CY_TRACE(cy,
-             "✨'%s' #%016llx @%04x: topic_count=%zu pub_count=%zu res=%d",
-             pub->topic->name,
+             "✨ t%016llx@%04x '%s': topic_count=%zu pub_count=%zu res=%d",
              (unsigned long long)pub->topic->hash,
              cy_topic_subject_id(pub->topic),
+             pub->topic->name,
              cavl_count(cy->topics_by_hash),
              pub->topic->pub_count,
              res);
@@ -1631,7 +1633,7 @@ cy_err_t cy_new(cy_t* const                cy,
     // If we are not given a node-ID, we need to first listen to the network.
     cy->heartbeat_next        = now;
     cy->heartbeat_next_urgent = HEAT_DEATH;
-    cy->heartbeat_period      = 3 * MEGA;
+    cy->heartbeat_period      = 2 * MEGA;
     cy_err_t res              = CY_OK;
     if (cy->node_id > cy->platform->node_id_max) {
         cy->heartbeat_next += random_int(cy, cy->heartbeat_period, 3 * cy->heartbeat_period);
@@ -1793,7 +1795,7 @@ void cy_ingest_p2p(cy_t* const cy, cy_transfer_owned_t transfer)
     cy_topic_t* const topic = cy_topic_find_by_hash(cy, topic_hash);
     if (topic == NULL) { // We don't know this topic, ignore it.
         cy->platform->buffer_release(cy, transfer.payload);
-        CY_TRACE(cy, "⚠️ Orphan kind=%u #%016llx", (unsigned)kind, (unsigned long long)topic_hash);
+        CY_TRACE(cy, "⚠️ Orphan kind=%u t%016llx", (unsigned)kind, (unsigned long long)topic_hash);
     } else {
         switch (kind) {
             case p2p_kind_ack_message: {
@@ -1812,7 +1814,7 @@ void cy_ingest_p2p(cy_t* const cy, cy_transfer_owned_t transfer)
             }
             default: {
                 cy->platform->buffer_release(cy, transfer.payload);
-                CY_TRACE(cy, "⚠️ Unknown kind=%u #%016llx", (unsigned)kind, (unsigned long long)topic_hash);
+                CY_TRACE(cy, "⚠️ Unknown kind=%u t%016llx", (unsigned)kind, (unsigned long long)topic_hash);
                 break;
             }
         }
