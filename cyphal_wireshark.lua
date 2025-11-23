@@ -36,7 +36,7 @@ local f_topic_name           = ProtoField.string("heartbeat.topic_name", "Topic 
 
 -- Computed synthetic fields
 local f_syn_topic_subject_id = ProtoField.uint16("heartbeat.topic_subject_id", "Subject-ID", base.DEC)
-local f_syn_topic_age_bracket= ProtoField.string("heartbeat.topic_age_bracket", "Topic age bracket", base.ACII)
+local f_syn_topic_age_bracket= ProtoField.string("heartbeat.topic_age_bracket", "Topic age bracket", base.ASCII)
 
 heartbeat_proto.fields       = {
     f_uptime,

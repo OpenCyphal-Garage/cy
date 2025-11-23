@@ -398,9 +398,6 @@ void     cy_destroy(cy_t* const cy);
 /// This is the only function that generates heartbeat -- the only kind of auxiliary traffic needed by the protocol.
 /// The returned value indicates the success of the heartbeat publication, if any took place, or zero.
 ///
-/// If this is invoked together with cy_ingest(), then cy_update() must be invoked AFTER cy_ingest() to ensure
-/// that the latest state updates are reflected in the heartbeat message.
-///
 /// This function is also responsible for handling the local node-ID allocation.
 ///
 /// Excluding the transport_publish dependency, the time complexity is logarithmic in the number of topics.
@@ -436,9 +433,6 @@ void cy_notify_node_id_collision(cy_t* const cy);
 /// The library will dispatch it to the appropriate subscriber callbacks.
 /// Excluding the callbacks, the time complexity is constant.
 /// The transfer payload ownership is taken by this function.
-///
-/// If this is invoked together with cy_update(), then cy_ingest() must be invoked BEFORE cy_update()
-/// to ensure that the latest state updates are reflected in the next heartbeat message.
 void cy_ingest(cy_t* const cy, cy_topic_t* const topic, cy_transfer_owned_t transfer);
 
 /// Report arrival of a P2P transfer from another node.
