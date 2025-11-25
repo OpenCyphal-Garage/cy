@@ -20,6 +20,8 @@ Stretch goals:
 
 - Optional reliable transfers with ack/retry
 
+All network participants are assumed to be honest and trusted; no malicious participants are present. This is identical to the original Cyphal v1.0 design. Security features are out of scope for this PoC.
+
 ## TL;DR
 
 ```c

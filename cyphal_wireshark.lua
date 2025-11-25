@@ -38,7 +38,7 @@ local f_topic_name           = ProtoField.string("heartbeat.topic_name", "Topic 
 local f_syn_topic_subject_id = ProtoField.uint16("heartbeat.topic_subject_id", "Subject-ID", base.DEC)
 local f_syn_topic_age_bracket= ProtoField.string("heartbeat.topic_age_bracket", "Topic age bracket", base.ASCII)
 
-heartbeat_proto.fields       = {
+heartbeat_proto.fields = {
     f_uptime,
     f_user,
     f_user_0,
@@ -70,7 +70,6 @@ function heartbeat_proto.dissector(tvb, pinfo, tree)
     -- Handle the Cyphal/UDP header.
     local header_version = tvb(0, 1):le_uint()
     local header_size = 0
-    local source_node_id = tvb(2, 2):le_uint()
     if header_version == 1 then
         header_size = 24
     elseif header_version == 2 then
@@ -181,8 +180,8 @@ function heartbeat_proto.dissector(tvb, pinfo, tree)
 
     -- Update Info column
     pinfo.cols.info = info .. string.format(
-        " N%04x_%04x_%08x@%04x 📢% 3u %+03d T%08x%08x@%04x \"%s\"",
-        vid, pid, iid, source_node_id, topic_evictions, topic_lage,
+        " N%04x_%04x_%08x 📢% 3u %+03d T%08x%08x@%04x \"%s\"",
+        vid, pid, iid, topic_evictions, topic_lage,
         topic_hash_hi, topic_hash_lo, subject_id, topic_name
     )
 end

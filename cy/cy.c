@@ -88,13 +88,6 @@ static uint64_t random_u64(const cy_t* const cy)
 }
 
 /// The limits are inclusive. Returns min unless min < max.
-static uint64_t random_uint(const cy_t* const cy, const uint64_t min, const uint64_t max)
-{
-    if (min < max) {
-        return (random_u64(cy) % (max - min)) + min;
-    }
-    return min;
-}
 static int64_t random_int(const cy_t* const cy, const int64_t min, const int64_t max)
 {
     if (min < max) {
@@ -294,120 +287,6 @@ static size_t cavl_count(cy_tree_t* const root)
         count++;
     }
     return count;
-}
-
-// =====================================================================================================================
-//                                                  NODE ID ALLOCATION
-// =====================================================================================================================
-
-// ReSharper disable CppParameterMayBeConstPtrOrRef
-
-/// A Bloom filter is a set-only structure so there is no way to clear a bit after it has been set.
-/// It is only possible to purge the entire filter state.
-static void bloom64_set(cy_bloom64_t* const bloom, const size_t value)
-{
-    assert(bloom != NULL);
-    const size_t   index = value % bloom->n_bits;
-    const uint64_t mask  = 1ULL << (index % 64U);
-    if ((bloom->storage[index / 64U] & mask) == 0) {
-        bloom->storage[index / 64U] |= mask;
-        bloom->popcount++;
-    }
-    assert(bloom->popcount <= bloom->n_bits);
-}
-
-static bool bloom64_get(const cy_bloom64_t* const bloom, const size_t value)
-{
-    assert(bloom != NULL);
-    const size_t index = value % bloom->n_bits;
-    return (bloom->storage[index / 64U] & (1ULL << (index % 64U))) != 0;
-}
-
-static void bloom64_purge(cy_bloom64_t* const bloom)
-{
-    assert(bloom != NULL);
-    for (size_t i = 0; i < (bloom->n_bits + 63U) / 64U; i++) { // dear compiler please unroll this
-        bloom->storage[i] = 0U; // I suppose this is better than memset cuz we're aligned to 64 bits.
-    }
-    bloom->popcount = 0U;
-}
-
-/// This is guaranteed to return a valid node-ID. If the Bloom filter is not full, an unoccupied node-ID will be
-/// chosen, and the corresponding entry in the filter will be set. If the filter is full, a random node-ID will be
-/// chosen, which can only happen if more than filter capacity nodes are currently online.
-/// The complexity is constant, independent of the filter occupancy.
-///
-/// In the future we could replace this with a deterministic algorithm that chooses the node-ID based on the UID
-/// and a nonce. Perhaps it could be simply SplitMix64 seeded with the UID?
-///
-/// The Spec says that node-ID 126 and 127 are reserved for diagnostic tools. We ignore this reservation here
-/// because there doesn't seem to be a good way to enforce it without degrading into a linear search,
-/// or increasing the complexity of the choosing algorithm significantly. The naive approach where we simply mark
-/// the corresponding Bloom filter entries as taken is too wasteful because it wipes out not only the reserved
-/// IDs, but all other IDs that map to the same Bloom filter bits. In CAN networks, the transport glue library can
-/// simply limit the node-ID allocation range to [0, 125], and thus ensure the reserved IDs are not used;
-/// all other transports that use much wider node-ID range (which is [0, 65534]) can just disregard the reservation
-/// because the likelihood of picking the reserved IDs is negligible, and the consequences of doing so are very minor.
-static uint16_t pick_node_id(const cy_t* const cy, cy_bloom64_t* const bloom, const uint16_t node_id_max)
-{
-    // The algorithm is hierarchical: find a 64-bit word that has at least one zero bit, then find a zero bit in it.
-    // This somewhat undermines the randomness of the result, but it is always fast.
-    const size_t num_words  = (smaller(node_id_max, bloom->n_bits) + 63U) / 64U;
-    size_t       word_index = (size_t)random_uint(cy, 0U, num_words - 1U);
-    for (size_t i = 0; i < num_words; i++) {
-        if (bloom->storage[word_index] != UINT64_MAX) {
-            break;
-        }
-        word_index = (word_index + 1U) % num_words;
-    }
-    const uint64_t word = bloom->storage[word_index];
-    if (word == UINT64_MAX) {
-        return (uint16_t)random_uint(cy, 0U, node_id_max); // The filter is full, fallback to random node-ID.
-    }
-
-    // Now we have a word with at least one zero bit. Find a random zero bit in it.
-    uint_fast8_t bit_index = (uint_fast8_t)random_uint(cy, 0U, 63U);
-    assert(word != UINT64_MAX);
-    while ((word & (1ULL << bit_index)) != 0) { // guaranteed to terminate, see above.
-        bit_index = (bit_index + 1U) % 64U;
-    }
-
-    // Now we have some valid free node-ID. Recall that the Bloom filter maps multiple values to the same bit.
-    // This means that we can increase randomness by incrementing the node-ID by a multiple of the Bloom filter period.
-    size_t node_id = (word_index * 64U) + bit_index;
-    assert(node_id < node_id_max);
-    assert(bloom64_get(bloom, node_id) == false);
-    node_id += (size_t)random_uint(cy, 0, node_id_max / bloom->n_bits) * bloom->n_bits;
-    // TODO FIXME ensure we don't exceed node_id_max -- decrement until free?
-    assert(node_id < node_id_max);
-    assert(bloom64_get(bloom, node_id) == false);
-    bloom64_set(bloom, node_id);
-    return (uint16_t)node_id;
-}
-
-// ReSharper restore CppParameterMayBeConstPtrOrRef
-
-/// If the local node still has no node-ID, this function will allocate one on the spot.
-/// May fail if the underlying platform->node_id_set() fails.
-static cy_err_t ensure_joined(cy_t* const cy)
-{
-    cy_err_t res = CY_OK;
-    if (cy->node_id >= cy->platform->node_id_max) {
-        cy_bloom64_t* const bloom = cy->platform->node_id_bloom(cy);
-        assert((bloom != NULL) && (bloom->n_bits > 0) && ((bloom->n_bits % 64) == 0) &&
-               (bloom->popcount <= bloom->n_bits));
-        cy->node_id = pick_node_id(cy, bloom, cy->platform->node_id_max);
-        assert(cy->node_id <= cy->platform->node_id_max);
-        res = cy->platform->node_id_set(cy);
-        if (res == CY_OK) {
-            CY_TRACE(cy, "☝️ Picked own node-ID %04x; bloom popcount %zu", cy->node_id, bloom->popcount);
-        } else {
-            CY_TRACE(cy, "☝️ Failed to set node-ID %04x with error %d; purge bloom to retry later", cy->node_id, res);
-            cy->node_id = cy->platform->node_id_max;
-            bloom64_purge(bloom);
-        }
-    }
-    return res;
 }
 
 // =====================================================================================================================
@@ -981,11 +860,6 @@ typedef struct
 
 static cy_err_t publish_heartbeat(cy_t* const cy, const cy_us_t now, heartbeat_t* const message)
 {
-    cy_err_t res = ensure_joined(cy);
-    if (res != CY_OK) {
-        return res;
-    }
-
     // Fill and serialize the message.
     message->uptime           = (uint32_t)((now - cy->ts_started) / MEGA);
     message->version          = 1;
@@ -996,8 +870,7 @@ static cy_err_t publish_heartbeat(cy_t* const cy, const cy_us_t now, heartbeat_t
     const cy_buffer_borrowed_t payload = { .next = NULL, .view = { .data = message, .size = message_size } };
 
     // Publish the message.
-    assert(cy->node_id <= cy->platform->node_id_max);
-    res = cy->platform->topic_publish(cy, &cy->heartbeat_pub, now + HEARTBEAT_PUB_TIMEOUT_us, payload);
+    const cy_err_t res = cy->platform->topic_publish(cy, &cy->heartbeat_pub, now + HEARTBEAT_PUB_TIMEOUT_us, payload);
     cy->heartbeat_pub.topic->pub_transfer_id++;
     return res;
 }
@@ -1027,6 +900,40 @@ static cy_err_t publish_heartbeat_scout(cy_t* const cy, cy_subscriber_root_t* co
     CY_TRACE(cy, "📢'%s' result=%d", msg.topic_name, res);
     if (res == CY_OK) {
         delist(&cy->list_scout_pending, &subr->list_scout_pending);
+    }
+    return res;
+}
+
+static cy_err_t heartbeat_poll(cy_t* const cy, const cy_us_t now)
+{
+    // Decide if it is time to publish a heartbeat. We use a very simple minimal-state scheduler that runs two
+    // periods and offers an opportunity to publish a heartbeat every now and then.
+    cy_err_t res = CY_OK;
+    if ((now >= cy->heartbeat_next) || (now >= cy->heartbeat_next_urgent)) {
+        cy_topic_t*                 topic = LIST_TAIL(cy->list_gossip_urgent, cy_topic_t, list_gossip_urgent);
+        cy_subscriber_root_t* const scout = LIST_TAIL(cy->list_scout_pending, cy_subscriber_root_t, list_scout_pending);
+        if ((now >= cy->heartbeat_next) || (topic != NULL) || (scout != NULL)) {
+            if ((topic != NULL) || (scout == NULL)) {
+                topic = (topic != NULL) ? topic : LIST_TAIL(cy->list_gossip, cy_topic_t, list_gossip);
+                topic = (topic != NULL) ? topic : cy->heartbeat_pub.topic;
+                res   = publish_heartbeat_gossip(cy, topic, now);
+            } else {
+                res = publish_heartbeat_scout(cy, scout, now);
+            }
+            cy->heartbeat_next = now + dither_int(cy, cy->heartbeat_period, cy->heartbeat_period / 8);
+        }
+        cy->heartbeat_next_urgent = now + cy->heartbeat_period / 16U;
+    }
+    return res;
+}
+
+static cy_err_t heartbeat_begin(cy_t* const cy)
+{
+    cy_err_t res = CY_OK;
+    if (cy->heartbeat_next == HEAT_DEATH) {
+        const cy_us_t now  = cy_now(cy);
+        cy->heartbeat_next = now;
+        res                = heartbeat_poll(cy, now);
     }
     return res;
 }
@@ -1064,12 +971,11 @@ static void on_heartbeat(cy_t* const cy, const cy_arrival_t* const evt)
                 const bool win =
                   (mine_lage > other_lage) || ((mine_lage == other_lage) && (mine->evictions > other_evictions));
                 CY_TRACE(cy,
-                         "🔀 Divergence on '%s' discovered via gossip from N%016llx@%04x:\n"
+                         "🔀 Divergence on '%s' discovered via gossip from N%016llx:\n"
                          "\t local  %s T%016llx@%04x evict=%llu lage=%+d\n"
                          "\t remote %s T%016llx@%04x evict=%llu lage=%+d",
                          mine->name,
                          (unsigned long long)heartbeat.uid,
-                         meta->remote_node_id,
                          win ? "✅" : "❌",
                          (unsigned long long)mine->hash,
                          cy_topic_subject_id(mine),
@@ -1110,12 +1016,11 @@ static void on_heartbeat(cy_t* const cy, const cy_arrival_t* const evt)
             assert(cy_topic_subject_id(mine) == topic_subject_id(other_hash, other_evictions));
             const bool win = left_wins(mine, ts, other_lage, other_hash);
             CY_TRACE(cy,
-                     "💥 Collision on @%04x discovered via gossip from N%016llx@%04x:\n"
+                     "💥 Collision on @%04x discovered via gossip from N%016llx:\n"
                      "\t local  %s T%016llx@%04x evict=%llu lage=%+d '%s'\n"
                      "\t remote %s T%016llx@%04x evict=%llu lage=%+d '%s'",
                      cy_topic_subject_id(mine),
                      (unsigned long long)heartbeat.uid,
-                     meta->remote_node_id,
                      win ? "✅" : "❌",
                      (unsigned long long)mine->hash,
                      cy_topic_subject_id(mine),
@@ -1143,9 +1048,8 @@ static void on_heartbeat(cy_t* const cy, const cy_arrival_t* const evt)
     } else if (heartbeat.topic_lage == LAGE_SCOUT) {
         // A scout message is simply asking us to check if we have any matching topics, and gossip them ASAP if so.
         CY_TRACE(cy,
-                 "📢 Scout from N%016llx@%04x: T%016llx evict=%llu lage=%+d '%s'",
+                 "📢 Scout from N%016llx: T%016llx evict=%llu lage=%+d '%s'",
                  (unsigned long long)heartbeat.uid,
-                 meta->remote_node_id,
                  (unsigned long long)other_hash,
                  (unsigned long long)other_evictions,
                  other_lage,
@@ -1153,10 +1057,9 @@ static void on_heartbeat(cy_t* const cy, const cy_arrival_t* const evt)
         (void)wkv_match(&cy->topics_by_name, key, cy, wkv_cb_topic_scout_response);
     } else {
         CY_TRACE(cy,
-                 "⚠️ Invalid heartbeat message version=%d from N%016llx@%04x: lage=%+d",
+                 "⚠️ Invalid heartbeat message version=%d from N%016llx: lage=%+d",
                  (int)heartbeat.version,
                  (unsigned long long)heartbeat.uid,
-                 meta->remote_node_id,
                  heartbeat.topic_lage);
     }
 }
@@ -1241,9 +1144,7 @@ cy_err_t cy_publish(cy_t* const                cy,
     assert(topic != NULL);
     assert(topic->pub_count > 0);
 
-    // If we still don't have a node-ID, force allocation right now.
-    // Normally, however, the application should wait for cy_join() to complete before publishing anything.
-    cy_err_t res = ensure_joined(cy);
+    cy_err_t res = heartbeat_begin(cy);
     if (res != CY_OK) {
         return res;
     }
@@ -1271,7 +1172,6 @@ cy_err_t cy_publish(cy_t* const                cy,
     }
 
     res = cy->platform->topic_publish(cy, pub, tx_deadline, payload);
-
     if (future != NULL) {
         if (res == CY_OK) {
             const cy_tree_t* const tr = cavl2_find_or_insert(&cy->futures_by_deadline,
@@ -1424,15 +1324,15 @@ cy_err_t cy_respond(cy_t* const                cy,
                     const cy_buffer_borrowed_t payload)
 {
     assert(topic != NULL);
-    const cy_err_t res = ensure_joined(cy);
+    const cy_err_t res = heartbeat_begin(cy);
     if (res != CY_OK) {
         return res;
     }
     const uint64_t response_header[3] = { p2p_kind_response, topic->hash, metadata.transfer_id };
     return cy->platform->p2p(cy,
                              topic,
+                             metadata.context,
                              metadata.priority,
-                             metadata.remote_node_id,
                              tx_deadline,
                              (cy_buffer_borrowed_t){
                                .next = &payload,
@@ -1452,11 +1352,6 @@ void cy_subscriber_name(const cy_t* const cy, const cy_subscriber_t* const sub, 
 cy_us_t cy_now(const cy_t* const cy)
 {
     return cy->platform->now(cy);
-}
-
-bool cy_joined(const cy_t* const cy)
-{
-    return cy->node_id <= cy->platform->node_id_max;
 }
 
 void cy_topic_hint(cy_t* const cy, cy_topic_t* const topic, const uint16_t subject_id)
@@ -1572,11 +1467,7 @@ size_t cy_buffer_borrowed_gather(const cy_buffer_borrowed_t payload, const cy_by
 //                                              PLATFORM LAYER INTERFACE
 // =====================================================================================================================
 
-cy_err_t cy_new(cy_t* const                cy,
-                const cy_platform_t* const platform,
-                const uint64_t             uid,
-                const uint16_t             node_id,
-                const wkv_str_t            namespace_)
+cy_err_t cy_new(cy_t* const cy, const cy_platform_t* const platform, const uint64_t uid, const wkv_str_t namespace_)
 {
     assert(cy != NULL);
     assert(uid != 0);
@@ -1585,9 +1476,6 @@ cy_err_t cy_new(cy_t* const                cy,
     assert(platform->realloc != NULL);
     assert(platform->prng != NULL);
     assert(platform->buffer_release != NULL);
-    assert(platform->node_id_set != NULL);
-    assert(platform->node_id_clear != NULL);
-    assert(platform->node_id_bloom != NULL);
     assert(platform->p2p != NULL);
     assert(platform->topic_new != NULL);
     assert(platform->topic_destroy != NULL);
@@ -1596,7 +1484,6 @@ cy_err_t cy_new(cy_t* const                cy,
     assert(platform->topic_unsubscribe != NULL);
     assert(platform->topic_advertise != NULL);
     assert(platform->topic_on_subscription_error != NULL);
-    assert((platform->node_id_max > 0) && (platform->node_id_max < CY_NODE_ID_INVALID));
 
     if (namespace_.len > CY_NAMESPACE_NAME_MAX) {
         return CY_ERR_NAME;
@@ -1606,7 +1493,6 @@ cy_err_t cy_new(cy_t* const                cy,
     memset(cy, 0, sizeof(*cy));
     cy->platform = platform;
     cy->uid      = uid;
-    cy->node_id  = (node_id <= platform->node_id_max) ? node_id : CY_NODE_ID_INVALID;
     // namespace
     if (namespace_.len > 0) {
         memcpy(cy->namespace_, namespace_.str, namespace_.len);
@@ -1639,70 +1525,26 @@ cy_err_t cy_new(cy_t* const                cy,
     const cy_us_t now = cy_now(cy);
     cy->ts_started    = now;
 
-    cy_bloom64_t* const node_id_bloom = platform->node_id_bloom(cy);
-    assert(node_id_bloom != NULL);
-    assert(node_id_bloom->n_bits > 0);
-    assert((node_id_bloom->n_bits % 64) == 0);
-    bloom64_purge(node_id_bloom);
-
-    // If a node-ID is given explicitly, we want to publish our heartbeat ASAP to speed up network convergence
-    // and to claim the address; if it's already taken, we will want to cause a collision to move the other node,
-    // because manually assigned addresses take precedence over auto-assigned ones.
-    // If we are not given a node-ID, we need to first listen to the network.
-    cy->heartbeat_next        = now;
+    cy->heartbeat_next        = HEAT_DEATH; // The first heartbeat is sent together with the first publication.
     cy->heartbeat_next_urgent = HEAT_DEATH;
     cy->heartbeat_period      = 2 * MEGA;
-    cy_err_t res              = CY_OK;
-    if (cy->node_id > cy->platform->node_id_max) {
-        cy->heartbeat_next += random_int(cy, cy->heartbeat_period, 3 * cy->heartbeat_period);
-    } else {
-        bloom64_set(node_id_bloom, cy->node_id);
-        assert(node_id_bloom->popcount == 1);
-        res = cy->platform->node_id_set(cy);
-    }
 
     cy->implicit_topic_timeout = IMPLICIT_TOPIC_DEFAULT_TIMEOUT_us;
 
     // Pub/sub on the heartbeat topic.
+    cy_err_t res = cy_advertise_c(cy, &cy->heartbeat_pub, CY_HEARTBEAT_TOPIC_NAME, 0);
     if (res == CY_OK) {
-        res = cy_advertise_c(cy, &cy->heartbeat_pub, CY_HEARTBEAT_TOPIC_NAME, 0);
-        if (res == CY_OK) {
-            res = cy_subscribe_c(cy, &cy->heartbeat_sub, CY_HEARTBEAT_TOPIC_NAME, sizeof(heartbeat_t), &on_heartbeat);
-            if (res != CY_OK) {
-                cy_unadvertise(cy, &cy->heartbeat_pub);
-            }
+        res = cy_subscribe_c(cy, &cy->heartbeat_sub, CY_HEARTBEAT_TOPIC_NAME, sizeof(heartbeat_t), &on_heartbeat);
+        if (res != CY_OK) {
+            cy_unadvertise(cy, &cy->heartbeat_pub);
         }
     }
     return res;
 }
 
-/// We snoop on all transfers we have access to to update the node-ID occupancy Bloom filter.
-/// If we don't have a node-ID and this is a new Bloom entry, follow CSMA/CD: add random wait.
-/// The point is to reduce the chances of multiple nodes appearing simultaneously and claiming same node-IDs.
-/// We keep tracking neighbors even if we have a node-ID in case we encounter a collision later and need to move.
-static void mark_neighbor(cy_t* const cy, const uint16_t remote_node_id)
-{
-    cy_bloom64_t* const bloom = cy->platform->node_id_bloom(cy);
-    assert((bloom != NULL) && (bloom->n_bits > 0) && ((bloom->n_bits % 64) == 0) && (bloom->popcount <= bloom->n_bits));
-    // A large population count indicates that the filter contains tombstones (marks for nodes that have left the
-    // network). We can't remove them individually, so we purge the filter and start over.
-    const bool bloom_congested = bloom->popcount > ((bloom->n_bits * 31ULL) / 32U);
-    if (bloom_congested) {
-        CY_TRACE(cy, "🌻 bloom filter congested: popcount=%zu; purging to remove tombstones", bloom->popcount);
-        bloom64_purge(bloom);
-        assert(bloom->popcount == 0);
-    }
-    if ((cy->node_id > cy->platform->node_id_max) && !bloom64_get(bloom, remote_node_id)) {
-        CY_TRACE(cy, "🔭 Discovered neighbor %04x; new bloom popcount %zu", remote_node_id, bloom->popcount + 1U);
-    }
-    bloom64_set(bloom, remote_node_id);
-}
-
 void cy_ingest(cy_t* const cy, cy_topic_t* const topic, cy_transfer_owned_t transfer)
 {
     assert(topic != NULL);
-
-    mark_neighbor(cy, transfer.metadata.remote_node_id);
 
     // Record activity so that the topic is not retired.
     implicit_animate(cy, topic, transfer.timestamp);
@@ -1733,15 +1575,11 @@ void cy_ingest(cy_t* const cy, cy_topic_t* const topic, cy_transfer_owned_t tran
     }
 }
 
-static void ingest_p2p_ack_message(cy_t* const       cy,
-                                   cy_topic_t* const topic,
-                                   const uint64_t    transfer_id,
-                                   const uint16_t    remote_node_id)
+static void ingest_p2p_ack_message(cy_t* const cy, cy_topic_t* const topic, const uint64_t transfer_id)
 {
     (void)cy;
     (void)topic;
     (void)transfer_id;
-    (void)remote_node_id;
     // TODO: implement reliable delivery https://github.com/OpenCyphal-Garage/cy/issues/21
     // Specifically, find the pending future and mark it as completed.
 }
@@ -1749,12 +1587,12 @@ static void ingest_p2p_ack_message(cy_t* const       cy,
 static void ingest_p2p_ack_response(cy_t* const       cy,
                                     cy_topic_t* const topic,
                                     const uint64_t    transfer_id,
-                                    const uint16_t    remote_node_id)
+                                    const uint32_t    cookie)
 {
     (void)cy;
     (void)topic;
     (void)transfer_id;
-    (void)remote_node_id;
+    (void)cookie;
     // TODO: implement reliable delivery https://github.com/OpenCyphal-Garage/cy/issues/21
     // Specifically, find the pending response state and delete it.
 }
@@ -1762,6 +1600,7 @@ static void ingest_p2p_ack_response(cy_t* const       cy,
 static void ingest_p2p_response(cy_t* const         cy,
                                 cy_topic_t* const   topic,
                                 const uint64_t      transfer_id,
+                                const uint32_t      cookie,
                                 cy_transfer_owned_t transfer)
 {
     // Find the matching pending response future -- log(N) lookup.
@@ -1772,6 +1611,7 @@ static void ingest_p2p_response(cy_t* const         cy,
     }
     cy_future_t* const fut = CAVL2_TO_OWNER(tr, cy_future_t, index_transfer_id);
     assert(fut->state == cy_future_pending);
+
     // Finalize and retire the future.
     fut->state = cy_future_success;
     cy_buffer_owned_release(cy, &fut->last_response.payload); // does nothing if already released
@@ -1781,21 +1621,19 @@ static void ingest_p2p_response(cy_t* const         cy,
     if (fut->callback != NULL) {
         fut->callback(cy, fut);
     }
+
+    // TODO: send rack.
+    (void)cookie;
 }
 
 void cy_ingest_p2p(cy_t* const cy, cy_transfer_owned_t transfer)
 {
     assert(cy != NULL);
-    mark_neighbor(cy, transfer.metadata.remote_node_id);
-
     // We require the first 24 bytes to be non-fragmented. This is trivially ensured because the MTU of all transports
     // that fragment per-frame is much larger (UDP requires the MTU to be at least a few hundreds of bytes),
     // while small-MTU transports reassemble the payload into a contiguous buffer anyway.
     if (transfer.payload.base.view.size < P2P_HEADER_BYTES) {
-        CY_TRACE(cy,
-                 "⚠️ Malformed from nid=%04x: size=%zu bytes",
-                 transfer.metadata.remote_node_id,
-                 transfer.payload.base.view.size);
+        CY_TRACE(cy, "⚠️ Malformed size=%zu bytes", transfer.payload.base.view.size);
         cy->platform->buffer_release(cy, transfer.payload);
         return; // Malformed response -- missing header.
     }
@@ -1805,7 +1643,8 @@ void cy_ingest_p2p(cy_t* const cy, cy_transfer_owned_t transfer)
     memcpy(&response_header, transfer.payload.base.view.data, P2P_HEADER_BYTES);
     transfer.payload.base.view.size -= P2P_HEADER_BYTES;
     transfer.payload.base.view.data = ((const char*)transfer.payload.base.view.data) + P2P_HEADER_BYTES;
-    const uint_fast8_t kind         = (uint_fast8_t)(response_header[0] & 0xFFU);
+    const uint_fast8_t kind         = (uint_fast8_t)(response_header[0] & UINT8_MAX);
+    const uint32_t     cookie       = (uint32_t)((response_header[0] >> 32U) & UINT32_MAX);
     const uint64_t     topic_hash   = response_header[1];
     const uint64_t     transfer_id  = response_header[2];
 
@@ -1818,16 +1657,17 @@ void cy_ingest_p2p(cy_t* const cy, cy_transfer_owned_t transfer)
         switch (kind) {
             case p2p_kind_ack_message: {
                 cy->platform->buffer_release(cy, transfer.payload);
-                ingest_p2p_ack_message(cy, topic, transfer_id, transfer.metadata.remote_node_id);
+                ingest_p2p_ack_message(cy, topic, transfer_id);
                 break;
             }
             case p2p_kind_ack_response: {
                 cy->platform->buffer_release(cy, transfer.payload);
-                ingest_p2p_ack_response(cy, topic, transfer_id, transfer.metadata.remote_node_id);
+                ingest_p2p_ack_response(cy, topic, transfer_id, cookie);
                 break;
             }
             case p2p_kind_response: {
-                ingest_p2p_response(cy, topic, transfer_id, transfer);
+                ingest_p2p_ack_message(cy, topic, transfer_id); // response automatically confirms message receipt
+                ingest_p2p_response(cy, topic, transfer_id, cookie, transfer);
                 break;
             }
             default: {
@@ -1843,36 +1683,9 @@ cy_err_t cy_update(cy_t* const cy)
 {
     cy_err_t      res = CY_OK;
     const cy_us_t now = cy_now(cy);
-
     futures_retire_timed_out(cy, now);
     implicit_retire_timed_out(cy, now);
-
-    if (cy->node_id_collision) {
-        CY_TRACE(cy, "🧠 Processing a recent node-ID collision event now.");
-        assert(cy->node_id <= cy->platform->node_id_max);
-        cy->node_id_collision = false;
-        cy->node_id           = CY_NODE_ID_INVALID;
-        cy->platform->node_id_clear(cy);
-        cy->heartbeat_next = now;
-    }
-
-    // Decide if it is time to publish a heartbeat. We use a very simple minimal-state scheduler that runs two
-    // periods and offers an opportunity to publish a heartbeat every now and then.
-    if ((now >= cy->heartbeat_next) || (now >= cy->heartbeat_next_urgent)) {
-        cy_topic_t*                 topic = LIST_TAIL(cy->list_gossip_urgent, cy_topic_t, list_gossip_urgent);
-        cy_subscriber_root_t* const scout = LIST_TAIL(cy->list_scout_pending, cy_subscriber_root_t, list_scout_pending);
-        if ((now >= cy->heartbeat_next) || (topic != NULL) || (scout != NULL)) {
-            if ((topic != NULL) || (scout == NULL)) {
-                topic = (topic != NULL) ? topic : LIST_TAIL(cy->list_gossip, cy_topic_t, list_gossip);
-                topic = (topic != NULL) ? topic : cy->heartbeat_pub.topic;
-                res   = publish_heartbeat_gossip(cy, topic, now);
-            } else {
-                res = publish_heartbeat_scout(cy, scout, now);
-            }
-            cy->heartbeat_next = now + dither_int(cy, cy->heartbeat_period, cy->heartbeat_period / 8);
-        }
-        cy->heartbeat_next_urgent = now + cy->heartbeat_period / 16U;
-    }
+    heartbeat_poll(cy, now);
     return res;
 }
 
@@ -1880,14 +1693,5 @@ void cy_notify_topic_collision(cy_t* const cy, cy_topic_t* const topic)
 {
     if (topic != NULL) {
         schedule_gossip(cy, topic, true);
-    }
-}
-
-void cy_notify_node_id_collision(cy_t* const cy)
-{
-    assert(cy != NULL);
-    if ((!cy->node_id_collision) && (cy->node_id <= cy->platform->node_id_max)) {
-        cy->node_id_collision = true;
-        CY_TRACE(cy, "💥 %04x", cy->node_id);
     }
 }

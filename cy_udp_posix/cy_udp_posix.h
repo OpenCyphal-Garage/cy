@@ -58,7 +58,8 @@ struct cy_udp_posix_t
     size_t n_topics;
 
     uint64_t     node_id_bloom_storage[CY_UDP_POSIX_NODE_ID_BLOOM_64BIT_WORDS];
-    cy_bloom64_t node_id_bloom;
+    size_t       node_id_bloom_popcount;
+    UdpardNodeID node_id;
 
     struct UdpardMemoryResource    mem;
     struct UdpardRxMemoryResources rx_mem;
@@ -114,8 +115,6 @@ cy_us_t cy_udp_posix_now(void);
 ///
 /// Unused interfaces should have address either 0 or 0xFFFFFFFF;
 /// to parse IP addresses from string see udp_wrapper_parse_iface_address().
-///
-/// The local node ID should be set to CY_NODE_ID_INVALID unless manual configuration is required.
 cy_err_t               cy_udp_posix_new(cy_udp_posix_t* const cy_udp,
                                         const uint64_t        uid,
                                         const wkv_str_t       namespace_,

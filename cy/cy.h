@@ -42,8 +42,6 @@ extern "C"
 #define CY_SUBJECT_BITS        13U
 #define CY_TOTAL_SUBJECT_COUNT (1UL << CY_SUBJECT_BITS)
 
-#define CY_NODE_ID_INVALID 0xFFFFU
-
 #define CY_PASTE_(a, b) a##b
 #define CY_PASTE(a, b)  CY_PASTE_(a, b)
 
@@ -84,6 +82,7 @@ typedef struct cy_bytes_mut_t           cy_bytes_mut_t;
 typedef struct cy_buffer_borrowed_t     cy_buffer_borrowed_t;
 typedef struct cy_buffer_owned_t        cy_buffer_owned_t;
 typedef struct cy_tree_t                cy_tree_t;
+typedef union cy_response_context_t     cy_response_context_t;
 typedef struct cy_transfer_metadata_t   cy_transfer_metadata_t;
 typedef struct cy_transfer_owned_t      cy_transfer_owned_t;
 typedef struct cy_publisher_t           cy_publisher_t;
@@ -152,15 +151,30 @@ struct cy_tree_t
     int_fast8_t bf;
 };
 
+#define CY_RESPONSE_CONTEXT_SIZE_BYTES 24U
+
+/// Received messages are given an instance of the response context to allow the application to respond to them,
+/// if necessary. The context is only valid for a single response. The context can be copied and passed by value.
+/// The platform layer uses the context to store arbitrary transport-specific information needed to send the
+/// response back to the publisher. For example, it may contain the source addresses and port numbers,
+/// or pointers into private structures.
+union cy_response_context_t
+{
+    uint64_t u64[CY_RESPONSE_CONTEXT_SIZE_BYTES / 8U]; // Enough for x3 IPv4 address+port pairs.
+    uint32_t u32[CY_RESPONSE_CONTEXT_SIZE_BYTES / 4U];
+    uint16_t u16[CY_RESPONSE_CONTEXT_SIZE_BYTES / 2U];
+    void*    ptr[CY_RESPONSE_CONTEXT_SIZE_BYTES / sizeof(void*)];
+};
+
 struct cy_transfer_metadata_t
 {
-    cy_prio_t priority;
-    uint16_t  remote_node_id;
-    uint64_t  transfer_id;
+    cy_prio_t             priority;
+    uint64_t              transfer_id;
+    cy_response_context_t context;
 };
 
 /// A transfer object owns its payload.
-/// The application may declare ownership transfer by invalidating the payload pointers in the object;
+/// The application may claim ownership of the payload by invalidating the payload pointers in the object;
 /// otherwise, Cy will clean it up afterward.
 struct cy_transfer_owned_t
 {
@@ -247,9 +261,6 @@ void cy_future_new(cy_future_t* const future, const cy_future_callback_t callbac
 void cy_future_cancel(cy_future_t* const future);
 
 /// The transfer-ID is always incremented, even on failure, to signal lost messages.
-/// This function always publishes only one transfer as requested; no auxiliary traffic is generated.
-/// If the local node-ID is not allocated, the function may fail depending on the capabilities of the transport library;
-/// to avoid this, it is possible to check cy_has_node_id() before calling this function.
 ///
 /// If no response is needed/expected, the future must be NULL and the response_deadline is ignored.
 /// Otherwise, future must point to an uninitialized cy_future_t instance.
@@ -374,20 +385,6 @@ void cy_subscriber_name(const cy_t* const cy, const cy_subscriber_t* const sub, 
 
 /// A convenience wrapper that returns the current time in microseconds.
 cy_us_t cy_now(const cy_t* const cy);
-
-/// If a node-ID is given explicitly at startup, it will be used as-is and the node will become operational immediately.
-/// Otherwise, some initial node-ID autoconfiguration time will be needed before the local ID is available
-/// (which amounts to a few seconds, depending on the number of participants).
-/// If a node-ID conflict is found at any later time (e.g., if a badly configured node joins the network),
-/// the current ID will be immediately replaced by a new one. This cannot happen in a well-managed network.
-///
-/// Once this state is switched to true, it cannot go back to false while the node is operational.
-///
-/// An attempt to emit a transfer while the local node-ID is missing will force the library to allocate a new node-ID
-/// immediately based on the partially discovered node-ID occupancy state; this may result in a node-ID collision
-/// and thus may cause disturbances in the network. To avoid this, it is recommended to check this flag before
-/// publishing anything.
-bool cy_joined(const cy_t* const cy);
 
 /// If the topic configuration is restored from non-volatile memory or elsewhere, it can be supplied to the library
 /// via this function immediately after the topic is first created. This function should not be invoked at any other

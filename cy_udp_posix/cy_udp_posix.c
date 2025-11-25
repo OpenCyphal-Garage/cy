@@ -107,7 +107,7 @@ static void purge_tx(cy_udp_posix_t* const cy_udp, const uint_fast8_t iface_inde
 
 static void rpc_listen(cy_udp_posix_t* const cy_udp)
 {
-    assert(cy_udp->base.node_id <= UDPARD_NODE_ID_MAX);
+    assert(cy_udp->node_id <= UDPARD_NODE_ID_MAX);
     const int_fast8_t res = udpardRxRPCDispatcherListen(&cy_udp->rpc_rx_dispatcher,
                                                         &cy_udp->rpc_rx_port_topic_response,
                                                         P2P_SERVICE_ID,
@@ -163,6 +163,67 @@ static cy_err_t err_from_udp_wrapper(const int16_t e)
     }
 }
 
+// ReSharper disable once CppParameterMayBeConstPtrOrRef
+static cy_err_t node_id_set(cy_udp_posix_t* const cy_udp)
+{
+    assert(cy_udp->node_id <= UDPARD_NODE_ID_MAX);
+    // The udpard tx pipeline has a node-ID pointer that already points into the cy_t structure,
+    // so it does not require updating. We need to reconfigure the RPC plane though.
+
+    // Initialize and start the UDP RPC dispatcher.
+    struct UdpardUDPIPEndpoint ep = { 0 };
+    {
+        int_fast8_t res = udpardRxRPCDispatcherInit(&cy_udp->rpc_rx_dispatcher, cy_udp->rx_mem);
+        assert(res >= 0); // infallible by design
+        res = udpardRxRPCDispatcherStart(&cy_udp->rpc_rx_dispatcher, cy_udp->node_id, &ep);
+        assert(res >= 0); // infallible by design
+    }
+    rpc_listen(cy_udp);
+
+    // Now it is finally time to open the multicast RX sockets.
+    for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
+        cy_udp->rpc_rx[i].sock      = udp_wrapper_rx_new();
+        cy_udp->rpc_rx[i].oom_count = 0;
+    }
+    cy_err_t res = CY_OK;
+    for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
+        if (is_valid_ip(cy_udp->local_iface_address[i])) {
+            res = err_from_udp_wrapper(udp_wrapper_rx_init(&cy_udp->rpc_rx[i].sock,
+                                                           cy_udp->local_iface_address[i],
+                                                           ep.ip_address,
+                                                           ep.udp_port,
+                                                           cy_udp->tx[i].local_port));
+            if (res != CY_OK) {
+                break;
+            }
+        }
+    }
+
+    // Cleanup on error.
+    if (res != CY_OK) {
+        for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
+            udp_wrapper_rx_close(&cy_udp->rpc_rx[i].sock);
+        }
+    }
+    return res;
+}
+
+static void node_id_clear(cy_udp_posix_t* const cy_udp)
+{
+    // Turn off the RPC plane. Close the sockets and stop the RPC ports. The RPC dispatcher holds no resources.
+    for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
+        udp_wrapper_rx_close(&cy_udp->rpc_rx[i].sock);
+    }
+    rpc_unlisten(cy_udp);
+
+    // The udpard tx pipeline has a node-ID pointer that already points into the cy_t structure,
+    // so it does not require updating.
+    // Purge the tx queues to avoid further collisions.
+    for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
+        purge_tx(cy_udp, i);
+    }
+}
+
 // ----------------------------------------  PLATFORM INTERFACE  ----------------------------------------
 
 static cy_us_t platform_now(const cy_t* const cy)
@@ -203,83 +264,10 @@ static void platform_buffer_release(cy_t* const cy, const cy_buffer_owned_t buf)
     udpardRxFragmentFree(copy, cy_udp->rx_mem.fragment, cy_udp->rx_mem.payload);
 }
 
-// ReSharper disable once CppParameterMayBeConstPtrOrRef
-static cy_err_t platform_node_id_set(cy_t* const cy)
-{
-    assert(cy != NULL);
-    assert(cy->node_id <= UDPARD_NODE_ID_MAX);
-    cy_udp_posix_t* const cy_udp = (cy_udp_posix_t*)cy;
-    // The udpard tx pipeline has a node-ID pointer that already points into the cy_t structure,
-    // so it does not require updating. We need to reconfigure the RPC plane though.
-
-    // Initialize and start the UDP RPC dispatcher.
-    struct UdpardUDPIPEndpoint ep = { 0 };
-    {
-        int_fast8_t res = udpardRxRPCDispatcherInit(&cy_udp->rpc_rx_dispatcher, cy_udp->rx_mem);
-        assert(res >= 0); // infallible by design
-        res = udpardRxRPCDispatcherStart(&cy_udp->rpc_rx_dispatcher, cy->node_id, &ep);
-        assert(res >= 0); // infallible by design
-    }
-    rpc_listen(cy_udp);
-
-    // Now it is finally time to open the multicast RX sockets.
-    for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
-        cy_udp->rpc_rx[i].sock      = udp_wrapper_rx_new();
-        cy_udp->rpc_rx[i].oom_count = 0;
-    }
-    cy_err_t res = CY_OK;
-    for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
-        if (is_valid_ip(cy_udp->local_iface_address[i])) {
-            res = err_from_udp_wrapper(udp_wrapper_rx_init(&cy_udp->rpc_rx[i].sock,
-                                                           cy_udp->local_iface_address[i],
-                                                           ep.ip_address,
-                                                           ep.udp_port,
-                                                           cy_udp->tx[i].local_port));
-            if (res != CY_OK) {
-                break;
-            }
-        }
-    }
-
-    // Cleanup on error.
-    if (res != CY_OK) {
-        for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
-            udp_wrapper_rx_close(&cy_udp->rpc_rx[i].sock);
-        }
-    }
-    return res;
-}
-
-static void platform_node_id_clear(cy_t* const cy)
-{
-    assert(cy != NULL);
-    cy_udp_posix_t* const cy_udp = (cy_udp_posix_t*)cy;
-
-    // Turn off the RPC plane. Close the sockets and stop the RPC ports. The RPC dispatcher holds no resources.
-    for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
-        udp_wrapper_rx_close(&cy_udp->rpc_rx[i].sock);
-    }
-    rpc_unlisten(cy_udp);
-
-    // The udpard tx pipeline has a node-ID pointer that already points into the cy_t structure,
-    // so it does not require updating.
-    // Purge the tx queues to avoid further collisions.
-    for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
-        purge_tx(cy_udp, i);
-    }
-}
-
-static cy_bloom64_t* platform_node_id_bloom(cy_t* const cy)
-{
-    assert(cy != NULL);
-    cy_udp_posix_t* const cy_udp = (cy_udp_posix_t*)cy;
-    return &cy_udp->node_id_bloom;
-}
-
 static cy_err_t platform_p2p(cy_t* const                cy,
                              cy_topic_t* const          topic,
+                             cy_response_context_t      context,
                              cy_prio_t                  priority,
-                             uint16_t                   dst_node_id,
                              const cy_us_t              tx_deadline,
                              const cy_buffer_borrowed_t payload)
 {
@@ -295,7 +283,7 @@ static cy_err_t platform_p2p(cy_t* const                cy,
                               (UdpardMicrosecond)tx_deadline,
                               (enum UdpardPriority)priority,
                               P2P_SERVICE_ID,
-                              dst_node_id,
+                              context.u16[0],
                               transfer_id,
                               (struct UdpardPayload){ .size = linear_payload.size, .data = linear_payload.data },
                               NULL);
@@ -425,7 +413,7 @@ static void platform_topic_advertise(cy_t* const       cy,
         CY_TRACE(&cy_udp->base, //
                  "📏 Response (extent+overhead) increased to %zu bytes",
                  cy_udp->response_extent_with_overhead);
-        if (cy_udp->base.node_id <= UDPARD_NODE_ID_MAX) {
+        if (cy_udp->node_id <= UDPARD_NODE_ID_MAX) {
             rpc_unlisten(cy_udp);
             rpc_listen(cy_udp);
         }
@@ -443,10 +431,6 @@ static const cy_platform_t g_platform = {
     .prng           = platform_prng,
     .buffer_release = platform_buffer_release,
 
-    .node_id_set   = platform_node_id_set,
-    .node_id_clear = platform_node_id_clear,
-    .node_id_bloom = platform_node_id_bloom,
-
     .p2p = platform_p2p,
 
     .topic_new                   = platform_topic_new,
@@ -456,8 +440,6 @@ static const cy_platform_t g_platform = {
     .topic_unsubscribe           = platform_topic_unsubscribe,
     .topic_advertise             = platform_topic_advertise,
     .topic_on_subscription_error = platform_topic_on_subscription_error,
-
-    .node_id_max = UDPARD_NODE_ID_MAX,
 };
 
 // ----------------------------------------  END OF PLATFORM INTERFACE  ----------------------------------------
@@ -493,9 +475,9 @@ cy_err_t cy_udp_posix_new(cy_udp_posix_t* const cy_udp,
     cy_udp->tx_sock_err_handler           = default_tx_sock_err_handler;
     cy_udp->rpc_rx_sock_err_handler       = default_rpc_rx_sock_err_handler;
 
-    cy_udp->node_id_bloom.storage  = cy_udp->node_id_bloom_storage;
-    cy_udp->node_id_bloom.n_bits   = sizeof(cy_udp->node_id_bloom_storage) * CHAR_BIT;
-    cy_udp->node_id_bloom.popcount = 0;
+    memset(&cy_udp->node_id_bloom_storage, 0, sizeof(cy_udp->node_id_bloom_storage));
+    cy_udp->node_id_bloom_popcount = 0;
+    cy_udp->node_id                = UDPARD_NODE_ID_UNSET;
 
     // Initialize the udpard tx pipelines. They are all initialized always even if the corresponding iface is disabled,
     // for regularity, because an unused tx pipline needs no resources, so it's not a problem.
@@ -505,7 +487,7 @@ cy_err_t cy_udp_posix_new(cy_udp_posix_t* const cy_udp,
         cy_udp->tx[i].sock             = udp_wrapper_tx_new();
         cy_udp->rpc_rx[i].sock         = udp_wrapper_rx_new();
         res                            = err_from_udpard(
-          udpardTxInit(&cy_udp->tx[i].udpard_tx, &cy_udp->base.node_id, tx_queue_capacity_per_iface, cy_udp->mem));
+          udpardTxInit(&cy_udp->tx[i].udpard_tx, &cy_udp->node_id, tx_queue_capacity_per_iface, cy_udp->mem));
     }
     if (res != CY_OK) {
         return res; // Cleanup not required -- no resources allocated yet.
@@ -525,7 +507,7 @@ cy_err_t cy_udp_posix_new(cy_udp_posix_t* const cy_udp,
 
     // Initialize Cy. It will not emit any transfers; this only happens from cy_heartbeat() and cy_publish().
     if (res == CY_OK) {
-        res = cy_new(&cy_udp->base, &g_platform, uid, UDPARD_NODE_ID_UNSET, namespace_);
+        res = cy_new(&cy_udp->base, &g_platform, uid, namespace_);
     }
 
     // Cleanup on error.
@@ -574,9 +556,11 @@ static void tx_offload(cy_udp_posix_t* const cy_udp)
 
 static cy_transfer_metadata_t make_metadata(const struct UdpardRxTransfer* const tr)
 {
-    return (cy_transfer_metadata_t){ .priority       = (cy_prio_t)tr->priority,
-                                     .remote_node_id = tr->source_node_id,
-                                     .transfer_id    = tr->transfer_id };
+    return (cy_transfer_metadata_t){
+        .priority    = (cy_prio_t)tr->priority,
+        .context     = { .u16 = { tr->source_node_id } },
+        .transfer_id = tr->transfer_id,
+    };
 }
 
 static cy_buffer_owned_t make_rx_buffer(const struct UdpardFragment head)
@@ -697,7 +681,7 @@ static void read_socket(cy_udp_posix_t* const       cy_udp,
     {
         const uint16_t src_nid = (uint16_t)(((const uint8_t*)dgram.data)[2] | //
                                             (((uint32_t)((const uint8_t*)dgram.data)[3]) << 8U));
-        if ((src_nid <= UDPARD_NODE_ID_MAX) && (src_nid == cy_udp->base.node_id)) {
+        if ((src_nid <= UDPARD_NODE_ID_MAX) && (src_nid == cy_udp->node_id)) {
             cy_notify_node_id_collision(&cy_udp->base);
         }
     }
