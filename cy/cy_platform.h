@@ -19,7 +19,7 @@
 
 /// Only for testing and debugging purposes; never redefine in production builds.
 /// All nodes obviously must use the same heartbeat topic, which is why it is pinned.
-#define CY_HEARTBEAT_TOPIC_NAME "/@/7509"
+#define CY_HEARTBEAT_TOPIC_NAME "/#1d55"
 
 /// Only for testing and debugging purposes.
 /// Makes all non-pinned topics prefer the same subject-ID that equals the value of this macro,
@@ -283,6 +283,10 @@ struct cy_t
 
     cy_us_t ts_started;
 
+    /// Cannot be changed after startup. Must be the same for all nodes in the network.
+    /// https://github.com/OpenCyphal-Garage/cy/issues/12#issuecomment-3577831960
+    uint32_t subject_id_modulus;
+
     /// Heartbeat topic and related items.
     cy_publisher_t  heartbeat_pub;
     cy_subscriber_t heartbeat_sub;
@@ -321,7 +325,11 @@ struct cy_t
 
 /// The namespace may be NULL or empty, in which case it defaults to `~`.
 /// It may begin with `~`, which expands into the node name.
-cy_err_t cy_new(cy_t* const cy, const cy_platform_t* const platform, const uint64_t uid, const wkv_str_t namespace_);
+cy_err_t cy_new(cy_t* const                cy,
+                const cy_platform_t* const platform,
+                const uint64_t             uid,
+                const wkv_str_t            namespace_,
+                const uint32_t             subject_id_modulus);
 void     cy_destroy(cy_t* const cy);
 
 /// This function must be invoked periodically to let the library publish heartbeats and handle response timeouts.

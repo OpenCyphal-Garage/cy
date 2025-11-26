@@ -34,13 +34,7 @@ extern "C"
 /// The max namespace length should also provide space for at least one separator and the one-character topic name.
 #define CY_NAMESPACE_NAME_MAX (CY_TOPIC_NAME_MAX - 2)
 
-/// The range of unregulated identifiers to use for CRDT topic allocation.
-/// Pinned topics (such as the ordinary topics with manually assigned IDs) can be pinned anywhere in [0, 8184].
-/// Subject-IDs in [8187, 65535] are managed by the named topic allocation protocol.
-/// Subject-IDs 8185 and 8186 are reserved.
-#define CY_TOPIC_SUBJECT_COUNT 6144
-#define CY_SUBJECT_BITS        13U
-#define CY_TOTAL_SUBJECT_COUNT (1UL << CY_SUBJECT_BITS)
+#define CY_PINNED_SUBJECT_ID_MAX 8186U
 
 #define CY_PASTE_(a, b) a##b
 #define CY_PASTE(a, b)  CY_PASTE_(a, b)
@@ -396,7 +390,7 @@ cy_us_t cy_now(const cy_t* const cy);
 /// operational immediately, without waiting for the CRDT consensus. Remember that the hint is discarded on conflict.
 ///
 /// The hint will be silently ignored if it is invalid, inapplicable, or if the topic is not freshly created.
-void cy_topic_hint(cy_t* const cy, cy_topic_t* const topic, const uint16_t subject_id);
+void cy_topic_hint(cy_t* const cy, cy_topic_t* const topic, const uint32_t subject_id);
 
 /// Complexity is logarithmic in the number of topics. NULL if not found.
 /// In practical terms, these queries are very fast and efficient.
@@ -420,7 +414,7 @@ cy_topic_t* cy_topic_iter_next(cy_topic_t* const topic);
 
 /// Optionally, the application can use this to save the allocated subject-ID before shutting down/rebooting
 /// for instant recovery. Not needed for pinned topics since their IDs cannot change.
-uint16_t cy_topic_subject_id(const cy_topic_t* const topic);
+uint32_t cy_topic_subject_id(const cy_t* const cy, const cy_topic_t* const topic);
 
 /// The name is NUL-terminated; pointer lifetime bound to the topic.
 wkv_str_t cy_topic_name(const cy_topic_t* const topic);

@@ -241,8 +241,14 @@ static int32_t cavl_comp_topic_hash(const void* const user, const cy_tree_t* con
 static int32_t cavl_comp_topic_subject_id(const void* const user, const cy_tree_t* const node)
 {
     assert((user != NULL) && (node != NULL));
-    const cy_topic_t* const inner = CAVL2_TO_OWNER(node, cy_topic_t, index_subject_id);
-    return (int32_t)(*(uint16_t*)user) - ((int32_t)cy_topic_subject_id(inner));
+    const cy_t* const       cy       = (const cy_t*)(((const void**)user)[0]);
+    const uint32_t          outer    = *(const uint32_t*)(((const void**)user)[1]);
+    const cy_topic_t* const inner    = CAVL2_TO_OWNER(node, cy_topic_t, index_subject_id);
+    const uint32_t          inner_id = cy_topic_subject_id(cy, inner);
+    if (outer == inner_id) {
+        return 0;
+    }
+    return (outer >= inner_id) ? +1 : -1;
 }
 
 static int32_t cavl_comp_future_transfer_id(const void* const user, const cy_tree_t* const node)
@@ -338,10 +344,9 @@ static void topic_merge_lage(cy_topic_t* const topic, const cy_us_t now, const i
     topic->ts_origin = min_i64(topic->ts_origin, now - (pow2us(r_lage) * MEGA));
 }
 
-/// Pinned topic names are canonical, which ensures that one pinned topic cannot collide with another.
 static bool is_pinned(const uint64_t hash)
 {
-    return hash < CY_TOTAL_SUBJECT_COUNT;
+    return hash <= CY_PINNED_SUBJECT_ID_MAX;
 }
 
 /// This comparator is only applicable on subject-ID allocation conflicts. As such, hashes must be different.
@@ -391,7 +396,7 @@ static void implicit_retire_timed_out(cy_t* const cy, const cy_us_t now)
         assert(is_implicit(cy, topic) && validate_is_implicit(topic));
         if ((topic->ts_animated + cy->implicit_topic_timeout) < now) {
             CY_TRACE(
-              cy, "⚰️ T%016llx@%04x '%s'", (unsigned long long)topic->hash, cy_topic_subject_id(topic), topic->name);
+              cy, "⚰️ T%016llx@%08x '%s'", (unsigned long long)topic->hash, cy_topic_subject_id(cy, topic), topic->name);
             topic_destroy(cy, topic);
         }
     }
@@ -408,8 +413,11 @@ static void schedule_gossip(cy_t* const cy, cy_topic_t* const topic, const bool 
         if (important) {
             delist(&cy->list_gossip, &topic->list_gossip);
             enlist_head(&cy->list_gossip_urgent, &topic->list_gossip_urgent);
-            CY_TRACE(
-              cy, "⏰ T%016llx@%04x '%s'", (unsigned long long)topic->hash, cy_topic_subject_id(topic), topic->name);
+            CY_TRACE(cy,
+                     "⏰ T%016llx@%08x '%s'",
+                     (unsigned long long)topic->hash,
+                     cy_topic_subject_id(cy, topic),
+                     topic->name);
         } else {
             delist(&cy->list_gossip_urgent, &topic->list_gossip_urgent);
             enlist_head(&cy->list_gossip, &topic->list_gossip);
@@ -420,22 +428,25 @@ static void schedule_gossip(cy_t* const cy, cy_topic_t* const topic, const bool 
     }
 }
 
-/// Returns UINT32_MAX if the string is not a valid pinned subject-ID form. A valid form is: "@/1234".
-/// Pinned topic names must have only canonical names to ensure that no two topic names map to the same subject-ID.
-/// The only requirement to ensure this is that there must be no leading zeros in the number.
+/// Returns UINT32_MAX if the string is not a valid canonical pinned subject-ID form. A valid form is: "#01af".
 static uint32_t parse_pinned(const wkv_str_t s)
 {
-    if ((s.len < 3) || (s.len > 6) || (s.str[0] != '@') || (s.str[1] != '/') || (s.str[2] == '0')) {
-        return UINT32_MAX; // Leading zeroes not accepted; only canonical form.
+    if ((s.len != 5) || (s.str[0] != '#')) {
+        return UINT32_MAX;
     }
     uint32_t out = 0U;
-    for (size_t i = 2; i < s.len; i++) {
-        if ((s.str[i] < '0') || (s.str[i] > '9')) {
+    for (size_t i = 1; i < s.len; i++) {
+        out <<= 4U;
+        const unsigned char ch = (unsigned char)s.str[i];
+        if ((ch >= '0') && (ch <= '9')) {
+            out |= (uint32_t)(ch - '0');
+        } else if ((ch >= 'a') && (ch <= 'f')) {
+            out |= (uint32_t)(ch - 'a' + 10U);
+        } else {
             return UINT32_MAX;
         }
-        out = (out * 10U) + (uint_fast8_t)(s.str[i] - '0');
     }
-    return (out < CY_TOTAL_SUBJECT_COUNT) ? out : UINT32_MAX;
+    return (out <= CY_PINNED_SUBJECT_ID_MAX) ? out : UINT32_MAX;
 }
 
 /// The topic hash is the key component of the protocol.
@@ -444,35 +455,35 @@ static uint32_t parse_pinned(const wkv_str_t s)
 static uint64_t topic_hash(const wkv_str_t name)
 {
     uint64_t hash = parse_pinned(name);
-    if (hash >= CY_TOTAL_SUBJECT_COUNT) {
+    if (hash > CY_PINNED_SUBJECT_ID_MAX) {
         hash = rapidhash(name.str, name.len);
     }
     return hash;
 }
 
-static uint16_t topic_subject_id(const uint64_t hash, const uint64_t evictions)
+static uint32_t topic_subject_id(const cy_t* const cy, const uint64_t hash, const uint64_t evictions)
 {
-    if (is_pinned(hash)) {
-        return (uint16_t)hash; // Pinned topics may exceed CY_TOPIC_SUBJECT_COUNT.
-    }
 #ifndef CY_CONFIG_PREFERRED_TOPIC_OVERRIDE
-    return (uint16_t)((hash + evictions) % CY_TOPIC_SUBJECT_COUNT);
+    return (uint32_t)((hash + (evictions * evictions)) % cy->subject_id_modulus);
 #else
-    return (uint16_t)((CY_CONFIG_PREFERRED_TOPIC_OVERRIDE + evictions) % CY_TOPIC_SUBJECT_COUNT);
+    (void)hash;
+    return (uint32_t)((CY_CONFIG_PREFERRED_TOPIC_OVERRIDE + (evictions * evictions)) % cy->subject_id_modulus);
 #endif
 }
 
 /// This will only search through topics that have auto-assigned subject-IDs;
 /// i.e., pinned topics will not be found by this function.
-static cy_topic_t* topic_find_by_subject_id(const cy_t* const cy, const uint16_t subject_id)
+static cy_topic_t* topic_find_by_subject_id(const cy_t* const cy, const uint32_t subject_id)
 {
     assert(cy != NULL);
-    cy_tree_t* const t = cavl2_find(cy->topics_by_subject_id, &subject_id, &cavl_comp_topic_subject_id);
+    cy_tree_t* const t = cavl2_find(cy->topics_by_subject_id, //
+                                    (const void*)(const void* [2]){ cy, &subject_id },
+                                    &cavl_comp_topic_subject_id);
     if (t == NULL) {
         return NULL;
     }
     cy_topic_t* topic = CAVL2_TO_OWNER(t, cy_topic_t, index_subject_id);
-    assert(cy_topic_subject_id(topic) == subject_id);
+    assert(cy_topic_subject_id(cy, topic) == subject_id);
     return topic;
 }
 
@@ -505,9 +516,9 @@ static void topic_ensure_subscribed(cy_t* const cy, cy_topic_t* const topic)
         const cy_err_t                 res    = cy->platform->topic_subscribe(cy, topic, params);
         topic->subscribed                     = res == CY_OK;
         CY_TRACE(cy,
-                 "🗞️ T%016llx@%04x '%s' extent=%zu result=%d",
+                 "🗞️ T%016llx@%08x '%s' extent=%zu result=%d",
                  (unsigned long long)topic->hash,
-                 cy_topic_subject_id(topic),
+                 cy_topic_subject_id(cy, topic),
                  topic->name,
                  params.extent,
                  res);
@@ -530,17 +541,17 @@ static void topic_allocate(cy_t* const       cy, // NOLINT(*-no-recursion)
                            const bool        virgin,
                            const cy_us_t     now)
 {
-    assert(cavl_count(cy->topics_by_hash) <= CY_TOPIC_SUBJECT_COUNT); // There is certain to be a free subject-ID!
+    assert(cavl_count(cy->topics_by_hash) <= (cy->subject_id_modulus / 4));
 #if CY_CONFIG_TRACE
     static const int         call_depth_indent = 2;
     static _Thread_local int call_depth        = 0U;
     call_depth++;
     CY_TRACE(cy,
-             "🔍%*s T%016llx@%04x '%s' evict=%llu->%llu lage=%+d subscribed=%d couplings=%p",
+             "🔍%*s T%016llx@%08x '%s' evict=%llu->%llu lage=%+d subscribed=%d couplings=%p",
              (call_depth - 1) * call_depth_indent,
              "",
              (unsigned long long)topic->hash,
-             cy_topic_subject_id(topic),
+             cy_topic_subject_id(cy, topic),
              topic->name,
              (unsigned long long)topic->evictions,
              (unsigned long long)new_evictions,
@@ -565,23 +576,26 @@ static void topic_allocate(cy_t* const       cy, // NOLINT(*-no-recursion)
     // This mirrors the formal specification of AllocateTopic(t, topics) given in Core.tla.
     // Note that it is possible that subject_id(hash,old_evictions) == subject_id(hash,new_evictions),
     // meaning that we stay with the same subject-ID. No special case is required to handle this.
-    const uint16_t    new_sid = topic_subject_id(topic->hash, new_evictions);
-    cy_topic_t* const that    = CAVL2_TO_OWNER(
-      cavl2_find(cy->topics_by_subject_id, &new_sid, &cavl_comp_topic_subject_id), cy_topic_t, index_subject_id);
+    const uint32_t    new_sid = topic_subject_id(cy, topic->hash, new_evictions);
+    cy_topic_t* const that = CAVL2_TO_OWNER(cavl2_find(cy->topics_by_subject_id, // ----------------------------------
+                                                       (const void*)(const void* [2]){ cy, &new_sid },
+                                                       &cavl_comp_topic_subject_id),
+                                            cy_topic_t,
+                                            index_subject_id);
     assert((that == NULL) || (topic->hash != that->hash)); // This would mean that we inserted the same topic twice
     const bool victory = (that == NULL) || left_wins(topic, now, topic_lage(that, now), that->hash);
 
 #if CY_CONFIG_TRACE
     if (that != NULL) {
         CY_TRACE(cy,
-                 "🎲%*s T%016llx@%04x %s T%016llx@%04x",
+                 "🎲%*s T%016llx@%08x %s T%016llx@%08x",
                  (call_depth - 1) * call_depth_indent,
                  "",
                  (unsigned long long)topic->hash,
                  new_sid,
                  victory ? "wins 👑 over" : "loses 💀 to",
                  (that != NULL) ? (unsigned long long)that->hash : UINT64_MAX,
-                 (that != NULL) ? cy_topic_subject_id(that) : UINT16_MAX);
+                 (that != NULL) ? cy_topic_subject_id(cy, that) : UINT32_MAX);
     }
 #endif
 
@@ -591,7 +605,7 @@ static void topic_allocate(cy_t* const       cy, // NOLINT(*-no-recursion)
         }
         topic->evictions       = new_evictions;
         cy_topic_t* const self = CAVL2_TO_OWNER(cavl2_find_or_insert(&cy->topics_by_subject_id, //
-                                                                     &new_sid,
+                                                                     (const void*)(const void* [2]){ cy, &new_sid },
                                                                      &cavl_comp_topic_subject_id,
                                                                      topic,
                                                                      &cavl_factory_topic_subject_id),
@@ -613,11 +627,11 @@ static void topic_allocate(cy_t* const       cy, // NOLINT(*-no-recursion)
 
 #if CY_CONFIG_TRACE
     CY_TRACE(cy,
-             "🔎%*s T%016llx@%04x '%s' evict=%llu lage=%+d subscribed=%d",
+             "🔎%*s T%016llx@%08x '%s' evict=%llu lage=%+d subscribed=%d",
              (call_depth - 1) * call_depth_indent,
              "",
              (unsigned long long)topic->hash,
-             cy_topic_subject_id(topic),
+             cy_topic_subject_id(cy, topic),
              topic->name,
              (unsigned long long)topic->evictions,
              topic_lage(topic, now),
@@ -663,7 +677,7 @@ static cy_err_t topic_new(cy_t* const        cy,
     topic->couplings  = NULL;
     topic->subscribed = false;
 
-    if (cavl_count(cy->topics_by_hash) >= CY_TOPIC_SUBJECT_COUNT) {
+    if (cavl_count(cy->topics_by_hash) >= (cy->subject_id_modulus / 4)) {
         goto bad_name;
     }
 
@@ -699,9 +713,9 @@ static cy_err_t topic_new(cy_t* const        cy,
     }
 
     CY_TRACE(cy,
-             "✨ T%016llx@%04x '%s': topic_count=%zu",
+             "✨ T%016llx@%08x '%s': topic_count=%zu",
              (unsigned long long)topic->hash,
-             cy_topic_subject_id(topic),
+             cy_topic_subject_id(cy, topic),
              topic->name,
              cavl_count(cy->topics_by_hash));
     return 0;
@@ -741,9 +755,9 @@ static cy_err_t topic_couple(cy_t* const                 cy,
     char subr_name[CY_TOPIC_NAME_MAX + 1];
     wkv_get_key(&cy->subscribers_by_name, subr->index_name, subr_name);
     CY_TRACE(cy,
-             "🔗 T%016llx@%04x '%s' <=> '%s' substitutions=%zu",
+             "🔗 T%016llx@%08x '%s' <=> '%s' substitutions=%zu",
              (unsigned long long)topic->hash,
-             cy_topic_subject_id(topic),
+             cy_topic_subject_id(cy, topic),
              topic->name,
              subr_name,
              substitution_count);
@@ -770,9 +784,9 @@ static cy_err_t topic_couple(cy_t* const                 cy,
         if ((subr->index_pattern == NULL) && is_implicit(cy, topic)) {
             delist(&cy->list_implicit, &topic->list_implicit);
             CY_TRACE(cy,
-                     "🧛 Promoted to explicit T%016llx@%04x '%s'",
+                     "🧛 Promoted to explicit T%016llx@%08x '%s'",
                      (unsigned long long)topic->hash,
-                     cy_topic_subject_id(topic),
+                     cy_topic_subject_id(cy, topic),
                      topic->name);
         }
     }
@@ -832,7 +846,8 @@ static void* wkv_cb_topic_scout_response(const wkv_event_t evt)
 {
     cy_t* const       cy    = (cy_t*)evt.context;
     cy_topic_t* const topic = (cy_topic_t*)evt.node->value;
-    CY_TRACE(cy, "📢 T%016llx@%04x '%s'", (unsigned long long)(topic->hash), cy_topic_subject_id(topic), topic->name);
+    CY_TRACE(
+      cy, "📢 T%016llx@%08x '%s'", (unsigned long long)(topic->hash), cy_topic_subject_id(cy, topic), topic->name);
     schedule_gossip(cy, topic, true);
     return NULL;
 }
@@ -885,7 +900,7 @@ static cy_err_t publish_heartbeat_gossip(cy_t* const cy, cy_topic_t* const topic
                         ._reserved_1_        = 0,
                         .topic_name_len      = (uint_fast8_t)topic->index_name->key_len };
     memcpy(msg.topic_name, topic->name, topic->index_name->key_len);
-    CY_TRACE(cy, "🗣️ T%016llx@%04x '%s'", (unsigned long long)topic->hash, cy_topic_subject_id(topic), topic->name);
+    CY_TRACE(cy, "🗣️ T%016llx@%08x '%s'", (unsigned long long)topic->hash, cy_topic_subject_id(cy, topic), topic->name);
     // Update gossip even if failed so we don't get stuck publishing same gossip if error reporting is broken.
     schedule_gossip(cy, topic, false);
     return publish_heartbeat(cy, now, &msg);
@@ -972,18 +987,18 @@ static void on_heartbeat(cy_t* const cy, const cy_arrival_t* const evt)
                   (mine_lage > other_lage) || ((mine_lage == other_lage) && (mine->evictions > other_evictions));
                 CY_TRACE(cy,
                          "🔀 Divergence on '%s' discovered via gossip from N%016llx:\n"
-                         "\t local  %s T%016llx@%04x evict=%llu lage=%+d\n"
-                         "\t remote %s T%016llx@%04x evict=%llu lage=%+d",
+                         "\t local  %s T%016llx@%08x evict=%llu lage=%+d\n"
+                         "\t remote %s T%016llx@%08x evict=%llu lage=%+d",
                          mine->name,
                          (unsigned long long)heartbeat.uid,
                          win ? "✅" : "❌",
                          (unsigned long long)mine->hash,
-                         cy_topic_subject_id(mine),
+                         cy_topic_subject_id(cy, mine),
                          (unsigned long long)mine->evictions,
                          mine_lage,
                          win ? "❌" : "✅",
                          (unsigned long long)mine->hash,
-                         topic_subject_id(other_hash, other_evictions),
+                         topic_subject_id(cy, other_hash, other_evictions),
                          (unsigned long long)other_evictions,
                          other_lage);
                 if (win) {
@@ -1009,27 +1024,27 @@ static void on_heartbeat(cy_t* const cy, const cy_arrival_t* const evt)
             }
             topic_merge_lage(mine, ts, other_lage);
         } else { // We don't know this topic; check for a subject-ID collision and do auto-subscription.
-            mine = topic_find_by_subject_id(cy, topic_subject_id(other_hash, other_evictions));
+            mine = topic_find_by_subject_id(cy, topic_subject_id(cy, other_hash, other_evictions));
             if (mine == NULL) {
                 return; // We are not using this subject-ID, no collision.
             }
-            assert(cy_topic_subject_id(mine) == topic_subject_id(other_hash, other_evictions));
+            assert(cy_topic_subject_id(cy, mine) == topic_subject_id(cy, other_hash, other_evictions));
             const bool win = left_wins(mine, ts, other_lage, other_hash);
             CY_TRACE(cy,
-                     "💥 Collision on @%04x discovered via gossip from N%016llx:\n"
-                     "\t local  %s T%016llx@%04x evict=%llu lage=%+d '%s'\n"
-                     "\t remote %s T%016llx@%04x evict=%llu lage=%+d '%s'",
-                     cy_topic_subject_id(mine),
+                     "💥 Collision on @%08x discovered via gossip from N%016llx:\n"
+                     "\t local  %s T%016llx@%08x evict=%llu lage=%+d '%s'\n"
+                     "\t remote %s T%016llx@%08x evict=%llu lage=%+d '%s'",
+                     cy_topic_subject_id(cy, mine),
                      (unsigned long long)heartbeat.uid,
                      win ? "✅" : "❌",
                      (unsigned long long)mine->hash,
-                     cy_topic_subject_id(mine),
+                     cy_topic_subject_id(cy, mine),
                      (unsigned long long)mine->evictions,
                      topic_lage(mine, ts),
                      mine->name,
                      win ? "❌" : "✅",
                      (unsigned long long)other_hash,
-                     topic_subject_id(other_hash, other_evictions),
+                     topic_subject_id(cy, other_hash, other_evictions),
                      (unsigned long long)other_evictions,
                      other_lage,
                      heartbeat.topic_name);
@@ -1107,9 +1122,9 @@ cy_err_t cy_advertise(cy_t* const cy, cy_publisher_t* const pub, const wkv_str_t
         // We don't need to schedule gossip here because this is managed by topic_ensure et al.
     }
     CY_TRACE(cy,
-             "✨ T%016llx@%04x '%s': topic_count=%zu pub_count=%zu res=%d",
+             "✨ T%016llx@%08x '%s': topic_count=%zu pub_count=%zu res=%d",
              (unsigned long long)pub->topic->hash,
-             cy_topic_subject_id(pub->topic),
+             cy_topic_subject_id(cy, pub->topic),
              pub->topic->name,
              cavl_count(cy->topics_by_hash),
              pub->topic->pub_count,
@@ -1354,10 +1369,10 @@ cy_us_t cy_now(const cy_t* const cy)
     return cy->platform->now(cy);
 }
 
-void cy_topic_hint(cy_t* const cy, cy_topic_t* const topic, const uint16_t subject_id)
+void cy_topic_hint(cy_t* const cy, cy_topic_t* const topic, const uint32_t subject_id)
 {
-    if ((topic != NULL) && (subject_id < CY_TOTAL_SUBJECT_COUNT) && (!is_pinned(topic->hash)) &&
-        (topic->evictions == 0)) {
+    if ((topic != NULL) && (subject_id <= (cy->subject_id_modulus + CY_PINNED_SUBJECT_ID_MAX)) &&
+        (!is_pinned(topic->hash)) && (topic->evictions == 0)) {
         // Existing subscriptions need to be deactivated first, if any.
         if (topic->subscribed) {
             assert(topic->couplings != NULL);
@@ -1365,10 +1380,10 @@ void cy_topic_hint(cy_t* const cy, cy_topic_t* const topic, const uint16_t subje
         }
         // Fit the lowest evictions counter such that we land at the specified subject-ID.
         // Avoid negative remainders, so we don't use simple evictions=(subject_id-hash)%6144.
-        while (topic_subject_id(topic->hash, topic->evictions) != subject_id) {
+        while (topic_subject_id(cy, topic->hash, topic->evictions) != subject_id) {
             topic->evictions++;
         }
-        assert(cy_topic_subject_id(topic) == subject_id);
+        assert(cy_topic_subject_id(cy, topic) == subject_id);
         // Restore the subscriptions.
         topic_ensure_subscribed(cy, topic);
     }
@@ -1403,9 +1418,9 @@ cy_topic_t* cy_topic_iter_next(cy_topic_t* const topic)
     return (cy_topic_t*)cavl2_next_greater(&topic->index_hash);
 }
 
-uint16_t cy_topic_subject_id(const cy_topic_t* const topic)
+uint32_t cy_topic_subject_id(const cy_t* const cy, const cy_topic_t* const topic)
 {
-    return topic_subject_id(topic->hash, topic->evictions);
+    return topic_subject_id(cy, topic->hash, topic->evictions);
 }
 
 wkv_str_t cy_topic_name(const cy_topic_t* const topic)
@@ -1467,10 +1482,15 @@ size_t cy_buffer_borrowed_gather(const cy_buffer_borrowed_t payload, const cy_by
 //                                              PLATFORM LAYER INTERFACE
 // =====================================================================================================================
 
-cy_err_t cy_new(cy_t* const cy, const cy_platform_t* const platform, const uint64_t uid, const wkv_str_t namespace_)
+cy_err_t cy_new(cy_t* const                cy,
+                const cy_platform_t* const platform,
+                const uint64_t             uid,
+                const wkv_str_t            namespace_,
+                const uint32_t             subject_id_modulus)
 {
     assert(cy != NULL);
     assert(uid != 0);
+    assert(subject_id_modulus > 1000);
     assert(platform != NULL);
     assert(platform->now != NULL);
     assert(platform->realloc != NULL);
@@ -1491,8 +1511,9 @@ cy_err_t cy_new(cy_t* const cy, const cy_platform_t* const platform, const uint6
 
     // Init the object.
     memset(cy, 0, sizeof(*cy));
-    cy->platform = platform;
-    cy->uid      = uid;
+    cy->platform           = platform;
+    cy->uid                = uid;
+    cy->subject_id_modulus = subject_id_modulus;
     // namespace
     if (namespace_.len > 0) {
         memcpy(cy->namespace_, namespace_.str, namespace_.len);
