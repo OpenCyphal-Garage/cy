@@ -411,6 +411,7 @@ static void schedule_gossip(cy_t* const cy, cy_topic_t* const topic, const bool 
         // urgent gossips on the same topic back-to-back. If this becomes a problem, we can store the last
         // gossip time per topic to throttle the gossiping rate here.
         if (important) {
+            // TODO: don't do anything if it's already in the list!
             delist(&cy->list_gossip, &topic->list_gossip);
             enlist_head(&cy->list_gossip_urgent, &topic->list_gossip_urgent);
             CY_TRACE(cy,
@@ -419,6 +420,7 @@ static void schedule_gossip(cy_t* const cy, cy_topic_t* const topic, const bool 
                      cy_topic_subject_id(cy, topic),
                      topic->name);
         } else {
+            // TODO: don't do anything if it's already in the list!
             delist(&cy->list_gossip_urgent, &topic->list_gossip_urgent);
             enlist_head(&cy->list_gossip, &topic->list_gossip);
         }
