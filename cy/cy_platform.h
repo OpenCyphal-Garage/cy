@@ -141,25 +141,28 @@ typedef cy_us_t (*cy_platform_now_t)(const cy_t*);
 /// - If the size is zero, it must behave like free() (which is often the case in realloc() but technically an UB).
 typedef void* (*cy_platform_realloc_t)(cy_t*, void*, size_t);
 
-/// Returns a PRNG hashing seed or a full pseudo-random 64-bit unsigned integer.
-/// A TRNG is preferred; if not available, a PRNG will suffice, but its initial state should be distinct across reboots.
+/// Returns a random 64-bit unsigned integer.
+/// A TRNG is preferred; if not available, a PRNG will suffice, but its initial state should be distinct across reboots,
+/// and it should be hashed with the node's unique identifier.
 ///
-/// The simplest compliant solution that can be implemented in an embedded system without TRNG is:
+/// A simple compliant solution that can be implemented in an embedded system without TRNG is:
 ///
 ///     static uint64_t g_prng_state __attribute__ ((section (".noinit")));
-///     g_prng_state += 0xA0761D6478BD642FULL;  // add Wyhash seed (64-bit prime)
-///     return g_prng_state;
+///     g_prng_state += 0xA0761D6478BD642FULL;                // add Wyhash seed (64-bit prime)
+///     const uint64_t seed[2] = { g_prng_state, local_uid }; // if possible, add more entropy here, like ADC noise
+///     return rapidhash(seed, sizeof(seed));
 ///
 /// It is desirable to save the PRNG state in a battery-backed memory, if available; otherwise, in small MCUs one could
 /// hash the entire RAM contents at startup to scavenge as much entropy as possible, or use ADC or clock noise.
 /// If an RTC is available, then the following is sufficient:
 ///
 ///     static uint_fast16_t g_counter = 0;
-///     return ((uint64_t)rtc_get_time() << 16U) + ++g_counter;
-///
-/// Internally, Cy will hash the returned value with the local node's UID for whitening and to ensure that each node
-/// obtains different sequences even if they all share the same PRNG source.
-typedef uint64_t (*cy_platform_prng_t)(const cy_t*);
+///     const uint64_t seed[2] = {
+///         ((uint64_t)rtc_get_time() << 16U) + ++g_counter,
+///         local_uid,
+///     }; // if possible, add more entropy here, like ADC noise
+///     return rapidhash(seed, sizeof(seed));
+typedef uint64_t (*cy_platform_random_t)(const cy_t*);
 
 /// Return payload memory obtained with received transfers via cy_ingest*().
 /// The head is passed by value so not freed, but its data and all other fragments are.
@@ -170,13 +173,8 @@ typedef void (*cy_platform_buffer_release_t)(cy_t*, cy_buffer_owned_t);
 /// The transfer-ID is managed by the glue library internally; it is expected that the glue layer may need
 /// access to the specific topic that this P2P transfer pertains to, so the reference to the topic is also provided.
 ///
-/// The named topic protocol uses a single RPC endpoint for all peer-to-peer communications.
-/// Acknowledgements are strictly single-frame transfers (except for the inherently limited Classic CAN transport).
 /// Each acknowledgement transfer can be sent twice to reduce the risk of loss, since the loss of an acknowledgment
 /// is costly in terms of bandwidth and latency.
-///
-/// The transfer-ID of ack/response has no relation to the transfer-ID of the original message;
-/// the coupling of the transfer-IDs was a design mistake in Cyphal v1.0 that is being corrected in Cyphal v1.1.
 ///
 /// The ack/response transfer payload is prefixed with a fixed-size header shown below in DSDL notation:
 ///
@@ -194,7 +192,8 @@ typedef cy_err_t (*cy_platform_p2p_t)(cy_t*,
                                       cy_response_context_t context,
                                       cy_prio_t             priority,
                                       cy_us_t               tx_deadline,
-                                      cy_buffer_borrowed_t  payload);
+                                      cy_buffer_borrowed_t  payload,
+                                      bool                  ack_required);
 
 /// Allocates a new topic. NULL if out of memory.
 typedef cy_topic_t* (*cy_platform_topic_new_t)(cy_t*);
@@ -245,7 +244,7 @@ struct cy_platform_t
 {
     cy_platform_now_t            now;
     cy_platform_realloc_t        realloc;
-    cy_platform_prng_t           prng;
+    cy_platform_random_t         random;
     cy_platform_buffer_release_t buffer_release;
 
     cy_platform_p2p_t p2p;
@@ -274,12 +273,6 @@ struct cy_t
     /// in the final topic name.
     char namespace_[CY_NAMESPACE_NAME_MAX + 1];
     char name[CY_NAMESPACE_NAME_MAX + 1];
-
-    /// The UID is actually composed of 16-bit vendor-ID, 16-bit product-ID, and 32-bit instance-ID (aka serial
-    /// number), arranged from the most significant to the least significant bits. However, Cy doesn't care about
-    /// the inner structure of the UID; all it needs is a number to order the nodes on the network and to seed PRNG.
-    /// Zero is not a valid UID.
-    uint64_t uid;
 
     cy_us_t ts_started;
 
@@ -325,9 +318,10 @@ struct cy_t
 
 /// The namespace may be NULL or empty, in which case it defaults to `~`.
 /// It may begin with `~`, which expands into the node name.
+/// The node name should be unique in the network; one way to ensure this is to default it to the node UID as hex.
 cy_err_t cy_new(cy_t* const                cy,
                 const cy_platform_t* const platform,
-                const uint64_t             uid,
+                const wkv_str_t            name,
                 const wkv_str_t            namespace_,
                 const uint32_t             subject_id_modulus);
 void     cy_destroy(cy_t* const cy);

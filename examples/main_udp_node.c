@@ -12,18 +12,16 @@
 // ReSharper disable CppDFAMemoryLeak
 // NOLINTBEGIN(*-err33-c,*-core.NonNullParamChecker)
 
-static uint64_t random_uid(void)
+/// Constructs a random locally-administered EUI-64. The collision probability given 1 million of identifiers is ≈10^-7.
+static uint64_t random_eui64(void)
 {
-    const uint16_t vid = UINT16_MAX; // This is the reserved public VID.
-    const uint16_t pid = (uint16_t)rand();
-    const uint32_t iid = (uint32_t)rand();
-    return (((uint64_t)vid) << 48U) | (((uint64_t)pid) << 32U) | iid;
+    uint64_t x = (((uint64_t)rand()) << 32U) | (uint32_t)rand(); // first octet is bits 63..56
+    x &= ~(1ULL << 56U);                                         // clear bit I/G (unicast)
+    x |= (1ULL << 57U);                                          // set bit U/L (locally administered)
+    return x;
 }
 
-static uint64_t arg_kv_hash(const char* s)
-{
-    return rapidhash(s, strlen(s));
-}
+static uint64_t arg_kv_hash(const char* s) { return rapidhash(s, strlen(s)); }
 
 /// The pointed strings have a static lifetime.
 struct arg_kv_t
@@ -89,7 +87,7 @@ static struct config_t load_config(const int argc, char* argv[])
 {
     // Load default config.
     struct config_t cfg = {
-        .local_uid                   = random_uid(),
+        .local_uid                   = random_eui64(),
         .tx_queue_capacity_per_iface = 1000,
         .namespace                   = NULL, // will use the default namespace by default.
         .pub_count                   = 0,

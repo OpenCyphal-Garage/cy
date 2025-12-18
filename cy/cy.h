@@ -145,7 +145,8 @@ struct cy_tree_t
     int_fast8_t bf;
 };
 
-#define CY_RESPONSE_CONTEXT_SIZE_BYTES 24U
+/// Enough for a 64-bit UID plus x3 IPv4 address+port pairs.
+#define CY_RESPONSE_CONTEXT_SIZE_BYTES 32U
 
 /// Received messages are given an instance of the response context to allow the application to respond to them,
 /// if necessary. The context is only valid for a single response. The context can be copied and passed by value.
@@ -154,7 +155,7 @@ struct cy_tree_t
 /// or pointers into private structures.
 union cy_response_context_t
 {
-    uint64_t u64[CY_RESPONSE_CONTEXT_SIZE_BYTES / 8U]; // Enough for x3 IPv4 address+port pairs.
+    uint64_t u64[CY_RESPONSE_CONTEXT_SIZE_BYTES / 8U];
     uint32_t u32[CY_RESPONSE_CONTEXT_SIZE_BYTES / 4U];
     uint16_t u16[CY_RESPONSE_CONTEXT_SIZE_BYTES / 2U];
     void*    ptr[CY_RESPONSE_CONTEXT_SIZE_BYTES / sizeof(void*)];
@@ -317,6 +318,7 @@ typedef void (*cy_subscriber_callback_t)(cy_t*, const cy_arrival_t*);
 struct cy_subscription_params_t
 {
     size_t extent;
+    bool   ordered;
 };
 
 /// Subscribers SHALL NOT be copied/moved after initialization until destroyed.

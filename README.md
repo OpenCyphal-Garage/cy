@@ -168,7 +168,6 @@ A new 64-bit globally unique node-ID is defined that replaces both the old 128-b
 The named topic protocol somewhat lifts the level of abstraction presented to the application. Considering that, it does no longer appear useful to include the application-specific fields `health` and `mode` in the heartbeat message. Instead, applications should choose more specialized means of status reporting. In this proposal, these two fields along with the vendor-specific status code are consumed by the new `uint32 user_word`. Applications that seek full compatibility with the old nodes will set the two least significant bytes to the health and mode values. Eventually, it is expected that this field will become a simple general-purpose status reporting word with fully application-defined semantics.
 
 - [`7509.cyphal.Heartbeat.1.1`](dsdl/cyphal/7509.Heartbeat.1.1.dsdl)
-- [`cyphal.UID`](dsdl/cyphal/UID.0.1.dsdl)
 
 ### RPC
 

@@ -18,24 +18,16 @@ extern "C"
 {
 #endif
 
-#define CY_UDP_POSIX_IFACE_COUNT_MAX           UDPARD_NETWORK_INTERFACE_COUNT_MAX
-#define CY_UDP_POSIX_NODE_ID_BLOOM_64BIT_WORDS 128
+#define CY_UDP_POSIX_IFACE_COUNT_MAX UDPARD_NETWORK_INTERFACE_COUNT_MAX
 
-#ifndef __cplusplus
 typedef struct cy_udp_posix_t       cy_udp_posix_t;
 typedef struct cy_udp_posix_topic_t cy_udp_posix_topic_t;
-#endif
 
 struct cy_udp_posix_topic_t
 {
-    cy_topic_t                  base;
-    struct UdpardRxSubscription sub;
-    udp_wrapper_rx_t            sock_rx[CY_UDP_POSIX_IFACE_COUNT_MAX];
-
-    /// Use a simplified transfer-ID counting policy where we just have a shared counter per topic.
-    /// An alternative would be to keep a separate counter per remote node, but it's impractical.
-    /// https://github.com/OpenCyphal/libudpard/issues/66
-    uint64_t p2p_transfer_id;
+    cy_topic_t       base;
+    udpard_rx_port_t port;
+    udp_wrapper_rx_t sock_rx[CY_UDP_POSIX_IFACE_COUNT_MAX];
 
     /// The count of out-of-memory errors that occurred while processing this topic.
     /// Every OOM implies that either a frame or a full transfer were lost.
@@ -52,29 +44,21 @@ struct cy_udp_posix_t
 {
     cy_t base;
 
-    /// Maximum seen value across all topics since initialization.
-    size_t response_extent_with_overhead;
-
     size_t n_topics;
 
-    uint64_t     node_id_bloom_storage[CY_UDP_POSIX_NODE_ID_BLOOM_64BIT_WORDS];
-    size_t       node_id_bloom_popcount;
-    UdpardNodeID node_id;
+    udpard_mem_resource_t     mem;
+    udpard_rx_mem_resources_t rx_mem;
 
-    struct UdpardMemoryResource    mem;
-    struct UdpardRxMemoryResources rx_mem;
-
-    struct UdpardRxRPCDispatcher rpc_rx_dispatcher;
-    struct UdpardRxRPCPort       rpc_rx_port_topic_response;
+    udpard_rx_port_t p2p_port;
+    uint64_t         p2p_transfer_id; ///< A simple shared counter for all outgoing P2P transfers.
 
     uint32_t local_iface_address[CY_UDP_POSIX_IFACE_COUNT_MAX];
 
     struct
     {
-        struct UdpardTx  udpard_tx;
+        udpard_tx_t      udpard_tx;
         udp_wrapper_tx_t sock;
         uint16_t         local_port;
-        uint64_t         frames_expired; ///< Number of tx frames that have timed out while waiting in the queue.
     } tx[CY_UDP_POSIX_IFACE_COUNT_MAX];
 
     struct
@@ -112,21 +96,24 @@ struct cy_udp_posix_t
 cy_us_t cy_udp_posix_now(void);
 
 /// The namespace may be NULL or empty, in which case it defaults to "~".
-///
+/// The name may be NULL or empty, in which case it defaults to the UID in lowercase hex.
 /// Unused interfaces should have address either 0 or 0xFFFFFFFF;
 /// to parse IP addresses from string see udp_wrapper_parse_iface_address().
 cy_err_t               cy_udp_posix_new(cy_udp_posix_t* const cy_udp,
                                         const uint64_t        uid,
+                                        const wkv_str_t       name,
                                         const wkv_str_t       namespace_,
                                         const uint32_t        local_iface_address[CY_UDP_POSIX_IFACE_COUNT_MAX],
                                         const size_t          tx_queue_capacity_per_iface);
 static inline cy_err_t cy_udp_posix_new_c(cy_udp_posix_t* const cy_udp,
                                           const uint64_t        uid,
+                                          const char* const     name,
                                           const char* const     namespace_,
                                           const uint32_t        local_iface_address[CY_UDP_POSIX_IFACE_COUNT_MAX],
                                           const size_t          tx_queue_capacity_per_iface)
 {
-    return cy_udp_posix_new(cy_udp, uid, wkv_key(namespace_), local_iface_address, tx_queue_capacity_per_iface);
+    return cy_udp_posix_new(
+      cy_udp, uid, wkv_key(name), wkv_key(namespace_), local_iface_address, tx_queue_capacity_per_iface);
 }
 
 /// Keep running the event loop until the deadline is reached or until the first error.

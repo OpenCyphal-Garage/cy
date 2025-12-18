@@ -76,11 +76,7 @@ static cy_us_t pow2us(const int_fast8_t exp)
     return 1LL << (uint_fast8_t)exp; // NOLINT(*-signed-bitwise)
 }
 
-static uint64_t random_u64(const cy_t* const cy)
-{
-    const uint64_t seed[2] = { cy->platform->prng(cy), cy->uid };
-    return rapidhash(seed, sizeof(seed));
-}
+static uint64_t random_u64(const cy_t* const cy) { return cy->platform->random(); }
 
 /// The limits are inclusive. Returns min unless min < max.
 static int64_t random_int(const cy_t* const cy, const int64_t min, const int64_t max)
@@ -840,7 +836,6 @@ typedef struct
     uint8_t  user_word[3]; ///< Used to be: health, mode, vendor-specific status code. Now opaque user-defined 24 bits.
     uint8_t  version;      ///< Union tag; Cyphal v1.0 -- 0; Cyphal v1.1 -- 1.
     // The following fields are conditional on version=1.
-    uint64_t uid;
     uint64_t topic_hash;
     uint32_t topic_evictions;
     uint8_t  topic_evictions_msb; ///< 40-bit continuation of topic_evictions.
@@ -855,7 +850,6 @@ static cy_err_t publish_heartbeat(cy_t* const cy, const cy_us_t now, heartbeat_t
     // Fill and serialize the message.
     message->uptime           = (uint32_t)((now - cy->ts_started) / MEGA);
     message->version          = 1;
-    message->uid              = cy->uid;
     const size_t message_size = offsetof(heartbeat_t, topic_name) + message->topic_name_len;
     assert(message_size <= sizeof(heartbeat_t));
     assert(message->topic_name_len <= CY_TOPIC_NAME_MAX);
@@ -963,11 +957,10 @@ static void on_heartbeat(cy_t* const cy, const cy_arrival_t* const evt)
                 const bool win =
                   (mine_lage > other_lage) || ((mine_lage == other_lage) && (mine->evictions > other_evictions));
                 CY_TRACE(cy,
-                         "🔀 Divergence on '%s' discovered via gossip from N%016llx:\n"
+                         "🔀 Divergence on '%s':\n"
                          "\t local  %s T%016llx@%08x evict=%llu lage=%+d\n"
                          "\t remote %s T%016llx@%08x evict=%llu lage=%+d",
                          mine->name,
-                         (unsigned long long)heartbeat.uid,
                          win ? "✅" : "❌",
                          (unsigned long long)mine->hash,
                          cy_topic_subject_id(cy, mine),
@@ -1008,11 +1001,10 @@ static void on_heartbeat(cy_t* const cy, const cy_arrival_t* const evt)
             assert(cy_topic_subject_id(cy, mine) == topic_subject_id(cy, other_hash, other_evictions));
             const bool win = left_wins(mine, ts, other_lage, other_hash);
             CY_TRACE(cy,
-                     "💥 Collision on @%08x discovered via gossip from N%016llx:\n"
+                     "💥 Collision on @%08x:\n"
                      "\t local  %s T%016llx@%08x evict=%llu lage=%+d '%s'\n"
                      "\t remote %s T%016llx@%08x evict=%llu lage=%+d '%s'",
                      cy_topic_subject_id(cy, mine),
-                     (unsigned long long)heartbeat.uid,
                      win ? "✅" : "❌",
                      (unsigned long long)mine->hash,
                      cy_topic_subject_id(cy, mine),
@@ -1040,19 +1032,14 @@ static void on_heartbeat(cy_t* const cy, const cy_arrival_t* const evt)
     } else if (heartbeat.topic_lage == LAGE_SCOUT) {
         // A scout message is simply asking us to check if we have any matching topics, and gossip them ASAP if so.
         CY_TRACE(cy,
-                 "📢 Scout from N%016llx: T%016llx evict=%llu lage=%+d '%s'",
-                 (unsigned long long)heartbeat.uid,
+                 "📢 Scout: T%016llx evict=%llu lage=%+d '%s'",
                  (unsigned long long)other_hash,
                  (unsigned long long)other_evictions,
                  other_lage,
                  heartbeat.topic_name);
         (void)wkv_match(&cy->topics_by_name, key, cy, wkv_cb_topic_scout_response);
     } else {
-        CY_TRACE(cy,
-                 "⚠️ Invalid heartbeat message version=%d from N%016llx: lage=%+d",
-                 (int)heartbeat.version,
-                 (unsigned long long)heartbeat.uid,
-                 heartbeat.topic_lage);
+        CY_TRACE(cy, "⚠️ Invalid heartbeat message version=%d: lage=%+d", (int)heartbeat.version, heartbeat.topic_lage);
     }
 }
 
@@ -1451,17 +1438,16 @@ size_t cy_buffer_borrowed_gather(const cy_buffer_borrowed_t payload, const cy_by
 
 cy_err_t cy_new(cy_t* const                cy,
                 const cy_platform_t* const platform,
-                const uint64_t             uid,
+                const wkv_str_t            name,
                 const wkv_str_t            namespace_,
                 const uint32_t             subject_id_modulus)
 {
     assert(cy != NULL);
-    assert(uid != 0);
     assert(subject_id_modulus > 1000);
     assert(platform != NULL);
     assert(platform->now != NULL);
     assert(platform->realloc != NULL);
-    assert(platform->prng != NULL);
+    assert(platform->random != NULL);
     assert(platform->buffer_release != NULL);
     assert(platform->p2p != NULL);
     assert(platform->topic_new != NULL);
@@ -1472,14 +1458,13 @@ cy_err_t cy_new(cy_t* const                cy,
     assert(platform->topic_advertise != NULL);
     assert(platform->topic_on_subscription_error != NULL);
 
-    if (namespace_.len > CY_NAMESPACE_NAME_MAX) {
+    if ((namespace_.len > CY_NAMESPACE_NAME_MAX) || (name.len > CY_NAMESPACE_NAME_MAX) || (name.len == 0)) {
         return CY_ERR_NAME;
     }
 
     // Init the object.
     memset(cy, 0, sizeof(*cy));
     cy->platform           = platform;
-    cy->uid                = uid;
     cy->subject_id_modulus = subject_id_modulus;
     // namespace
     if (namespace_.len > 0) {
@@ -1489,13 +1474,10 @@ cy_err_t cy_new(cy_t* const                cy,
         cy->namespace_[0] = '~';
         cy->namespace_[1] = '\0';
     }
-    // the default name is just derived from UID, can be overridden by the user later
-    (void)snprintf(cy->name,
-                   sizeof(cy->name),
-                   "@/%04x/%04x/%08lx/",
-                   (unsigned)(uid >> 48U) & UINT16_MAX,
-                   (unsigned)(uid >> 32U) & UINT16_MAX,
-                   (unsigned long)(uid & UINT32_MAX));
+    // node name
+    memcpy(cy->name, name.str, name.len);
+    cy->name[name.len] = '\0';
+
     cy->topics_by_hash       = NULL;
     cy->topics_by_subject_id = NULL;
     cy->user                 = NULL;

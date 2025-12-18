@@ -9,12 +9,13 @@
 #include <errno.h>
 #include <err.h>
 
-static uint64_t random_uid(void)
+/// Constructs a random locally-administered EUI-64. The collision probability given 1 million of identifiers is ≈10^-7.
+static uint64_t random_eui64(void)
 {
-    const uint16_t vid = UINT16_MAX; // This is the reserved public VID.
-    const uint16_t pid = (uint16_t)rand();
-    const uint32_t iid = (uint32_t)rand();
-    return (((uint64_t)vid) << 48U) | (((uint64_t)pid) << 32U) | iid;
+    uint64_t x = (((uint64_t)rand()) << 32U) | (uint32_t)rand(); // first octet is bits 63..56
+    x &= ~(1ULL << 56U);                                         // clear bit I/G (unicast)
+    x |= (1ULL << 57U);                                          // set bit U/L (locally administered)
+    return x;
 }
 
 /// Request schema:
@@ -86,7 +87,7 @@ int main(const int argc, char* argv[])
     // SET UP THE NODE. This is the only platform-specific part; the rest is platform- and transport-agnostic.
     cy_udp_posix_t cy_udp;
     cy_err_t       res = cy_udp_posix_new_c(&cy_udp,
-                                      random_uid(),
+                                      random_eui64(),
                                       (argc > 1) ? argv[1] : "~",
                                       (uint32_t[3]){ udp_wrapper_parse_iface_address("127.0.0.1") },
                                       1000);
