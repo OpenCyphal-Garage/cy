@@ -56,18 +56,13 @@ enum p2p_kind
     p2p_kind_response     = 2,
 };
 
-// clang-format off
-static   size_t smaller(const size_t a,   const size_t b)   { return (a < b) ? a : b; }
-static   size_t  larger(const size_t a,   const size_t b)   { return (a > b) ? a : b; }
-static  int64_t max_i64(const int64_t a,  const int64_t b)  { return (a > b) ? a : b; }
-static  int64_t min_i64(const int64_t a,  const int64_t b)  { return (a < b) ? a : b; }
-// clang-format on
+static size_t  smaller(const size_t a, const size_t b) { return (a < b) ? a : b; }
+static size_t  larger(const size_t a, const size_t b) { return (a > b) ? a : b; }
+static int64_t max_i64(const int64_t a, const int64_t b) { return (a > b) ? a : b; }
+static int64_t min_i64(const int64_t a, const int64_t b) { return (a < b) ? a : b; }
 
 /// Returns -1 if the argument is zero to allow linear comparison.
-static int_fast8_t log2_floor(const uint64_t x)
-{
-    return (int_fast8_t)((x == 0) ? -1 : (63 - __builtin_clzll(x)));
-}
+static int_fast8_t log2_floor(const uint64_t x) { return (int_fast8_t)((x == 0) ? -1 : (63 - __builtin_clzll(x))); }
 
 /// The inverse of log2_floor() with the same special case: exp=-1 returns 0.
 static cy_us_t pow2us(const int_fast8_t exp)
@@ -106,10 +101,7 @@ static void* wkv_realloc(wkv_t* const self, void* ptr, const size_t new_size)
     return ((cy_t*)self->context)->platform->realloc((cy_t*)self->context, ptr, new_size);
 }
 
-static void* mem_alloc(cy_t* const cy, const size_t size)
-{
-    return cy->platform->realloc(cy, NULL, size);
-}
+static void* mem_alloc(cy_t* const cy, const size_t size) { return cy->platform->realloc(cy, NULL, size); }
 
 static void mem_free(cy_t* const cy, void* ptr)
 {
@@ -119,10 +111,7 @@ static void mem_free(cy_t* const cy, void* ptr)
 }
 
 /// Simply returns the value of the first hit. Useful for existence checks.
-static void* wkv_cb_first(const wkv_event_t evt)
-{
-    return evt.node->value;
-}
+static void* wkv_cb_first(const wkv_event_t evt) { return evt.node->value; }
 
 // =====================================================================================================================
 //                                                      NAMES
@@ -235,7 +224,7 @@ static int32_t cavl_comp_topic_hash(const void* const user, const cy_tree_t* con
     if (outer == inner->hash) {
         return 0;
     }
-    return (outer >= inner->hash) ? +1 : -1;
+    return (outer > inner->hash) ? +1 : -1;
 }
 
 static int32_t cavl_comp_topic_subject_id(const void* const user, const cy_tree_t* const node)
@@ -248,7 +237,7 @@ static int32_t cavl_comp_topic_subject_id(const void* const user, const cy_tree_
     if (outer == inner_id) {
         return 0;
     }
-    return (outer >= inner_id) ? +1 : -1;
+    return (outer > inner_id) ? +1 : -1;
 }
 
 static int32_t cavl_comp_future_transfer_id(const void* const user, const cy_tree_t* const node)
@@ -270,20 +259,9 @@ static int32_t cavl_comp_future_deadline(const void* const user, const cy_tree_t
     return ((*(cy_us_t*)user) >= inner->deadline) ? +1 : -1;
 }
 
-static cy_tree_t* cavl_factory_future_transfer_id(void* const user)
-{
-    return &((cy_future_t*)user)->index_transfer_id;
-}
-
-static cy_tree_t* cavl_factory_future_deadline(void* const user)
-{
-    return &((cy_future_t*)user)->index_deadline;
-}
-
-static cy_tree_t* cavl_factory_topic_subject_id(void* const user)
-{
-    return &((cy_topic_t*)user)->index_subject_id;
-}
+static cy_tree_t* cavl_factory_future_transfer_id(void* const user) { return &((cy_future_t*)user)->index_transfer_id; }
+static cy_tree_t* cavl_factory_future_deadline(void* const user) { return &((cy_future_t*)user)->index_deadline; }
+static cy_tree_t* cavl_factory_topic_subject_id(void* const user) { return &((cy_topic_t*)user)->index_subject_id; }
 
 /// For debug invariant checking only; linear complexity.
 static size_t cavl_count(cy_tree_t* const root)
@@ -344,10 +322,7 @@ static void topic_merge_lage(cy_topic_t* const topic, const cy_us_t now, const i
     topic->ts_origin = min_i64(topic->ts_origin, now - (pow2us(r_lage) * MEGA));
 }
 
-static bool is_pinned(const uint64_t hash)
-{
-    return hash <= CY_PINNED_SUBJECT_ID_MAX;
-}
+static bool is_pinned(const uint64_t hash) { return hash <= CY_PINNED_SUBJECT_ID_MAX; }
 
 /// This comparator is only applicable on subject-ID allocation conflicts. As such, hashes must be different.
 static bool left_wins(const cy_topic_t* const left, const cy_us_t now, const int_fast8_t r_lage, const uint64_t r_hash)
@@ -939,7 +914,7 @@ static cy_err_t heartbeat_poll(cy_t* const cy, const cy_us_t now)
             }
             cy->heartbeat_next = now + dither_int(cy, cy->heartbeat_period, cy->heartbeat_period / 8);
         }
-        cy->heartbeat_next_urgent = now + cy->heartbeat_period / 16U;
+        cy->heartbeat_next_urgent = now + (cy->heartbeat_period / 32);
     }
     return res;
 }
@@ -1366,10 +1341,7 @@ void cy_subscriber_name(const cy_t* const cy, const cy_subscriber_t* const sub, 
 //                                                  NODE & TOPIC
 // =====================================================================================================================
 
-cy_us_t cy_now(const cy_t* const cy)
-{
-    return cy->platform->now(cy);
-}
+cy_us_t cy_now(const cy_t* const cy) { return cy->platform->now(cy); }
 
 void cy_topic_hint(cy_t* const cy, cy_topic_t* const topic, const uint32_t subject_id)
 {
@@ -1410,15 +1382,8 @@ cy_topic_t* cy_topic_find_by_hash(const cy_t* const cy, const uint64_t hash)
     return topic;
 }
 
-cy_topic_t* cy_topic_iter_first(const cy_t* const cy)
-{
-    return (cy_topic_t*)cavl2_min(cy->topics_by_hash);
-}
-
-cy_topic_t* cy_topic_iter_next(cy_topic_t* const topic)
-{
-    return (cy_topic_t*)cavl2_next_greater(&topic->index_hash);
-}
+cy_topic_t* cy_topic_iter_first(const cy_t* const cy) { return (cy_topic_t*)cavl2_min(cy->topics_by_hash); }
+cy_topic_t* cy_topic_iter_next(cy_topic_t* const topic) { return (cy_topic_t*)cavl2_next_greater(&topic->index_hash); }
 
 uint32_t cy_topic_subject_id(const cy_t* const cy, const cy_topic_t* const topic)
 {
@@ -1550,7 +1515,7 @@ cy_err_t cy_new(cy_t* const                cy,
 
     cy->heartbeat_next        = HEAT_DEATH; // The first heartbeat is sent together with the first publication.
     cy->heartbeat_next_urgent = HEAT_DEATH;
-    cy->heartbeat_period      = 2 * MEGA;
+    cy->heartbeat_period      = 3 * MEGA;
 
     cy->implicit_topic_timeout = IMPLICIT_TOPIC_DEFAULT_TIMEOUT_us;
 
@@ -1620,11 +1585,11 @@ static void ingest_p2p_ack_response(cy_t* const       cy,
     // Specifically, find the pending response state and delete it.
 }
 
-static void ingest_p2p_response(cy_t* const         cy,
-                                cy_topic_t* const   topic,
-                                const uint64_t      transfer_id,
-                                const uint32_t      cookie,
-                                cy_transfer_owned_t transfer)
+static void ingest_p2p_response(cy_t* const               cy,
+                                cy_topic_t* const         topic,
+                                const uint64_t            transfer_id,
+                                const uint32_t            cookie,
+                                const cy_transfer_owned_t transfer)
 {
     // Find the matching pending response future -- log(N) lookup.
     cy_tree_t* const tr = cavl2_find(topic->futures_by_transfer_id, &transfer_id, &cavl_comp_future_transfer_id);
@@ -1704,12 +1669,10 @@ void cy_ingest_p2p(cy_t* const cy, cy_transfer_owned_t transfer)
 
 cy_err_t cy_update(cy_t* const cy)
 {
-    cy_err_t      res = CY_OK;
     const cy_us_t now = cy_now(cy);
     futures_retire_timed_out(cy, now);
     implicit_retire_timed_out(cy, now);
-    heartbeat_poll(cy, now);
-    return res;
+    return heartbeat_poll(cy, now);
 }
 
 void cy_notify_topic_collision(cy_t* const cy, cy_topic_t* const topic)

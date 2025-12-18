@@ -32,15 +32,8 @@
 /// https://github.com/OpenCyphal/specification/issues/139
 #define TRANSFER_ID_TIMEOUT_us (60 * 1000000LL)
 
-static int64_t min_i64(const int64_t a, const int64_t b)
-{
-    return (a < b) ? a : b;
-}
-
-static int64_t min_i64_3(const int64_t a, const int64_t b, const int64_t c)
-{
-    return min_i64(a, min_i64(b, c));
-}
+static int64_t min_i64(const int64_t a, const int64_t b) { return (a < b) ? a : b; }
+static int64_t min_i64_3(const int64_t a, const int64_t b, const int64_t c) { return min_i64(a, min_i64(b, c)); }
 
 static void default_tx_sock_err_handler(cy_udp_posix_t* const cy_udp,
                                         const uint_fast8_t    iface_index,
@@ -65,10 +58,7 @@ static void default_rx_sock_err_handler(cy_udp_posix_t* const       cy_udp,
       &cy_udp->base, "⚠️ RX socket error on iface #%u topic '%s': %u", iface_index, topic->base.name, (unsigned)err_no);
 }
 
-static bool is_valid_ip(const uint32_t ip)
-{
-    return (ip > 0) && (ip < UINT32_MAX);
-}
+static bool is_valid_ip(const uint32_t ip) { return (ip > 0) && (ip < UINT32_MAX); }
 
 static void* mem_alloc(void* const user, const size_t size)
 {

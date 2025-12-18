@@ -333,8 +333,8 @@ cy_err_t cy_new(cy_t* const                cy,
 void     cy_destroy(cy_t* const cy);
 
 /// This function must be invoked periodically to let the library publish heartbeats and handle response timeouts.
-/// The most efficient invocation schedule is guided by cy->heartbeat_next, but not less often than every 10 ms;
-/// if a fixed-rate updates are desired, then the recommended period is 1 millisecond.
+/// The most efficient invocation schedule is guided by cy->heartbeat_next_urgent, but not less often than every 10 ms;
+/// if fixed-rate updates are desired, then the recommended period is 1 millisecond.
 ///
 /// This is the only function that generates heartbeat -- the only kind of auxiliary traffic needed by the protocol.
 /// The returned value indicates the success of the heartbeat publication, if any took place, or zero.
@@ -342,9 +342,9 @@ void     cy_destroy(cy_t* const cy);
 /// Excluding the transport_publish dependency, the time complexity is logarithmic in the number of topics.
 cy_err_t cy_update(cy_t* const cy);
 
-/// When the transport library detects a topic hash error, it will notify Cy about it to let it rectify the
-/// problem. Transport frames with mismatched topic hash must be dropped; no processing at the transport layer
-/// is needed. This function is not essential for the protocol to function, but it speeds up collision repair.
+/// When the transport library detects a topic hash mismatch, it will notify Cy about it to let it rectify the problem.
+/// Transport frames with mismatched topic hash must be dropped; no processing at the transport layer is needed.
+/// This function is not essential for the protocol to function, but it speeds up collision repair.
 ///
 /// The function will not perform any IO and will return immediately after quickly updating an internal state.
 /// It is thus safe to invoke it from a deep callback or from deep inside the transport library; the side effects

@@ -135,8 +135,31 @@ static inline CAVL2_T* cavl2_find(CAVL2_T* root, const void* const user_comparat
 /// If the node is not in the tree, the behavior is undefined; it may create cycles in the tree which is deadly.
 /// It is safe to pass the result of cavl2_find/cavl2_find_or_insert directly as the second argument:
 ///     cavl2_remove(&root, cavl2_find(&root, user, search_comparator));
-/// It is recommended to invalidate the pointers stored in the node after its removal.
-static inline void cavl2_remove(CAVL2_T** const root, const CAVL2_T* const node);
+/// The removed node will have all of its pointers set to NULL.
+static inline void cavl2_remove(CAVL2_T** const root, CAVL2_T* const node);
+
+/// Replace the specified node with another node without rebalancing.
+/// This is useful when you want to replace a node with an equivalent one (same key ordering).
+/// The new node takes over the position (parent, children, balance factor) of the old node.
+/// The old node will have all of its pointers set to NULL.
+/// The new node must not already be in the tree; if it is, the behavior is undefined.
+/// The new node's fields (up, lr, bf) will be overwritten to match the old node's position in the tree.
+/// The complexity is O(1).
+/// The function has no effect if any of the pointers are NULL.
+/// If the old node is not in the tree, the behavior is undefined.
+static inline void cavl2_replace(CAVL2_T** const root, CAVL2_T* const old_node, CAVL2_T* const new_node);
+
+/// True iff the node is in the tree. The complexity is O(1).
+/// Returns false if the node is NULL.
+/// Assumes that the node pointers are NULL when it is not inserted (this is ensured by the removal function).
+static inline bool cavl2_is_inserted(const CAVL2_T* const root, const CAVL2_T* const node)
+{
+    bool out = false;
+    if (node != NULL) {
+        out = (node->up != NULL) || (node->lr[0] != NULL) || (node->lr[1] != NULL) || (node == root);
+    }
+    return out;
+}
 
 /// Return the min-/max-valued node stored in the tree, depending on the flag. This is an extremely fast query.
 /// Returns NULL iff the argument is NULL (i.e., the tree is empty). The worst-case complexity is O(log n).
@@ -183,6 +206,86 @@ static inline CAVL2_T* cavl2_next_greater(CAVL2_T* const node)
     return c;
 }
 
+/// Find the smallest node whose value is greater than or equal to the search target, in O(log n).
+/// Returns the first node for which the comparator returns a non-positive result.
+/// If no such node exists (all nodes compare less than target), returns NULL.
+/// The comparator returns: positive if target>candidate, zero if target==candidate, negative if target<candidate.
+/// Example: tree={1,3,5,7}, target=4 => 5; target=5 => 5; target=8 => NULL.
+static inline CAVL2_T* cavl2_lower_bound(CAVL2_T* const           root,
+                                         const void* const        user,
+                                         const cavl2_comparator_t comparator)
+{
+    CAVL2_T* result = NULL;
+    if ((root != NULL) && (comparator != NULL)) {
+        CAVL2_T* n = root;
+        while (n != NULL) {
+            const CAVL2_RELATION cmp = comparator(user, n);
+            if (cmp <= 0) {
+                result = n;
+                n      = n->lr[0];
+            } else {
+                n = n->lr[1];
+            }
+        }
+    }
+    return result;
+}
+
+/// Find the smallest node whose value is strictly greater than the search target (upper bound).
+/// Returns the first node for which the comparator returns a negative result.
+/// See cavl2_lower_bound() for details.
+/// Example: tree={1,3,5,7}, target=4 => 5; target=5 => 7; target=7 => NULL.
+static inline CAVL2_T* cavl2_upper_bound(CAVL2_T* const           root,
+                                         const void* const        user,
+                                         const cavl2_comparator_t comparator)
+{
+    CAVL2_T* result = NULL;
+    if ((root != NULL) && (comparator != NULL)) {
+        CAVL2_T* n = root;
+        while (n != NULL) {
+            const CAVL2_RELATION cmp = comparator(user, n);
+            if (cmp < 0) {
+                result = n;
+                n      = n->lr[0];
+            } else {
+                n = n->lr[1];
+            }
+        }
+    }
+    return result;
+}
+
+/// Find the largest node whose value is less than or equal to the search target, in O(log n).
+/// Returns the last node for which the comparator returns a non-negative result.
+/// See cavl2_lower_bound() for details.
+/// Example: tree={1,3,5,7}, target=4 => 3; target=5 => 5; target=0 => NULL.
+static inline CAVL2_T* cavl2_predecessor(CAVL2_T* const           root,
+                                         const void* const        user,
+                                         const cavl2_comparator_t comparator)
+{
+    CAVL2_T* result = NULL;
+    if ((root != NULL) && (comparator != NULL)) {
+        CAVL2_T* n = root;
+        while (n != NULL) {
+            const CAVL2_RELATION cmp = comparator(user, n);
+            if (cmp >= 0) {
+                result = n;
+                n      = n->lr[1];
+            } else {
+                n = n->lr[0];
+            }
+        }
+    }
+    return result;
+}
+
+/// The successor counterpart of cavl2_predecessor() is an alias of cavl2_lower_bound(), provided for completeness only.
+/// Example: tree={1,3,5,7}, target=4 => 5; target=5 => 5; target=8 => NULL.
+static inline CAVL2_T* cavl2_successor(CAVL2_T* const root, const void* const user, const cavl2_comparator_t comparator)
+{
+    return cavl2_lower_bound(root, user, comparator);
+}
+
 /// The trivial factory is useful in most applications. It simply returns the user pointed converted to CAVL2_T.
 /// It is meant for use with cavl2_find_or_insert().
 static inline CAVL2_T* cavl2_trivial_factory(void* const user)
@@ -207,8 +310,6 @@ static inline CAVL2_T* cavl2_trivial_factory(void* const user)
 ///     struct cavl2_t* tree_node_b = cavl2_find(...);  // whatever
 ///     if (tree_node_b == NULL) { ... }                // do something else
 ///     struct my_type_t* my_struct = CAVL2_TO_OWNER(tree_node_b, struct my_type_t, tree_b);
-///
-/// The result is undefined if the tree_node_ptr is not a valid pointer to the tree node.
 #define CAVL2_TO_OWNER(tree_node_ptr, owner_type, owner_tree_node_field)                                          \
     ((owner_type*)_cavl2_to_owner_helper((tree_node_ptr), offsetof(owner_type, owner_tree_node_field))) // NOLINT
 
@@ -346,7 +447,7 @@ static inline CAVL2_T* cavl2_find_or_insert(CAVL2_T** const          root,
     return out;
 }
 
-static inline void cavl2_remove(CAVL2_T** const root, const CAVL2_T* const node)
+static inline void cavl2_remove(CAVL2_T** const root, CAVL2_T* const node)
 {
     if ((root != NULL) && (node != NULL)) {
         CAVL2_ASSERT(*root != NULL); // Otherwise, the node would have to be NULL.
@@ -417,6 +518,41 @@ static inline void cavl2_remove(CAVL2_T** const root, const CAVL2_T* const node)
                 *root = c;
             }
         }
+        // Invalidate the node's pointers to indicate it is no longer in the tree.
+        node->up    = NULL;
+        node->lr[0] = NULL;
+        node->lr[1] = NULL;
+    }
+}
+
+static inline void cavl2_replace(CAVL2_T** const root, CAVL2_T* const old_node, CAVL2_T* const new_node)
+{
+    if ((root != NULL) && (old_node != NULL) && (new_node != NULL)) {
+        CAVL2_ASSERT(*root != NULL);                                 // Otherwise, old_node would have to be NULL.
+        CAVL2_ASSERT((old_node->up != NULL) || (old_node == *root)); // old_node must be in the tree.
+        CAVL2_ASSERT((new_node->up == NULL) && (new_node->lr[0] == NULL) && (new_node->lr[1] == NULL));
+        // Copy the structural data from the old node to the new node.
+        new_node->up    = old_node->up;
+        new_node->lr[0] = old_node->lr[0];
+        new_node->lr[1] = old_node->lr[1];
+        new_node->bf    = old_node->bf;
+        // Update the parent to point to the new node.
+        if (old_node->up != NULL) {
+            old_node->up->lr[old_node->up->lr[1] == old_node] = new_node;
+        } else {
+            *root = new_node;
+        }
+        // Update the children to point to the new parent.
+        if (old_node->lr[0] != NULL) {
+            old_node->lr[0]->up = new_node;
+        }
+        if (old_node->lr[1] != NULL) {
+            old_node->lr[1]->up = new_node;
+        }
+        // Invalidate the old node's pointers to indicate it is no longer in the tree.
+        old_node->up    = NULL;
+        old_node->lr[0] = NULL;
+        old_node->lr[1] = NULL;
     }
 }
 
