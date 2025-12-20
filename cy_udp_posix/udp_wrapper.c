@@ -7,10 +7,11 @@
 #include "udp_wrapper.h"
 
 /// Enable SO_REUSEPORT.
-#ifndef _DEFAULT_SOURCE
-#define _DEFAULT_SOURCE // NOLINT(bugprone-reserved-identifier,cert-dcl37-c,cert-dcl51-cpp)
+#ifndef _DEFAULT_SOURCE // NOLINT(*-reserved-identifier,*-dcl37-c,*-dcl51-cpp)
+#define _DEFAULT_SOURCE // NOLINT(*-reserved-identifier,*-dcl37-c,*-dcl51-cpp)
 #endif
 
+#include <assert.h>
 #include <fcntl.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
@@ -20,7 +21,7 @@
 #include <poll.h>
 #include <errno.h>
 #include <limits.h>
-#include <stdbool.h>
+#include <string.h>
 
 /// This is the value recommended by the Cyphal/UDP specification.
 #define OVERRIDE_TTL 16
@@ -41,13 +42,13 @@ static bool is_multicast(const uint32_t address)
 }
 
 /// Zero on error, otherwise the interface index. Zero is not a valid interface index.
-static uint32_t get_local_iface_index(const uint32_t local_iface_address)
+static size_t get_local_iface_index(const uint32_t local_iface_address)
 {
     const uint32_t  addr_be = htonl(local_iface_address);
-    struct ifaddrs* ifa;
-    uint32_t        idx = 0;
+    struct ifaddrs* ifa     = NULL;
+    size_t          idx     = 0;
     if (getifaddrs(&ifa) == 0) {
-        for (struct ifaddrs* it = ifa; it; it = it->ifa_next) {
+        for (const struct ifaddrs* it = ifa; it; it = it->ifa_next) {
             if (it->ifa_addr && it->ifa_addr->sa_family == AF_INET) {
                 const struct sockaddr_in* const sa = (struct sockaddr_in*)it->ifa_addr;
                 if (sa->sin_addr.s_addr == addr_be) {
@@ -61,35 +62,22 @@ static uint32_t get_local_iface_index(const uint32_t local_iface_address)
     return idx;
 }
 
-udp_wrapper_tx_t udp_wrapper_tx_new(void)
-{
-    return (udp_wrapper_tx_t){ .fd = -1 };
-}
-udp_wrapper_rx_t udp_wrapper_rx_new(void)
-{
-    return (udp_wrapper_rx_t){ .fd = -1 };
-}
+udp_wrapper_t udp_wrapper_new(void) { return (udp_wrapper_t){ .fd = -1 }; }
 
-/// Return false unless the handle has been successfully initialized and not yet closed.
-bool udp_wrapper_tx_is_initialized(const udp_wrapper_tx_t* const self)
-{
-    return self->fd >= 0;
-}
-bool udp_wrapper_rx_is_initialized(const udp_wrapper_rx_t* const self)
-{
-    return self->fd >= 0;
-}
+bool udp_wrapper_is_open(const udp_wrapper_t* const self) { return self->fd >= 0; }
 
-int16_t udp_wrapper_tx_init(udp_wrapper_tx_t* const self,
-                            const uint32_t          local_iface_address,
-                            uint16_t* const         local_port)
+int16_t udp_wrapper_open_unicast(udp_wrapper_t* const self,
+                                 const uint32_t       local_iface_address,
+                                 uint16_t* const      out_local_port)
 {
     int16_t res = -EINVAL;
     if ((self != NULL) && (local_iface_address > 0)) {
+        memset(self, 0, sizeof(*self));
+        self->iface_index             = get_local_iface_index(local_iface_address);
         self->fd                      = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
         const uint32_t local_iface_be = htonl(local_iface_address);
         const int      ttl            = OVERRIDE_TTL;
-        bool           ok             = self->fd >= 0;
+        bool           ok             = (self->fd >= 0) && (self->iface_index > 0);
         //
         ok = ok && bind(self->fd,
                         (struct sockaddr*)&(struct sockaddr_in){
@@ -98,11 +86,11 @@ int16_t udp_wrapper_tx_init(udp_wrapper_tx_t* const self,
                           .sin_port   = 0,
                         },
                         sizeof(struct sockaddr_in)) == 0;
-        if (ok && (local_port != NULL)) {
+        if (ok && (out_local_port != NULL)) {
             struct sockaddr_in sa = { 0 };
             socklen_t          al = sizeof(sa);
             ok                    = getsockname(self->fd, (struct sockaddr*)&sa, &al) == 0;
-            *local_port           = ntohs(sa.sin_port);
+            *out_local_port       = ntohs(sa.sin_port);
         }
         ok = ok && fcntl(self->fd, F_SETFL, O_NONBLOCK) == 0;
         ok = ok && setsockopt(self->fd, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl)) == 0;
@@ -116,62 +104,22 @@ int16_t udp_wrapper_tx_init(udp_wrapper_tx_t* const self,
             self->fd = -1;
         }
     }
+    assert((res < 0) || udp_wrapper_is_open(self));
     return res;
 }
 
-int16_t udp_wrapper_tx_send(udp_wrapper_tx_t* const self,
-                            const uint32_t          remote_address,
-                            const uint16_t          remote_port,
-                            const uint8_t           dscp,
-                            const size_t            payload_size,
-                            const void* const       payload)
-{
-    int16_t res = -EINVAL;
-    if ((self != NULL) && (self->fd >= 0) && (remote_address > 0) && (remote_port > 0) && (payload != NULL) &&
-        (dscp <= DSCP_MAX)) {
-        const int dscp_int = dscp << 2U; // The 2 least significant bits are used for the ECN field.
-        (void)setsockopt(self->fd, IPPROTO_IP, IP_TOS, &dscp_int, sizeof(dscp_int)); // Best effort.
-        const ssize_t send_result = sendto(
-          self->fd,
-          payload,
-          payload_size,
-          MSG_DONTWAIT,
-          (struct sockaddr*)&(struct sockaddr_in){
-            .sin_family = AF_INET, .sin_addr = { .s_addr = htonl(remote_address) }, .sin_port = htons(remote_port) },
-          sizeof(struct sockaddr_in));
-        if (send_result == (ssize_t)payload_size) {
-            res = 1;
-        } else if ((errno == EAGAIN) || (errno == EWOULDBLOCK)) {
-            res = 0;
-        } else {
-            res = (int16_t)-errno;
-        }
-    }
-    return res;
-}
-
-void udp_wrapper_tx_close(udp_wrapper_tx_t* const self)
-{
-    if ((self != NULL) && (self->fd >= 0)) {
-        (void)close(self->fd);
-        self->fd = -1;
-    }
-}
-
-int16_t udp_wrapper_rx_init(udp_wrapper_rx_t* const self,
-                            const uint32_t          local_iface_address,
-                            const uint32_t          multicast_group,
-                            const uint16_t          remote_port,
-                            const uint16_t          deny_source_port)
+int16_t udp_wrapper_open_multicast(udp_wrapper_t* const self,
+                                   const uint32_t       local_iface_address,
+                                   const uint32_t       multicast_group,
+                                   const uint16_t       remote_port)
 {
     int16_t res = -EINVAL;
     if ((self != NULL) && (local_iface_address > 0) && is_multicast(multicast_group) && (remote_port > 0)) {
-        const int one             = 1;
-        self->deny_source_address = local_iface_address;
-        self->deny_source_port    = deny_source_port;
-        self->allow_iface_index   = get_local_iface_index(local_iface_address);
-        self->fd                  = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-        bool ok                   = (self->fd >= 0) && (self->allow_iface_index > 0);
+        memset(self, 0, sizeof(*self));
+        const int one     = 1;
+        self->iface_index = get_local_iface_index(local_iface_address);
+        self->fd          = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        bool ok           = (self->fd >= 0) && (self->iface_index > 0);
         // Set non-blocking mode.
         ok = ok && (fcntl(self->fd, F_SETFL, O_NONBLOCK) == 0);
         // Allow other applications to use the same Cyphal port as well. This must be done before binding.
@@ -209,10 +157,57 @@ int16_t udp_wrapper_rx_init(udp_wrapper_rx_t* const self,
             self->fd = -1;
         }
     }
+    assert((res < 0) || udp_wrapper_is_open(self));
     return res;
 }
 
-int16_t udp_wrapper_rx_receive(udp_wrapper_rx_t* const self, size_t* const inout_payload_size, void* const out_payload)
+void udp_wrapper_close(udp_wrapper_t* const self)
+{
+    if ((self != NULL) && (self->fd >= 0)) {
+        (void)close(self->fd);
+        memset(self, 0, sizeof(*self));
+        self->fd = -1;
+    }
+}
+
+// ReSharper disable once CppParameterMayBeConstPtrOrRef
+int16_t udp_wrapper_send(udp_wrapper_t* const self,
+                         const uint32_t       remote_address,
+                         const uint16_t       remote_port,
+                         const uint8_t        dscp,
+                         const size_t         payload_size,
+                         const void* const    payload)
+{
+    int16_t res = -EINVAL;
+    if ((self != NULL) && (self->fd >= 0) && (remote_address > 0) && (remote_port > 0) && (payload != NULL) &&
+        (dscp <= DSCP_MAX)) {
+        const int dscp_int = dscp << 2U; // The 2 least significant bits are used for the ECN field.
+        (void)setsockopt(self->fd, IPPROTO_IP, IP_TOS, &dscp_int, sizeof(dscp_int)); // Best effort.
+        const ssize_t send_result = sendto(
+          self->fd,
+          payload,
+          payload_size,
+          MSG_DONTWAIT,
+          (struct sockaddr*)&(struct sockaddr_in){
+            .sin_family = AF_INET, .sin_addr = { .s_addr = htonl(remote_address) }, .sin_port = htons(remote_port) },
+          sizeof(struct sockaddr_in));
+        if (send_result >= 0) {
+            res = (send_result == (ssize_t)payload_size) ? 1 : -EIO;
+        } else if ((errno == EAGAIN) || (errno == EWOULDBLOCK)) {
+            res = 0;
+        } else {
+            res = (int16_t)-errno;
+        }
+    }
+    return res;
+}
+
+// ReSharper disable once CppParameterMayBeConstPtrOrRef
+int16_t udp_wrapper_receive(udp_wrapper_t* const self,
+                            size_t* const        inout_payload_size,
+                            void* const          out_payload,
+                            uint32_t* const      out_src_address,
+                            uint16_t* const      out_src_port)
 {
     int16_t res = -EINVAL;
     if ((self != NULL) && (self->fd >= 0) && (inout_payload_size != NULL) && (out_payload != NULL)) {
@@ -227,22 +222,24 @@ int16_t udp_wrapper_rx_receive(udp_wrapper_rx_t* const self, size_t* const inout
                                    .msg_controllen = sizeof(cbuf) };
         const ssize_t      n   = recvmsg(self->fd, &msg, MSG_DONTWAIT);
         if (n >= 0) {
+            if (out_src_address != NULL) {
+                *out_src_address = ntohl(src.sin_addr.s_addr);
+            }
+            if (out_src_port != NULL) {
+                *out_src_port = ntohs(src.sin_port);
+            }
             // locate IP_PKTINFO
-            struct in_pktinfo* pi = NULL;
+            const struct in_pktinfo* pi = NULL;
             for (struct cmsghdr* c = CMSG_FIRSTHDR(&msg); c; c = CMSG_NXTHDR(&msg, c)) {
                 if (c->cmsg_level == IPPROTO_IP && c->cmsg_type == IP_PKTINFO) {
                     pi = (struct in_pktinfo*)CMSG_DATA(c);
                     break;
                 }
             }
-            // drop out own traffic and only accept packets from the right iface.
             if (pi == NULL) {
                 res = -EIO;
-            } else if (pi->ipi_ifindex != self->allow_iface_index) {
-                res = 0; // wrong iface -- ignore
-            } else if ((ntohl(src.sin_addr.s_addr) == self->deny_source_address) &&
-                       (ntohs(src.sin_port) == self->deny_source_port)) {
-                res = 0; // own traffic -- ignore
+            } else if (pi->ipi_ifindex != self->iface_index) { // NOLINT(*-branch-clone)
+                res = 0;                                       // wrong iface -- ignore
             } else {
                 *inout_payload_size = (size_t)n;
                 res                 = 1;
@@ -256,19 +253,11 @@ int16_t udp_wrapper_rx_receive(udp_wrapper_rx_t* const self, size_t* const inout
     return res;
 }
 
-void udp_wrapper_rx_close(udp_wrapper_rx_t* const self)
-{
-    if ((self != NULL) && (self->fd >= 0)) {
-        (void)close(self->fd);
-        self->fd = -1;
-    }
-}
-
-int16_t udp_wrapper_wait(const int64_t            timeout_us,
-                         const size_t             tx_count,
-                         udp_wrapper_tx_t** const tx,
-                         const size_t             rx_count,
-                         udp_wrapper_rx_t** const rx)
+int16_t udp_wrapper_wait(const int64_t         timeout_us,
+                         const size_t          tx_count,
+                         udp_wrapper_t** const tx,
+                         const size_t          rx_count,
+                         udp_wrapper_t** const rx)
 {
     int16_t       res         = -EINVAL;
     const size_t  total_count = tx_count + rx_count;

@@ -20,6 +20,9 @@ extern "C"
 
 #define CY_UDP_POSIX_IFACE_COUNT_MAX UDPARD_NETWORK_INTERFACE_COUNT_MAX
 
+/// Any smaller value is also acceptable.
+#define CY_UDP_POSIX_SUBJECT_ID_MODULUS_MAX (UDPARD_IPv4_SUBJECT_ID_MAX + 1U)
+
 typedef struct cy_udp_posix_t       cy_udp_posix_t;
 typedef struct cy_udp_posix_topic_t cy_udp_posix_topic_t;
 
@@ -27,11 +30,7 @@ struct cy_udp_posix_topic_t
 {
     cy_topic_t       base;
     udpard_rx_port_t port;
-    udp_wrapper_rx_t sock_rx[CY_UDP_POSIX_IFACE_COUNT_MAX];
-
-    /// The count of out-of-memory errors that occurred while processing this topic.
-    /// Every OOM implies that either a frame or a full transfer were lost.
-    uint64_t rx_oom_count;
+    udp_wrapper_t    rx_sock[CY_UDP_POSIX_IFACE_COUNT_MAX];
 
     /// Initialized from the eponymous field of cy_udp_posix_t when a new topic is created.
     void (*rx_sock_err_handler)(cy_udp_posix_t*       cy_udp,
@@ -46,32 +45,24 @@ struct cy_udp_posix_t
 
     size_t n_topics;
 
-    udpard_mem_resource_t     mem;
-    udpard_rx_mem_resources_t rx_mem;
+    udpard_mem_resource_t mem;
 
     udpard_rx_port_t p2p_port;
     uint64_t         p2p_transfer_id; ///< A simple shared counter for all outgoing P2P transfers.
 
-    uint32_t local_iface_address[CY_UDP_POSIX_IFACE_COUNT_MAX];
+    udpard_rx_t   udpard_rx;
+    udpard_tx_t   udpard_tx[CY_UDP_POSIX_IFACE_COUNT_MAX];
+    udp_wrapper_t sock[CY_UDP_POSIX_IFACE_COUNT_MAX]; ///< All TX and P2P RX.
+    uint32_t      local_ip[CY_UDP_POSIX_IFACE_COUNT_MAX];
+    uint16_t      local_tx_port[CY_UDP_POSIX_IFACE_COUNT_MAX];
 
-    struct
-    {
-        udpard_tx_t      udpard_tx;
-        udp_wrapper_tx_t sock;
-        uint16_t         local_port;
-    } tx[CY_UDP_POSIX_IFACE_COUNT_MAX];
-
-    struct
-    {
-        udp_wrapper_rx_t sock;
-        /// The count of out-of-memory errors that occurred while reading from this socket.
-        /// Every OOM implies that either a frame or a full transfer were lost.
-        uint64_t oom_count;
-    } rpc_rx[CY_UDP_POSIX_IFACE_COUNT_MAX];
+    /// Mapping from UDPARD priority (0..7) to DSCP value (0..63). Defaults to all zeros, can be changed at any time.
+    uint8_t map_priority_to_dscp[UDPARD_PRIORITY_MAX + 1U];
 
     /// Handler for errors occurring while reading from the socket of the topic on the specified iface.
     /// The default handler is provided which will use CY_TRACE() to report the error.
-    /// This is only used to initialize the corresponding field of cy_udp_posix_topic_t when a new topic is created.
+    /// This is used to initialize the corresponding field in cy_udp_posix_topic_t when a new topic is created.
+    /// This is also used to report RX socket errors for P2P transfers with the topic set to NULL.
     /// Changes to this handler will not affect existing topics.
     void (*rx_sock_err_handler)(cy_udp_posix_t*       cy_udp,
                                 cy_udp_posix_topic_t* topic,
@@ -82,11 +73,6 @@ struct cy_udp_posix_t
     /// These are platform-specific.
     /// The default handler is provided which will use CY_TRACE() to report the error.
     void (*tx_sock_err_handler)(cy_udp_posix_t* cy_udp, uint_fast8_t iface_index, uint32_t err_no);
-
-    /// Handler for errors occurring while reading from an RPC RX socket on the specified iface.
-    /// These are platform-specific.
-    /// The default handler is provided which will use CY_TRACE() to report the error.
-    void (*rpc_rx_sock_err_handler)(cy_udp_posix_t* topic, uint_fast8_t iface_index, uint32_t err_no);
 
     size_t   mem_allocated_fragments;
     uint64_t mem_oom_count;

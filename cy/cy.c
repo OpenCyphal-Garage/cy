@@ -76,7 +76,7 @@ static cy_us_t pow2us(const int_fast8_t exp)
     return 1LL << (uint_fast8_t)exp; // NOLINT(*-signed-bitwise)
 }
 
-static uint64_t random_u64(const cy_t* const cy) { return cy->platform->random(); }
+static uint64_t random_u64(const cy_t* const cy) { return cy->platform->random(cy); }
 
 /// The limits are inclusive. Returns min unless min < max.
 static int64_t random_int(const cy_t* const cy, const int64_t min, const int64_t max)
@@ -856,7 +856,11 @@ static cy_err_t publish_heartbeat(cy_t* const cy, const cy_us_t now, heartbeat_t
     const cy_buffer_borrowed_t payload = { .next = NULL, .view = { .data = message, .size = message_size } };
 
     // Publish the message.
-    const cy_err_t res = cy->platform->topic_publish(cy, &cy->heartbeat_pub, now + HEARTBEAT_PUB_TIMEOUT_us, payload);
+    const cy_err_t res = cy->platform->topic_publish(cy, //
+                                                     &cy->heartbeat_pub,
+                                                     now + HEARTBEAT_PUB_TIMEOUT_us,
+                                                     payload,
+                                                     false);
     cy->heartbeat_pub.topic->pub_transfer_id++;
     return res;
 }
@@ -913,6 +917,7 @@ static cy_err_t heartbeat_poll(cy_t* const cy, const cy_us_t now)
     return res;
 }
 
+/// Will publish the first heartbeat if it hasn't been published yet. Does nothing otherwise.
 static cy_err_t heartbeat_begin(cy_t* const cy)
 {
     cy_err_t res = CY_OK;
@@ -935,9 +940,8 @@ static void on_heartbeat(cy_t* const cy, const cy_arrival_t* const evt)
     if ((msg_size < offsetof(heartbeat_t, topic_name)) || (heartbeat.version != 1)) {
         return;
     }
-    const cy_us_t                 ts         = evt->transfer->timestamp;
-    const cy_transfer_metadata_t* meta       = &evt->transfer->metadata;
-    const uint64_t                other_hash = heartbeat.topic_hash;
+    const cy_us_t     ts              = evt->transfer->timestamp;
+    const uint64_t    other_hash      = heartbeat.topic_hash;
     const uint64_t    other_evictions = heartbeat.topic_evictions + (((uint64_t)heartbeat.topic_evictions_msb) << 32U);
     const int_fast8_t other_lage      = heartbeat.topic_lage;
     const wkv_str_t   key             = { .len = heartbeat.topic_name_len, .str = heartbeat.topic_name };
@@ -1150,7 +1154,8 @@ cy_err_t cy_publish(cy_t* const                cy,
         }
     }
 
-    res = cy->platform->topic_publish(cy, pub, tx_deadline, payload);
+    const bool ack_required = (future != NULL);
+    res                     = cy->platform->topic_publish(cy, pub, tx_deadline, payload, ack_required);
     if (future != NULL) {
         if (res == CY_OK) {
             const cy_tree_t* const tr = cavl2_find_or_insert(&cy->futures_by_deadline,
@@ -1258,10 +1263,12 @@ static cy_err_t ensure_subscriber_root(cy_t* const                  cy,
 cy_err_t cy_subscribe(cy_t* const                    cy,
                       cy_subscriber_t* const         sub,
                       const wkv_str_t                name,
-                      const size_t                   extent,
+                      const cy_subscription_params_t params,
                       const cy_subscriber_callback_t callback)
 {
-    if ((sub == NULL) || (cy == NULL) || (callback == NULL)) {
+    const bool rwin_ok = (params.reordering_window == CY_SUBSCRIPTION_REORDERING_WINDOW_UNORDERED) || //
+                         (params.reordering_window >= 0);
+    if ((sub == NULL) || (cy == NULL) || (callback == NULL) || !rwin_ok) {
         return CY_ERR_ARGUMENT;
     }
     char name_buf[CY_TOPIC_NAME_MAX + 1U];
@@ -1270,13 +1277,13 @@ cy_err_t cy_subscribe(cy_t* const                    cy,
     }
     const wkv_str_t resolved_name = wkv_key(name_buf);
     (void)memset(sub, 0, sizeof(*sub));
-    CY_TRACE(cy, "✨'%s' extent=%zu", resolved_name.str, extent);
+    CY_TRACE(cy, "✨'%s' extent=%zu rwin=%lld", resolved_name.str, params.extent, (long long)params.reordering_window);
     const cy_err_t res = ensure_subscriber_root(cy, resolved_name, &sub->root);
     if (res != CY_OK) {
         return res;
     }
     assert(sub->root != NULL);
-    sub->params     = (cy_subscription_params_t){ .extent = extent };
+    sub->params     = params;
     sub->callback   = callback;
     sub->next       = sub->root->head;
     sub->root->head = sub;
@@ -1307,7 +1314,11 @@ cy_err_t cy_respond(cy_t* const                cy,
     if (res != CY_OK) {
         return res;
     }
-    const uint64_t response_header[3] = { p2p_kind_response, topic->hash, metadata.transfer_id };
+    const uint64_t cookie = cy->p2p_next_cookie++;
+    // TODO: endian-agnostic serialization
+    const uint64_t response_header[3] = { (uint64_t)p2p_kind_response | (cookie << 32U),
+                                          topic->hash,
+                                          metadata.transfer_id };
     return cy->platform->p2p(cy,
                              topic,
                              metadata.context,
@@ -1316,7 +1327,8 @@ cy_err_t cy_respond(cy_t* const                cy,
                              (cy_buffer_borrowed_t){
                                .next = &payload,
                                .view = { .size = sizeof(response_header), .data = &response_header },
-                             });
+                             },
+                             true);
 }
 
 void cy_subscriber_name(const cy_t* const cy, const cy_subscriber_t* const sub, char* const out_name)
@@ -1504,7 +1516,11 @@ cy_err_t cy_new(cy_t* const                cy,
     // Pub/sub on the heartbeat topic.
     cy_err_t res = cy_advertise_c(cy, &cy->heartbeat_pub, CY_HEARTBEAT_TOPIC_NAME, 0);
     if (res == CY_OK) {
-        res = cy_subscribe_c(cy, &cy->heartbeat_sub, CY_HEARTBEAT_TOPIC_NAME, sizeof(heartbeat_t), &on_heartbeat);
+        const cy_subscription_params_t hb_sub_params = {
+            .extent            = sizeof(heartbeat_t),
+            .reordering_window = CY_SUBSCRIPTION_REORDERING_WINDOW_UNORDERED,
+        };
+        res = cy_subscribe_c(cy, &cy->heartbeat_sub, CY_HEARTBEAT_TOPIC_NAME, hb_sub_params, &on_heartbeat);
         if (res != CY_OK) {
             cy_unadvertise(cy, &cy->heartbeat_pub);
         }
@@ -1608,6 +1624,7 @@ void cy_ingest_p2p(cy_t* const cy, cy_transfer_owned_t transfer)
         return; // Malformed response -- missing header.
     }
     // Deserialize the header. The rest of the payload is for the application.
+    // TODO: endian-agnostic deserialization
     uint64_t response_header[3];
     static_assert(sizeof(response_header) == P2P_HEADER_BYTES, "P2P header size mismatch");
     memcpy(&response_header, transfer.payload.base.view.data, P2P_HEADER_BYTES);

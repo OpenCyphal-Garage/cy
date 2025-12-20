@@ -311,14 +311,19 @@ struct cy_arrival_t
 
 typedef void (*cy_subscriber_callback_t)(cy_t*, const cy_arrival_t*);
 
+/// Disable strictly increasing transfer-ID ordering enforcement and deliver messages as they arrive immediately.
+/// Refer to libudpard docs for the explanation of the available options.
+/// This should be the default option if not sure.
+#define CY_SUBSCRIPTION_REORDERING_WINDOW_UNORDERED (-1)
+
 /// These parameters are used to configure the underlying transport layer implementation.
 /// These values shall not be changed by the user; the only way to set them is when a new subscription is created.
 /// They need to be stored per subscriber to support pattern subscriptions, where the first subscription may
 /// be created asynchronously wrt the user calling cy_subscribe().
 struct cy_subscription_params_t
 {
-    size_t extent;
-    bool   ordered;
+    size_t  extent;
+    cy_us_t reordering_window; ///< See CY_SUBSCRIPTION_REORDERING_WINDOW_UNORDERED. Some transports may ignore.
 };
 
 /// Subscribers SHALL NOT be copied/moved after initialization until destroyed.
@@ -345,15 +350,15 @@ struct cy_subscriber_t
 cy_err_t               cy_subscribe(cy_t* const                    cy,
                                     cy_subscriber_t* const         sub,
                                     const wkv_str_t                name,
-                                    const size_t                   extent,
+                                    const cy_subscription_params_t params,
                                     const cy_subscriber_callback_t callback);
 static inline cy_err_t cy_subscribe_c(cy_t* const                    cy,
                                       cy_subscriber_t* const         sub,
                                       const char* const              name,
-                                      const size_t                   extent,
+                                      const cy_subscription_params_t params,
                                       const cy_subscriber_callback_t callback)
 {
-    return cy_subscribe(cy, sub, wkv_key(name), extent, callback);
+    return cy_subscribe(cy, sub, wkv_key(name), params, callback);
 }
 void cy_unsubscribe(cy_t* const cy, cy_subscriber_t* const sub);
 
@@ -365,7 +370,8 @@ void cy_unsubscribe(cy_t* const cy, cy_subscriber_t* const sub);
 /// This can be invoked either from a subscription callback or at any later point. The topic may even get reallocated
 /// in the process but it doesn't matter.
 ///
-/// The response is sent using a P2P transfer to the publisher with the specified priority and the original transfer-ID.
+/// The response is sent using a P2P transfer to the publisher with the specified priority.
+/// Reliable delivery will be used with automatic retransmission.
 cy_err_t cy_respond(cy_t* const                cy,
                     cy_topic_t* const          topic,
                     const cy_us_t              tx_deadline,

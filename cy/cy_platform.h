@@ -182,7 +182,7 @@ typedef void (*cy_platform_buffer_release_t)(cy_t*, cy_buffer_owned_t);
 ///     void24              # Reserved
 ///     uint32 cookie       # A response ack shall contain the same cookie as in the response data header.
 ///     uint64 topic_hash   # The hash of the topic that the ack/response is for.
-///     uint64 transfer_id  # The transfer-ID of the message that this ack/response is for.
+///     uint64 transfer_id  # The transfer-ID of the original message that this ack/response is for.
 ///     # If this is a response, the payload follows immediately after this header.
 ///     # Acks have no payload beyond the header.
 ///
@@ -202,7 +202,11 @@ typedef void (*cy_platform_topic_destroy_t)(cy_t*, cy_topic_t*);
 
 /// Instructs the underlying transport layer to publish a new message on the topic.
 /// The function shall not increment the transfer-ID counter; Cy will do it.
-typedef cy_err_t (*cy_platform_topic_publish_t)(cy_t*, cy_publisher_t*, cy_us_t, cy_buffer_borrowed_t);
+typedef cy_err_t (*cy_platform_topic_publish_t)(cy_t*, //
+                                                cy_publisher_t*,
+                                                cy_us_t,
+                                                cy_buffer_borrowed_t,
+                                                bool ack_required);
 
 /// Instructs the underlying transport layer to create a new subscription on the topic.
 typedef cy_err_t (*cy_platform_topic_subscribe_t)(cy_t*, cy_topic_t*, cy_subscription_params_t);
@@ -309,6 +313,8 @@ struct cy_t
     /// The values of these tree nodes point to instances of cy_subscriber_root_t.
     wkv_t subscribers_by_name;    ///< Both explicit and patterns.
     wkv_t subscribers_by_pattern; ///< Only patterns for implicit subscriptions on heartbeat.
+
+    uint32_t p2p_next_cookie;
 
     /// For detecting timed out futures. This index spans all topics.
     cy_tree_t* futures_by_deadline;
