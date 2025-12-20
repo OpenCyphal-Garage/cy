@@ -39,24 +39,6 @@ extern "C"
 #define CY_PASTE_(a, b) a##b
 #define CY_PASTE(a, b)  CY_PASTE_(a, b)
 
-/// I am not sure if this should be part of the library because this is a rather complicated macro.
-/// It simply eliminates the boilerplate code for gathering a borrowed buffer into a contiguous storage on the stack.
-/// If the source buffer is only a single fragment, then no copying is done as the resulting cy_bytes_t is simply
-/// set to point to the only fragment.
-///
-/// Ideally, this should not be necessary at all, as all efficient APIs need to support scattered buffers;
-/// but the reality is that many APIs still expect contiguous buffers, which requires an extra copy.
-#define CY_BUFFER_GATHER_ON_STACK(to_bytes, from_buffer_borrowed_head)                                             \
-    cy_bytes_t    to_bytes = { .data = from_buffer_borrowed_head.view.data,                                        \
-                               .size = from_buffer_borrowed_head.view.size };                                      \
-    unsigned char CY_PASTE(to_bytes, _storage)[cy_buffer_borrowed_size(from_buffer_borrowed_head)];                \
-    if (from_buffer_borrowed_head.next != NULL) {                                                                  \
-        to_bytes.size = cy_buffer_borrowed_gather(                                                                 \
-          from_buffer_borrowed_head,                                                                               \
-          (cy_bytes_mut_t){ .data = CY_PASTE(to_bytes, _storage), .size = sizeof(CY_PASTE(to_bytes, _storage)) }); \
-        to_bytes.data = CY_PASTE(to_bytes, _storage);                                                              \
-    }
-
 #define CY_OK 0
 // error code 1 is omitted intentionally
 #define CY_ERR_ARGUMENT 2
@@ -83,46 +65,7 @@ typedef enum cy_prio_t
     cy_prio_optional    = 7,
 } cy_prio_t;
 
-typedef struct cy_bytes_t
-{
-    size_t      size;
-    const void* data;
-} cy_bytes_t;
-typedef struct cy_bytes_mut_t
-{
-    size_t size;
-    void*  data;
-} cy_bytes_mut_t;
-
-/// The transport libraries support very efficient zero-copy data pipelines which operate on scattered buffers.
-/// Received data may be represented as a chain of scattered buffers; likewise, it is possible to transmit a chain
-/// of buffers instead of a single monolithic buffer. The last entry in the chain has next=NULL.
-///
-/// The view points to the useful payload; DO NOT attempt to deallocate the view.
-/// The origin can only be used to deallocate the payload; that address shall not be accessed in any way.
-/// Normally, the view and origin are identical, but this is not always the case depending on the transport library.
-/// The view is usually inside the origin, but even that is not guaranteed; e.g., if memory mapping is used.
-///
-/// The head of the payload chain is always passed by value and thus does not require freeing; the following chain
-/// elements are also allocated from some memory resource and thus shall be freed with the payload.
-///
-/// Warning: It is required that the first 24 bytes of the payload are NOT fragmented. Otherwise, Cy may refuse to
-/// accept the transfer. This requirement is trivial to meet because the MTU of all transports that supply fragmented
-/// payloads is much larger than this.
-///
-/// The size of a payload fragment may be zero.
-typedef struct cy_buffer_borrowed_t cy_buffer_borrowed_t;
-struct cy_buffer_borrowed_t
-{
-    const cy_buffer_borrowed_t* next; ///< NULL in the last entry.
-    cy_bytes_t                  view;
-};
-typedef struct cy_buffer_owned_t
-{
-    cy_buffer_borrowed_t base;
-    cy_bytes_mut_t       origin; ///< Do not access! Address may not be mapped. Only for freeing the payload.
-} cy_buffer_owned_t;
-
+/// Not for public use.
 typedef struct cy_tree_t cy_tree_t;
 struct cy_tree_t
 {
@@ -130,6 +73,55 @@ struct cy_tree_t
     cy_tree_t*  lr[2];
     int_fast8_t bf;
 };
+
+/// An immutable borrowed fragmented buffer. The last entry has next==NULL.
+typedef struct cy_bytes_t
+{
+    size_t             size;
+    const void*        data;
+    struct cy_bytes_t* next;
+} cy_bytes_t;
+
+/// A type-erased received transfer buffer with a platform-specific implementation.
+/// It allows the platform layer to eliminate payload copying until/unless explicitly requested by the application.
+/// Some transport libraries (e.g., libudpard) store the payload in a set of segments obtained directly from the NIC.
+/// Use cy_gather to access the data. Instances are trivially copyable.
+/// The pointers can be zeroed to transfer the data ownership to another instance.
+typedef struct cy_scatter_t
+{
+    const void* ptr[3];
+} cy_scatter_t;
+
+/// Returns the total size of the scattered buffer in bytes. The complexity is constant.
+size_t cy_scatter_size(const cy_scatter_t scatter);
+
+/// A convenience helper that invalidates the source scatter object and returns a copy of it.
+/// Use this to transfer the ownership of the payload to another scatter object.
+cy_scatter_t cy_scatter_move(cy_scatter_t* const scatter);
+
+/// Must be invoked at least once on a scatter object obtained from a received transfer.
+/// Subsequent calls have no effect; the instance is moved-from.
+void cy_scatter_free(cy_t* const cy, cy_scatter_t* const scatter);
+
+/// This is the only way to access the received payload data.
+/// It gathers `size` bytes of data located at `offset` bytes from the beginning of the transfer payload
+/// into the provided contiguous buffer. The function returns the number of bytes copied.
+/// If the requested range exceeds the available payload size, only the available bytes are copied.
+/// The implementation may be optimized for highly efficient sequential access by caching soft states in the cursor
+/// instance. This is particularly useful for message deserialization by reading the fields out one by one.
+size_t cy_gather(cy_scatter_t* const cursor, const size_t offset, const size_t size, void* const destination);
+
+/// Creates a local stack-allocated array of bytes and gathers the data from the scattered buffer into it.
+/// The output is an instance of cy_bytes_t with next=NULL because it is a single contiguous buffer.
+/// Doing this is only a good idea for small payloads.
+/// Usage example:
+///     CY_GATHER_HERE(my_bytes, my_scatter);
+///     foo(my_bytes.size, my_bytes.data);
+#define CY_GATHER_HERE(dest_bytes_name, scatter)                                                 \
+    cy_bytes_t    dest_bytes_name = { .size = cy_scatter_size(scatter) };                        \
+    unsigned char CY_PASTE(dest_bytes_name, _storage)[dest_bytes_name.size];                     \
+    dest_bytes_name.data = &CY_PASTE(dest_bytes_name, _storage)[0];                              \
+    to_bytes.size        = cy_gather(&(scatter), 0, dest_bytes_name.size, dest_bytes_name.data);
 
 /// Enough for a 64-bit UID plus x3 IPv4 address+port pairs.
 #define CY_RESPONSE_CONTEXT_SIZE_BYTES 32U
@@ -157,12 +149,12 @@ typedef struct cy_transfer_metadata_t
 /// A transfer object owns its payload.
 /// The application may claim ownership of the payload by invalidating the payload pointers in the object;
 /// otherwise, Cy will clean it up afterward.
-typedef struct cy_transfer_owned_t
+typedef struct cy_transfer_t
 {
     cy_us_t                timestamp;
     cy_transfer_metadata_t metadata;
-    cy_buffer_owned_t      payload;
-} cy_transfer_owned_t;
+    cy_scatter_t           payload;
+} cy_transfer_t;
 
 // =====================================================================================================================
 //                                                      PUBLISHER
@@ -211,7 +203,7 @@ struct cy_future_t
     /// The payload ownership is transferred to this structure.
     /// If a payload is already available when a response is received, Cy will free the old payload first.
     /// The user can detect when a new response is received by checking its timestamp.
-    cy_transfer_owned_t last_response;
+    cy_transfer_t last_response;
 
     /// Only these fields can be altered by the user while the future is pending.
     /// The callback may be NULL if the application prefers to check last_response by polling.
@@ -251,18 +243,18 @@ void cy_future_cancel(cy_future_t* const future);
 /// The response future will not be registered unless the result is non-negative.
 ///
 /// If the response deadline is in the past, the message will be sent anyway but it will time out immediately.
-cy_err_t cy_publish(cy_t* const                cy,
-                    cy_publisher_t* const      pub,
-                    const cy_us_t              tx_deadline,
-                    const cy_buffer_borrowed_t payload,
-                    const cy_us_t              response_deadline,
-                    cy_future_t* const         future);
+cy_err_t cy_publish(cy_t* const           cy,
+                    cy_publisher_t* const pub,
+                    const cy_us_t         tx_deadline,
+                    const cy_bytes_t      payload,
+                    const cy_us_t         response_deadline,
+                    cy_future_t* const    future);
 
 /// A simpler wrapper over cy_publish() when no response is needed/expected. 1 means one way.
-static inline cy_err_t cy_publish1(cy_t* const                cy,
-                                   cy_publisher_t* const      pub,
-                                   const cy_us_t              tx_deadline,
-                                   const cy_buffer_borrowed_t payload)
+static inline cy_err_t cy_publish1(cy_t* const           cy,
+                                   cy_publisher_t* const pub,
+                                   const cy_us_t         tx_deadline,
+                                   const cy_bytes_t      payload)
 {
     return cy_publish(cy, pub, tx_deadline, payload, 0, NULL);
 }
@@ -284,9 +276,9 @@ typedef struct cy_substitution_t
 /// subscribers that also match the same topic and are to receive the data after the current callback returns.
 typedef struct cy_arrival_t
 {
-    cy_subscriber_t*     subscriber; ///< Which subscriber matched on this topic by verbatim name or pattern.
-    cy_topic_t*          topic;      ///< The specific topic that received the transfer.
-    cy_transfer_owned_t* transfer;   ///< The actual received message and its metadata.
+    cy_subscriber_t* subscriber; ///< Which subscriber matched on this topic by verbatim name or pattern.
+    cy_topic_t*      topic;      ///< The specific topic that received the transfer.
+    cy_transfer_t    transfer;   ///< The actual received message and its metadata.
 
     /// When a pattern match occurs, the matcher will store the string substitutions that had to be made to
     /// achieve the match. For example, if the pattern is "ins/?/data/*" and the key is "ins/0/data/foo/456",
@@ -362,11 +354,11 @@ void cy_unsubscribe(cy_t* const cy, cy_subscriber_t* const sub);
 ///
 /// The response is sent using a P2P transfer to the publisher with the specified priority.
 /// Reliable delivery will be used with automatic retransmission.
-cy_err_t cy_respond(cy_t* const                cy,
-                    cy_topic_t* const          topic,
-                    const cy_us_t              tx_deadline,
-                    cy_transfer_metadata_t     metadata,
-                    const cy_buffer_borrowed_t payload);
+cy_err_t cy_respond(cy_t* const            cy,
+                    cy_topic_t* const      topic,
+                    const cy_us_t          tx_deadline,
+                    cy_transfer_metadata_t metadata,
+                    const cy_bytes_t       payload);
 
 /// Copies the subscriber name into the user-supplied buffer.
 void cy_subscriber_name(const cy_t* const cy, const cy_subscriber_t* const sub, char* const out_name);
@@ -423,37 +415,6 @@ bool               cy_has_substitution_tokens(const wkv_str_t name);
 static inline bool cy_has_substitution_tokens_c(const char* const name)
 {
     return cy_has_substitution_tokens(wkv_key(name));
-}
-
-// =====================================================================================================================
-//                                                      BUFFERS
-// =====================================================================================================================
-
-/// This should be invoked once the application is done processing a payload.
-/// The struct will be modified by zeroing pointers and sizes in it.
-/// When Cy assigns a new payload to a subscription/response/etc object, it will check first if the previous payload
-/// is released; if not, it will do it automatically. The nullification of the pointers is thus required to make it
-/// explicit that the payload is no longer valid and to prevent double-free errors.
-/// Invoking this function on an already released payload has no effect and is safe.
-void cy_buffer_owned_release(cy_t* const cy, cy_buffer_owned_t* const payload);
-
-/// Returns the total size of all payload fragments in the chain.
-/// The complexity is linear, but the number of elements is very small (total size divided by MTU).
-size_t               cy_buffer_borrowed_size(const cy_buffer_borrowed_t payload);
-static inline size_t cy_buffer_owned_size(const cy_buffer_owned_t payload)
-{
-    return cy_buffer_borrowed_size(payload.base);
-}
-
-/// Takes the head of a fragmented buffer list and copies the data into the contiguous buffer provided by the user.
-/// If the total size of all fragments combined exceeds the size of the user-provided buffer,
-/// copying will stop early after the buffer is filled, thus truncating the fragmented data short.
-/// The function has no effect and returns zero if the destination buffer is NULL.
-/// Returns the number of bytes copied into the contiguous destination buffer.
-size_t               cy_buffer_borrowed_gather(const cy_buffer_borrowed_t payload, const cy_bytes_mut_t dest);
-static inline size_t cy_buffer_owned_gather(const cy_buffer_owned_t payload, const cy_bytes_mut_t dest)
-{
-    return cy_buffer_borrowed_gather(payload.base, dest);
 }
 
 #ifdef __cplusplus

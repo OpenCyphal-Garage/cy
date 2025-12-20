@@ -122,14 +122,14 @@ static cy_response_context_t remote_to_response_context(const udpard_remote_t* c
     return ctx;
 }
 
-static cy_err_t tx_push(cy_udp_posix_t* const      cy_udp,
-                        const cy_us_t              tx_deadline,
-                        const cy_prio_t            priority,
-                        const uint64_t             transfer_id,
-                        const uint64_t             topic_hash,
-                        const udpard_udpip_ep_t    dest_ep[UDPARD_NETWORK_INTERFACE_COUNT_MAX],
-                        const cy_buffer_borrowed_t payload,
-                        const bool                 ack_required)
+static cy_err_t tx_push(cy_udp_posix_t* const   cy_udp,
+                        const cy_us_t           tx_deadline,
+                        const cy_prio_t         priority,
+                        const uint64_t          transfer_id,
+                        const uint64_t          topic_hash,
+                        const udpard_udpip_ep_t dest_ep[UDPARD_NETWORK_INTERFACE_COUNT_MAX],
+                        const cy_bytes_t        payload,
+                        const bool              ack_required)
 {
     CY_BUFFER_GATHER_ON_STACK(linear_payload, payload);
     cy_err_t          res = CY_OK;

@@ -1402,49 +1402,6 @@ bool cy_has_substitution_tokens(const wkv_str_t name)
 }
 
 // =====================================================================================================================
-//                                                      BUFFERS
-// =====================================================================================================================
-
-void cy_buffer_owned_release(cy_t* const cy, cy_buffer_owned_t* const payload)
-{
-    if ((cy != NULL) && (payload != NULL) && (payload->origin.data != NULL)) {
-        cy->platform->buffer_release(cy, *payload);
-        // nullify the pointers to prevent double free
-        payload->base.next   = NULL;
-        payload->origin.size = 0;
-        payload->origin.data = NULL;
-    }
-}
-
-size_t cy_buffer_borrowed_size(const cy_buffer_borrowed_t payload)
-{
-    size_t                      out = 0;
-    const cy_buffer_borrowed_t* p   = &payload;
-    while (p != NULL) {
-        out += p->view.size;
-        p = p->next;
-    }
-    return out;
-}
-
-size_t cy_buffer_borrowed_gather(const cy_buffer_borrowed_t payload, const cy_bytes_mut_t dest)
-{
-    size_t offset = 0;
-    if (NULL != dest.data) {
-        const cy_buffer_borrowed_t* frag = &payload;
-        while ((frag != NULL) && (offset < dest.size)) {
-            assert(frag->view.data != NULL);
-            const size_t frag_size = smaller(frag->view.size, dest.size - offset);
-            (void)memmove(((char*)dest.data) + offset, frag->view.data, frag_size);
-            offset += frag_size;
-            assert(offset <= dest.size);
-            frag = frag->next;
-        }
-    }
-    return offset;
-}
-
-// =====================================================================================================================
 //                                              PLATFORM LAYER INTERFACE
 // =====================================================================================================================
 

@@ -158,9 +158,14 @@ typedef void* (*cy_platform_realloc_t)(cy_t*, void*, size_t);
 ///     return rapidhash(seed, sizeof(seed));
 typedef uint64_t (*cy_platform_random_t)(const cy_t*);
 
-/// Return payload memory obtained with received transfers via cy_ingest*().
-/// The head is passed by value so not freed, but its data and all other fragments are.
-typedef void (*cy_platform_buffer_release_t)(cy_t*, cy_buffer_owned_t);
+/// Implementation of cy_scatter_size().
+typedef size_t (*cy_platform_scatter_size_t)(cy_scatter_t);
+
+/// Implementation of cy_scatter_free().
+typedef void (*cy_platform_scatter_free_t)(cy_t*, cy_scatter_t);
+
+/// Implementation of cy_gather().
+typedef void (*cy_platform_gather_t)(cy_scatter_t*, size_t, size_t, void*);
 
 /// Instructs the underlying transport layer to send a peer-to-peer response transfer. The identity of the remote
 /// endpoint is encoded inside the cy_response_context_t object in a platform-specific manner.
@@ -186,7 +191,7 @@ typedef cy_err_t (*cy_platform_p2p_t)(cy_t*,
                                       cy_response_context_t context,
                                       cy_prio_t             priority,
                                       cy_us_t               tx_deadline,
-                                      cy_buffer_borrowed_t  payload,
+                                      cy_bytes_t            payload,
                                       bool                  ack_required);
 
 /// Allocates a new topic. NULL if out of memory.
@@ -199,7 +204,7 @@ typedef void (*cy_platform_topic_destroy_t)(cy_t*, cy_topic_t*);
 typedef cy_err_t (*cy_platform_topic_publish_t)(cy_t*, //
                                                 cy_publisher_t*,
                                                 cy_us_t,
-                                                cy_buffer_borrowed_t,
+                                                cy_bytes_t,
                                                 bool ack_required);
 
 /// Instructs the underlying transport layer to create a new subscription on the topic.
@@ -240,10 +245,13 @@ typedef void (*cy_platform_topic_on_subscription_error_t)(cy_t*, cy_topic_t*, co
 /// will search the local topics and futures for the closest transfer-ID to the received one.
 typedef struct cy_platform_t
 {
-    cy_platform_now_t            now;
-    cy_platform_realloc_t        realloc;
-    cy_platform_random_t         random;
-    cy_platform_buffer_release_t buffer_release;
+    cy_platform_now_t     now;
+    cy_platform_realloc_t realloc;
+    cy_platform_random_t  random;
+
+    cy_platform_scatter_size_t scatter_size;
+    cy_platform_scatter_free_t scatter_free;
+    cy_platform_gather_t       gather;
 
     cy_platform_p2p_t p2p;
 
@@ -354,10 +362,10 @@ void cy_notify_topic_collision(cy_t* const cy, cy_topic_t* const topic);
 /// The library will dispatch it to the appropriate subscriber callbacks.
 /// Excluding the callbacks, the time complexity is constant.
 /// The transfer payload ownership is taken by this function.
-void cy_ingest(cy_t* const cy, cy_topic_t* const topic, cy_transfer_owned_t transfer);
+void cy_ingest(cy_t* const cy, cy_topic_t* const topic, cy_transfer_t transfer);
 
 /// Report arrival of a P2P transfer from another node.
-void cy_ingest_p2p(cy_t* const cy, cy_transfer_owned_t transfer);
+void cy_ingest_p2p(cy_t* const cy, cy_transfer_t transfer);
 
 /// For diagnostics and logging only. Do not use in embedded and real-time applications.
 /// This function is only required if CY_CONFIG_TRACE is defined and is nonzero; otherwise it should be left undefined.
