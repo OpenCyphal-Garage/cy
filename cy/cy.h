@@ -68,24 +68,8 @@ extern "C"
 typedef uint_fast8_t cy_err_t;
 typedef int64_t      cy_us_t; ///< Monotonic microsecond timestamp. Signed to permit arithmetics in the past.
 
-#ifndef __cplusplus
-typedef struct cy_t                     cy_t;
-typedef struct cy_topic_t               cy_topic_t;
-typedef struct cy_bytes_t               cy_bytes_t;
-typedef struct cy_bytes_mut_t           cy_bytes_mut_t;
-typedef struct cy_buffer_borrowed_t     cy_buffer_borrowed_t;
-typedef struct cy_buffer_owned_t        cy_buffer_owned_t;
-typedef struct cy_tree_t                cy_tree_t;
-typedef union cy_response_context_t     cy_response_context_t;
-typedef struct cy_transfer_metadata_t   cy_transfer_metadata_t;
-typedef struct cy_transfer_owned_t      cy_transfer_owned_t;
-typedef struct cy_publisher_t           cy_publisher_t;
-typedef struct cy_future_t              cy_future_t;
-typedef struct cy_substitution_t        cy_substitution_t;
-typedef struct cy_arrival_t             cy_arrival_t;
-typedef struct cy_subscription_params_t cy_subscription_params_t;
-typedef struct cy_subscriber_t          cy_subscriber_t;
-#endif
+typedef struct cy_t       cy_t;
+typedef struct cy_topic_t cy_topic_t;
 
 typedef enum cy_prio_t
 {
@@ -99,16 +83,16 @@ typedef enum cy_prio_t
     cy_prio_optional    = 7,
 } cy_prio_t;
 
-struct cy_bytes_t
+typedef struct cy_bytes_t
 {
     size_t      size;
     const void* data;
-};
-struct cy_bytes_mut_t
+} cy_bytes_t;
+typedef struct cy_bytes_mut_t
 {
     size_t size;
     void*  data;
-};
+} cy_bytes_mut_t;
 
 /// The transport libraries support very efficient zero-copy data pipelines which operate on scattered buffers.
 /// Received data may be represented as a chain of scattered buffers; likewise, it is possible to transmit a chain
@@ -127,17 +111,19 @@ struct cy_bytes_mut_t
 /// payloads is much larger than this.
 ///
 /// The size of a payload fragment may be zero.
+typedef struct cy_buffer_borrowed_t cy_buffer_borrowed_t;
 struct cy_buffer_borrowed_t
 {
     const cy_buffer_borrowed_t* next; ///< NULL in the last entry.
     cy_bytes_t                  view;
 };
-struct cy_buffer_owned_t
+typedef struct cy_buffer_owned_t
 {
     cy_buffer_borrowed_t base;
     cy_bytes_mut_t       origin; ///< Do not access! Address may not be mapped. Only for freeing the payload.
-};
+} cy_buffer_owned_t;
 
+typedef struct cy_tree_t cy_tree_t;
 struct cy_tree_t
 {
     cy_tree_t*  up;
@@ -153,42 +139,42 @@ struct cy_tree_t
 /// The platform layer uses the context to store arbitrary transport-specific information needed to send the
 /// response back to the publisher. For example, it may contain the source addresses and port numbers,
 /// or pointers into private structures.
-union cy_response_context_t
+typedef union cy_response_context_t
 {
     uint64_t u64[CY_RESPONSE_CONTEXT_SIZE_BYTES / 8U];
     uint32_t u32[CY_RESPONSE_CONTEXT_SIZE_BYTES / 4U];
     uint16_t u16[CY_RESPONSE_CONTEXT_SIZE_BYTES / 2U];
     void*    ptr[CY_RESPONSE_CONTEXT_SIZE_BYTES / sizeof(void*)];
-};
+} cy_response_context_t;
 
-struct cy_transfer_metadata_t
+typedef struct cy_transfer_metadata_t
 {
     cy_prio_t             priority;
     uint64_t              transfer_id;
     cy_response_context_t context;
-};
+} cy_transfer_metadata_t;
 
 /// A transfer object owns its payload.
 /// The application may claim ownership of the payload by invalidating the payload pointers in the object;
 /// otherwise, Cy will clean it up afterward.
-struct cy_transfer_owned_t
+typedef struct cy_transfer_owned_t
 {
     cy_us_t                timestamp;
     cy_transfer_metadata_t metadata;
     cy_buffer_owned_t      payload;
-};
+} cy_transfer_owned_t;
 
 // =====================================================================================================================
 //                                                      PUBLISHER
 // =====================================================================================================================
 
-struct cy_publisher_t
+typedef struct cy_publisher_t
 {
     cy_topic_t* topic;    ///< Many-to-one relationship, never NULL; the topic is reference counted.
     cy_prio_t   priority; ///< Defaults to cy_prio_nominal; can be overridden by the user at any time.
     // TODO: add `bool fec`
     void* user;
-};
+} cy_publisher_t;
 
 /// Future lifecycle:
 ///     fresh --> pending --+--> success
@@ -202,6 +188,8 @@ typedef enum cy_future_state_t
     cy_future_timeout_ack,      ///< Remote end did not confirm reception of the message.
     cy_future_timeout_response, ///< Response was not received before the deadline.
 } cy_future_state_t;
+
+typedef struct cy_future_t cy_future_t;
 
 typedef void (*cy_future_callback_t)(cy_t*, cy_future_t*);
 
@@ -283,16 +271,18 @@ static inline cy_err_t cy_publish1(cy_t* const                cy,
 //                                                      SUBSCRIBER
 // =====================================================================================================================
 
-struct cy_substitution_t
+typedef struct cy_subscriber_t cy_subscriber_t;
+
+typedef struct cy_substitution_t
 {
     wkv_str_t str;     ///< The substring that matched the substitution token in the pattern. Not NUL-terminated.
     size_t    ordinal; ///< Zero-based index of the substitution token as occurred in the pattern.
-};
+} cy_substitution_t;
 
 /// Optionally, the user handler can take ownership of the transfer payload by zeroing the origin pointer
 /// by setting transfer->payload.origin.data = NULL. However, this may cause undesirable interference with other
 /// subscribers that also match the same topic and are to receive the data after the current callback returns.
-struct cy_arrival_t
+typedef struct cy_arrival_t
 {
     cy_subscriber_t*     subscriber; ///< Which subscriber matched on this topic by verbatim name or pattern.
     cy_topic_t*          topic;      ///< The specific topic that received the transfer.
@@ -307,7 +297,7 @@ struct cy_arrival_t
     /// The lifetime of the substitutions is at least as long as that of the subscriber.
     size_t                   substitution_count; ///< The size of the following substitutions array.
     const cy_substitution_t* substitutions;      ///< A contiguous array of substitutions.
-};
+} cy_arrival_t;
 
 typedef void (*cy_subscriber_callback_t)(cy_t*, const cy_arrival_t*);
 
@@ -320,11 +310,11 @@ typedef void (*cy_subscriber_callback_t)(cy_t*, const cy_arrival_t*);
 /// These values shall not be changed by the user; the only way to set them is when a new subscription is created.
 /// They need to be stored per subscriber to support pattern subscriptions, where the first subscription may
 /// be created asynchronously wrt the user calling cy_subscribe().
-struct cy_subscription_params_t
+typedef struct cy_subscription_params_t
 {
     size_t  extent;
     cy_us_t reordering_window; ///< See CY_SUBSCRIPTION_REORDERING_WINDOW_UNORDERED. Some transports may ignore.
-};
+} cy_subscription_params_t;
 
 /// Subscribers SHALL NOT be copied/moved after initialization until destroyed.
 /// There may be more than one subscriber with the same name (pattern).

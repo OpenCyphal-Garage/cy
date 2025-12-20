@@ -45,22 +45,17 @@ extern "C"
 {
 #endif
 
-#ifndef __cplusplus
-typedef struct cy_list_t        cy_list_t;
 typedef struct cy_list_member_t cy_list_member_t;
-typedef struct cy_platform_t    cy_platform_t;
-#endif
-
 struct cy_list_member_t
 {
     cy_list_member_t* next;
     cy_list_member_t* prev;
 };
-struct cy_list_t
+typedef struct cy_list_t
 {
     cy_list_member_t* head; ///< NULL if list empty
     cy_list_member_t* tail; ///< NULL if list empty
-};
+} cy_list_t;
 
 /// This is the base type that is extended by the platform layer with transport- and platform-specific entities,
 /// such as socket handles, etc. Instantiation is therefore done inside the platform layer in the heap or some
@@ -68,8 +63,7 @@ struct cy_list_t
 /// defined in the header file is to allow the platform layer to use it.
 ///
 /// A topic name is suffixed to the namespace name of the node that owns it, unless it begins with a `/`.
-/// The leading `~` in the name is replaced with `/vvvv/pppp/iiiiiiii`, where the letters represent hexadecimal
-/// digits of the vendor ID, product ID, and instance ID of the node.
+/// The leading `~` in the name is replaced with the local node name, which is set during node initialization.
 /// Repeated and trailing slashes are removed.
 ///
 /// A topic that is only used by pattern subscriptions (like `ins/?/data/*`, without publishers or explicit
@@ -88,7 +82,7 @@ struct cy_list_t
 ///     2. winner has seen more evictions (i.e., larger subject-ID mod max_topics).
 /// When a topic is reallocated, it retains its current age.
 /// Conflict resolution may result in a temporary jitter if it happens to occur near log2(age) integer boundary.
-struct cy_topic_t
+typedef struct cy_topic_t
 {
     /// All indexes that this topic is a member of. Indexes are very fast log(N) lookup structures.
     cy_tree_t   index_hash; ///< Hash index handle MUST be the first field.
@@ -131,7 +125,7 @@ struct cy_topic_t
     /// Only used if the application subscribes on this topic.
     struct cy_topic_coupling_t* couplings;
     bool subscribed; ///< May be (tentatively) false even with couplings!=NULL on resubscription error.
-};
+} cy_topic_t;
 
 /// Returns the current monotonic time in microseconds. The initial time shall be non-negative.
 typedef cy_us_t (*cy_platform_now_t)(const cy_t*);
@@ -244,7 +238,7 @@ typedef void (*cy_platform_topic_on_subscription_error_t)(cy_t*, cy_topic_t*, co
 /// with the values we unrolled locally; this must be addressed by the platform layer by fusing the least significant
 /// bits of the remote transfer-ID with the most significant bits of the local counter. To do that, the platform layer
 /// will search the local topics and futures for the closest transfer-ID to the received one.
-struct cy_platform_t
+typedef struct cy_platform_t
 {
     cy_platform_now_t            now;
     cy_platform_realloc_t        realloc;
@@ -260,14 +254,14 @@ struct cy_platform_t
     cy_platform_topic_unsubscribe_t           topic_unsubscribe;
     cy_platform_topic_advertise_t             topic_advertise;
     cy_platform_topic_on_subscription_error_t topic_on_subscription_error;
-};
+} cy_platform_t;
 
 /// There are only three functions (plus convenience wrappers) whose invocations may result in network traffic:
 /// - cy_update()  -- heartbeat only, at most one per call.
 /// - cy_publish() -- user transfers only.
 /// - cy_respond() -- user transfers only.
 /// Creation of a new topic may cause resubscription of any existing topics (all in the worst case).
-struct cy_t
+typedef struct cy_t
 {
     const cy_platform_t* platform; ///< Never NULL.
 
@@ -320,7 +314,7 @@ struct cy_t
     cy_tree_t* futures_by_deadline;
     /// The user can use this field for arbitrary purposes.
     void* user;
-};
+} cy_t;
 
 /// The namespace may be NULL or empty, in which case it defaults to `~`.
 /// It may begin with `~`, which expands into the node name.
