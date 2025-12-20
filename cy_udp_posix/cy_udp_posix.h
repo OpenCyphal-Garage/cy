@@ -28,8 +28,10 @@ typedef struct cy_udp_posix_topic_t cy_udp_posix_topic_t;
 
 struct cy_udp_posix_topic_t
 {
-    cy_topic_t       base;
-    udpard_rx_port_t port;
+    cy_topic_t base;
+
+    /// RX pipeline for subscriptions.
+    udpard_rx_port_t rx_port;
     udp_wrapper_t    rx_sock[CY_UDP_POSIX_IFACE_COUNT_MAX];
 
     /// Initialized from the eponymous field of cy_udp_posix_t when a new topic is created.

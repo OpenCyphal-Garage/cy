@@ -200,6 +200,7 @@ static void platform_buffer_release(cy_t* const cy, const cy_buffer_owned_t buf)
     CY_TRACE(cy, "💣 TODO: RELEASE BUFFER CORRECTLY! size=%zu", buf.origin.size); // TODO FIXME
 }
 
+// ReSharper disable once CppParameterMayBeConstPtrOrRef
 static cy_err_t platform_p2p(cy_t* const                 cy,
                              cy_topic_t* const           topic,
                              const cy_response_context_t context,
@@ -279,7 +280,7 @@ static cy_err_t platform_topic_subscribe(cy_t* const                    cy,
 
     // Set up the udpard port. This does not yet allocate any resources.
     const udpard_rx_mem_resources_t rx_mem = { .fragment = cy_udp->mem, .session = cy_udp->mem };
-    if (!udpard_rx_port_new(&topic->port, topic->base.hash, params.extent, params.reordering_window, rx_mem)) {
+    if (!udpard_rx_port_new(&topic->rx_port, topic->base.hash, params.extent, params.reordering_window, rx_mem)) {
         return CY_ERR_ARGUMENT;
     }
     const udpard_udpip_ep_t endpoint = udpard_make_subject_endpoint(cy_topic_subject_id(cy, cy_topic));
@@ -308,7 +309,7 @@ static void platform_topic_unsubscribe(cy_t* const cy, cy_topic_t* const cy_topi
 {
     cy_udp_posix_topic_t* const topic  = (cy_udp_posix_topic_t*)cy_topic;
     cy_udp_posix_t* const       cy_udp = (cy_udp_posix_t*)cy;
-    udpard_rx_port_free(&cy_udp->udpard_rx, &topic->port);
+    udpard_rx_port_free(&cy_udp->udpard_rx, &topic->rx_port);
     for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
         udp_wrapper_close(&((cy_udp_posix_topic_t*)cy_topic)->rx_sock[i]);
     }
