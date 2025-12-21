@@ -36,9 +36,6 @@ extern "C"
 
 #define CY_PINNED_SUBJECT_ID_MAX 8186U
 
-#define CY_PASTE_(a, b) a##b
-#define CY_PASTE(a, b)  CY_PASTE_(a, b)
-
 #define CY_OK 0
 // error code 1 is omitted intentionally
 #define CY_ERR_ARGUMENT 2
@@ -86,11 +83,16 @@ typedef struct cy_bytes_t
 /// It allows the platform layer to eliminate payload copying until/unless explicitly requested by the application.
 /// Some transport libraries (e.g., libudpard) store the payload in a set of segments obtained directly from the NIC.
 /// Use cy_gather to access the data. Instances are trivially copyable.
-/// The pointers can be zeroed to transfer the data ownership to another instance.
-typedef struct cy_scatter_t
+/// Do not access any of the fields directly; use the provided functions instead.
+typedef struct cy_scatter_t cy_scatter_t;
+struct cy_scatter_t
 {
-    const void* ptr[3];
-} cy_scatter_t;
+    const void* state[3];
+
+    size_t (*impl_size)(const cy_scatter_t*);
+    void (*impl_free)(cy_scatter_t*, cy_t*);
+    size_t (*impl_gather)(cy_scatter_t*, size_t, size_t, void*);
+};
 
 /// Returns the total size of the scattered buffer in bytes. The complexity is constant.
 size_t cy_scatter_size(const cy_scatter_t scatter);
@@ -117,11 +119,11 @@ size_t cy_gather(cy_scatter_t* const cursor, const size_t offset, const size_t s
 /// Usage example:
 ///     CY_GATHER_HERE(my_bytes, my_scatter);
 ///     foo(my_bytes.size, my_bytes.data);
-#define CY_GATHER_HERE(dest_bytes_name, scatter)                                                 \
-    cy_bytes_t    dest_bytes_name = { .size = cy_scatter_size(scatter) };                        \
-    unsigned char CY_PASTE(dest_bytes_name, _storage)[dest_bytes_name.size];                     \
-    dest_bytes_name.data = &CY_PASTE(dest_bytes_name, _storage)[0];                              \
-    to_bytes.size        = cy_gather(&(scatter), 0, dest_bytes_name.size, dest_bytes_name.data);
+#define CY_GATHER_HERE(dest_bytes_name, scatter)                                                \
+    cy_bytes_t    dest_bytes_name = { .size = cy_scatter_size(scatter) };                       \
+    unsigned char dest_bytes_name##_storage[dest_bytes_name.size];                              \
+    dest_bytes_name.data = &dest_bytes_name##_storage[0];                                       \
+    dest_bytes_name.size = cy_gather(&(scatter), 0, dest_bytes_name.size, dest_bytes_name.data)
 
 /// Enough for a 64-bit UID plus x3 IPv4 address+port pairs.
 #define CY_RESPONSE_CONTEXT_SIZE_BYTES 32U

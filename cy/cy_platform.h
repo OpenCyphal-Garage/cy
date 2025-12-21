@@ -158,15 +158,6 @@ typedef void* (*cy_platform_realloc_t)(cy_t*, void*, size_t);
 ///     return rapidhash(seed, sizeof(seed));
 typedef uint64_t (*cy_platform_random_t)(const cy_t*);
 
-/// Implementation of cy_scatter_size().
-typedef size_t (*cy_platform_scatter_size_t)(cy_scatter_t);
-
-/// Implementation of cy_scatter_free().
-typedef void (*cy_platform_scatter_free_t)(cy_t*, cy_scatter_t);
-
-/// Implementation of cy_gather().
-typedef void (*cy_platform_gather_t)(cy_scatter_t*, size_t, size_t, void*);
-
 /// Instructs the underlying transport layer to send a peer-to-peer response transfer. The identity of the remote
 /// endpoint is encoded inside the cy_response_context_t object in a platform-specific manner.
 /// The transfer-ID is managed by the glue library internally; it is expected that the glue layer may need
@@ -248,10 +239,6 @@ typedef struct cy_platform_t
     cy_platform_now_t     now;
     cy_platform_realloc_t realloc;
     cy_platform_random_t  random;
-
-    cy_platform_scatter_size_t scatter_size;
-    cy_platform_scatter_free_t scatter_free;
-    cy_platform_gather_t       gather;
 
     cy_platform_p2p_t p2p;
 

@@ -131,7 +131,7 @@ static cy_err_t tx_push(cy_udp_posix_t* const   cy_udp,
                         const cy_bytes_t        payload,
                         const bool              ack_required)
 {
-    CY_BUFFER_GATHER_ON_STACK(linear_payload, payload);
+    CY_GATHER_HERE(linear_payload, payload);
     cy_err_t          res = CY_OK;
     const udpard_us_t now = cy_udp_posix_now();
     for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
