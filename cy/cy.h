@@ -20,10 +20,6 @@ extern "C"
 {
 #endif
 
-// =====================================================================================================================
-//                                              PRIMITIVES & CONSTANTS
-// =====================================================================================================================
-
 /// A sensible middle ground between worst-case gossip traffic and memory utilization vs. longest name support.
 /// In CAN FD networks, topic names should be short to avoid multi-frame heartbeats.
 ///
@@ -71,39 +67,48 @@ struct cy_tree_t
     int_fast8_t bf;
 };
 
-/// An immutable borrowed fragmented buffer. The last entry has next==NULL.
+/// An immutable borrowed buffer, optionally fragmented if next is not NULL. The last entry has next==NULL.
+/// The optional fragmentation allows efficient handling of scatter/gather I/O without copying the data.
 typedef struct cy_bytes_t
 {
-    size_t             size;
-    const void*        data;
+    size_t             size; ///< Size of the current fragment in bytes.
+    const void*        data; ///< May be NULL if size==0.
     struct cy_bytes_t* next;
 } cy_bytes_t;
 
-/// A type-erased received transfer buffer with a platform-specific implementation.
+// =====================================================================================================================
+//                                                  SCATTER BUFFER
+// =====================================================================================================================
+
+/// A type-erased movable received transfer buffer handle with a platform-specific implementation.
 /// It allows the platform layer to eliminate payload copying until/unless explicitly requested by the application.
 /// Some transport libraries (e.g., libudpard) store the payload in a set of segments obtained directly from the NIC.
-/// Use cy_gather to access the data. Instances are trivially copyable.
+/// Use cy_gather to access the data.
+/// Avoid copying instances, consider using cy_scatter_move() instead.
 /// Do not access any of the fields directly; use the provided functions instead.
-typedef struct cy_scatter_t cy_scatter_t;
-struct cy_scatter_t
+typedef struct cy_scatter_t
 {
-    const void* state[3];
+    const void*                 state[2]; ///< Opaque implementation-specific soft state.
+    size_t                      size;     ///< Must contain the total size of the scattered buffer data in bytes.
+    struct cy_scatter_vtable_t* vtable;
+} cy_scatter_t;
 
-    size_t (*impl_size)(const cy_scatter_t*);
-    void (*impl_free)(cy_scatter_t*, cy_t*);
-    size_t (*impl_gather)(cy_scatter_t*, size_t, size_t, void*);
-};
+/// Returns the total size of the scattered buffer in bytes.
+static inline size_t cy_scatter_size(const cy_scatter_t scatter) { return scatter.size; }
 
-/// Returns the total size of the scattered buffer in bytes. The complexity is constant.
-size_t cy_scatter_size(const cy_scatter_t scatter);
-
-/// A convenience helper that invalidates the source scatter object and returns a copy of it.
+/// A convenience helper that returns a copy of the scatter object and invalidates the original.
 /// Use this to transfer the ownership of the payload to another scatter object.
-cy_scatter_t cy_scatter_move(cy_scatter_t* const scatter);
+static inline cy_scatter_t cy_scatter_move(cy_scatter_t* const scatter)
+{
+    const cy_scatter_t ret = *scatter;
+    *scatter               = (cy_scatter_t){ .state = { NULL, NULL }, .size = 0, .vtable = NULL };
+    return ret;
+}
 
 /// Must be invoked at least once on a scatter object obtained from a received transfer.
-/// Subsequent calls have no effect; the instance is moved-from.
-void cy_scatter_free(cy_t* const cy, cy_scatter_t* const scatter);
+/// No effect if the instance is already moved-from or if the pointer is NULL.
+/// Subsequent calls have no effect; the passed instance will be moved-from.
+void cy_scatter_free(cy_scatter_t* const scatter);
 
 /// This is the only way to access the received payload data.
 /// It gathers `size` bytes of data located at `offset` bytes from the beginning of the transfer payload
@@ -124,39 +129,6 @@ size_t cy_gather(cy_scatter_t* const cursor, const size_t offset, const size_t s
     unsigned char dest_bytes_name##_storage[dest_bytes_name.size];                              \
     dest_bytes_name.data = &dest_bytes_name##_storage[0];                                       \
     dest_bytes_name.size = cy_gather(&(scatter), 0, dest_bytes_name.size, dest_bytes_name.data)
-
-/// Enough for a 64-bit UID plus x3 IPv4 address+port pairs.
-#define CY_RESPONSE_CONTEXT_SIZE_BYTES 32U
-
-/// Received messages are given an instance of the response context to allow the application to respond to them,
-/// if necessary. The context is only valid for a single response. The context can be copied and passed by value.
-/// The platform layer uses the context to store arbitrary transport-specific information needed to send the
-/// response back to the publisher. For example, it may contain the source addresses and port numbers,
-/// or pointers into private structures.
-typedef union cy_response_context_t
-{
-    uint64_t u64[CY_RESPONSE_CONTEXT_SIZE_BYTES / 8U];
-    uint32_t u32[CY_RESPONSE_CONTEXT_SIZE_BYTES / 4U];
-    uint16_t u16[CY_RESPONSE_CONTEXT_SIZE_BYTES / 2U];
-    void*    ptr[CY_RESPONSE_CONTEXT_SIZE_BYTES / sizeof(void*)];
-} cy_response_context_t;
-
-typedef struct cy_transfer_metadata_t
-{
-    cy_prio_t             priority;
-    uint64_t              transfer_id;
-    cy_response_context_t context;
-} cy_transfer_metadata_t;
-
-/// A transfer object owns its payload.
-/// The application may claim ownership of the payload by invalidating the payload pointers in the object;
-/// otherwise, Cy will clean it up afterward.
-typedef struct cy_transfer_t
-{
-    cy_us_t                timestamp;
-    cy_transfer_metadata_t metadata;
-    cy_scatter_t           payload;
-} cy_transfer_t;
 
 // =====================================================================================================================
 //                                                      PUBLISHER
@@ -205,7 +177,8 @@ struct cy_future_t
     /// The payload ownership is transferred to this structure.
     /// If a payload is already available when a response is received, Cy will free the old payload first.
     /// The user can detect when a new response is received by checking its timestamp.
-    cy_transfer_t last_response;
+    cy_us_t      response_timestamp;
+    cy_scatter_t response_payload;
 
     /// Only these fields can be altered by the user while the future is pending.
     /// The callback may be NULL if the application prefers to check last_response by polling.
@@ -267,6 +240,25 @@ static inline cy_err_t cy_publish1(cy_t* const           cy,
 
 typedef struct cy_subscriber_t cy_subscriber_t;
 
+/// This ought to be enough for any reasonable transport-specific state.
+#define CY_RESPONDER_STATE_SIZE_BYTES 64U
+
+/// Received messages are given a copyable responder instance to allow the application to respond to them if necessary.
+/// A responder is only valid for a single response. It can be copied and passed by value.
+/// The platform layer uses responder objects to store arbitrary transport-specific information needed to send the
+/// response back to the correct remote node. For example, it may contain the source addresses and port numbers,
+/// or pointers into private structures.
+typedef struct cy_responder_t
+{
+    union
+    {
+        uint64_t      u64[CY_RESPONDER_STATE_SIZE_BYTES / 8U];
+        void*         ptr[CY_RESPONDER_STATE_SIZE_BYTES / sizeof(void*)];
+        unsigned char byte[CY_RESPONDER_STATE_SIZE_BYTES / sizeof(unsigned char)];
+    } state;
+    struct cy_responder_vtable_t* vtable;
+} cy_responder_t;
+
 typedef struct cy_substitution_t
 {
     wkv_str_t str;     ///< The substring that matched the substitution token in the pattern. Not NUL-terminated.
@@ -278,9 +270,13 @@ typedef struct cy_substitution_t
 /// subscribers that also match the same topic and are to receive the data after the current callback returns.
 typedef struct cy_arrival_t
 {
-    cy_subscriber_t* subscriber; ///< Which subscriber matched on this topic by verbatim name or pattern.
-    cy_topic_t*      topic;      ///< The specific topic that received the transfer.
-    cy_transfer_t    transfer;   ///< The actual received message and its metadata.
+    cy_us_t        timestamp;
+    uint64_t       transfer_id;
+    cy_scatter_t   payload;   ///< Move using cy_scatter_move() to claim ownership, otherwise freed after callback.
+    cy_responder_t responder; ///< Can be copied out to respond later, after return from the callback.
+
+    cy_subscriber_t*  subscriber; ///< Which subscriber matched on this topic by verbatim name or pattern.
+    const cy_topic_t* topic;      ///< The specific topic that received the transfer.
 
     /// When a pattern match occurs, the matcher will store the string substitutions that had to be made to
     /// achieve the match. For example, if the pattern is "ins/?/data/*" and the key is "ins/0/data/foo/456",
@@ -346,43 +342,22 @@ static inline cy_err_t cy_subscribe_c(cy_t* const                    cy,
 }
 void cy_unsubscribe(cy_t* const cy, cy_subscriber_t* const sub);
 
-/// Send a response to a message received from a topic subscription. The response will be sent directly to the
-/// publisher using peer-to-peer transport, not affecting other nodes on this topic. The payload may be arbitrary
-/// and the metadata shall be taken from the original message. The transfer-ID will not be incremented since it's
-/// not a publication.
-///
-/// This can be invoked either from a subscription callback or at any later point. The topic may even get reallocated
-/// in the process but it doesn't matter.
-///
-/// The response is sent using a P2P transfer to the publisher with the specified priority.
-/// Reliable delivery will be used with automatic retransmission.
-cy_err_t cy_respond(cy_t* const            cy,
-                    cy_topic_t* const      topic,
-                    const cy_us_t          tx_deadline,
-                    cy_transfer_metadata_t metadata,
-                    const cy_bytes_t       payload);
-
-/// Copies the subscriber name into the user-supplied buffer.
+/// Copies the subscriber name into the user-supplied buffer. Max size is CY_TOPIC_NAME_MAX.
 void cy_subscriber_name(const cy_t* const cy, const cy_subscriber_t* const sub, char* const out_name);
+
+/// Send a response to a message previously received from a topic subscription. The response will be sent directly
+/// to the publisher using peer-to-peer transport, not affecting other nodes on this topic.
+/// This can be invoked from a subscription callback or at any later point as long as the responder object is available.
+cy_err_t cy_respond(cy_responder_t* const responder, const cy_us_t tx_deadline, const cy_bytes_t response_payload);
 
 // =====================================================================================================================
 //                                                  NODE & TOPIC
 // =====================================================================================================================
 
-/// A convenience wrapper that returns the current time in microseconds.
-cy_us_t cy_now(const cy_t* const cy);
+// TODO: add a way to dump/restore topic configuration for instant initialization. This may be platform-specific.
 
-/// If the topic configuration is restored from non-volatile memory or elsewhere, it can be supplied to the library
-/// via this function immediately after the topic is first created. This function should not be invoked at any other
-/// moment except immediately after initialization.
-///
-/// If the hint is provided, it will be used as the initial allocation state, unless either a conflict or divergence
-/// are discovered, which will be treated normally, without any preference to the hint. This option allows the user
-/// to optionally save the network configuration in a non-volatile storage, such that the next time the network becomes
-/// operational immediately, without waiting for the CRDT consensus. Remember that the hint is discarded on conflict.
-///
-/// The hint will be silently ignored if it is invalid, inapplicable, or if the topic is not freshly created.
-void cy_topic_hint(cy_t* const cy, cy_topic_t* const topic, const uint32_t subject_id);
+/// A convenience wrapper that returns the current time in microseconds. Always non-negative.
+cy_us_t cy_now(const cy_t* const cy);
 
 /// Complexity is logarithmic in the number of topics. NULL if not found.
 /// In practical terms, these queries are very fast and efficient.
@@ -403,10 +378,6 @@ cy_topic_t* cy_topic_find_by_hash(const cy_t* const cy, const uint64_t hash);
 ///     }
 cy_topic_t* cy_topic_iter_first(const cy_t* const cy);
 cy_topic_t* cy_topic_iter_next(cy_topic_t* const topic);
-
-/// Optionally, the application can use this to save the allocated subject-ID before shutting down/rebooting
-/// for instant recovery. Not needed for pinned topics since their IDs cannot change.
-uint32_t cy_topic_subject_id(const cy_t* const cy, const cy_topic_t* const topic);
 
 /// The name is NUL-terminated; pointer lifetime bound to the topic.
 wkv_str_t cy_topic_name(const cy_topic_t* const topic);

@@ -57,10 +57,19 @@ typedef struct cy_list_t
     cy_list_member_t* tail; ///< NULL if list empty
 } cy_list_t;
 
+/// Platform-specific implementation of cy_scatter_t.
+typedef struct cy_scatter_vtable_t
+{
+    void (*free)(cy_scatter_t*);
+    size_t (*gather)(cy_scatter_t*, size_t, size_t, void*);
+} cy_scatter_vtable_t;
+
 /// This is the base type that is extended by the platform layer with transport- and platform-specific entities,
 /// such as socket handles, etc. Instantiation is therefore done inside the platform layer in the heap or some
 /// other dynamic storage. The user code is not expected to interact with the topic type, and the only reason it is
 /// defined in the header file is to allow the platform layer to use it.
+///
+/// Topic instances are allocated in some kind of dynamic storage (heap or block pool) and are pinned (never copied).
 ///
 /// A topic name is suffixed to the namespace name of the node that owns it, unless it begins with a `/`.
 /// The leading `~` in the name is replaced with the local node name, which is set during node initialization.
@@ -125,132 +134,70 @@ typedef struct cy_topic_t
     /// Only used if the application subscribes on this topic.
     struct cy_topic_coupling_t* couplings;
     bool subscribed; ///< May be (tentatively) false even with couplings!=NULL on resubscription error.
+
+    struct cy_topic_vtable_t* vtable;
 } cy_topic_t;
 
-/// Returns the current monotonic time in microseconds. The initial time shall be non-negative.
-typedef cy_us_t (*cy_platform_now_t)(const cy_t*);
-
-/// The semantics are per the standard realloc from stdlib, except:
-/// - If the fragment is not increased in size, reallocation MUST succeed.
-/// - If the size is zero, it must behave like free() (which is often the case in realloc() but technically an UB).
-typedef void* (*cy_platform_realloc_t)(cy_t*, void*, size_t);
-
-/// Returns a random 64-bit unsigned integer.
-/// A TRNG is preferred; if not available, a PRNG will suffice, but its initial state should be distinct across reboots,
-/// and it should be hashed with the node's unique identifier.
-///
-/// A simple compliant solution that can be implemented in an embedded system without TRNG is:
-///
-///     static uint64_t g_prng_state __attribute__ ((section (".noinit")));
-///     g_prng_state += 0xA0761D6478BD642FULL;                // add Wyhash seed (64-bit prime)
-///     const uint64_t seed[2] = { g_prng_state, local_uid }; // if possible, add more entropy here, like ADC noise
-///     return rapidhash(seed, sizeof(seed));
-///
-/// It is desirable to save the PRNG state in a battery-backed memory, if available; otherwise, in small MCUs one could
-/// hash the entire RAM contents at startup to scavenge as much entropy as possible, or use ADC or clock noise.
-/// If an RTC is available, then the following is sufficient:
-///
-///     static uint_fast16_t g_counter = 0;
-///     const uint64_t seed[2] = {
-///         ((uint64_t)rtc_get_time() << 16U) + ++g_counter,
-///         local_uid,
-///     }; // if possible, add more entropy here, like ADC noise
-///     return rapidhash(seed, sizeof(seed));
-typedef uint64_t (*cy_platform_random_t)(const cy_t*);
-
-/// Instructs the underlying transport layer to send a peer-to-peer response transfer. The identity of the remote
-/// endpoint is encoded inside the cy_response_context_t object in a platform-specific manner.
-/// The transfer-ID is managed by the glue library internally; it is expected that the glue layer may need
-/// access to the specific topic that this P2P transfer pertains to, so the reference to the topic is also provided.
-///
-/// Each acknowledgement transfer can be sent twice to reduce the risk of loss, since the loss of an acknowledgment
-/// is costly in terms of bandwidth and latency.
-///
-/// The ack/response transfer payload is prefixed with a fixed-size header shown below in DSDL notation:
-///
-///     uint8  kind         # 0 -- message ack; 1 -- response ack; 2 -- response data.
-///     void24              # Reserved
-///     uint32 cookie       # A response ack shall contain the same cookie as in the response data header.
-///     uint64 topic_hash   # The hash of the topic that the ack/response is for.
-///     uint64 transfer_id  # The transfer-ID of the original message that this ack/response is for.
-///     # If this is a response, the payload follows immediately after this header.
-///     # Acks have no payload beyond the header.
-///
-/// Transfers with invalid kind shall be dropped.
-typedef cy_err_t (*cy_platform_p2p_t)(cy_t*,
-                                      cy_topic_t*,
-                                      cy_response_context_t context,
-                                      cy_prio_t             priority,
-                                      cy_us_t               tx_deadline,
-                                      cy_bytes_t            payload,
-                                      bool                  ack_required);
-
-/// Allocates a new topic. NULL if out of memory.
-typedef cy_topic_t* (*cy_platform_topic_new_t)(cy_t*);
-
-typedef void (*cy_platform_topic_destroy_t)(cy_t*, cy_topic_t*);
-
-/// Instructs the underlying transport layer to publish a new message on the topic.
-/// The function shall not increment the transfer-ID counter; Cy will do it.
-typedef cy_err_t (*cy_platform_topic_publish_t)(cy_t*, //
-                                                cy_publisher_t*,
-                                                cy_us_t,
-                                                cy_bytes_t,
-                                                bool ack_required);
-
-/// Instructs the underlying transport layer to create a new subscription on the topic.
-typedef cy_err_t (*cy_platform_topic_subscribe_t)(cy_t*, cy_topic_t*, cy_subscription_params_t);
-
-/// Instructs the underlying transport to destroy an existing subscription.
-typedef void (*cy_platform_topic_unsubscribe_t)(cy_t*, cy_topic_t*);
-
-/// Invoked when a new publisher is created on the topic.
-/// The main purpose here is to communicate the response extent requested by this publisher to the platform layer,
-/// allowing it to configure the RPC session accordingly.
-/// The requested extent is adjusted for any protocol overheads, so that the platform layer does not have to handle it.
-typedef void (*cy_platform_topic_advertise_t)(cy_t*, cy_topic_t*, size_t response_extent_with_overhead);
-
-/// If a subject-ID collision or divergence are discovered, Cy may reassign the topic to a different subject-ID.
-/// To do that, it will first unsubscribe the topic using the corresponding function,
-/// and then invoke the subscription function to recreate the subscription with the new subject-ID.
-/// The unsubscription function is infallible, but the subscription function may fail.
-/// If it does, this callback will be invoked to inform the user about the failure,
-/// along with the error code returned by the subscription function.
-///
-/// The callback is also used to report errors that occur when attempting to create a new topic that matches a
-/// pattern subscriber; in this case, the topic pointer will be NULL.
-///
-/// Normally, the error handler does not need to do anything specific aside from perhaps logging/reporting the error.
-/// Cy will keep attempting to repair the topic periodically when relevant heartbeats are received.
-typedef void (*cy_platform_topic_on_subscription_error_t)(cy_t*, cy_topic_t*, const cy_err_t);
-
-/// The platform- and transport-specific entities. These can be underpinned by libcanard, libudpard, libserard,
-/// or any other transport library, plus the platform-specific logic.
-/// None of the entities are mutable; instances of this struct are mostly intended to be static const singletons.
-///
-/// The platform layer implementations for cyclic-transfer-ID transports (specifically, Cyphal/CAN) must unroll
-/// the transfer-ID counters into monotonic 64-bit counters that do not overflow. This is trivial to do for topics
-/// but P2P ack/response transfers will contain transfer-ID values unrolled by the remote node, which may disagree
-/// with the values we unrolled locally; this must be addressed by the platform layer by fusing the least significant
-/// bits of the remote transfer-ID with the most significant bits of the local counter. To do that, the platform layer
-/// will search the local topics and futures for the closest transfer-ID to the received one.
-typedef struct cy_platform_t
+/// Platform-specific implementation of the topic operations.
+typedef struct cy_topic_vtable_t
 {
-    cy_platform_now_t     now;
-    cy_platform_realloc_t realloc;
-    cy_platform_random_t  random;
+    void (*destroy)(cy_topic_t*);
 
-    cy_platform_p2p_t p2p;
+    /// Instructs the underlying transport layer to publish a new message on the topic.
+    /// The function shall not increment the transfer-ID counter; Cy will do it.
+    cy_err_t (*publish)(cy_topic_t*, //
+                        cy_publisher_t*,
+                        cy_us_t,
+                        cy_bytes_t,
+                        bool ack_required);
 
-    cy_platform_topic_new_t                   topic_new;
-    cy_platform_topic_destroy_t               topic_destroy;
-    cy_platform_topic_publish_t               topic_publish;
-    cy_platform_topic_subscribe_t             topic_subscribe;
-    cy_platform_topic_unsubscribe_t           topic_unsubscribe;
-    cy_platform_topic_advertise_t             topic_advertise;
-    cy_platform_topic_on_subscription_error_t topic_on_subscription_error;
-} cy_platform_t;
+    /// Instructs the underlying transport layer to create a new subscription on the topic.
+    cy_err_t (*subscribe)(cy_topic_t*, cy_subscription_params_t);
 
+    /// Instructs the underlying transport to destroy an existing subscription.
+    void (*unsubscribe)(cy_topic_t*);
+
+    /// Invoked when a new publisher is created on the topic.
+    /// The main purpose here is to communicate the response extent requested by this publisher to the platform layer,
+    /// allowing it to configure the RPC session accordingly.
+    /// The requested extent is adjusted for any protocol overheads, so that the platform layer does not have to handle
+    /// it.
+    void (*advertise)(cy_topic_t*, size_t response_extent_with_overhead);
+
+    /// If a subject-ID collision or divergence are discovered, Cy may reassign the topic to a different subject-ID.
+    /// To do that, it will first unsubscribe the topic using the corresponding function,
+    /// and then invoke the subscription function to recreate the subscription with the new subject-ID.
+    /// The unsubscription function is infallible, but the subscription function may fail.
+    /// If it does, this callback will be invoked to inform the user about the failure,
+    /// along with the error code returned by the subscription function.
+    ///
+    /// The callback is also used to report errors that occur when attempting to create a new topic that matches a
+    /// pattern subscriber; in this case, the topic pointer will be NULL.
+    ///
+    /// Normally, the error handler does not need to do anything specific aside from perhaps logging/reporting the
+    /// error. Cy will keep attempting to repair the topic periodically when relevant heartbeats are received.
+    void (*on_subscription_error)(cy_topic_t*, const cy_err_t);
+} cy_topic_vtable_t;
+
+/// Platform-specific implementation of cy_responder_t.
+typedef struct cy_responder_vtable_t
+{
+    /// Instructs the underlying transport layer to send a peer-to-peer response transfer. The identity of the remote
+    /// endpoint is encoded and the transfer metadata are stored inside the cy_responder_t object in a
+    /// platform-specific manner. Implementations may optionally invalidate the responder object after use.
+    ///
+    /// The ack/response transfer payload is prefixed with a fixed-size header shown below in DSDL notation:
+    ///
+    ///     uint8  kind         # 0 -- message ack; 1 -- response ack; 2 -- response data.
+    ///     void24              # Reserved
+    ///     uint32 cookie       # A response ack shall contain the same cookie as in the response data header.
+    ///     uint64 topic_hash   # The hash of the topic that the ack/response is for.
+    ///     uint64 transfer_id  # The transfer-ID of the original message that this ack/response is for.
+    ///     # If this is a response, the payload follows immediately after this header.
+    cy_err_t (*respond)(cy_responder_t*, cy_us_t tx_deadline, cy_bytes_t payload, bool ack_required);
+} cy_responder_vtable_t;
+
+/// Instances of cy are not copyable; they are always accessed via pointer provided during initialization.
 /// There are only three functions (plus convenience wrappers) whose invocations may result in network traffic:
 /// - cy_update()  -- heartbeat only, at most one per call.
 /// - cy_publish() -- user transfers only.
@@ -258,7 +205,7 @@ typedef struct cy_platform_t
 /// Creation of a new topic may cause resubscription of any existing topics (all in the worst case).
 typedef struct cy_t
 {
-    const cy_platform_t* platform; ///< Never NULL.
+    struct cy_vtable_t* vtable;
 
     /// Namespace is a prefix added to all topics created on this instance, unless the topic name starts with "/".
     /// Local node name is prefixed to the topic name if it starts with `~`.
@@ -311,14 +258,52 @@ typedef struct cy_t
     void* user;
 } cy_t;
 
+/// Platform-specific implementation of cy_t.
+typedef struct cy_vtable_t
+{
+    /// Returns the current monotonic time in microseconds. The initial time shall be non-negative.
+    cy_us_t (*now)(const cy_t*);
+
+    /// The semantics are per the standard realloc from stdlib, except:
+    /// - If the fragment is not increased in size, reallocation MUST succeed.
+    /// - If the size is zero, it must behave like free() (which is often the case in realloc() but technically an UB).
+    void* (*realloc)(cy_t*, void*, size_t);
+
+    /// Returns a random 64-bit unsigned integer.
+    /// A TRNG is preferred; if not available, a PRNG will suffice, but its initial state should be distinct across
+    /// reboots, and it should be hashed with the node's unique identifier.
+    ///
+    /// A simple compliant solution that can be implemented in an embedded system without TRNG is:
+    ///
+    ///     static uint64_t g_prng_state __attribute__ ((section (".noinit")));
+    ///     g_prng_state += 0xA0761D6478BD642FULL;                // add Wyhash seed (64-bit prime)
+    ///     const uint64_t seed[2] = { g_prng_state, local_uid }; // if possible, add more entropy here, like ADC noise
+    ///     return rapidhash(seed, sizeof(seed));
+    ///
+    /// It is desirable to save the PRNG state in a battery-backed memory, if available; otherwise, in small MCUs one
+    /// could hash the entire RAM contents at startup to scavenge as much entropy as possible, or use ADC or clock
+    /// noise. If an RTC is available, then the following is sufficient:
+    ///
+    ///     static uint_fast16_t g_counter = 0;
+    ///     const uint64_t seed[2] = {
+    ///         ((uint64_t)rtc_get_time() << 16U) + ++g_counter,
+    ///         local_uid,
+    ///     }; // if possible, add more entropy here, like ADC noise
+    ///     return rapidhash(seed, sizeof(seed));
+    uint64_t (*random)(cy_t*);
+
+    /// Allocates a new topic. NULL if out of memory.
+    cy_topic_t* (*new_topic)(cy_t*);
+} cy_vtable_t;
+
 /// The namespace may be NULL or empty, in which case it defaults to `~`.
 /// It may begin with `~`, which expands into the node name.
 /// The node name should be unique in the network; one way to ensure this is to default it to the node UID as hex.
-cy_err_t cy_new(cy_t* const                cy,
-                const cy_platform_t* const platform,
-                const wkv_str_t            name,
-                const wkv_str_t            namespace_,
-                const uint32_t             subject_id_modulus);
+cy_err_t cy_new(cy_t* const              cy,
+                const cy_vtable_t* const vtable,
+                const wkv_str_t          name,
+                const wkv_str_t          namespace_,
+                const uint32_t           subject_id_modulus);
 void     cy_destroy(cy_t* const cy);
 
 /// This function must be invoked periodically to let the library publish heartbeats and handle response timeouts.
@@ -330,6 +315,9 @@ void     cy_destroy(cy_t* const cy);
 ///
 /// Excluding the transport_publish dependency, the time complexity is logarithmic in the number of topics.
 cy_err_t cy_update(cy_t* const cy);
+
+/// Hidden from the application because the application is not expected to need this.
+uint32_t cy_topic_subject_id(const cy_t* const cy, const cy_topic_t* const topic);
 
 /// When the transport library detects a topic hash mismatch, it will notify Cy about it to let it rectify the problem.
 /// Transport frames with mismatched topic hash must be dropped; no processing at the transport layer is needed.

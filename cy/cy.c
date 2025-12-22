@@ -270,6 +270,26 @@ static size_t cavl_count(cy_tree_t* const root)
 }
 
 // =====================================================================================================================
+//                                                  SCATTER BUFFER
+// =====================================================================================================================
+
+void cy_scatter_free(cy_scatter_t* const scatter)
+{
+    if ((scatter != NULL) && (scatter->vtable != NULL) && (scatter->vtable->free != NULL)) {
+        scatter->vtable->free(scatter);
+        (void)cy_scatter_move(scatter);
+    }
+}
+
+size_t cy_gather(cy_scatter_t* const cursor, const size_t offset, const size_t size, void* const destination)
+{
+    if ((cursor != NULL) && (cursor->vtable != NULL) && (cursor->vtable->gather != NULL) && (destination != NULL)) {
+        return cursor->vtable->gather(cursor, offset, size, destination);
+    }
+    return 0;
+}
+
+// =====================================================================================================================
 //                                                  TOPIC UTILITIES
 // =====================================================================================================================
 
