@@ -103,6 +103,8 @@ typedef struct cy_topic_t
     cy_list_member_t list_gossip_urgent; ///< High-priority gossips. Fetch from the tail.
     cy_list_member_t list_gossip;        ///< Normal-priority gossips. Fetch from the tail.
 
+    cy_t* cy;
+
     /// The name length is stored in index_name.
     /// We need to store the full name to allow valid references from name substitutions during pattern matching.
     char name[CY_TOPIC_NAME_MAX + 1];
@@ -135,7 +137,7 @@ typedef struct cy_topic_t
     struct cy_topic_coupling_t* couplings;
     bool subscribed; ///< May be (tentatively) false even with couplings!=NULL on resubscription error.
 
-    struct cy_topic_vtable_t* vtable;
+    const struct cy_topic_vtable_t* vtable;
 } cy_topic_t;
 
 /// Platform-specific implementation of the topic operations.
@@ -145,11 +147,7 @@ typedef struct cy_topic_vtable_t
 
     /// Instructs the underlying transport layer to publish a new message on the topic.
     /// The function shall not increment the transfer-ID counter; Cy will do it.
-    cy_err_t (*publish)(cy_topic_t*, //
-                        cy_publisher_t*,
-                        cy_us_t,
-                        cy_bytes_t,
-                        bool ack_required);
+    cy_err_t (*publish)(cy_publisher_t*, cy_us_t, cy_bytes_t, bool ack_required);
 
     /// Instructs the underlying transport layer to create a new subscription on the topic.
     cy_err_t (*subscribe)(cy_topic_t*, cy_subscription_params_t);
@@ -163,20 +161,6 @@ typedef struct cy_topic_vtable_t
     /// The requested extent is adjusted for any protocol overheads, so that the platform layer does not have to handle
     /// it.
     void (*advertise)(cy_topic_t*, size_t response_extent_with_overhead);
-
-    /// If a subject-ID collision or divergence are discovered, Cy may reassign the topic to a different subject-ID.
-    /// To do that, it will first unsubscribe the topic using the corresponding function,
-    /// and then invoke the subscription function to recreate the subscription with the new subject-ID.
-    /// The unsubscription function is infallible, but the subscription function may fail.
-    /// If it does, this callback will be invoked to inform the user about the failure,
-    /// along with the error code returned by the subscription function.
-    ///
-    /// The callback is also used to report errors that occur when attempting to create a new topic that matches a
-    /// pattern subscriber; in this case, the topic pointer will be NULL.
-    ///
-    /// Normally, the error handler does not need to do anything specific aside from perhaps logging/reporting the
-    /// error. Cy will keep attempting to repair the topic periodically when relevant heartbeats are received.
-    void (*on_subscription_error)(cy_topic_t*, const cy_err_t);
 } cy_topic_vtable_t;
 
 /// Platform-specific implementation of cy_responder_t.
@@ -203,9 +187,9 @@ typedef struct cy_responder_vtable_t
 /// - cy_publish() -- user transfers only.
 /// - cy_respond() -- user transfers only.
 /// Creation of a new topic may cause resubscription of any existing topics (all in the worst case).
-typedef struct cy_t
+struct cy_t
 {
-    struct cy_vtable_t* vtable;
+    const struct cy_vtable_t* vtable;
 
     /// Namespace is a prefix added to all topics created on this instance, unless the topic name starts with "/".
     /// Local node name is prefixed to the topic name if it starts with `~`.
@@ -250,13 +234,11 @@ typedef struct cy_t
     wkv_t subscribers_by_name;    ///< Both explicit and patterns.
     wkv_t subscribers_by_pattern; ///< Only patterns for implicit subscriptions on heartbeat.
 
-    uint32_t p2p_next_cookie;
-
     /// For detecting timed out futures. This index spans all topics.
     cy_tree_t* futures_by_deadline;
     /// The user can use this field for arbitrary purposes.
     void* user;
-} cy_t;
+};
 
 /// Platform-specific implementation of cy_t.
 typedef struct cy_vtable_t
@@ -294,6 +276,20 @@ typedef struct cy_vtable_t
 
     /// Allocates a new topic. NULL if out of memory.
     cy_topic_t* (*new_topic)(cy_t*);
+
+    /// If an allocation collision or divergence are discovered, Cy may reassign the topic to a different subject-ID.
+    /// To do that, it will first unsubscribe the topic using the corresponding function,
+    /// and then invoke the subscription function to recreate the subscription with the new subject-ID.
+    /// The unsubscription function is infallible, but the subscription function may fail.
+    /// If it does, this callback will be invoked to inform the user about the failure,
+    /// along with the error code returned by the subscription function.
+    ///
+    /// The callback is also used to report errors that occur when attempting to create a new topic that matches a
+    /// pattern subscriber; in this case, the topic pointer will be NULL.
+    ///
+    /// Normally, the error handler does not need to do anything specific aside from perhaps logging/reporting the
+    /// error. Cy will keep attempting to repair the topic periodically as long as it exists.
+    void (*on_subscription_error)(cy_t*, cy_topic_t*, cy_err_t);
 } cy_vtable_t;
 
 /// The namespace may be NULL or empty, in which case it defaults to `~`.
@@ -317,7 +313,7 @@ void     cy_destroy(cy_t* const cy);
 cy_err_t cy_update(cy_t* const cy);
 
 /// Hidden from the application because the application is not expected to need this.
-uint32_t cy_topic_subject_id(const cy_t* const cy, const cy_topic_t* const topic);
+uint32_t cy_topic_subject_id(const cy_topic_t* const topic);
 
 /// When the transport library detects a topic hash mismatch, it will notify Cy about it to let it rectify the problem.
 /// Transport frames with mismatched topic hash must be dropped; no processing at the transport layer is needed.
@@ -331,16 +327,18 @@ uint32_t cy_topic_subject_id(const cy_t* const cy, const cy_topic_t* const topic
 /// cy_topic_find_by_subject_id(). The function has no effect if the topic is NULL; it is not an error to call it
 /// with NULL to simplify chaining like:
 ///     cy_notify_topic_collision(cy, cy_topic_find_by_subject_id(cy, collision_subject_id));
-void cy_notify_topic_collision(cy_t* const cy, cy_topic_t* const topic);
+void cy_notify_topic_collision(cy_topic_t* const topic);
 
-/// This is invoked whenever a new transfer on the topic is received.
-/// The library will dispatch it to the appropriate subscriber callbacks.
-/// Excluding the callbacks, the time complexity is constant.
+typedef struct cy_ingest_t
+{
+    cy_us_t        timestamp;
+    cy_scatter_t   payload;
+    cy_responder_t responder;
+} cy_ingest_t;
+
 /// The transfer payload ownership is taken by this function.
-void cy_ingest(cy_t* const cy, cy_topic_t* const topic, cy_transfer_t transfer);
-
-/// Report arrival of a P2P transfer from another node.
-void cy_ingest_p2p(cy_t* const cy, cy_transfer_t transfer);
+void cy_ingest(cy_topic_t* const topic, cy_ingest_t transfer);
+void cy_ingest_p2p(cy_t* const cy, cy_ingest_t transfer);
 
 /// For diagnostics and logging only. Do not use in embedded and real-time applications.
 /// This function is only required if CY_CONFIG_TRACE is defined and is nonzero; otherwise it should be left undefined.

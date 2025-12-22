@@ -56,7 +56,6 @@ enum p2p_kind
     p2p_kind_response     = 2,
 };
 
-static size_t  smaller(const size_t a, const size_t b) { return (a < b) ? a : b; }
 static size_t  larger(const size_t a, const size_t b) { return (a > b) ? a : b; }
 static int64_t max_i64(const int64_t a, const int64_t b) { return (a > b) ? a : b; }
 static int64_t min_i64(const int64_t a, const int64_t b) { return (a < b) ? a : b; }
@@ -76,17 +75,17 @@ static cy_us_t pow2us(const int_fast8_t exp)
     return 1LL << (uint_fast8_t)exp; // NOLINT(*-signed-bitwise)
 }
 
-static uint64_t random_u64(const cy_t* const cy) { return cy->platform->random(cy); }
+static uint64_t random_u64(cy_t* const cy) { return cy->vtable->random(cy); }
 
 /// The limits are inclusive. Returns min unless min < max.
-static int64_t random_int(const cy_t* const cy, const int64_t min, const int64_t max)
+static int64_t random_int(cy_t* const cy, const int64_t min, const int64_t max)
 {
     if (min < max) {
         return (int64_t)(random_u64(cy) % (uint64_t)(max - min)) + min;
     }
     return min;
 }
-static int64_t dither_int(const cy_t* const cy, const int64_t mean, const int64_t deviation)
+static int64_t dither_int(cy_t* const cy, const int64_t mean, const int64_t deviation)
 {
     return mean + random_int(cy, -deviation, +deviation);
 }
@@ -94,15 +93,15 @@ static int64_t dither_int(const cy_t* const cy, const int64_t mean, const int64_
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
 static void* wkv_realloc(wkv_t* const self, void* ptr, const size_t new_size)
 {
-    return ((cy_t*)self->context)->platform->realloc((cy_t*)self->context, ptr, new_size);
+    return ((cy_t*)self->context)->vtable->realloc((cy_t*)self->context, ptr, new_size);
 }
 
-static void* mem_alloc(cy_t* const cy, const size_t size) { return cy->platform->realloc(cy, NULL, size); }
+static void* mem_alloc(cy_t* const cy, const size_t size) { return cy->vtable->realloc(cy, NULL, size); }
 
 static void mem_free(cy_t* const cy, void* ptr)
 {
     if (ptr != NULL) {
-        cy->platform->realloc(cy, ptr, 0);
+        cy->vtable->realloc(cy, ptr, 0);
     }
 }
 
@@ -226,14 +225,12 @@ static int32_t cavl_comp_topic_hash(const void* const user, const cy_tree_t* con
 static int32_t cavl_comp_topic_subject_id(const void* const user, const cy_tree_t* const node)
 {
     assert((user != NULL) && (node != NULL));
-    const cy_t* const       cy       = (const cy_t*)(((const void**)user)[0]);
-    const uint32_t          outer    = *(const uint32_t*)(((const void**)user)[1]);
-    const cy_topic_t* const inner    = CAVL2_TO_OWNER(node, cy_topic_t, index_subject_id);
-    const uint32_t          inner_id = cy_topic_subject_id(cy, inner);
-    if (outer == inner_id) {
+    const uint32_t outer = *(const uint32_t*)user;
+    const uint32_t inner = cy_topic_subject_id(CAVL2_TO_OWNER(node, cy_topic_t, index_subject_id));
+    if (outer == inner) {
         return 0;
     }
-    return (outer > inner_id) ? +1 : -1;
+    return (outer > inner) ? +1 : -1;
 }
 
 static int32_t cavl_comp_future_transfer_id(const void* const user, const cy_tree_t* const node)
@@ -320,9 +317,8 @@ typedef struct cy_topic_coupling_t
     cy_substitution_t substitutions[CY_TOPIC_NAME_MAX]; ///< Flex array.
 } cy_topic_coupling_t;
 
-static void topic_destroy(cy_t* const cy, cy_topic_t* const topic)
+static void topic_destroy(cy_topic_t* const topic)
 {
-    assert(cy != NULL);
     assert(topic != NULL);
     // TODO implement
 }
@@ -364,18 +360,18 @@ static bool validate_is_implicit(const cy_topic_t* const topic)
     return true;
 }
 
-static bool is_implicit(const cy_t* const cy, const cy_topic_t* const topic)
+static bool is_implicit(const cy_topic_t* const topic)
 {
-    return is_listed(&cy->list_implicit, &topic->list_implicit);
+    return is_listed(&topic->cy->list_implicit, &topic->list_implicit);
 }
 
 /// Move the topic to the head of the doubly-linked list of implicit topics.
 /// The oldest implicit topic will be eventually pushed to the tail of the list.
-static void implicit_animate(cy_t* const cy, cy_topic_t* const topic, const cy_us_t now)
+static void implicit_animate(cy_topic_t* const topic, const cy_us_t now)
 {
     topic->ts_animated = now;
-    if (is_implicit(cy, topic)) {
-        enlist_head(&cy->list_implicit, &topic->list_implicit); // move to the head of the list
+    if (is_implicit(topic)) {
+        enlist_head(&topic->cy->list_implicit, &topic->list_implicit); // move to the head of the list
     }
 }
 
@@ -384,18 +380,18 @@ static void implicit_retire_timed_out(cy_t* const cy, const cy_us_t now)
 {
     cy_topic_t* const topic = LIST_TAIL(cy->list_implicit, cy_topic_t, list_implicit);
     if (topic != NULL) {
-        assert(is_implicit(cy, topic) && validate_is_implicit(topic));
+        assert(is_implicit(topic) && validate_is_implicit(topic));
         if ((topic->ts_animated + cy->implicit_topic_timeout) < now) {
             CY_TRACE(
-              cy, "⚰️ T%016llx@%08x '%s'", (unsigned long long)topic->hash, cy_topic_subject_id(cy, topic), topic->name);
-            topic_destroy(cy, topic);
+              cy, "⚰️ T%016llx@%08x '%s'", (unsigned long long)topic->hash, cy_topic_subject_id(topic), topic->name);
+            topic_destroy(topic);
         }
     }
 }
 
-static void schedule_gossip(cy_t* const cy, cy_topic_t* const topic, const bool important)
+static void schedule_gossip(cy_topic_t* const topic, const bool important)
 {
-    const bool eligible = important || (!is_pinned(topic->hash) && !is_implicit(cy, topic));
+    const bool eligible = important || (!is_pinned(topic->hash) && !is_implicit(topic));
     if (eligible) {
         // It is conceivable that large networks may encounter transient gossip storms when multiple nodes
         // trigger collisions on a topic in a short time window, forcing the local node to send multiple
@@ -403,21 +399,21 @@ static void schedule_gossip(cy_t* const cy, cy_topic_t* const topic, const bool 
         // gossip time per topic to throttle the gossiping rate here.
         if (important) {
             // TODO: don't do anything if it's already in the list!
-            delist(&cy->list_gossip, &topic->list_gossip);
-            enlist_head(&cy->list_gossip_urgent, &topic->list_gossip_urgent);
-            CY_TRACE(cy,
+            delist(&topic->cy->list_gossip, &topic->list_gossip);
+            enlist_head(&topic->cy->list_gossip_urgent, &topic->list_gossip_urgent);
+            CY_TRACE(topic->cy,
                      "⏰ T%016llx@%08x '%s'",
                      (unsigned long long)topic->hash,
-                     cy_topic_subject_id(cy, topic),
+                     cy_topic_subject_id(topic),
                      topic->name);
         } else {
             // TODO: don't do anything if it's already in the list!
-            delist(&cy->list_gossip_urgent, &topic->list_gossip_urgent);
-            enlist_head(&cy->list_gossip, &topic->list_gossip);
+            delist(&topic->cy->list_gossip_urgent, &topic->list_gossip_urgent);
+            enlist_head(&topic->cy->list_gossip, &topic->list_gossip);
         }
     } else {
-        delist(&cy->list_gossip, &topic->list_gossip);
-        delist(&cy->list_gossip_urgent, &topic->list_gossip_urgent);
+        delist(&topic->cy->list_gossip, &topic->list_gossip);
+        delist(&topic->cy->list_gossip_urgent, &topic->list_gossip_urgent);
     }
 }
 
@@ -469,14 +465,12 @@ static uint32_t topic_subject_id(const cy_t* const cy, const uint64_t hash, cons
 static cy_topic_t* topic_find_by_subject_id(const cy_t* const cy, const uint32_t subject_id)
 {
     assert(cy != NULL);
-    cy_tree_t* const t = cavl2_find(cy->topics_by_subject_id, //
-                                    (const void*)(const void* [2]){ cy, &subject_id },
-                                    &cavl_comp_topic_subject_id);
+    cy_tree_t* const t = cavl2_find(cy->topics_by_subject_id, &subject_id, &cavl_comp_topic_subject_id);
     if (t == NULL) {
         return NULL;
     }
     cy_topic_t* topic = CAVL2_TO_OWNER(t, cy_topic_t, index_subject_id);
-    assert(cy_topic_subject_id(cy, topic) == subject_id);
+    assert(cy_topic_subject_id(topic) == subject_id);
     return topic;
 }
 
@@ -502,21 +496,21 @@ static cy_subscription_params_t deduce_subscription_params(const cy_topic_t* con
 
 /// If a subscription is needed but is not active, this function will attempt to resubscribe.
 /// Errors are handled via the platform handler, so from the caller's perspective this is infallible.
-static void topic_ensure_subscribed(cy_t* const cy, cy_topic_t* const topic)
+static void topic_ensure_subscribed(cy_topic_t* const topic)
 {
     if ((topic->couplings != NULL) && (!topic->subscribed)) {
         const cy_subscription_params_t params = deduce_subscription_params(topic);
-        const cy_err_t                 res    = cy->platform->topic_subscribe(cy, topic, params);
+        const cy_err_t                 res    = topic->vtable->subscribe(topic, params);
         topic->subscribed                     = res == CY_OK;
-        CY_TRACE(cy,
+        CY_TRACE(topic->cy,
                  "🗞️ T%016llx@%08x '%s' extent=%zu result=%d",
                  (unsigned long long)topic->hash,
-                 cy_topic_subject_id(cy, topic),
+                 cy_topic_subject_id(topic),
                  topic->name,
                  params.extent,
                  res);
         if (!topic->subscribed) {
-            cy->platform->topic_on_subscription_error(cy, topic, res); // not our problem anymore
+            topic->cy->vtable->on_subscription_error(topic->cy, topic, res); // not our problem anymore
         }
     }
 }
@@ -528,12 +522,9 @@ static void topic_ensure_subscribed(cy_t* const cy, cy_topic_t* const topic)
 /// index tree on every iteration, and there may be as many iterations as there are local topics in the theoretical
 /// worst case. The amortized worst case is only O(log(N)) because the topics are sparsely distributed thanks to the
 /// topic hash function, unless there is a large number of topics (~>1000).
-static void topic_allocate(cy_t* const       cy, // NOLINT(*-no-recursion)
-                           cy_topic_t* const topic,
-                           const uint64_t    new_evictions,
-                           const bool        virgin,
-                           const cy_us_t     now)
+static void topic_allocate(cy_topic_t* const topic, const uint64_t new_evictions, const bool virgin, const cy_us_t now)
 {
+    cy_t* const cy = topic->cy;
     assert(cavl_count(cy->topics_by_hash) <= (cy->subject_id_modulus / 4));
 #if CY_CONFIG_TRACE
     static const int         call_depth_indent = 2;
@@ -544,7 +535,7 @@ static void topic_allocate(cy_t* const       cy, // NOLINT(*-no-recursion)
              (call_depth - 1) * call_depth_indent,
              "",
              (unsigned long long)topic->hash,
-             cy_topic_subject_id(cy, topic),
+             cy_topic_subject_id(topic),
              topic->name,
              (unsigned long long)topic->evictions,
              (unsigned long long)new_evictions,
@@ -557,7 +548,7 @@ static void topic_allocate(cy_t* const       cy, // NOLINT(*-no-recursion)
     // Otherwise, changing the subject-ID field on the go may break something underneath.
     if (topic->subscribed) {
         assert(topic->couplings != NULL);
-        cy->platform->topic_unsubscribe(cy, topic);
+        topic->vtable->unsubscribe(topic);
         topic->subscribed = false;
     }
 
@@ -570,11 +561,8 @@ static void topic_allocate(cy_t* const       cy, // NOLINT(*-no-recursion)
     // Note that it is possible that subject_id(hash,old_evictions) == subject_id(hash,new_evictions),
     // meaning that we stay with the same subject-ID. No special case is required to handle this.
     const uint32_t    new_sid = topic_subject_id(cy, topic->hash, new_evictions);
-    cy_topic_t* const that = CAVL2_TO_OWNER(cavl2_find(cy->topics_by_subject_id, // ----------------------------------
-                                                       (const void*)(const void* [2]){ cy, &new_sid },
-                                                       &cavl_comp_topic_subject_id),
-                                            cy_topic_t,
-                                            index_subject_id);
+    cy_topic_t* const that    = CAVL2_TO_OWNER(
+      cavl2_find(cy->topics_by_subject_id, &new_sid, &cavl_comp_topic_subject_id), cy_topic_t, index_subject_id);
     assert((that == NULL) || (topic->hash != that->hash)); // This would mean that we inserted the same topic twice
     const bool victory = (that == NULL) || left_wins(topic, now, topic_lage(that, now), that->hash);
 
@@ -588,7 +576,7 @@ static void topic_allocate(cy_t* const       cy, // NOLINT(*-no-recursion)
                  new_sid,
                  victory ? "wins 👑 over" : "loses 💀 to",
                  (that != NULL) ? (unsigned long long)that->hash : UINT64_MAX,
-                 (that != NULL) ? cy_topic_subject_id(cy, that) : UINT32_MAX);
+                 (that != NULL) ? cy_topic_subject_id(that) : UINT32_MAX);
     }
 #endif
 
@@ -597,25 +585,23 @@ static void topic_allocate(cy_t* const       cy, // NOLINT(*-no-recursion)
             cavl2_remove(&cy->topics_by_subject_id, &that->index_subject_id);
         }
         topic->evictions       = new_evictions;
-        cy_topic_t* const self = CAVL2_TO_OWNER(cavl2_find_or_insert(&cy->topics_by_subject_id, //
-                                                                     (const void*)(const void* [2]){ cy, &new_sid },
-                                                                     &cavl_comp_topic_subject_id,
-                                                                     topic,
-                                                                     &cavl_factory_topic_subject_id),
-                                                cy_topic_t,
-                                                index_subject_id);
+        cy_topic_t* const self = CAVL2_TO_OWNER(
+          cavl2_find_or_insert(
+            &cy->topics_by_subject_id, &new_sid, &cavl_comp_topic_subject_id, topic, &cavl_factory_topic_subject_id),
+          cy_topic_t,
+          index_subject_id);
         assert(self == topic);
         assert(!topic->subscribed);
         // Allocation done (end of the recursion chain), schedule gossip and resubscribe if needed.
         // If a resubscription failed in the past, we will retry here as long as there is at least one live subscriber.
-        schedule_gossip(cy, topic, true);
-        topic_ensure_subscribed(cy, topic);
+        schedule_gossip(topic, true);
+        topic_ensure_subscribed(topic);
         // Re-allocate the defeated topic with incremented eviction counter.
         if (that != NULL) {
-            topic_allocate(cy, that, that->evictions + 1U, true, now);
+            topic_allocate(that, that->evictions + 1U, true, now);
         }
     } else {
-        topic_allocate(cy, topic, new_evictions + 1U, true, now);
+        topic_allocate(topic, new_evictions + 1U, true, now);
     }
 
 #if CY_CONFIG_TRACE
@@ -624,7 +610,7 @@ static void topic_allocate(cy_t* const       cy, // NOLINT(*-no-recursion)
              (call_depth - 1) * call_depth_indent,
              "",
              (unsigned long long)topic->hash,
-             cy_topic_subject_id(cy, topic),
+             cy_topic_subject_id(topic),
              topic->name,
              (unsigned long long)topic->evictions,
              topic_lage(topic, now),
@@ -645,7 +631,7 @@ static cy_err_t topic_new(cy_t* const        cy,
                           const uint64_t     evictions,
                           const int_fast8_t  lage)
 {
-    cy_topic_t* const topic = cy->platform->topic_new(cy);
+    cy_topic_t* const topic = cy->vtable->new_topic(cy);
     if (topic == NULL) {
         return CY_ERR_MEMORY;
     }
@@ -693,7 +679,7 @@ static cy_err_t topic_new(cy_t* const        cy,
         // meaning that another pinned topic is not occupying the same subject-ID.
         // Remember that topics arbitrate locally the same way they do externally, meaning that adding a new local topic
         // may displace another local one.
-        topic_allocate(cy, topic, topic->evictions, true, now);
+        topic_allocate(topic, topic->evictions, true, now);
         if (out_topic != NULL) {
             *out_topic = topic;
         }
@@ -708,17 +694,17 @@ static cy_err_t topic_new(cy_t* const        cy,
     CY_TRACE(cy,
              "✨ T%016llx@%08x '%s': topic_count=%zu",
              (unsigned long long)topic->hash,
-             cy_topic_subject_id(cy, topic),
+             cy_topic_subject_id(topic),
              topic->name,
              cavl_count(cy->topics_by_hash));
     return 0;
 
 oom: // TODO correct deinitialization
-    cy->platform->topic_destroy(cy, topic);
+    topic->vtable->destroy(topic);
     return CY_ERR_NAME;
 
 bad_name: // TODO correct deinitialization
-    cy->platform->topic_destroy(cy, topic);
+    topic->vtable->destroy(topic);
     return CY_ERR_NAME;
 }
 
@@ -738,19 +724,18 @@ static cy_err_t topic_ensure(cy_t* const cy, cy_topic_t** const out_topic, const
 /// Allocates new memory for the coupling, which may fail.
 /// Don't forget topic_ensure_subscribed() afterward if necessary.
 /// The substitutions must not lose validity until the topic is destroyed.
-static cy_err_t topic_couple(cy_t* const                 cy,
-                             cy_topic_t* const           topic,
+static cy_err_t topic_couple(cy_topic_t* const           topic,
                              cy_subscriber_root_t* const subr,
                              const size_t                substitution_count,
                              const wkv_substitution_t*   substitutions)
 {
 #if CY_CONFIG_TRACE
     char subr_name[CY_TOPIC_NAME_MAX + 1];
-    wkv_get_key(&cy->subscribers_by_name, subr->index_name, subr_name);
-    CY_TRACE(cy,
+    wkv_get_key(&topic->cy->subscribers_by_name, subr->index_name, subr_name);
+    CY_TRACE(topic->cy,
              "🔗 T%016llx@%08x '%s' <=> '%s' substitutions=%zu",
              (unsigned long long)topic->hash,
-             cy_topic_subject_id(cy, topic),
+             cy_topic_subject_id(topic),
              topic->name,
              subr_name,
              substitution_count);
@@ -758,7 +743,7 @@ static cy_err_t topic_couple(cy_t* const                 cy,
     // Allocate the new coupling object with the substitutions flex array.
     // Each topic keeps its own couplings because the sets of subscription names and topic names are orthogonal.
     cy_topic_coupling_t* const cpl = (cy_topic_coupling_t*)mem_alloc(
-      cy, offsetof(cy_topic_coupling_t, substitutions) + (substitution_count * sizeof(cy_substitution_t)));
+      topic->cy, offsetof(cy_topic_coupling_t, substitutions) + (substitution_count * sizeof(cy_substitution_t)));
     if (cpl != NULL) {
         cpl->root               = subr;
         cpl->next               = topic->couplings;
@@ -774,12 +759,12 @@ static cy_err_t topic_couple(cy_t* const                 cy,
             s                     = s->next;
         }
         // If this is a verbatim subscriber, the topic is no (longer) implicit.
-        if ((subr->index_pattern == NULL) && is_implicit(cy, topic)) {
-            delist(&cy->list_implicit, &topic->list_implicit);
-            CY_TRACE(cy,
+        if ((subr->index_pattern == NULL) && is_implicit(topic)) {
+            delist(&topic->cy->list_implicit, &topic->list_implicit);
+            CY_TRACE(topic->cy,
                      "🧛 Promoted to explicit T%016llx@%08x '%s'",
                      (unsigned long long)topic->hash,
-                     cy_topic_subject_id(cy, topic),
+                     cy_topic_subject_id(topic),
                      topic->name);
         }
     }
@@ -789,10 +774,9 @@ static cy_err_t topic_couple(cy_t* const                 cy,
 /// Returns non-NULL on OOM.
 static void* wkv_cb_couple_new_topic(const wkv_event_t evt)
 {
-    cy_t* const                 cy    = (cy_t*)(((void**)evt.context)[0]);
-    cy_topic_t* const           topic = (cy_topic_t*)(((void**)evt.context)[1]);
+    cy_topic_t* const           topic = (cy_topic_t*)evt.context;
     cy_subscriber_root_t* const subr  = (cy_subscriber_root_t*)evt.node->value;
-    const cy_err_t              res   = topic_couple(cy, topic, subr, evt.substitution_count, evt.substitutions);
+    const cy_err_t              res   = topic_couple(topic, subr, evt.substitution_count, evt.substitutions);
     return (0 == res) ? NULL : "";
 }
 
@@ -817,31 +801,30 @@ static cy_topic_t* topic_subscribe_if_matching(cy_t* const       cy,
     {
         const cy_err_t res = topic_new(cy, &topic, resolved_name, hash, evictions, lage);
         if (res != CY_OK) {
-            cy->platform->topic_on_subscription_error(cy, NULL, res);
+            cy->vtable->on_subscription_error(cy, NULL, res);
             return NULL;
         }
     }
     // Attach subscriptions.
-    if (NULL != wkv_route(&cy->subscribers_by_pattern, //
-                          resolved_name,
-                          (void* [2]){ cy, topic }, // NOLINT(*-multi-level-implicit-pointer-conversion)
-                          wkv_cb_couple_new_topic)) {
+    if (NULL != wkv_route(&cy->subscribers_by_pattern, resolved_name, topic, wkv_cb_couple_new_topic)) {
         // TODO discard the topic!
-        cy->platform->topic_on_subscription_error(cy, NULL, CY_ERR_MEMORY);
+        cy->vtable->on_subscription_error(cy, NULL, CY_ERR_MEMORY);
         return NULL;
     }
     // Create the transport subscription once at the end, considering the parameters from all subscribers.
-    topic_ensure_subscribed(cy, topic);
+    topic_ensure_subscribed(topic);
     return topic;
 }
 
 static void* wkv_cb_topic_scout_response(const wkv_event_t evt)
 {
-    cy_t* const       cy    = (cy_t*)evt.context;
     cy_topic_t* const topic = (cy_topic_t*)evt.node->value;
-    CY_TRACE(
-      cy, "📢 T%016llx@%08x '%s'", (unsigned long long)(topic->hash), cy_topic_subject_id(cy, topic), topic->name);
-    schedule_gossip(cy, topic, true);
+    CY_TRACE((cy_t*)evt.context,
+             "📢 T%016llx@%08x '%s'",
+             (unsigned long long)(topic->hash),
+             cy_topic_subject_id(topic),
+             topic->name);
+    schedule_gossip(topic, true);
     return NULL;
 }
 
@@ -867,27 +850,21 @@ typedef struct
 
 static cy_err_t publish_heartbeat(cy_t* const cy, const cy_us_t now, heartbeat_t* const message)
 {
-    // Fill and serialize the message.
+    // TODO proper serialization
     message->uptime           = (uint32_t)((now - cy->ts_started) / MEGA);
     message->version          = 1;
     const size_t message_size = offsetof(heartbeat_t, topic_name) + message->topic_name_len;
     assert(message_size <= sizeof(heartbeat_t));
     assert(message->topic_name_len <= CY_TOPIC_NAME_MAX);
-    const cy_buffer_borrowed_t payload = { .next = NULL, .view = { .data = message, .size = message_size } };
-
-    // Publish the message.
-    const cy_err_t res = cy->platform->topic_publish(cy, //
-                                                     &cy->heartbeat_pub,
-                                                     now + HEARTBEAT_PUB_TIMEOUT_us,
-                                                     payload,
-                                                     false);
+    const cy_err_t res = cy->heartbeat_pub.topic->vtable->publish(
+      &cy->heartbeat_pub, now + HEARTBEAT_PUB_TIMEOUT_us, (cy_bytes_t){ .size = message_size, .data = message }, false);
     cy->heartbeat_pub.topic->pub_transfer_id++;
     return res;
 }
 
 static cy_err_t publish_heartbeat_gossip(cy_t* const cy, cy_topic_t* const topic, const cy_us_t now)
 {
-    topic_ensure_subscribed(cy, topic); // use this opportunity to repair the subscription if broken
+    topic_ensure_subscribed(topic); // use this opportunity to repair the subscription if broken
     heartbeat_t msg = { .topic_hash          = topic->hash,
                         .topic_evictions     = topic->evictions & UINT32_MAX,
                         .topic_evictions_msb = (uint8_t)(topic->evictions >> 32U),
@@ -895,9 +872,9 @@ static cy_err_t publish_heartbeat_gossip(cy_t* const cy, cy_topic_t* const topic
                         ._reserved_1_        = 0,
                         .topic_name_len      = (uint_fast8_t)topic->index_name->key_len };
     memcpy(msg.topic_name, topic->name, topic->index_name->key_len);
-    CY_TRACE(cy, "🗣️ T%016llx@%08x '%s'", (unsigned long long)topic->hash, cy_topic_subject_id(cy, topic), topic->name);
+    CY_TRACE(cy, "🗣️ T%016llx@%08x '%s'", (unsigned long long)topic->hash, cy_topic_subject_id(topic), topic->name);
     // Update gossip even if failed so we don't get stuck publishing same gossip if error reporting is broken.
-    schedule_gossip(cy, topic, false);
+    schedule_gossip(topic, false);
     return publish_heartbeat(cy, now, &msg);
 }
 
@@ -950,17 +927,17 @@ static cy_err_t heartbeat_begin(cy_t* const cy)
 }
 
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
-static void on_heartbeat(cy_t* const cy, const cy_arrival_t* const evt)
+static void on_heartbeat(cy_arrival_t* const evt)
 {
-    assert((evt->subscriber != NULL) && (evt->topic != NULL) && (evt->transfer != NULL));
+    assert((evt->subscriber != NULL) && (evt->topic != NULL));
+    cy_t* const cy = evt->topic->cy;
     // Deserialize the message. TODO: deserialize properly and check version.
     heartbeat_t  heartbeat = { 0 };
-    const size_t msg_size =
-      cy_buffer_owned_gather(evt->transfer->payload, (cy_bytes_mut_t){ .size = sizeof(heartbeat), .data = &heartbeat });
+    const size_t msg_size  = cy_gather(&evt->payload, 0, sizeof(heartbeat), &heartbeat);
     if ((msg_size < offsetof(heartbeat_t, topic_name)) || (heartbeat.version != 1)) {
         return;
     }
-    const cy_us_t     ts              = evt->transfer->timestamp;
+    const cy_us_t     ts              = evt->timestamp;
     const uint64_t    other_hash      = heartbeat.topic_hash;
     const uint64_t    other_evictions = heartbeat.topic_evictions + (((uint64_t)heartbeat.topic_evictions_msb) << 32U);
     const int_fast8_t other_lage      = heartbeat.topic_lage;
@@ -972,9 +949,9 @@ static void on_heartbeat(cy_t* const cy, const cy_arrival_t* const evt)
         if (mine == NULL) {
             mine = topic_subscribe_if_matching(cy, key, other_hash, other_evictions, other_lage);
         }
-        if (mine != NULL) {                   // We have this topic! Check if we have consensus on the subject-ID.
-            schedule_gossip(cy, mine, false); // suppress next gossip -- the network just heard about it
-            implicit_animate(cy, mine, ts);
+        if (mine != NULL) {               // We have this topic! Check if we have consensus on the subject-ID.
+            schedule_gossip(mine, false); // suppress next gossip -- the network just heard about it
+            implicit_animate(mine, ts);
             assert(mine->hash == other_hash);
             const int_fast8_t mine_lage = topic_lage(mine, ts);
             if (mine->evictions != other_evictions) {
@@ -987,7 +964,7 @@ static void on_heartbeat(cy_t* const cy, const cy_arrival_t* const evt)
                          mine->name,
                          win ? "✅" : "❌",
                          (unsigned long long)mine->hash,
-                         cy_topic_subject_id(cy, mine),
+                         cy_topic_subject_id(mine),
                          (unsigned long long)mine->evictions,
                          mine_lage,
                          win ? "❌" : "✅",
@@ -1002,19 +979,19 @@ static void on_heartbeat(cy_t* const cy, const cy_arrival_t* const evt)
                     // thus resolving the collision.
                     // See https://github.com/OpenCyphal-Garage/cy/issues/28 and AcceptGossip() in Core.tla.
                     assert(!is_pinned(mine->hash));
-                    schedule_gossip(cy, mine, true);
+                    schedule_gossip(mine, true);
                 } else {
                     assert((mine_lage <= other_lage) &&
                            ((mine_lage < other_lage) || (mine->evictions < other_evictions)));
                     assert(mine_lage <= other_lage);
                     topic_merge_lage(mine, ts, other_lage);
-                    topic_allocate(cy, mine, other_evictions, false, ts);
+                    topic_allocate(mine, other_evictions, false, ts);
                     if (mine->evictions == other_evictions) { // perfect sync, lower the gossip priority
-                        schedule_gossip(cy, mine, false);
+                        schedule_gossip(mine, false);
                     }
                 }
             } else {
-                topic_ensure_subscribed(cy, mine); // use this opportunity to repair the subscription if broken
+                topic_ensure_subscribed(mine); // use this opportunity to repair the subscription if broken
             }
             topic_merge_lage(mine, ts, other_lage);
         } else { // We don't know this topic; check for a subject-ID collision and do auto-subscription.
@@ -1022,16 +999,16 @@ static void on_heartbeat(cy_t* const cy, const cy_arrival_t* const evt)
             if (mine == NULL) {
                 return; // We are not using this subject-ID, no collision.
             }
-            assert(cy_topic_subject_id(cy, mine) == topic_subject_id(cy, other_hash, other_evictions));
+            assert(cy_topic_subject_id(mine) == topic_subject_id(cy, other_hash, other_evictions));
             const bool win = left_wins(mine, ts, other_lage, other_hash);
             CY_TRACE(cy,
                      "💥 Collision on @%08x:\n"
                      "\t local  %s T%016llx@%08x evict=%llu lage=%+d '%s'\n"
                      "\t remote %s T%016llx@%08x evict=%llu lage=%+d '%s'",
-                     cy_topic_subject_id(cy, mine),
+                     cy_topic_subject_id(mine),
                      win ? "✅" : "❌",
                      (unsigned long long)mine->hash,
-                     cy_topic_subject_id(cy, mine),
+                     cy_topic_subject_id(mine),
                      (unsigned long long)mine->evictions,
                      topic_lage(mine, ts),
                      mine->name,
@@ -1047,10 +1024,10 @@ static void on_heartbeat(cy_t* const cy, const cy_arrival_t* const evt)
             // will also move, but the trick is that the others could have settled on different subject-IDs.
             // Everyone needs to publish their own new allocation and then we will pick max subject-ID out of that.
             if (!win) {
-                topic_allocate(cy, mine, mine->evictions + 1U, false, ts);
+                topic_allocate(mine, mine->evictions + 1U, false, ts);
             } else {
                 assert(!is_pinned(mine->hash));
-                schedule_gossip(cy, mine, true);
+                schedule_gossip(mine, true);
             }
         }
     } else if (heartbeat.topic_lage == LAGE_SCOUT) {
@@ -1080,7 +1057,7 @@ static void futures_retire_timed_out(cy_t* cy, const cy_us_t now)
         cavl2_remove(&fut->publisher->topic->futures_by_transfer_id, &fut->index_transfer_id);
         fut->state = cy_future_timeout_response;
         if (fut->callback != NULL) {
-            fut->callback(cy, fut);
+            fut->callback(fut);
         }
         // We could have trivially avoided having to search the tree again by replacing this with a
         // cavl2_next_greater(), which is very efficient, but the problem here is that the user callback may modify
@@ -1106,13 +1083,13 @@ cy_err_t cy_advertise(cy_t* const cy, cy_publisher_t* const pub, const wkv_str_t
         assert(pub->topic != NULL);
         pub->topic->pub_count++;
         delist(&cy->list_implicit, &pub->topic->list_implicit);
-        cy->platform->topic_advertise(cy, pub->topic, response_extent + P2P_HEADER_BYTES);
+        pub->topic->vtable->advertise(pub->topic, response_extent + P2P_HEADER_BYTES);
         // We don't need to schedule gossip here because this is managed by topic_ensure et al.
     }
     CY_TRACE(cy,
              "✨ T%016llx@%08x '%s': topic_count=%zu pub_count=%zu res=%d",
              (unsigned long long)pub->topic->hash,
-             cy_topic_subject_id(cy, pub->topic),
+             cy_topic_subject_id(pub->topic),
              pub->topic->name,
              cavl_count(cy->topics_by_hash),
              pub->topic->pub_count,
@@ -1120,11 +1097,7 @@ cy_err_t cy_advertise(cy_t* const cy, cy_publisher_t* const pub, const wkv_str_t
     return res;
 }
 
-void cy_unadvertise(cy_t* const cy, cy_publisher_t* pub)
-{
-    (void)cy;
-    (void)pub;
-}
+void cy_unadvertise(cy_publisher_t* const pub) { (void)pub; }
 
 void cy_future_new(cy_future_t* const future, const cy_future_callback_t callback, void* const user)
 {
@@ -1135,19 +1108,18 @@ void cy_future_new(cy_future_t* const future, const cy_future_callback_t callbac
     future->user     = user;
 }
 
-cy_err_t cy_publish(cy_t* const                cy,
-                    cy_publisher_t* const      pub,
-                    const cy_us_t              tx_deadline,
-                    const cy_buffer_borrowed_t payload,
-                    const cy_us_t              response_deadline,
-                    cy_future_t* const         future)
+cy_err_t cy_publish(cy_publisher_t* const pub,
+                    const cy_us_t         tx_deadline,
+                    const cy_bytes_t      payload,
+                    const cy_us_t         response_deadline,
+                    cy_future_t* const    future)
 {
     assert(pub != NULL);
     cy_topic_t* const topic = pub->topic;
     assert(topic != NULL);
     assert(topic->pub_count > 0);
 
-    cy_err_t res = heartbeat_begin(cy);
+    cy_err_t res = heartbeat_begin(pub->topic->cy);
     if (res != CY_OK) {
         return res;
     }
@@ -1156,13 +1128,14 @@ cy_err_t cy_publish(cy_t* const                cy,
     // The reason we can't do it afterward is that if the transport has a cyclic transfer-ID, insertion may fail if
     // we have exhausted the transfer-ID set.
     if (future != NULL) {
-        future->index_deadline    = (cy_tree_t){ 0 };
-        future->index_transfer_id = (cy_tree_t){ 0 };
-        future->publisher         = pub;
-        future->state             = cy_future_pending;
-        future->transfer_id       = topic->pub_transfer_id;
-        future->deadline          = response_deadline;
-        future->last_response     = (cy_transfer_owned_t){ 0 };
+        future->index_deadline     = (cy_tree_t){ 0 };
+        future->index_transfer_id  = (cy_tree_t){ 0 };
+        future->publisher          = pub;
+        future->state              = cy_future_pending;
+        future->transfer_id        = topic->pub_transfer_id;
+        future->deadline           = response_deadline;
+        future->response_timestamp = BIG_BANG;
+        future->response_payload   = (cy_scatter_t){ 0 };
         // NB: we don't touch the callback and the user pointer, as they are to be initialized by the user.
         const cy_tree_t* const tr = cavl2_find_or_insert(&topic->futures_by_transfer_id,
                                                          &future->transfer_id,
@@ -1175,10 +1148,10 @@ cy_err_t cy_publish(cy_t* const                cy,
     }
 
     const bool ack_required = (future != NULL);
-    res                     = cy->platform->topic_publish(cy, pub, tx_deadline, payload, ack_required);
+    res                     = pub->topic->vtable->publish(pub, tx_deadline, payload, ack_required);
     if (future != NULL) {
         if (res == CY_OK) {
-            const cy_tree_t* const tr = cavl2_find_or_insert(&cy->futures_by_deadline,
+            const cy_tree_t* const tr = cavl2_find_or_insert(&pub->topic->cy->futures_by_deadline,
                                                              &response_deadline,
                                                              &cavl_comp_future_deadline,
                                                              future,
@@ -1200,8 +1173,7 @@ cy_err_t cy_publish(cy_t* const                cy,
 /// Returns non-NULL on OOM, which aborts the traversal early.
 static void* wkv_cb_couple_new_subscription(const wkv_event_t evt)
 {
-    cy_t* const                  cy    = (cy_t*)(((void**)evt.context)[0]);
-    const cy_subscriber_t* const sub   = (cy_subscriber_t*)(((void**)evt.context)[1]);
+    const cy_subscriber_t* const sub   = (cy_subscriber_t*)evt.context;
     cy_topic_t* const            topic = (cy_topic_t*)evt.node->value;
     // If the new subscription parameters are different, we will need to resubscribe this topic.
     bool resubscribe = false;
@@ -1211,14 +1183,14 @@ static void* wkv_cb_couple_new_subscription(const wkv_event_t evt)
         resubscribe                              = (param_new.extent > param_old.extent);
     }
     // Create the coupling.
-    const cy_err_t res = topic_couple(cy, topic, sub->root, evt.substitution_count, evt.substitutions);
+    const cy_err_t res = topic_couple(topic, sub->root, evt.substitution_count, evt.substitutions);
     // Refresh the subscription if needed. Due to the new coupling, the params are now different.
     if (res == CY_OK) {
         if (resubscribe) {
-            cy->platform->topic_unsubscribe(cy, topic);
+            topic->vtable->unsubscribe(topic);
             topic->subscribed = false;
         }
-        topic_ensure_subscribed(cy, topic);
+        topic_ensure_subscribed(topic);
     }
     return (CY_OK == res) ? NULL : "";
 }
@@ -1307,80 +1279,38 @@ cy_err_t cy_subscribe(cy_t* const                    cy,
     sub->callback   = callback;
     sub->next       = sub->root->head;
     sub->root->head = sub;
-    if (NULL != wkv_match(&cy->topics_by_name, //
-                          resolved_name,
-                          (void*)(void* [2]){ cy, sub },
-                          wkv_cb_couple_new_subscription)) {
-        cy_unsubscribe(cy, sub);
+    if (NULL != wkv_match(&cy->topics_by_name, resolved_name, sub, wkv_cb_couple_new_subscription)) {
+        cy_unsubscribe(sub);
         return CY_ERR_MEMORY;
     }
     return CY_OK;
 }
 
-void cy_unsubscribe(cy_t* const cy, cy_subscriber_t* const sub)
+void cy_unsubscribe(cy_subscriber_t* const sub) { (void)sub; }
+
+void cy_subscriber_name(const cy_subscriber_t* const sub, char* const out_name)
 {
-    (void)cy;
-    (void)sub;
+    wkv_get_key(&sub->cy->subscribers_by_name, sub->root->index_name, out_name);
 }
 
-cy_err_t cy_respond(cy_t* const                cy,
-                    cy_topic_t* const          topic,
-                    const cy_us_t              tx_deadline,
-                    cy_transfer_metadata_t     metadata,
-                    const cy_buffer_borrowed_t payload)
+cy_err_t cy_respond(cy_responder_t* const responder, const cy_us_t deadline, const cy_bytes_t payload)
 {
-    assert(topic != NULL);
-    const cy_err_t res = heartbeat_begin(cy);
+    assert(responder != NULL);
+    const cy_err_t res = heartbeat_begin(responder->cy);
     if (res != CY_OK) {
         return res;
     }
-    const uint64_t cookie = cy->p2p_next_cookie++;
     // TODO: endian-agnostic serialization
-    const uint64_t response_header[3] = { (uint64_t)p2p_kind_response | (cookie << 32U),
-                                          topic->hash,
-                                          metadata.transfer_id };
-    return cy->platform->p2p(cy,
-                             topic,
-                             metadata.context,
-                             metadata.priority,
-                             tx_deadline,
-                             (cy_buffer_borrowed_t){
-                               .next = &payload,
-                               .view = { .size = sizeof(response_header), .data = &response_header },
-                             },
-                             true);
-}
-
-void cy_subscriber_name(const cy_t* const cy, const cy_subscriber_t* const sub, char* const out_name)
-{
-    wkv_get_key(&cy->subscribers_by_name, sub->root->index_name, out_name);
+    const uint64_t response_header[3] = { (uint64_t)p2p_kind_response, responder->topic_hash, responder->transfer_id };
+    const cy_bytes_t bytes            = { .size = sizeof(response_header), .data = &response_header, .next = &payload };
+    return responder->vtable->respond(responder, deadline, bytes, true);
 }
 
 // =====================================================================================================================
 //                                                  NODE & TOPIC
 // =====================================================================================================================
 
-cy_us_t cy_now(const cy_t* const cy) { return cy->platform->now(cy); }
-
-void cy_topic_hint(cy_t* const cy, cy_topic_t* const topic, const uint32_t subject_id)
-{
-    if ((topic != NULL) && (subject_id <= (cy->subject_id_modulus + CY_PINNED_SUBJECT_ID_MAX)) &&
-        (!is_pinned(topic->hash)) && (topic->evictions == 0)) {
-        // Existing subscriptions need to be deactivated first, if any.
-        if (topic->subscribed) {
-            assert(topic->couplings != NULL);
-            cy->platform->topic_unsubscribe(cy, topic);
-        }
-        // Fit the lowest evictions counter such that we land at the specified subject-ID.
-        // Avoid negative remainders, so we don't use simple evictions=(subject_id-hash)%6144.
-        while (topic_subject_id(cy, topic->hash, topic->evictions) != subject_id) {
-            topic->evictions++;
-        }
-        assert(cy_topic_subject_id(cy, topic) == subject_id);
-        // Restore the subscriptions.
-        topic_ensure_subscribed(cy, topic);
-    }
-}
+cy_us_t cy_now(const cy_t* const cy) { return cy->vtable->now(cy); }
 
 cy_topic_t* cy_topic_find_by_name(const cy_t* const cy, const wkv_str_t name)
 {
@@ -1404,9 +1334,9 @@ cy_topic_t* cy_topic_find_by_hash(const cy_t* const cy, const uint64_t hash)
 cy_topic_t* cy_topic_iter_first(const cy_t* const cy) { return (cy_topic_t*)cavl2_min(cy->topics_by_hash); }
 cy_topic_t* cy_topic_iter_next(cy_topic_t* const topic) { return (cy_topic_t*)cavl2_next_greater(&topic->index_hash); }
 
-uint32_t cy_topic_subject_id(const cy_t* const cy, const cy_topic_t* const topic)
+uint32_t cy_topic_subject_id(const cy_topic_t* const topic)
 {
-    return topic_subject_id(cy, topic->hash, topic->evictions);
+    return topic_subject_id(topic->cy, topic->hash, topic->evictions);
 }
 
 wkv_str_t cy_topic_name(const cy_topic_t* const topic)
@@ -1425,27 +1355,14 @@ bool cy_has_substitution_tokens(const wkv_str_t name)
 //                                              PLATFORM LAYER INTERFACE
 // =====================================================================================================================
 
-cy_err_t cy_new(cy_t* const                cy,
-                const cy_platform_t* const platform,
-                const wkv_str_t            name,
-                const wkv_str_t            namespace_,
-                const uint32_t             subject_id_modulus)
+cy_err_t cy_new(cy_t* const              cy,
+                const cy_vtable_t* const vtable,
+                const wkv_str_t          name,
+                const wkv_str_t          namespace_,
+                const uint32_t           subject_id_modulus)
 {
     assert(cy != NULL);
     assert(subject_id_modulus > 1000);
-    assert(platform != NULL);
-    assert(platform->now != NULL);
-    assert(platform->realloc != NULL);
-    assert(platform->random != NULL);
-    assert(platform->buffer_release != NULL);
-    assert(platform->p2p != NULL);
-    assert(platform->topic_new != NULL);
-    assert(platform->topic_destroy != NULL);
-    assert(platform->topic_publish != NULL);
-    assert(platform->topic_subscribe != NULL);
-    assert(platform->topic_unsubscribe != NULL);
-    assert(platform->topic_advertise != NULL);
-    assert(platform->topic_on_subscription_error != NULL);
 
     if ((namespace_.len > CY_NAMESPACE_NAME_MAX) || (name.len > CY_NAMESPACE_NAME_MAX) || (name.len == 0)) {
         return CY_ERR_NAME;
@@ -1453,7 +1370,7 @@ cy_err_t cy_new(cy_t* const                cy,
 
     // Init the object.
     memset(cy, 0, sizeof(*cy));
-    cy->platform           = platform;
+    cy->vtable             = vtable;
     cy->subject_id_modulus = subject_id_modulus;
     // namespace
     if (namespace_.len > 0) {
@@ -1499,18 +1416,18 @@ cy_err_t cy_new(cy_t* const                cy,
         };
         res = cy_subscribe_c(cy, &cy->heartbeat_sub, CY_HEARTBEAT_TOPIC_NAME, hb_sub_params, &on_heartbeat);
         if (res != CY_OK) {
-            cy_unadvertise(cy, &cy->heartbeat_pub);
+            cy_unadvertise(&cy->heartbeat_pub);
         }
     }
     return res;
 }
 
-void cy_ingest(cy_t* const cy, cy_topic_t* const topic, cy_transfer_owned_t transfer)
+void cy_ingest(cy_topic_t* const topic, cy_ingest_t transfer)
 {
     assert(topic != NULL);
 
     // Record activity so that the topic is not retired.
-    implicit_animate(cy, topic, transfer.timestamp);
+    implicit_animate(topic, transfer.timestamp);
 
     // Simply invoke all callbacks that match this topic name.
     // The callback may unsubscribe, so we have to store the next pointer early.
@@ -1589,7 +1506,7 @@ static void ingest_p2p_response(cy_t* const               cy,
     (void)cookie;
 }
 
-void cy_ingest_p2p(cy_t* const cy, cy_transfer_owned_t transfer)
+void cy_ingest_p2p(cy_t* const cy, cy_ingest_t transfer)
 {
     assert(cy != NULL);
     // We require the first 24 bytes to be non-fragmented. This is trivially ensured because the MTU of all transports

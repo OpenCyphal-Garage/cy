@@ -88,9 +88,9 @@ typedef struct cy_bytes_t
 /// Do not access any of the fields directly; use the provided functions instead.
 typedef struct cy_scatter_t
 {
-    const void*                 state[2]; ///< Opaque implementation-specific soft state.
-    size_t                      size;     ///< Must contain the total size of the scattered buffer data in bytes.
-    struct cy_scatter_vtable_t* vtable;
+    const void*                       state[2]; ///< Opaque implementation-specific soft state.
+    size_t                            size;     ///< Must contain the total size of the scattered buffer data in bytes.
+    const struct cy_scatter_vtable_t* vtable;
 } cy_scatter_t;
 
 /// Returns the total size of the scattered buffer in bytes.
@@ -157,7 +157,7 @@ typedef enum cy_future_state_t
 
 typedef struct cy_future_t cy_future_t;
 
-typedef void (*cy_future_callback_t)(cy_t*, cy_future_t*);
+typedef void (*cy_future_callback_t)(cy_future_t*);
 
 /// Register an expectation for a response to a message sent to the topic.
 /// The future shall not be moved or altered in any way except for the user and callback fields until its state is
@@ -200,7 +200,7 @@ static inline cy_err_t cy_advertise_c(cy_t* const           cy,
 {
     return cy_advertise(cy, pub, wkv_key(name), response_extent);
 }
-void cy_unadvertise(cy_t* const cy, cy_publisher_t* pub);
+void cy_unadvertise(cy_publisher_t* const pub);
 
 /// Just a convenience function, nothing special.
 /// The initial future state is cy_future_fresh.
@@ -218,20 +218,16 @@ void cy_future_cancel(cy_future_t* const future);
 /// The response future will not be registered unless the result is non-negative.
 ///
 /// If the response deadline is in the past, the message will be sent anyway but it will time out immediately.
-cy_err_t cy_publish(cy_t* const           cy,
-                    cy_publisher_t* const pub,
+cy_err_t cy_publish(cy_publisher_t* const pub,
                     const cy_us_t         tx_deadline,
                     const cy_bytes_t      payload,
                     const cy_us_t         response_deadline,
                     cy_future_t* const    future);
 
-/// A simpler wrapper over cy_publish() when no response is needed/expected. 1 means one way.
-static inline cy_err_t cy_publish1(cy_t* const           cy,
-                                   cy_publisher_t* const pub,
-                                   const cy_us_t         tx_deadline,
-                                   const cy_bytes_t      payload)
+/// A simpler wrapper over cy_publish() when no ack or response is needed/expected. 1 means one way.
+static inline cy_err_t cy_publish1(cy_publisher_t* const pub, const cy_us_t tx_deadline, const cy_bytes_t payload)
 {
-    return cy_publish(cy, pub, tx_deadline, payload, 0, NULL);
+    return cy_publish(pub, tx_deadline, payload, 0, NULL);
 }
 
 // =====================================================================================================================
@@ -248,15 +244,24 @@ typedef struct cy_subscriber_t cy_subscriber_t;
 /// The platform layer uses responder objects to store arbitrary transport-specific information needed to send the
 /// response back to the correct remote node. For example, it may contain the source addresses and port numbers,
 /// or pointers into private structures.
+///
+/// Note that this object avoids linking the topic instance that delivered the original message to avoid lifetime
+/// issues that would occur if the topic is destroyed between the message arrival and the response time.
+/// Instead of referencing the topic, the relevant parameters of the topic are stored here by value.
 typedef struct cy_responder_t
 {
+    cy_t* cy;
+    // TODO this is broken
+    uint64_t topic_hash;
+    uint64_t transfer_id;
+    uint64_t origin_id; ///< A platform-specific unique identifier of the remote node.
     union
     {
         uint64_t      u64[CY_RESPONDER_STATE_SIZE_BYTES / 8U];
         void*         ptr[CY_RESPONDER_STATE_SIZE_BYTES / sizeof(void*)];
         unsigned char byte[CY_RESPONDER_STATE_SIZE_BYTES / sizeof(unsigned char)];
     } state;
-    struct cy_responder_vtable_t* vtable;
+    const struct cy_responder_vtable_t* vtable;
 } cy_responder_t;
 
 typedef struct cy_substitution_t
@@ -290,7 +295,7 @@ typedef struct cy_arrival_t
     const cy_substitution_t* substitutions;      ///< A contiguous array of substitutions.
 } cy_arrival_t;
 
-typedef void (*cy_subscriber_callback_t)(cy_t*, const cy_arrival_t*);
+typedef void (*cy_subscriber_callback_t)(cy_arrival_t*);
 
 /// Disable strictly increasing transfer-ID ordering enforcement and deliver messages as they arrive immediately.
 /// Refer to libudpard docs for the explanation of the available options.
@@ -312,6 +317,7 @@ typedef struct cy_subscription_params_t
 /// The user must not alter any fields except for the callback and the user pointer.
 struct cy_subscriber_t
 {
+    cy_t*                        cy;
     struct cy_subscriber_root_t* root;
     cy_subscriber_t*             next;
 
@@ -341,15 +347,15 @@ static inline cy_err_t cy_subscribe_c(cy_t* const                    cy,
 {
     return cy_subscribe(cy, sub, wkv_key(name), params, callback);
 }
-void cy_unsubscribe(cy_t* const cy, cy_subscriber_t* const sub);
+void cy_unsubscribe(cy_subscriber_t* const sub);
 
 /// Copies the subscriber name into the user-supplied buffer. Max size is CY_TOPIC_NAME_MAX.
-void cy_subscriber_name(const cy_t* const cy, const cy_subscriber_t* const sub, char* const out_name);
+void cy_subscriber_name(const cy_subscriber_t* const sub, char* const out_name);
 
 /// Send a response to a message previously received from a topic subscription. The response will be sent directly
 /// to the publisher using peer-to-peer transport, not affecting other nodes on this topic.
 /// This can be invoked from a subscription callback or at any later point as long as the responder object is available.
-cy_err_t cy_respond(cy_responder_t* const responder, const cy_us_t tx_deadline, const cy_bytes_t response_payload);
+cy_err_t cy_respond(cy_responder_t* const responder, const cy_us_t deadline, const cy_bytes_t payload);
 
 // =====================================================================================================================
 //                                                  NODE & TOPIC
