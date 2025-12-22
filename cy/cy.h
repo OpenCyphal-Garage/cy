@@ -71,9 +71,9 @@ struct cy_tree_t
 /// The optional fragmentation allows efficient handling of scatter/gather I/O without copying the data.
 typedef struct cy_bytes_t
 {
-    size_t             size; ///< Size of the current fragment in bytes.
-    const void*        data; ///< May be NULL if size==0.
-    struct cy_bytes_t* next;
+    size_t                   size; ///< Size of the current fragment in bytes.
+    const void*              data; ///< May be NULL if size==0.
+    const struct cy_bytes_t* next;
 } cy_bytes_t;
 
 // =====================================================================================================================
@@ -265,14 +265,15 @@ typedef struct cy_substitution_t
     size_t    ordinal; ///< Zero-based index of the substitution token as occurred in the pattern.
 } cy_substitution_t;
 
-/// Optionally, the user handler can take ownership of the transfer payload by zeroing the origin pointer
-/// by setting transfer->payload.origin.data = NULL. However, this may cause undesirable interference with other
-/// subscribers that also match the same topic and are to receive the data after the current callback returns.
+/// Optionally, the user handler can take ownership of the transfer payload using cy_scatter_move();
+/// however, this may cause undesirable interference with other subscribers that also match the same topic
+/// and are to receive the data after the current callback returns.
+/// If the payload is not moved out, it will be freed automatically after return from the callback.
 typedef struct cy_arrival_t
 {
     cy_us_t        timestamp;
     uint64_t       transfer_id;
-    cy_scatter_t   payload;   ///< Move using cy_scatter_move() to claim ownership, otherwise freed after callback.
+    cy_scatter_t   payload;
     cy_responder_t responder; ///< Can be copied out to respond later, after return from the callback.
 
     cy_subscriber_t*  subscriber; ///< Which subscriber matched on this topic by verbatim name or pattern.

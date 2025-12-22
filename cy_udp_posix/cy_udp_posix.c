@@ -271,6 +271,7 @@ static cy_err_t platform_topic_publish(cy_t* const                cy,
                    ack_required);
 }
 
+/// TODO: extent change without resubscription -- just invoke subscribe again with new extent?
 static cy_err_t platform_topic_subscribe(cy_t* const                    cy,
                                          cy_topic_t* const              cy_topic,
                                          const cy_subscription_params_t params)
@@ -336,23 +337,6 @@ static void platform_topic_on_subscription_error(cy_t* const cy, cy_topic_t* con
 {
     CY_TRACE(cy, "⚠️ Subscription error on topic '%s': %d", (cy_topic != NULL) ? cy_topic->name : "", error);
 }
-
-static const cy_platform_t g_platform = {
-    .now            = platform_now,
-    .realloc        = platform_realloc,
-    .random         = platform_random,
-    .buffer_release = platform_buffer_release,
-
-    .p2p = platform_p2p,
-
-    .topic_new                   = platform_topic_new,
-    .topic_destroy               = platform_topic_destroy,
-    .topic_publish               = platform_topic_publish,
-    .topic_subscribe             = platform_topic_subscribe,
-    .topic_unsubscribe           = platform_topic_unsubscribe,
-    .topic_advertise             = platform_topic_advertise,
-    .topic_on_subscription_error = platform_topic_on_subscription_error,
-};
 
 // ----------------------------------------  END OF PLATFORM INTERFACE  ----------------------------------------
 
