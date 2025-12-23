@@ -1293,17 +1293,21 @@ void cy_subscriber_name(const cy_subscriber_t* const sub, char* const out_name)
     wkv_get_key(&sub->cy->subscribers_by_name, sub->root->index_name, out_name);
 }
 
-cy_err_t cy_respond(cy_responder_t* const responder, const cy_us_t deadline, const cy_bytes_t payload)
+cy_err_t cy_respond(cy_response_context_t* const context, const cy_us_t deadline, const cy_bytes_t payload)
 {
-    assert(responder != NULL);
-    const cy_err_t res = heartbeat_begin(responder->cy);
+    assert(context != NULL);
+    const cy_err_t res = heartbeat_begin(context->cy);
     if (res != CY_OK) {
         return res;
     }
+    const uint32_t cookie = context->cy->p2p_response_cookie_counter++;
     // TODO: endian-agnostic serialization
-    const uint64_t response_header[3] = { (uint64_t)p2p_kind_response, responder->topic_hash, responder->transfer_id };
-    const cy_bytes_t bytes            = { .size = sizeof(response_header), .data = &response_header, .next = &payload };
-    return responder->vtable->respond(responder, deadline, bytes, true);
+    // TODO: stage the response for retransmission until acknowledged
+    const uint64_t   response_header[3] = { ((uint64_t)p2p_kind_response) | ((uint64_t)cookie << 32U),
+                                            context->topic_hash,
+                                            context->transfer_id };
+    const cy_bytes_t bytes = { .size = sizeof(response_header), .data = &response_header, .next = &payload };
+    return context->responder.vtable->respond(&context->responder, deadline, bytes, true);
 }
 
 // =====================================================================================================================
@@ -1422,36 +1426,46 @@ cy_err_t cy_new(cy_t* const              cy,
     return res;
 }
 
-void cy_ingest(cy_topic_t* const topic, cy_ingest_t transfer)
+void cy_ingest(cy_topic_t* const    topic,
+               const cy_us_t        timestamp,
+               const uint64_t       transfer_id,
+               cy_scatter_t         payload,
+               const cy_responder_t responder)
 {
     assert(topic != NULL);
-
-    // Record activity so that the topic is not retired.
-    implicit_animate(topic, transfer.timestamp);
-
-    // Simply invoke all callbacks that match this topic name.
-    // The callback may unsubscribe, so we have to store the next pointer early.
-    const cy_topic_coupling_t* cpl = topic->couplings;
+    implicit_animate(topic, timestamp);
+    const cy_response_context_t response_context = { .cy          = topic->cy, //
+                                                     .topic_hash  = topic->hash,
+                                                     .transfer_id = transfer_id,
+                                                     .responder   = responder };
+    const cy_topic_coupling_t*  cpl              = topic->couplings;
+    size_t                      move_count       = 0;
+    // A callback may unsubscribe, so we have to store the next pointer early.
     while (cpl != NULL) {
         const cy_topic_coupling_t* const next_cpl = cpl->next;
         cy_subscriber_t*                 sub      = cpl->root->head;
         assert(sub != NULL);
         while (sub != NULL) {
             cy_subscriber_t* const next_sub = sub->next;
-            const cy_arrival_t     evt      = { .subscriber         = sub,
+            cy_arrival_t           arrival  = { .timestamp          = timestamp,
+                                                .payload            = payload,
+                                                .response_context   = response_context,
+                                                .subscriber         = sub,
                                                 .topic              = topic,
-                                                .transfer           = &transfer,
                                                 .substitution_count = cpl->substitution_count,
                                                 .substitutions      = cpl->substitutions };
-            sub->callback(cy, &evt);
+            sub->callback(&arrival);
+            const bool handler_took_ownership = cy_scatter_size(arrival.payload) < cy_scatter_size(payload);
+            if (handler_took_ownership) {
+                assert(move_count == 0); // At most one handler can take ownership of the payload.
+                move_count++;
+            }
             sub = next_sub;
         }
         cpl = next_cpl;
     }
-
-    // Release the payload at the end, unless the subscriber(s) took ownership of it.
-    if (transfer.payload.base.view.data != NULL) {
-        cy->platform->buffer_release(cy, transfer.payload);
+    if (move_count == 0) {
+        cy_scatter_free(&payload);
     }
 }
 
@@ -1477,16 +1491,18 @@ static void ingest_p2p_ack_response(cy_t* const       cy,
     // Specifically, find the pending response state and delete it.
 }
 
-static void ingest_p2p_response(cy_t* const               cy,
-                                cy_topic_t* const         topic,
-                                const uint64_t            transfer_id,
-                                const uint32_t            cookie,
-                                const cy_transfer_owned_t transfer)
+static void ingest_p2p_response(cy_t* const          cy,
+                                cy_topic_t* const    topic,
+                                const cy_us_t        timestamp,
+                                const uint64_t       transfer_id,
+                                const uint32_t       cookie,
+                                cy_scatter_t         payload,
+                                const cy_responder_t responder)
 {
     // Find the matching pending response future -- log(N) lookup.
     cy_tree_t* const tr = cavl2_find(topic->futures_by_transfer_id, &transfer_id, &cavl_comp_future_transfer_id);
     if (tr == NULL) {
-        cy->platform->buffer_release(cy, transfer.payload);
+        cy_scatter_free(&payload);
         return; // Unexpected or duplicate response. TODO: Linger completed futures for multiple responses?
     }
     cy_future_t* const fut = CAVL2_TO_OWNER(tr, cy_future_t, index_transfer_id);
@@ -1494,34 +1510,38 @@ static void ingest_p2p_response(cy_t* const               cy,
 
     // Finalize and retire the future.
     fut->state = cy_future_success;
-    cy_buffer_owned_release(cy, &fut->last_response.payload); // does nothing if already released
-    fut->last_response = transfer;
+    cy_scatter_free(&payload); // does nothing if already released
+    fut->response_timestamp = timestamp;
+    fut->response_payload   = cy_scatter_move(&payload);
     cavl2_remove(&cy->futures_by_deadline, &fut->index_deadline);
     cavl2_remove(&topic->futures_by_transfer_id, &fut->index_transfer_id);
     if (fut->callback != NULL) {
-        fut->callback(cy, fut);
+        fut->callback(fut);
     }
 
     // TODO: send rack.
     (void)cookie;
+    (void)responder;
 }
 
-void cy_ingest_p2p(cy_t* const cy, cy_ingest_t transfer)
+void cy_ingest_p2p(cy_t* const cy, const cy_us_t timestamp, cy_scatter_t payload, const cy_responder_t responder)
 {
     assert(cy != NULL);
     // We require the first 24 bytes to be non-fragmented. This is trivially ensured because the MTU of all transports
     // that fragment per-frame is much larger (UDP requires the MTU to be at least a few hundreds of bytes),
     // while small-MTU transports reassemble the payload into a contiguous buffer anyway.
-    if (transfer.payload.base.view.size < P2P_HEADER_BYTES) {
-        CY_TRACE(cy, "⚠️ Malformed size=%zu bytes", transfer.payload.base.view.size);
-        cy->platform->buffer_release(cy, transfer.payload);
+    if (cy_scatter_size(payload) < P2P_HEADER_BYTES) {
+        CY_TRACE(cy, "⚠️ Malformed size=%zu bytes", cy_scatter_size(payload));
+        cy_scatter_free(&payload);
         return; // Malformed response -- missing header.
     }
     // Deserialize the header. The rest of the payload is for the application.
     // TODO: endian-agnostic deserialization
     uint64_t response_header[3];
     static_assert(sizeof(response_header) == P2P_HEADER_BYTES, "P2P header size mismatch");
-    memcpy(&response_header, transfer.payload.base.view.data, P2P_HEADER_BYTES);
+    const size_t header_size = cy_gather(&payload, 0, P2P_HEADER_BYTES, &response_header);
+    assert(header_size == P2P_HEADER_BYTES);
+    (void)header_size;
     transfer.payload.base.view.size -= P2P_HEADER_BYTES;
     transfer.payload.base.view.data = ((const char*)transfer.payload.base.view.data) + P2P_HEADER_BYTES;
     const uint_fast8_t kind         = (uint_fast8_t)(response_header[0] & UINT8_MAX);
@@ -1532,27 +1552,27 @@ void cy_ingest_p2p(cy_t* const cy, cy_ingest_t transfer)
     // Find the topic -- log(N) lookup.
     cy_topic_t* const topic = cy_topic_find_by_hash(cy, topic_hash);
     if (topic == NULL) { // We don't know this topic, ignore it.
-        cy->platform->buffer_release(cy, transfer.payload);
+        cy_scatter_free(&payload);
         CY_TRACE(cy, "⚠️ Orphan kind=%u T%016llx", (unsigned)kind, (unsigned long long)topic_hash);
     } else {
         switch (kind) {
             case p2p_kind_ack_message: {
-                cy->platform->buffer_release(cy, transfer.payload);
+                cy_scatter_free(&payload);
                 ingest_p2p_ack_message(cy, topic, transfer_id);
                 break;
             }
             case p2p_kind_ack_response: {
-                cy->platform->buffer_release(cy, transfer.payload);
+                cy_scatter_free(&payload);
                 ingest_p2p_ack_response(cy, topic, transfer_id, cookie);
                 break;
             }
             case p2p_kind_response: {
                 ingest_p2p_ack_message(cy, topic, transfer_id); // response automatically confirms message receipt
-                ingest_p2p_response(cy, topic, transfer_id, cookie, transfer);
+                ingest_p2p_response(cy, topic, timestamp, transfer_id, cookie, payload, responder);
                 break;
             }
             default: {
-                cy->platform->buffer_release(cy, transfer.payload);
+                cy_scatter_free(&payload);
                 CY_TRACE(cy, "⚠️ Unknown kind=%u T%016llx", (unsigned)kind, (unsigned long long)topic_hash);
                 break;
             }
@@ -1568,9 +1588,9 @@ cy_err_t cy_update(cy_t* const cy)
     return heartbeat_poll(cy, now);
 }
 
-void cy_notify_topic_collision(cy_t* const cy, cy_topic_t* const topic)
+void cy_notify_topic_collision(cy_topic_t* const topic)
 {
     if (topic != NULL) {
-        schedule_gossip(cy, topic, true);
+        schedule_gossip(topic, true);
     }
 }

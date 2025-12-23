@@ -234,6 +234,8 @@ struct cy_t
     wkv_t subscribers_by_name;    ///< Both explicit and patterns.
     wkv_t subscribers_by_pattern; ///< Only patterns for implicit subscriptions on heartbeat.
 
+    uint32_t p2p_response_cookie_counter;
+
     /// For detecting timed out futures. This index spans all topics.
     cy_tree_t* futures_by_deadline;
     /// The user can use this field for arbitrary purposes.
@@ -329,16 +331,13 @@ uint32_t cy_topic_subject_id(const cy_topic_t* const topic);
 ///     cy_notify_topic_collision(cy, cy_topic_find_by_subject_id(cy, collision_subject_id));
 void cy_notify_topic_collision(cy_topic_t* const topic);
 
-typedef struct cy_ingest_t
-{
-    cy_us_t        timestamp;
-    cy_scatter_t   payload;
-    cy_responder_t responder;
-} cy_ingest_t;
-
 /// The transfer payload ownership is taken by this function.
-void cy_ingest(cy_topic_t* const topic, cy_ingest_t transfer);
-void cy_ingest_p2p(cy_t* const cy, cy_ingest_t transfer);
+void cy_ingest(cy_topic_t* const    topic,
+               const cy_us_t        timestamp,
+               const uint64_t       transfer_id,
+               cy_scatter_t         payload,
+               const cy_responder_t responder);
+void cy_ingest_p2p(cy_t* const cy, const cy_us_t timestamp, cy_scatter_t payload, const cy_responder_t responder);
 
 /// For diagnostics and logging only. Do not use in embedded and real-time applications.
 /// This function is only required if CY_CONFIG_TRACE is defined and is nonzero; otherwise it should be left undefined.

@@ -93,7 +93,7 @@ typedef struct cy_scatter_t
     const struct cy_scatter_vtable_t* vtable;
 } cy_scatter_t;
 
-/// Returns the total size of the scattered buffer in bytes.
+/// Returns the total size of the scattered buffer in bytes. The size of a moved-from instance is zero.
 static inline size_t cy_scatter_size(const cy_scatter_t scatter) { return scatter.size; }
 
 /// A convenience helper that returns a copy of the scatter object and invalidates the original.
@@ -237,32 +237,35 @@ static inline cy_err_t cy_publish1(cy_publisher_t* const pub, const cy_us_t tx_d
 typedef struct cy_subscriber_t cy_subscriber_t;
 
 /// This ought to be enough for any reasonable transport-specific state.
-#define CY_RESPONDER_STATE_SIZE_BYTES 64U
+#define CY_RESPONDER_STATE_SIZE_BYTES 32U
 
-/// Received messages are given a copyable responder instance to allow the application to respond to them if necessary.
-/// A responder is only valid for a single response. It can be copied and passed by value.
-/// The platform layer uses responder objects to store arbitrary transport-specific information needed to send the
-/// response back to the correct remote node. For example, it may contain the source addresses and port numbers,
-/// or pointers into private structures.
-///
-/// Note that this object avoids linking the topic instance that delivered the original message to avoid lifetime
-/// issues that would occur if the topic is destroyed between the message arrival and the response time.
-/// Instead of referencing the topic, the relevant parameters of the topic are stored here by value.
+/// Platform-specific P2P response behavior and data.
 typedef struct cy_responder_t
 {
-    cy_t* cy;
-    // TODO this is broken
-    uint64_t topic_hash;
-    uint64_t transfer_id;
-    uint64_t origin_id; ///< A platform-specific unique identifier of the remote node.
     union
     {
         uint64_t      u64[CY_RESPONDER_STATE_SIZE_BYTES / 8U];
+        uint32_t      u32[CY_RESPONDER_STATE_SIZE_BYTES / 4U];
+        unsigned char byte[CY_RESPONDER_STATE_SIZE_BYTES];
         void*         ptr[CY_RESPONDER_STATE_SIZE_BYTES / sizeof(void*)];
-        unsigned char byte[CY_RESPONDER_STATE_SIZE_BYTES / sizeof(unsigned char)];
     } state;
     const struct cy_responder_vtable_t* vtable;
 } cy_responder_t;
+
+/// Received transfers are given this copyable instance to allow sending P2P response transfers if necessary.
+/// It is only valid for a single response. It can be copied / passed by value.
+/// It can be trivially discarded if no response is needed.
+///
+/// This object avoids linking the topic instance that delivered the original message to avoid lifetime
+/// issues that would occur if the topic is destroyed between the message arrival and the response time.
+/// Instead of referencing the topic, the relevant parameters of the topic are stored here by value.
+typedef struct cy_response_context_t
+{
+    cy_t*          cy;
+    uint64_t       topic_hash;
+    uint64_t       transfer_id;
+    cy_responder_t responder;
+} cy_response_context_t;
 
 typedef struct cy_substitution_t
 {
@@ -271,15 +274,19 @@ typedef struct cy_substitution_t
 } cy_substitution_t;
 
 /// Optionally, the user handler can take ownership of the transfer payload using cy_scatter_move();
-/// however, this may cause undesirable interference with other subscribers that also match the same topic
-/// and are to receive the data after the current callback returns.
+/// however, to avoid use-after-free, the following rules must be followed:
+///     1. At most one handler can move the payload out of the arrival instance.
+///     2. If payload is moved out, it shall not be freed (see cy_scatter_free()) until after the callback returns,
+///        unless it is the last handler to process it.
 /// If the payload is not moved out, it will be freed automatically after return from the callback.
 typedef struct cy_arrival_t
 {
-    cy_us_t        timestamp;
-    uint64_t       transfer_id;
-    cy_scatter_t   payload;
-    cy_responder_t responder; ///< Can be copied out to respond later, after return from the callback.
+    cy_us_t      timestamp;
+    cy_scatter_t payload;
+
+    /// Can be copied out to respond later, after return from the callback. See cy_respond().
+    /// Nothing needs to be done if it is not needed to respond.
+    cy_response_context_t response_context;
 
     cy_subscriber_t*  subscriber; ///< Which subscriber matched on this topic by verbatim name or pattern.
     const cy_topic_t* topic;      ///< The specific topic that received the transfer.
@@ -355,7 +362,7 @@ void cy_subscriber_name(const cy_subscriber_t* const sub, char* const out_name);
 /// Send a response to a message previously received from a topic subscription. The response will be sent directly
 /// to the publisher using peer-to-peer transport, not affecting other nodes on this topic.
 /// This can be invoked from a subscription callback or at any later point as long as the responder object is available.
-cy_err_t cy_respond(cy_responder_t* const responder, const cy_us_t deadline, const cy_bytes_t payload);
+cy_err_t cy_respond(cy_response_context_t* const context, const cy_us_t deadline, const cy_bytes_t payload);
 
 // =====================================================================================================================
 //                                                  NODE & TOPIC
