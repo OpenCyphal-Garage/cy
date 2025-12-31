@@ -30,6 +30,7 @@ extern "C"
 /// The max namespace length should also provide space for at least one separator and the one-character topic name.
 #define CY_NAMESPACE_NAME_MAX (CY_TOPIC_NAME_MAX - 2)
 
+/// https://github.com/OpenCyphal-Garage/cy/issues/12#issuecomment-2953184238
 #define CY_PINNED_SUBJECT_ID_MAX 8186U
 
 #define CY_OK 0
@@ -138,25 +139,23 @@ typedef struct cy_publisher_t
 {
     cy_topic_t* topic; ///< Many-to-one relationship, never NULL; the topic is reference counted.
 
-    /// The transport parameters can be changed by the user at any time.
-    /// They will take effect on the next publish().
+    /// The transport parameters can be changed by the user at any time. They will take effect on the next cy_publish().
     cy_prio_t priority;
-    bool      fec; ///< TODO not currently used but should be
 
     void* user; ///< Opaque pointer for application use; not used by Cy.
 } cy_publisher_t;
 
-/// Future lifecycle:
-///     fresh --> pending --+--> success
-///                         +--> timeout_ack
-///                         +--> timeout_response
+/// idle --> waiting_delivery --> waiting_response --> done
+///                           \                    \-> timeout_response
+///                            \--> timeout_delivery
 typedef enum cy_future_state_t
 {
-    cy_future_fresh,
-    cy_future_pending,
-    cy_future_success,
-    cy_future_timeout_ack,      ///< Remote end did not confirm reception of the message.
-    cy_future_timeout_response, ///< Response was not received before the deadline.
+    cy_future_idle,
+    cy_future_waiting_delivery,
+    cy_future_waiting_response,
+    cy_future_done,
+    cy_future_timeout_delivery,
+    cy_future_timeout_response,
 } cy_future_state_t;
 
 typedef struct cy_future_t cy_future_t;
@@ -241,7 +240,7 @@ static inline cy_err_t cy_publish1(cy_publisher_t* const pub, const cy_us_t tx_d
 typedef struct cy_subscriber_t cy_subscriber_t;
 
 /// This ought to be enough for any reasonable transport-specific state.
-#define CY_RESPONDER_STATE_SIZE_BYTES 32U
+#define CY_RESPONDER_STATE_SIZE_BYTES 64U
 
 /// Received transfers are given this copyable instance to allow sending P2P response transfers if necessary.
 /// It is only valid for a single response. It can be copied / passed by value.
@@ -252,7 +251,7 @@ typedef struct cy_subscriber_t cy_subscriber_t;
 /// Instead of referencing the topic, the relevant parameters of the topic are stored here by value.
 typedef struct cy_responder_t
 {
-    cy_t* cy;
+    cy_t* cy; ///< Must be valid; the platform layer is responsible for ensuring this.
     union
     {
         uint64_t      u64[CY_RESPONDER_STATE_SIZE_BYTES / 8U];
