@@ -46,9 +46,6 @@
 /// Topics created explicitly by the application (without substitution tokens) are not affected by this timeout.
 #define IMPLICIT_TOPIC_DEFAULT_TIMEOUT_us (3600 * MEGA)
 
-/// P2P exchanges (acks, RPC responses) have a fixed header size before the payload.
-#define P2P_HEADER_BYTES 24U
-
 enum p2p_kind
 {
     p2p_kind_ack_message  = 0,
@@ -1293,21 +1290,14 @@ void cy_subscriber_name(const cy_subscriber_t* const sub, char* const out_name)
     wkv_get_key(&sub->cy->subscribers_by_name, sub->root->index_name, out_name);
 }
 
-cy_err_t cy_respond(cy_response_context_t* const context, const cy_us_t deadline, const cy_bytes_t payload)
+cy_err_t cy_respond(cy_responder_t* const responder, const cy_us_t deadline, const cy_bytes_t payload)
 {
-    assert(context != NULL);
-    const cy_err_t res = heartbeat_begin(context->cy);
+    assert(responder != NULL);
+    const cy_err_t res = heartbeat_begin(responder->cy);
     if (res != CY_OK) {
         return res;
     }
-    const uint32_t cookie = context->cy->p2p_response_cookie_counter++;
-    // TODO: endian-agnostic serialization
-    // TODO: stage the response for retransmission until acknowledged
-    const uint64_t   response_header[3] = { ((uint64_t)p2p_kind_response) | ((uint64_t)cookie << 32U),
-                                            context->topic_hash,
-                                            context->transfer_id };
-    const cy_bytes_t bytes = { .size = sizeof(response_header), .data = &response_header, .next = &payload };
-    return context->responder.vtable->respond(&context->responder, deadline, bytes, true);
+    return responder->vtable->respond(responder, deadline, payload);
 }
 
 // =====================================================================================================================

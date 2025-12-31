@@ -147,7 +147,7 @@ typedef struct cy_topic_vtable_t
 
     /// Instructs the underlying transport layer to publish a new message on the topic.
     /// The function shall not increment the transfer-ID counter; Cy will do it.
-    cy_err_t (*publish)(cy_publisher_t*, cy_us_t, cy_bytes_t, bool ack_required);
+    cy_err_t (*publish)(cy_publisher_t*, cy_us_t, cy_bytes_t, bool reliable);
 
     /// Instructs the underlying transport layer to create a new subscription on the topic.
     cy_err_t (*subscribe)(cy_topic_t*, cy_subscription_params_t);
@@ -178,7 +178,7 @@ typedef struct cy_responder_vtable_t
     ///     uint64 topic_hash   # The hash of the topic that the ack/response is for.
     ///     uint64 transfer_id  # The transfer-ID of the original message that this ack/response is for.
     ///     # If this is a response, the payload follows immediately after this header.
-    cy_err_t (*respond)(cy_responder_t*, cy_us_t tx_deadline, cy_bytes_t payload, bool ack_required);
+    cy_err_t (*respond)(cy_responder_t*, cy_us_t tx_deadline, cy_bytes_t payload);
 } cy_responder_vtable_t;
 
 /// Instances of cy are not copyable; they are always accessed via pointer provided during initialization.
@@ -233,8 +233,6 @@ struct cy_t
     /// The values of these tree nodes point to instances of cy_subscriber_root_t.
     wkv_t subscribers_by_name;    ///< Both explicit and patterns.
     wkv_t subscribers_by_pattern; ///< Only patterns for implicit subscriptions on heartbeat.
-
-    uint32_t p2p_response_cookie_counter;
 
     /// For detecting timed out futures. This index spans all topics.
     cy_tree_t* futures_by_deadline;
@@ -331,13 +329,24 @@ uint32_t cy_topic_subject_id(const cy_topic_t* const topic);
 ///     cy_notify_topic_collision(cy, cy_topic_find_by_subject_id(cy, collision_subject_id));
 void cy_notify_topic_collision(cy_topic_t* const topic);
 
+/// Communicates the delivery status of a message published on a topic.
+/// This is guaranteed to be invoked exactly once per published message where the reliable option is set,
+/// unless the publish function did not return CY_OK.
+/// Note that this function accepts a topic hash instead of a topic pointer, which is to decouple it from the
+/// topic lifetime -- by the time the delivery outcome is known, the topic may have been destroyed already.
+void cy_notify_delivery_outcome(cy_t* const cy, const uint64_t topic_hash, const uint64_t transfer_id, const bool ok);
+
+/// New message received on a topic.
 /// The transfer payload ownership is taken by this function.
 void cy_ingest(cy_topic_t* const    topic,
                const cy_us_t        timestamp,
                const uint64_t       transfer_id,
                cy_scatter_t         payload,
                const cy_responder_t responder);
-void cy_ingest_p2p(cy_t* const cy, const cy_us_t timestamp, cy_scatter_t payload, const cy_responder_t responder);
+
+/// New P2P response is received to a message published earlier.
+/// The transfer payload ownership is taken by this function.
+void cy_ingest_p2p(cy_topic_t* const topic, const cy_us_t timestamp, cy_scatter_t payload);
 
 /// For diagnostics and logging only. Do not use in embedded and real-time applications.
 /// This function is only required if CY_CONFIG_TRACE is defined and is nonzero; otherwise it should be left undefined.

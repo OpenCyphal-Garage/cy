@@ -122,9 +122,9 @@ size_t cy_gather(cy_scatter_t* const cursor, const size_t offset, const size_t s
 /// The output is an instance of cy_bytes_t with next=NULL because it is a single contiguous buffer.
 /// Doing this is only a good idea for small payloads.
 /// Usage example:
-///     CY_GATHER_HERE(my_bytes, my_scatter);
+///     CY_GATHER_ON_STACK(my_bytes, my_scatter);
 ///     foo(my_bytes.size, my_bytes.data);
-#define CY_GATHER_HERE(dest_bytes_name, scatter)                                                \
+#define CY_GATHER_ON_STACK(dest_bytes_name, scatter)                                            \
     cy_bytes_t    dest_bytes_name = { .size = cy_scatter_size(scatter) };                       \
     unsigned char dest_bytes_name##_storage[dest_bytes_name.size];                              \
     dest_bytes_name.data = &dest_bytes_name##_storage[0];                                       \
@@ -136,10 +136,14 @@ size_t cy_gather(cy_scatter_t* const cursor, const size_t offset, const size_t s
 
 typedef struct cy_publisher_t
 {
-    cy_topic_t* topic;    ///< Many-to-one relationship, never NULL; the topic is reference counted.
-    cy_prio_t   priority; ///< Defaults to cy_prio_nominal; can be overridden by the user at any time.
-    // TODO: add `bool fec`
-    void* user;
+    cy_topic_t* topic; ///< Many-to-one relationship, never NULL; the topic is reference counted.
+
+    /// The transport parameters can be changed by the user at any time.
+    /// They will take effect on the next publish().
+    cy_prio_t priority;
+    bool      fec; ///< TODO not currently used but should be
+
+    void* user; ///< Opaque pointer for application use; not used by Cy.
 } cy_publisher_t;
 
 /// Future lifecycle:
@@ -239,9 +243,16 @@ typedef struct cy_subscriber_t cy_subscriber_t;
 /// This ought to be enough for any reasonable transport-specific state.
 #define CY_RESPONDER_STATE_SIZE_BYTES 32U
 
-/// Platform-specific P2P response behavior and data.
+/// Received transfers are given this copyable instance to allow sending P2P response transfers if necessary.
+/// It is only valid for a single response. It can be copied / passed by value.
+/// It can be trivially discarded if no response is needed.
+///
+/// This object avoids linking the topic instance that delivered the original message to avoid lifetime
+/// issues that would occur if the topic is destroyed between the message arrival and the response time.
+/// Instead of referencing the topic, the relevant parameters of the topic are stored here by value.
 typedef struct cy_responder_t
 {
+    cy_t* cy;
     union
     {
         uint64_t      u64[CY_RESPONDER_STATE_SIZE_BYTES / 8U];
@@ -251,21 +262,6 @@ typedef struct cy_responder_t
     } state;
     const struct cy_responder_vtable_t* vtable;
 } cy_responder_t;
-
-/// Received transfers are given this copyable instance to allow sending P2P response transfers if necessary.
-/// It is only valid for a single response. It can be copied / passed by value.
-/// It can be trivially discarded if no response is needed.
-///
-/// This object avoids linking the topic instance that delivered the original message to avoid lifetime
-/// issues that would occur if the topic is destroyed between the message arrival and the response time.
-/// Instead of referencing the topic, the relevant parameters of the topic are stored here by value.
-typedef struct cy_response_context_t
-{
-    cy_t*          cy;
-    uint64_t       topic_hash;
-    uint64_t       transfer_id;
-    cy_responder_t responder;
-} cy_response_context_t;
 
 typedef struct cy_substitution_t
 {
@@ -286,7 +282,7 @@ typedef struct cy_arrival_t
 
     /// Can be copied out to respond later, after return from the callback. See cy_respond().
     /// Nothing needs to be done if it is not needed to respond.
-    cy_response_context_t response_context;
+    cy_responder_t responder;
 
     cy_subscriber_t*  subscriber; ///< Which subscriber matched on this topic by verbatim name or pattern.
     const cy_topic_t* topic;      ///< The specific topic that received the transfer.
@@ -331,7 +327,7 @@ struct cy_subscriber_t
     cy_subscription_params_t params;
 
     /// The callback may be changed by the user at any time; e.g., to implement a state machine.
-    /// The user field can be changed arbitrarily at any moment.
+    /// The user field is an opaque pointer that can be changed arbitrarily.
     cy_subscriber_callback_t callback;
     void*                    user;
 };
@@ -359,10 +355,10 @@ void cy_unsubscribe(cy_subscriber_t* const sub);
 /// Copies the subscriber name into the user-supplied buffer. Max size is CY_TOPIC_NAME_MAX.
 void cy_subscriber_name(const cy_subscriber_t* const sub, char* const out_name);
 
-/// Send a response to a message previously received from a topic subscription. The response will be sent directly
-/// to the publisher using peer-to-peer transport, not affecting other nodes on this topic.
+/// Send a response to a message previously received from a topic subscription.
+/// The response will be sent directly to the publisher using peer-to-peer transport, not affecting other nodes.
 /// This can be invoked from a subscription callback or at any later point as long as the responder object is available.
-cy_err_t cy_respond(cy_response_context_t* const context, const cy_us_t deadline, const cy_bytes_t payload);
+cy_err_t cy_respond(cy_responder_t* const responder, const cy_us_t deadline, const cy_bytes_t payload);
 
 // =====================================================================================================================
 //                                                  NODE & TOPIC
