@@ -89,7 +89,7 @@ typedef struct cy_bytes_t
 /// The size is chosen to match most small closures, which is helpful when pairing with Rust/C++ lambdas.
 typedef struct cy_user_context_t
 {
-    CY_ALIGN void* data[4U];
+    CY_ALIGN void* data[3];
 } cy_user_context_t;
 
 #ifdef __cplusplus

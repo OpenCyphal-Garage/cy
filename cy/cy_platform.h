@@ -68,8 +68,8 @@ typedef struct cy_scatter_vtable_t
 typedef struct cy_feedback_context_t cy_feedback_context_t;
 struct cy_feedback_context_t
 {
-    void* user;
-    void (*feedback)(void* user, bool success);
+    cy_user_context_t user;
+    void (*fun)(void); ///< May exceed sizeof(void*) depending on the platform; treat as opaque.
 };
 
 /// This is the base type that is extended by the platform layer with transport- and platform-specific entities,
