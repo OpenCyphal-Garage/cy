@@ -125,11 +125,11 @@ size_t cy_gather(cy_scatter_t* const cursor, const size_t offset, const size_t s
 /// Usage example:
 ///     CY_GATHER_ON_STACK(my_bytes, my_scatter);
 ///     foo(my_bytes.size, my_bytes.data);
-#define CY_GATHER_ON_STACK(dest_bytes_name, scatter)                                            \
-    cy_bytes_t    dest_bytes_name = { .size = cy_scatter_size(scatter) };                       \
-    unsigned char dest_bytes_name##_storage[dest_bytes_name.size];                              \
-    dest_bytes_name.data = &dest_bytes_name##_storage[0];                                       \
-    dest_bytes_name.size = cy_gather(&(scatter), 0, dest_bytes_name.size, dest_bytes_name.data)
+#define CY_GATHER_ON_STACK(dest_bytes_name, scatter)                                                                  \
+    cy_bytes_t    dest_bytes_name = { .size = cy_scatter_size(scatter) };                                             \
+    unsigned char dest_bytes_name##_storage[(dest_bytes_name).size];                                                  \
+    (dest_bytes_name).data = &dest_bytes_name##_storage[0];                                                           \
+    (dest_bytes_name).size = cy_gather(&(scatter), 0, (dest_bytes_name).size, dest_byt(dest_bytes_name) es_name.data)
 
 // =====================================================================================================================
 //                                                      PUBLISHER
@@ -137,64 +137,17 @@ size_t cy_gather(cy_scatter_t* const cursor, const size_t offset, const size_t s
 
 typedef struct cy_publisher_t
 {
-    cy_topic_t* topic; ///< Many-to-one relationship, never NULL; the topic is reference counted.
-
-    /// The transport parameters can be changed by the user at any time. They will take effect on the next cy_publish().
-    cy_prio_t priority;
-
-    void* user; ///< Opaque pointer for application use; not used by Cy.
+    const cy_topic_t* topic;    ///< Many-to-one relationship, never NULL; the topic is reference counted.
+    cy_prio_t         priority; ///< Defaults to nominal, can be changed at any moment.
+    void*             user;     ///< Opaque pointer for application use; not used by Cy.
 } cy_publisher_t;
-
-/// idle --> waiting_delivery --> waiting_response --> done
-///                           \                    \-> timeout_response
-///                            \--> timeout_delivery
-typedef enum cy_future_state_t
-{
-    cy_future_idle,
-    cy_future_waiting_delivery,
-    cy_future_waiting_response,
-    cy_future_done,
-    cy_future_timeout_delivery,
-    cy_future_timeout_response,
-} cy_future_state_t;
-
-typedef struct cy_future_t cy_future_t;
-
-typedef void (*cy_future_callback_t)(cy_future_t*);
-
-/// Register an expectation for a response to a message sent to the topic.
-/// The future shall not be moved or altered in any way except for the user and callback fields until its state is
-/// no longer pending. Once it is not pending, it can be reused for another request.
-/// The future will enter the failure state to indicate that the response was not received before the deadline.
-struct cy_future_t
-{
-    cy_tree_t index_deadline;
-    cy_tree_t index_transfer_id;
-
-    cy_publisher_t*   publisher;
-    cy_future_state_t state;
-    uint64_t          transfer_id; ///< Remember that transports with narrow transfer-ID should recover the full ID.
-    cy_us_t           deadline;    ///< We're indexing on this so it shall not be changed after insertion.
-
-    /// These fields are populated once the response is received.
-    /// The payload ownership is transferred to this structure.
-    /// If a payload is already available when a response is received, Cy will free the old payload first.
-    /// The user can detect when a new response is received by checking its timestamp.
-    cy_us_t      response_timestamp;
-    cy_scatter_t response_payload;
-
-    /// Only these fields can be altered by the user while the future is pending.
-    /// The callback may be NULL if the application prefers to check last_response by polling.
-    cy_future_callback_t callback;
-    void*                user;
-};
 
 /// Create a new publisher on the topic.
 /// Every advertisement needs to be unadvertised later to clean up resources.
 ///
 /// The response_extent is the extent (maximum size) of the response payload if the publisher expects responses;
 /// if no response is expected/needed, the response_extent should be zero. If responses are needed but their maximum
-/// size is unknown, pick any sensible large value.
+/// size is unknown, use SIZE_MAX.
 cy_err_t cy_advertise(cy_t* const cy, cy_publisher_t* const pub, const wkv_str_t name, const size_t response_extent);
 static inline cy_err_t cy_advertise_c(cy_t* const           cy,
                                       cy_publisher_t* const pub,
@@ -205,32 +158,47 @@ static inline cy_err_t cy_advertise_c(cy_t* const           cy,
 }
 void cy_unadvertise(cy_publisher_t* const pub);
 
-/// Just a convenience function, nothing special.
-/// The initial future state is cy_future_fresh.
-void cy_future_new(cy_future_t* const future, const cy_future_callback_t callback, void* const user);
-
-/// This needs not be done after a future completes normally. It is only needed if the future needs to be
-/// destroyed before it completes. Calling this on a non-pending future has no effect.
-void cy_future_cancel(cy_future_t* const future);
-
 /// The transfer-ID is always incremented, even on failure, to signal lost messages.
 ///
-/// If no response is needed/expected, the future must be NULL and the response_deadline is ignored.
-/// Otherwise, future must point to an uninitialized cy_future_t instance.
+/// If the delivery callback is provided, reliable delivery will be used, attempting to deliver the message
+/// until the specified deadline is reached. The outcome will be reported via the delivery callback,
+/// which is GUARANTEED to be invoked EXACTLY ONCE per published message unless the function did not return CY_OK.
+/// If the delivery callback is NULL, best-effort delivery will be used, and no outcome will be reported.
 ///
-/// The response future will not be registered unless the result is non-negative.
+/// If the response callback is provided, a P2P response transfer will be awaited from a remote node that
+/// received the published message. The response or lack thereof will be reported via the response callback.
+/// The response callback is GUARANTEED to be invoked EXACTLY ONCE per published message unless the function
+/// did not return CY_OK. If no response is received before the deadline, the response callback will be invoked
+/// with a negative timestamp and empty payload. If the response callback is NULL, no response will be awaited.
 ///
-/// If the response deadline is in the past, the message will be sent anyway but it will time out immediately.
-cy_err_t cy_publish(cy_publisher_t* const pub,
-                    const cy_us_t         tx_deadline,
+/// If both callbacks are given and the delivery fails, the response callback will still be invoked.
+/// The guaranteed callback invocation regardless of the outcome is taken very seriously because it simplifies
+/// resource management for the application.
+cy_err_t cy_request(cy_publisher_t* const pub,
+                    const cy_us_t         deadline,
                     const cy_bytes_t      payload,
-                    const cy_us_t         response_deadline,
-                    cy_future_t* const    future);
+                    void* const           user_delivery,
+                    void (*const cb_delivery)(void* user_delivery, bool success),
+                    void* const user_response,
+                    void (*const cb_response)(void*        user_response,
+                                              cy_us_t      response_timestamp,
+                                              cy_scatter_t response_payload));
 
-/// A simpler wrapper over cy_publish() when no ack or response is needed/expected. 1 means one way.
-static inline cy_err_t cy_publish1(cy_publisher_t* const pub, const cy_us_t tx_deadline, const cy_bytes_t payload)
+/// A convenience wrapper on top of cy_request for sending reliable one-way messages without response.
+static inline cy_err_t cy_publish(cy_publisher_t* const pub,
+                                  const cy_us_t         deadline,
+                                  const cy_bytes_t      payload,
+                                  void* const           user_delivery,
+                                  void (*const cb_delivery)(void* user_delivery, bool success))
 {
-    return cy_publish(pub, tx_deadline, payload, 0, NULL);
+    return cy_request(pub, deadline, payload, user_delivery, cb_delivery, NULL, NULL);
+}
+
+/// A convenience wrapper on top of cy_publish that sends a one-way best-effort message without ack nor response.
+/// The "1" suffix means "try once 1-way".
+static inline cy_err_t cy_publish1(cy_publisher_t* const pub, const cy_us_t deadline, const cy_bytes_t payload)
+{
+    return cy_publish(pub, deadline, payload, NULL, NULL);
 }
 
 // =====================================================================================================================
@@ -287,7 +255,8 @@ typedef struct cy_arrival_t
     const cy_topic_t* topic;      ///< The specific topic that received the transfer.
 
     /// When a pattern match occurs, the matcher will store the string substitutions that had to be made to
-    /// achieve the match. For example, if the pattern is "ins/?/data/*" and the key is "ins/0/data/foo/456",
+    /// achieve the match. The substitutions are listed in the order of their occurrence in the pattern.
+    /// For example, if the pattern is "ins/?/data/*" and the key is "ins/0/data/foo/456",
     /// then the substitutions will be (together with their ordinals):
     ///  1. #0 "0"
     ///  2. #1 "foo"
@@ -300,8 +269,7 @@ typedef struct cy_arrival_t
 typedef void (*cy_subscriber_callback_t)(cy_arrival_t*);
 
 /// Disable strictly increasing transfer-ID ordering enforcement and deliver messages as they arrive immediately.
-/// Refer to libudpard docs for the explanation of the available options.
-/// This should be the default option if not sure.
+/// Duplicates will still be filtered out. This should be the default option if not sure.
 #define CY_SUBSCRIPTION_REORDERING_WINDOW_UNORDERED (-1)
 
 /// These parameters are used to configure the underlying transport layer implementation.
@@ -356,8 +324,15 @@ void cy_subscriber_name(const cy_subscriber_t* const sub, char* const out_name);
 
 /// Send a response to a message previously received from a topic subscription.
 /// The response will be sent directly to the publisher using peer-to-peer transport, not affecting other nodes.
-/// This can be invoked from a subscription callback or at any later point as long as the responder object is available.
-cy_err_t cy_respond(cy_responder_t* const responder, const cy_us_t deadline, const cy_bytes_t payload);
+/// This can be invoked from a subscription callback or at any later point as long as the responder object is available,
+/// but there may be at most one such invocation per responder instance.
+/// The feedback may be NULL if no delivery status notification is needed; the absence of the callback does not imply
+/// that the transfer will not be sent in the reliable mode.
+cy_err_t cy_respond(cy_responder_t* const responder,
+                    const cy_us_t         deadline,
+                    const cy_bytes_t      payload,
+                    void* const           user_delivery,
+                    void (*const cb_delivery)(void* user_delivery, bool success));
 
 // =====================================================================================================================
 //                                                  NODE & TOPIC

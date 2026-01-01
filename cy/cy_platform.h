@@ -64,6 +64,14 @@ typedef struct cy_scatter_vtable_t
     size_t (*gather)(cy_scatter_t*, size_t, size_t, void*);
 } cy_scatter_vtable_t;
 
+/// The data that is forwarded back to Cy per message delivery callback by value.
+typedef struct cy_feedback_context_t cy_feedback_context_t;
+struct cy_feedback_context_t
+{
+    void* user;
+    void (*feedback)(void* user, bool success);
+};
+
 /// This is the base type that is extended by the platform layer with transport- and platform-specific entities,
 /// such as socket handles, etc. Instantiation is therefore done inside the platform layer in the heap or some
 /// other dynamic storage. The user code is not expected to interact with the topic type, and the only reason it is
@@ -123,9 +131,8 @@ typedef struct cy_topic_t
     cy_us_t ts_origin;   ///< An approximation of when the topic was first seen on the network.
     cy_us_t ts_animated; ///< Last time the topic saw activity that prevents it from being retired.
 
-    /// Used for matching futures against received responses.
-    /// The platform layer can access this too if needed.
-    cy_tree_t* futures_by_transfer_id;
+    /// Used for matching pending response states against received responses by transfer-ID.
+    cy_tree_t* response_by_transfer_id;
 
     /// Only used if the application publishes data on this topic.
     /// pub_count tracks the number of existing advertisements on this topic; when this number reaches zero
@@ -149,7 +156,11 @@ typedef struct cy_topic_vtable_t
     /// The function shall not increment the transfer-ID counter; Cy will do it.
     /// If reliable mode is chosen, the outcome will ALWAYS be reported EXACTLY ONCE per successful publish() call
     /// via cy_on_message_feedback().
-    cy_err_t (*publish)(cy_publisher_t*, cy_us_t, cy_bytes_t, bool reliable);
+    cy_err_t (*publish)(cy_publisher_t*, cy_us_t, cy_bytes_t, bool reliable, cy_feedback_context_t context);
+
+    /// If there is a pending reliable transfer with the given transfer-ID, cancel it.
+    /// Returns true if such transfer was found and cancelled; false otherwise.
+    bool (*cancel)(cy_publisher_t*, uint64_t transfer_id);
 
     /// Instructs the underlying transport layer to create a new subscription on the topic.
     /// Importantly, this may be invoked on an already subscribed topic when the parameters have changed,
@@ -176,7 +187,7 @@ typedef struct cy_responder_vtable_t
     /// Implementations may optionally invalidate the responder object after use -- only a single use is guaranteed.
     /// Currently, all P2P response transfers are sent using the reliable delivery mode, and the result of the transfer
     /// is reported via cy_on_message_feedback().
-    cy_err_t (*respond)(cy_responder_t*, cy_us_t tx_deadline, cy_bytes_t payload);
+    cy_err_t (*respond)(cy_responder_t*, cy_us_t tx_deadline, cy_bytes_t payload, cy_feedback_context_t context);
 } cy_responder_vtable_t;
 
 /// Instances of cy are not copyable; they are always accessed via pointer provided during initialization.
@@ -228,9 +239,10 @@ struct cy_t
     wkv_t subscribers_by_name;    ///< Both explicit and patterns.
     wkv_t subscribers_by_pattern; ///< Only patterns for implicit subscriptions on heartbeat.
 
-    /// For detecting timed out futures. This index spans all topics.
-    cy_tree_t* futures_by_deadline;
-    /// The user can use this field for arbitrary purposes.
+    /// For detecting timed out responses. This index spans all topics.
+    cy_tree_t* responses_by_deadline;
+
+    /// The user can use this field for arbitrary purposes. The platform layer shall not touch it.
     void* user;
 };
 
@@ -349,8 +361,16 @@ void cy_on_response(cy_t* const        cy,
 /// unless the publish function did not return CY_OK.
 /// This function accepts a topic hash instead of a topic pointer, which is to decouple it from the topic lifetime
 /// -- by the time the delivery outcome is known, the topic may have been destroyed already.
-void cy_on_message_feedback(cy_t* const cy, const uint64_t topic_hash, const uint64_t transfer_id, const bool success);
-void cy_on_response_feedback(cy_t* const cy, const uint64_t topic_hash, const uint64_t transfer_id, const bool success);
+void cy_on_message_feedback(cy_t* const                 cy,
+                            const uint64_t              topic_hash,
+                            const uint64_t              transfer_id,
+                            const bool                  success,
+                            const cy_feedback_context_t context);
+void cy_on_response_feedback(cy_t* const                 cy,
+                             const uint64_t              topic_hash,
+                             const uint64_t              transfer_id,
+                             const bool                  success,
+                             const cy_feedback_context_t context);
 
 /// For diagnostics and logging only. Do not use in embedded and real-time applications.
 /// This function is only required if CY_CONFIG_TRACE is defined and is nonzero; otherwise it should be left undefined.
