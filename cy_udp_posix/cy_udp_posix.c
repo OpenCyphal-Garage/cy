@@ -32,6 +32,7 @@
 /// Some arbitrary initial extent for P2P transfers. Will be increased as needed, but never decreased.
 #define P2P_INITIAL_EXTENT 1024U
 
+static size_t  smaller(const size_t a, const size_t b) { return (a < b) ? a : b; }
 static int64_t min_i64(const int64_t a, const int64_t b) { return (a < b) ? a : b; }
 static int64_t min_i64_3(const int64_t a, const int64_t b, const int64_t c) { return min_i64(a, min_i64(b, c)); }
 
@@ -79,17 +80,6 @@ static void mem_free(void* const user, const size_t size, void* const pointer)
     }
 }
 
-static void purge_tx(cy_udp_posix_t* const cy_udp, const uint_fast8_t iface_index)
-{
-    udpard_tx_t* const tx  = &cy_udp->udpard_tx[iface_index];
-    udpard_tx_item_t*  it  = NULL;
-    const udpard_us_t  now = cy_udp_posix_now();
-    while ((it = udpard_tx_peek(tx, now))) {
-        udpard_tx_pop(tx, it);
-        udpard_tx_free(tx->memory, it);
-    }
-}
-
 static cy_err_t err_from_udp_wrapper(const int16_t e)
 {
     switch (e) {
@@ -102,67 +92,68 @@ static cy_err_t err_from_udp_wrapper(const int16_t e)
     }
 }
 
-static udpard_remote_t response_context_to_remote(const cy_response_context_t* const ctx)
+typedef struct responder_context_t
 {
-    udpard_remote_t rem = { .uid = ctx->u64[3] };
-    for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
-        rem.endpoints[i].ip   = ctx->u64[i] & UINT32_MAX;
-        rem.endpoints[i].port = (uint16_t)(ctx->u64[i] >> 32U);
-    }
-    return rem;
+    uint64_t        topic_hash;
+    uint64_t        transfer_id;
+    udpard_prio_t   priority;
+    udpard_remote_t remote;
+} responder_context_t;
+static_assert(sizeof(responder_context_t) <= CY_RESPONDER_STATE_BYTES, "");
+
+static responder_context_t responder_unbox(const cy_responder_t responder)
+{
+    responder_context_t out;
+    memcpy(&out, responder.state, sizeof(out));
+    return out;
 }
 
-static cy_response_context_t remote_to_response_context(const udpard_remote_t* const remote)
+static cy_responder_t make_responder(cy_t* const           cy,
+                                     const uint64_t        topic_hash,
+                                     const uint64_t        transfer_id,
+                                     const udpard_prio_t   priority,
+                                     const udpard_remote_t remote)
 {
-    cy_response_context_t ctx = { 0 };
-    ctx.u64[3]                = remote->uid;
-    for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
-        ctx.u64[i] = ((uint64_t)remote->endpoints[i].port << 32U) | (uint64_t)remote->endpoints[i].ip;
-    }
-    return ctx;
+    cy_responder_t      out;
+    responder_context_t context;
+    context.topic_hash  = topic_hash;
+    context.transfer_id = transfer_id;
+    context.priority    = priority;
+    context.remote      = remote;
+    memset(&out, 0, sizeof(out));
+    out.cy = cy;
+    memcpy(out.state, &context, sizeof(context));
+    return out;
 }
 
-static cy_err_t tx_push(cy_udp_posix_t* const   cy_udp,
-                        const cy_us_t           tx_deadline,
-                        const cy_prio_t         priority,
-                        const uint64_t          transfer_id,
-                        const uint64_t          topic_hash,
-                        const udpard_udpip_ep_t dest_ep[UDPARD_NETWORK_INTERFACE_COUNT_MAX],
-                        const cy_bytes_t        payload,
-                        const bool              ack_required)
+// ----------------------------------------  SCATTER IMPLEMENTATION  ----------------------------------------
+
+static void scatter_free(cy_scatter_t* const self)
 {
-    CY_GATHER_HERE(linear_payload, payload);
-    cy_err_t          res = CY_OK;
-    const udpard_us_t now = cy_udp_posix_now();
-    for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
-        if (cy_udp->udpard_tx[i].queue_capacity > 0) {
-            const uint64_t err_oom = cy_udp->udpard_tx[i].errors_oom;
-            const uint64_t err_cap = cy_udp->udpard_tx[i].errors_capacity;
-            const uint32_t n_frames =
-              udpard_tx_push(&cy_udp->udpard_tx[i],
-                             now,
-                             tx_deadline,
-                             (udpard_prio_t)priority,
-                             topic_hash,
-                             dest_ep[i],
-                             transfer_id,
-                             (udpard_bytes_t){ .size = linear_payload.size, .data = linear_payload.data },
-                             ack_required,
-                             NULL);
-            // On error, keep going but remember the last error encountered.
-            if (n_frames == 0) {
-                if (err_oom < cy_udp->udpard_tx[i].errors_oom) {
-                    res = CY_ERR_MEMORY;
-                } else if (err_cap < cy_udp->udpard_tx[i].errors_capacity) {
-                    res = CY_ERR_CAPACITY;
-                } else {
-                    res = CY_ERR_ARGUMENT;
-                }
-            }
-        }
-    }
-    return res;
+    udpard_fragment_free_all((udpard_fragment_t*)self->state[0], *(udpard_mem_resource_t*)self->state[1]);
 }
+
+static size_t gather(cy_scatter_t* const self, const size_t offset, const size_t size, void* const destination)
+{
+    const udpard_fragment_t** cursor = (const udpard_fragment_t**)&self->state[0];
+    return udpard_fragment_gather(cursor, offset, size, destination);
+}
+
+static size_t gather_1frame(cy_scatter_t* const self, const size_t offset, const size_t size, void* const destination)
+{
+    const udpard_fragment_t* const frag = (const udpard_fragment_t*)self->state[0];
+    assert((frag->index_offset.lr[0] == NULL) && (frag->index_offset.lr[1] == NULL));
+    size_t out = 0;
+    if (offset < frag->view.size) {
+        const size_t to_copy = smaller(size, frag->view.size - offset);
+        memcpy(destination, ((const char*)frag->view.data) + offset, to_copy);
+        out = to_copy;
+    }
+    return out;
+}
+
+static const cy_scatter_vtable_t scatter_vtable        = { .free = scatter_free, .gather = gather };
+static const cy_scatter_vtable_t scatter_vtable_1frame = { .free = scatter_free, .gather = gather_1frame };
 
 // ----------------------------------------  PLATFORM INTERFACE  ----------------------------------------
 

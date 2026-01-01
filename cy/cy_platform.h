@@ -210,11 +210,11 @@ struct cy_t
     uint32_t subject_id_modulus;
 
     /// Heartbeat topic and related items.
-    cy_publisher_t  heartbeat_pub;
-    cy_subscriber_t heartbeat_sub;
-    cy_us_t         heartbeat_period;
-    cy_us_t         heartbeat_next;
-    cy_us_t         heartbeat_next_urgent;
+    cy_publisher_t*  heartbeat_pub;
+    cy_subscriber_t* heartbeat_sub;
+    cy_us_t          heartbeat_period;
+    cy_us_t          heartbeat_next;
+    cy_us_t          heartbeat_next_urgent;
 
     cy_us_t implicit_topic_timeout;
 

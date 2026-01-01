@@ -21,6 +21,7 @@ Checks: >-
   -readability-redundant-member-init,
   -llvm-header-guard,
   -llvm-include-order,
+  -*-include-cleaner,
   -bugprone-easily-swappable-parameters,
   -cert-err58-cpp,
   -cert-msc30-c,

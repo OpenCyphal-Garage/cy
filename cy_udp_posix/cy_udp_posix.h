@@ -18,10 +18,8 @@ extern "C"
 {
 #endif
 
-#define CY_UDP_POSIX_IFACE_COUNT_MAX UDPARD_NETWORK_INTERFACE_COUNT_MAX
-
-/// Any smaller value is also acceptable.
-#define CY_UDP_POSIX_SUBJECT_ID_MODULUS_MAX (UDPARD_IPv4_SUBJECT_ID_MAX + 1U)
+#define CY_UDP_POSIX_IFACE_COUNT_MAX UDPARD_IFACE_COUNT_MAX
+#define CY_UDP_POSIX_SUBJECT_ID_MAX  UDPARD_IPv4_SUBJECT_ID_MAX
 
 typedef struct cy_udp_posix_t       cy_udp_posix_t;
 typedef struct cy_udp_posix_topic_t cy_udp_posix_topic_t;
@@ -50,16 +48,12 @@ struct cy_udp_posix_t
     udpard_mem_resource_t mem;
 
     udpard_rx_port_t p2p_port;
-    uint64_t         p2p_transfer_id; ///< A simple shared counter for all outgoing P2P transfers.
 
     udpard_rx_t   udpard_rx;
-    udpard_tx_t   udpard_tx[CY_UDP_POSIX_IFACE_COUNT_MAX];
+    udpard_tx_t   udpard_tx;
     udp_wrapper_t sock[CY_UDP_POSIX_IFACE_COUNT_MAX]; ///< All TX and P2P RX.
     uint32_t      local_ip[CY_UDP_POSIX_IFACE_COUNT_MAX];
     uint16_t      local_tx_port[CY_UDP_POSIX_IFACE_COUNT_MAX];
-
-    /// Mapping from UDPARD priority (0..7) to DSCP value (0..63). Defaults to all zeros, can be changed at any time.
-    uint8_t map_priority_to_dscp[UDPARD_PRIORITY_MAX + 1U];
 
     /// Handler for errors occurring while reading from the socket of the topic on the specified iface.
     /// The default handler is provided which will use CY_TRACE() to report the error.
@@ -92,16 +86,15 @@ cy_err_t               cy_udp_posix_new(cy_udp_posix_t* const cy_udp,
                                         const wkv_str_t       name,
                                         const wkv_str_t       namespace_,
                                         const uint32_t        local_iface_address[CY_UDP_POSIX_IFACE_COUNT_MAX],
-                                        const size_t          tx_queue_capacity_per_iface);
+                                        const size_t          tx_queue_capacity);
 static inline cy_err_t cy_udp_posix_new_c(cy_udp_posix_t* const cy_udp,
                                           const uint64_t        uid,
                                           const char* const     name,
                                           const char* const     namespace_,
                                           const uint32_t        local_iface_address[CY_UDP_POSIX_IFACE_COUNT_MAX],
-                                          const size_t          tx_queue_capacity_per_iface)
+                                          const size_t          tx_queue_capacity)
 {
-    return cy_udp_posix_new(
-      cy_udp, uid, wkv_key(name), wkv_key(namespace_), local_iface_address, tx_queue_capacity_per_iface);
+    return cy_udp_posix_new(cy_udp, uid, wkv_key(name), wkv_key(namespace_), local_iface_address, tx_queue_capacity);
 }
 
 /// Keep running the event loop until the deadline is reached or until the first error.
