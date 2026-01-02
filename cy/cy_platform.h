@@ -45,6 +45,14 @@ extern "C"
 {
 #endif
 
+typedef struct cy_tree_t cy_tree_t;
+struct cy_tree_t
+{
+    cy_tree_t*  up;
+    cy_tree_t*  lr[2];
+    int_fast8_t bf;
+};
+
 typedef struct cy_list_member_t cy_list_member_t;
 struct cy_list_member_t
 {
@@ -57,12 +65,12 @@ typedef struct cy_list_t
     cy_list_member_t* tail; ///< NULL if list empty
 } cy_list_t;
 
-/// Platform-specific implementation of cy_scatter_t.
-typedef struct cy_scatter_vtable_t
+/// Platform-specific implementation of cy_message_t.
+typedef struct cy_message_vtable_t
 {
-    void (*free)(cy_scatter_t*);
-    size_t (*gather)(cy_scatter_t*, size_t, size_t, void*);
-} cy_scatter_vtable_t;
+    void (*free)(cy_message_t*);
+    size_t (*read)(cy_message_t*, size_t, size_t, void*);
+} cy_message_vtable_t;
 
 /// The data that is forwarded back to Cy per message delivery callback by value.
 typedef struct cy_feedback_context_t cy_feedback_context_t;
@@ -166,13 +174,13 @@ typedef struct cy_topic_vtable_t
     /// Importantly, this may be invoked on an already subscribed topic when the parameters have changed,
     /// but the subject-ID remains the same.
     /// On subject-ID change, this is always preceded by an unsubscribe() call.
-    cy_err_t (*subscribe)(cy_topic_t*, cy_subscription_params_t);
+    cy_err_t (*subscribe)(cy_topic_t*, size_t, cy_us_t);
 
     /// Instructs the underlying transport to destroy an existing subscription.
     void (*unsubscribe)(cy_topic_t*);
 
     /// Invoked when a new publisher is created on the topic.
-    /// The main purpose here is to communicate the response extent (i.e., the maximum size of response payloads
+    /// The main purpose here is to communicate the response extent (i.e., the maximum size of response messages
     /// that is of interest for the application, allowing the transport to truncate the rest)
     /// requested by this publisher to the platform layer, allowing it to configure the P2P port accordingly.
     void (*advertise)(cy_topic_t*, size_t response_extent);
@@ -187,7 +195,7 @@ typedef struct cy_responder_vtable_t
     /// Implementations may optionally invalidate the responder object after use -- only a single use is guaranteed.
     /// Currently, all P2P response transfers are sent using the reliable delivery mode, and the result of the transfer
     /// is reported via cy_on_message_feedback().
-    cy_err_t (*respond)(cy_responder_t*, cy_us_t tx_deadline, cy_bytes_t payload, cy_feedback_context_t context);
+    cy_err_t (*respond)(cy_responder_t*, cy_us_t tx_deadline, cy_bytes_t message, cy_feedback_context_t context);
 } cy_responder_vtable_t;
 
 /// Instances of cy are not copyable; they are always accessed via pointer provided during initialization.
@@ -334,24 +342,24 @@ uint32_t cy_topic_subject_id(const cy_topic_t* const topic);
 void cy_on_topic_collision(cy_topic_t* const topic);
 
 /// New message received on a topic.
-/// The transfer payload ownership is taken by this function.
+/// The transfer message ownership is taken by this function.
 /// No effect if the topic is NULL.
 void cy_on_message(cy_topic_t* const    topic,
                    const cy_us_t        timestamp,
                    const uint64_t       transfer_id,
-                   const cy_scatter_t   payload,
+                   const cy_message_t   message,
                    const cy_responder_t responder);
 
 /// New P2P response to a message published earlier is received. The topic hash and the transfer-ID of the original
 /// message are provided.
 /// This function accepts a topic hash instead of a topic pointer, which is to decouple it from the topic lifetime
 /// -- by the time the response is received, the topic may have been destroyed already.
-/// The transfer payload ownership is taken by this function.
+/// The transfer message ownership is taken by this function.
 void cy_on_response(cy_t* const        cy,
                     const cy_us_t      timestamp,
                     const uint64_t     topic_hash,
                     const uint64_t     transfer_id,
-                    const cy_scatter_t payload);
+                    const cy_message_t message);
 
 /// Communicates the delivery status of a reliable message published on a topic (with the topic hash and the
 /// transfer-ID of the message), and a P2P response sent to a previously received message (with the topic hash and

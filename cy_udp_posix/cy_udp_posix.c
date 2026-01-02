@@ -126,7 +126,7 @@ static cy_responder_t make_responder(cy_t* const           cy,
     return out;
 }
 
-// ----------------------------------------  SCATTER IMPLEMENTATION  ----------------------------------------
+// ----------------------------------------  MESSAGE BUFFER IMPLEMENTATION  ----------------------------------------
 
 static void scatter_free(cy_scatter_t* const self)
 {

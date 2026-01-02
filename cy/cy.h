@@ -20,6 +20,14 @@ extern "C"
 {
 #endif
 
+#if defined(__STDC_VERSION__) && (__STDC_VERSION__ < 201112L)
+#define CY_ALIGN
+#elif defined(__STDC_VERSION__) && (__STDC_VERSION__ < 202311L)
+#define CY_ALIGN _Alignas(max_align_t)
+#else
+#define CY_ALIGN alignas(max_align_t)
+#endif
+
 /// A sensible middle ground between worst-case gossip traffic and memory utilization vs. longest name support.
 /// In CAN FD networks, topic names should be short to avoid multi-frame heartbeats.
 ///
@@ -59,15 +67,6 @@ typedef enum cy_prio_t
     cy_prio_optional    = 7,
 } cy_prio_t;
 
-/// Not for public use.
-typedef struct cy_tree_t cy_tree_t;
-struct cy_tree_t
-{
-    cy_tree_t*  up;
-    cy_tree_t*  lr[2];
-    int_fast8_t bf;
-};
-
 /// An immutable borrowed buffer, optionally fragmented if next is not NULL. The last entry has next==NULL.
 /// The optional fragmentation allows efficient handling of scatter/gather I/O without copying the data.
 typedef struct cy_bytes_t
@@ -77,16 +76,8 @@ typedef struct cy_bytes_t
     const struct cy_bytes_t* next;
 } cy_bytes_t;
 
-#if defined(__STDC_VERSION__) && (__STDC_VERSION__ < 201112L)
-#define CY_ALIGN
-#elif defined(__STDC_VERSION__) && (__STDC_VERSION__ < 202311L)
-#define CY_ALIGN _Alignas(max_align_t)
-#else
-#define CY_ALIGN alignas(max_align_t)
-#endif
-
 /// An opaque user context enabling the application to share data with callbacks. It is intended to be passed by value.
-/// The size is chosen to match most small closures, which is helpful when pairing with Rust/C++ lambdas.
+/// The size is chosen to match most small closures, which is helpful when interfacing with Rust/C++ lambdas.
 typedef struct cy_user_context_t
 {
     CY_ALIGN void* data[3];
@@ -100,58 +91,53 @@ typedef struct cy_user_context_t
 #endif
 
 // =====================================================================================================================
-//                                                  SCATTER BUFFER
+//                                                  MESSAGE BUFFER
 // =====================================================================================================================
 
 /// A type-erased movable received transfer buffer handle with a platform-specific implementation.
-/// It allows the platform layer to eliminate payload copying until/unless explicitly requested by the application.
-/// Some transport libraries (e.g., libudpard) store the payload in a set of segments obtained directly from the NIC.
-/// Use cy_gather to access the data.
-/// Avoid copying instances, consider using cy_scatter_move() instead.
+/// It allows the platform layer to eliminate data copying until/unless explicitly requested by the application.
+/// Some transport libraries (e.g., libudpard) store the data in a set of segments obtained directly from the NIC.
+/// Use cy_message_read to access the data.
+/// Avoid copying instances, consider using cy_message_move() instead.
 /// Do not access any of the fields directly; use the provided functions instead.
-typedef struct cy_scatter_t
+typedef struct cy_message_t
 {
     const void*                       state[2]; ///< Opaque implementation-specific soft state.
     size_t                            size;     ///< Must contain the total size of the scattered buffer data in bytes.
-    const struct cy_scatter_vtable_t* vtable;
-} cy_scatter_t;
+    const struct cy_message_vtable_t* vtable;
+} cy_message_t;
 
 /// Returns the total size of the scattered buffer in bytes. The size of a moved-from instance is zero.
-static inline size_t cy_scatter_size(const cy_scatter_t scatter) { return scatter.size; }
+static inline size_t cy_message_size(const cy_message_t msg) { return msg.size; }
 
-/// A convenience helper that returns a copy of the scatter object and invalidates the original.
-/// Use this to transfer the ownership of the payload to another scatter object.
-static inline cy_scatter_t cy_scatter_move(cy_scatter_t* const scatter)
-{
-    const cy_scatter_t ret = *scatter;
-    *scatter               = (cy_scatter_t){ .state = { NULL, NULL }, .size = 0, .vtable = NULL };
-    return ret;
-}
+/// A convenience helper that returns a copy of the message object and invalidates the original.
+/// Use this to transfer the ownership of the message to another message object.
+cy_message_t cy_message_move(cy_message_t* const msg);
 
-/// Must be invoked at least once on a scatter object obtained from a received transfer.
+/// Must be invoked at least once on a message object obtained from a received transfer.
 /// No effect if the instance is already moved-from or if the pointer is NULL.
 /// Subsequent calls have no effect; the passed instance will be moved-from.
-void cy_scatter_free(cy_scatter_t* const scatter);
+void cy_message_free(cy_message_t* const msg);
 
-/// This is the only way to access the received payload data.
-/// It gathers `size` bytes of data located at `offset` bytes from the beginning of the transfer payload
+/// This is the only way to access the received message data.
+/// It gathers `size` bytes of data located at `offset` bytes from the beginning of the transfer data
 /// into the provided contiguous buffer. The function returns the number of bytes copied.
-/// If the requested range exceeds the available payload size, only the available bytes are copied.
+/// If the requested range exceeds the available message size, only the available bytes are copied.
 /// The implementation may be optimized for highly efficient sequential access by caching soft states in the cursor
 /// instance. This is particularly useful for message deserialization by reading the fields out one by one.
-size_t cy_gather(cy_scatter_t* const cursor, const size_t offset, const size_t size, void* const destination);
+size_t cy_message_read(cy_message_t* const cursor, const size_t offset, const size_t size, void* const destination);
 
 /// Creates a local stack-allocated array of bytes and gathers the data from the scattered buffer into it.
 /// The output is an instance of cy_bytes_t with next=NULL because it is a single contiguous buffer.
-/// Doing this is only a good idea for small payloads.
+/// Doing this is only a good idea for small messages.
 /// Usage example:
-///     CY_GATHER_ON_STACK(my_bytes, my_scatter);
+///     CY_MESSAGE_DUMP(my_bytes, my_message);
 ///     foo(my_bytes.size, my_bytes.data);
-#define CY_GATHER_ON_STACK(dest_bytes_name, scatter)                                                                  \
-    cy_bytes_t    dest_bytes_name = { .size = cy_scatter_size(scatter) };                                             \
-    unsigned char dest_bytes_name##_storage[(dest_bytes_name).size];                                                  \
-    (dest_bytes_name).data = &dest_bytes_name##_storage[0];                                                           \
-    (dest_bytes_name).size = cy_gather(&(scatter), 0, (dest_bytes_name).size, dest_byt(dest_bytes_name) es_name.data)
+#define CY_MESSAGE_DUMP(dest_bytes_name, msg)                         \
+    cy_bytes_t    dest_bytes_name = { .size = cy_message_size(msg) }; \
+    unsigned char dest_bytes_name##_storage[(dest_bytes_name).size];  \
+    (dest_bytes_name).data = &dest_bytes_name##_storage[0];           \
+    (dest_bytes_name).size = cy_message_read(&(msg), 0, (dest_bytes_name).size, dest_byt(dest_bytes_name) es_name.data)
 
 // =====================================================================================================================
 //                                                      PUBLISHER
@@ -159,17 +145,29 @@ size_t cy_gather(cy_scatter_t* const cursor, const size_t offset, const size_t s
 
 typedef struct cy_publisher_t cy_publisher_t;
 
-/// Create a new publisher on the topic.
-///
-/// The response_extent is the extent (maximum size) of the response payload if the publisher expects responses;
-/// if no response is expected/needed, the response_extent should be zero. If responses are needed but their maximum
-/// size is unknown, use SIZE_MAX.
-cy_publisher_t*               cy_advertise(cy_t* const cy, const wkv_str_t name, const size_t response_extent);
-static inline cy_publisher_t* cy_advertise0(cy_t* const cy, const char* const name, const size_t response_extent)
+/// Create a new publisher on the topic. The default priority value is cy_prio_nominal; can be changed later.
+/// The response_extent is the extent (maximum size) of the response data if the publisher expects responses.
+cy_publisher_t* cy_advertise(cy_t* const cy, const wkv_str_t name);
+cy_publisher_t* cy_advertise_client(cy_t* const cy, const wkv_str_t name, const size_t response_extent);
+
+static inline cy_publisher_t* cy_advertise0(cy_t* const cy, const char* const name)
 {
-    return cy_advertise(cy, wkv_key(name), response_extent);
+    return cy_advertise(cy, wkv_key(name));
 }
+static inline cy_publisher_t* cy_advertise_client0(cy_t* const cy, const char* const name, const size_t response_extent)
+{
+    return cy_advertise_client(cy, wkv_key(name), response_extent);
+}
+
 void cy_unadvertise(cy_publisher_t* const pub);
+
+/// Each publisher is always linked to a specific single topic.
+/// This pointer remains valid for the entire lifetime of the publisher.
+/// It can be used to obtain the topic name, hash, etc. of this publisher.
+const cy_topic_t* cy_publisher_topic(const cy_publisher_t* const pub);
+
+cy_prio_t cy_priority(cy_publisher_t* const pub);
+void      cy_priority_set(cy_publisher_t* const pub, const cy_prio_t priority);
 
 /// The transfer-ID is always incremented, even on failure, to signal lost messages.
 ///
@@ -182,36 +180,35 @@ void cy_unadvertise(cy_publisher_t* const pub);
 /// received the published message. The response or lack thereof will be reported via the response callback.
 /// The response callback is GUARANTEED to be invoked EXACTLY ONCE per published message unless the function
 /// did not return CY_OK. If no response is received before the deadline, the response callback will be invoked
-/// with a negative timestamp and empty payload. If the response callback is NULL, no response will be awaited.
+/// with a negative timestamp and empty data. If the response callback is NULL, no response will be awaited.
 ///
 /// If both callbacks are given and the delivery fails, the response callback will still be invoked.
 /// The guaranteed callback invocation regardless of the outcome is taken very seriously because it simplifies
 /// resource management for the application.
 cy_err_t cy_request(cy_publisher_t* const   pub,
                     const cy_us_t           deadline,
-                    const cy_bytes_t        payload,
+                    const cy_bytes_t        message, // May be fragmented.
                     const cy_user_context_t ctx_delivery,
                     void (*const cb_delivery)(cy_user_context_t, bool success),
                     const cy_user_context_t ctx_response,
                     void (*const cb_response)(cy_user_context_t,
                                               cy_us_t      response_timestamp,
-                                              cy_scatter_t response_payload));
+                                              cy_message_t response_message));
 
 /// A convenience wrapper on top of cy_request for sending reliable one-way messages without response.
-static inline cy_err_t cy_publish(cy_publisher_t* const   pub,
-                                  const cy_us_t           deadline,
-                                  const cy_bytes_t        payload,
-                                  const cy_user_context_t ctx_delivery,
-                                  void (*const cb_delivery)(cy_user_context_t, bool success))
+static inline cy_err_t cy_publish_reliable(cy_publisher_t* const   pub,
+                                           const cy_us_t           deadline,
+                                           const cy_bytes_t        message,
+                                           const cy_user_context_t ctx_delivery,
+                                           void (*const cb_delivery)(cy_user_context_t, bool success))
 {
-    return cy_request(pub, deadline, payload, ctx_delivery, cb_delivery, CY_USER_CONTEXT_EMPTY, NULL);
+    return cy_request(pub, deadline, message, ctx_delivery, cb_delivery, CY_USER_CONTEXT_EMPTY, NULL);
 }
-
-/// A convenience wrapper on top of cy_publish that sends a one-way best-effort message without ack nor response.
-/// The "1" suffix means "try once 1-way".
-static inline cy_err_t cy_publish1(cy_publisher_t* const pub, const cy_us_t deadline, const cy_bytes_t payload)
+static inline cy_err_t cy_publish_best_effort(cy_publisher_t* const pub,
+                                              const cy_us_t         deadline,
+                                              const cy_bytes_t      message)
 {
-    return cy_publish(pub, deadline, payload, CY_USER_CONTEXT_EMPTY, NULL);
+    return cy_request(pub, deadline, message, CY_USER_CONTEXT_EMPTY, NULL, CY_USER_CONTEXT_EMPTY, NULL);
 }
 
 // =====================================================================================================================
@@ -258,36 +255,22 @@ typedef struct cy_substitution_set_t
 /// For pattern subscribers, the topic pointer refers to the matched topic instance, which may change.
 /// For verbatim subscribers, the topic pointer is always the same.
 ///
-/// Optionally, the user handler can take ownership of the transfer payload using cy_scatter_move();
+/// Optionally, the user handler can take ownership of the transfer message using cy_message_move();
 /// however, to avoid use-after-free, the following rules must be followed:
-/// 1. At most one handler can move the payload out of the arrival instance.
-/// 2. If payload is moved out, it shall not be freed (see cy_scatter_free()) until after the callback returns,
+/// 1. At most one handler can move the message out of the arrival instance.
+/// 2. If message is moved out, it shall not be freed (see cy_message_free()) until after the callback returns,
 ///    unless it is the last handler to process it.
-/// If the payload is not moved out, it will be freed automatically after return from the callback.
+/// If the message is not moved out, it will be freed automatically after return from the callback.
 ///
-/// Subscription name pattern substitutions that were made to achieve the match.
+/// The substitution set specifies the subscription name pattern substitutions that were made to achieve the match.
 /// E.g., matching "ins/?/data/*" against topic "ins/0/data/foo/456" produces ("0", "foo", "456").
 /// The lifetime of the substitutions is at least as long as that of the subscriber.
 typedef void (*cy_subscriber_callback_t)(cy_user_context_t,
                                          const cy_topic_t*,
                                          cy_us_t        timestamp,
-                                         cy_scatter_t*  payload,   // Use cy_scatter_move() to take ownership if needed.
+                                         cy_message_t*  message,   // Use cy_message_move() to take ownership if needed.
                                          cy_responder_t responder, // Use cy_respond() to send a response if needed.
                                          cy_substitution_set_t);   // For pattern subscribers only, otherwise empty.
-
-/// Disable strictly increasing transfer-ID ordering enforcement and deliver messages as they arrive immediately.
-/// Duplicates will still be filtered out. This should be the default option if not sure.
-#define CY_SUBSCRIPTION_REORDERING_WINDOW_UNORDERED (-1)
-
-/// These parameters are used to configure the underlying transport layer implementation.
-/// These values shall not be changed by the user; the only way to set them is when a new subscription is created.
-/// They need to be stored per subscriber to support pattern subscriptions, where the first subscription may
-/// be created asynchronously wrt the user calling cy_subscribe().
-typedef struct cy_subscription_params_t
-{
-    size_t  extent;
-    cy_us_t reordering_window; ///< See CY_SUBSCRIPTION_REORDERING_WINDOW_UNORDERED. Some transports may ignore.
-} cy_subscription_params_t;
 
 /// It is allowed to remove the subscription from its own callback, but not from the callback of another subscription.
 ///
@@ -296,20 +279,18 @@ typedef struct cy_subscription_params_t
 ///
 /// The extent of all subscriptions should be the same, or the values of subscriptions added later should be less
 /// than those of subscriptions added earlier. Otherwise, the library will be forced to resubscribe,
-/// which may cause momentary data loss if there were transfers in the middle of reassembly, plus it is usually slow.
-cy_subscriber_t*               cy_subscribe(cy_t* const                    cy,
-                                            const wkv_str_t                name,
-                                            const cy_subscription_params_t params,
-                                            const cy_user_context_t        ctx,
-                                            const cy_subscriber_callback_t callback);
-static inline cy_subscriber_t* cy_subscribe0(cy_t* const                    cy,
-                                             const char* const              name,
-                                             const cy_subscription_params_t params,
-                                             const cy_user_context_t        ctx,
-                                             const cy_subscriber_callback_t callback)
-{
-    return cy_subscribe(cy, wkv_key(name), params, ctx, callback);
-}
+/// which may cause momentary data loss and/or duplication across the point of resubscription.
+cy_subscriber_t* cy_subscribe(cy_t* const                    cy,
+                              const wkv_str_t                name,
+                              const size_t                   extent,
+                              const cy_user_context_t        ctx,
+                              const cy_subscriber_callback_t callback);
+cy_subscriber_t* cy_subscribe_ordered(cy_t* const                    cy,
+                                      const wkv_str_t                name,
+                                      const size_t                   extent,
+                                      const cy_us_t                  reordering_window,
+                                      const cy_user_context_t        ctx,
+                                      const cy_subscriber_callback_t callback);
 
 /// No effect if the subscriber pointer is NULL.
 void cy_unsubscribe(cy_subscriber_t* const sub);
@@ -325,9 +306,27 @@ void cy_subscriber_name(const cy_subscriber_t* const sub, char* const out_name);
 /// that the transfer will not be sent in the reliable mode.
 cy_err_t cy_respond(cy_responder_t* const   responder,
                     const cy_us_t           deadline,
-                    const cy_bytes_t        payload,
+                    const cy_bytes_t        response_message,
                     const cy_user_context_t ctx_delivery,
                     void (*const cb_delivery)(cy_user_context_t, bool success));
+
+static inline cy_subscriber_t* cy_subscribe0(cy_t* const                    cy,
+                                             const char* const              name,
+                                             const size_t                   extent,
+                                             const cy_user_context_t        ctx,
+                                             const cy_subscriber_callback_t callback)
+{
+    return cy_subscribe(cy, wkv_key(name), extent, ctx, callback);
+}
+static inline cy_subscriber_t* cy_subscribe_ordered0(cy_t* const                    cy,
+                                                     const char* const              name,
+                                                     const size_t                   extent,
+                                                     const cy_us_t                  reordering_window,
+                                                     const cy_user_context_t        ctx,
+                                                     const cy_subscriber_callback_t callback)
+{
+    return cy_subscribe_ordered(cy, wkv_key(name), extent, reordering_window, ctx, callback);
+}
 
 // =====================================================================================================================
 //                                                  NODE & TOPIC
@@ -340,12 +339,12 @@ cy_us_t cy_now(const cy_t* const cy);
 
 /// Complexity is logarithmic in the number of topics. NULL if not found.
 /// In practical terms, these queries are very fast and efficient.
+cy_topic_t*               cy_topic_find_by_hash(const cy_t* const cy, const uint64_t hash);
 cy_topic_t*               cy_topic_find_by_name(const cy_t* const cy, const wkv_str_t name);
 static inline cy_topic_t* cy_topic_find_by_name0(const cy_t* const cy, const char* const name)
 {
     return cy_topic_find_by_name(cy, wkv_key(name));
 }
-cy_topic_t* cy_topic_find_by_hash(const cy_t* const cy, const uint64_t hash);
 
 /// Iterate over all topics in an unspecified order except that pinned topic are listed first.
 /// This is useful when handling IO multiplexing (building the list of descriptors to read) and for introspection.
@@ -358,8 +357,9 @@ cy_topic_t* cy_topic_find_by_hash(const cy_t* const cy, const uint64_t hash);
 cy_topic_t* cy_topic_iter_first(const cy_t* const cy);
 cy_topic_t* cy_topic_iter_next(cy_topic_t* const topic);
 
-/// The name is NUL-terminated; pointer lifetime bound to the topic.
+/// The name pointer lifetime is bound to the topic.
 wkv_str_t cy_topic_name(const cy_topic_t* const topic);
+uint64_t  cy_topic_hash(const cy_topic_t* const topic);
 
 /// Returns true iff the name can match more than one topic.
 /// This is useful for some applications that want to ensure that certain names can match only one topic.

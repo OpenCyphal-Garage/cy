@@ -26,13 +26,9 @@ typedef struct cy_udp_posix_topic_t cy_udp_posix_topic_t;
 
 struct cy_udp_posix_topic_t
 {
-    cy_topic_t base;
-
-    /// RX pipeline for subscriptions.
+    cy_topic_t       base;
     udpard_rx_port_t rx_port;
     udp_wrapper_t    rx_sock[CY_UDP_POSIX_IFACE_COUNT_MAX];
-
-    /// Initialized from the eponymous field of cy_udp_posix_t when a new topic is created.
     void (*rx_sock_err_handler)(cy_udp_posix_t*       cy_udp,
                                 cy_udp_posix_topic_t* topic,
                                 uint_fast8_t          iface_index,
@@ -41,19 +37,15 @@ struct cy_udp_posix_topic_t
 
 struct cy_udp_posix_t
 {
-    cy_t base;
-
-    size_t n_topics;
-
+    cy_t                  base;
+    size_t                n_topics;
     udpard_mem_resource_t mem;
-
-    udpard_rx_port_t p2p_port;
-
-    udpard_rx_t   udpard_rx;
-    udpard_tx_t   udpard_tx;
-    udp_wrapper_t sock[CY_UDP_POSIX_IFACE_COUNT_MAX]; ///< All TX and P2P RX.
-    uint32_t      local_ip[CY_UDP_POSIX_IFACE_COUNT_MAX];
-    uint16_t      local_tx_port[CY_UDP_POSIX_IFACE_COUNT_MAX];
+    udpard_rx_port_t      p2p_port;
+    udpard_rx_t           udpard_rx;
+    udpard_tx_t           udpard_tx;
+    udp_wrapper_t         sock[CY_UDP_POSIX_IFACE_COUNT_MAX]; ///< All TX and P2P RX.
+    uint32_t              local_ip[CY_UDP_POSIX_IFACE_COUNT_MAX];
+    uint16_t              local_tx_port[CY_UDP_POSIX_IFACE_COUNT_MAX];
 
     /// Handler for errors occurring while reading from the socket of the topic on the specified iface.
     /// The default handler is provided which will use CY_TRACE() to report the error.

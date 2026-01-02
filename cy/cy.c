@@ -264,21 +264,28 @@ static size_t cavl_count(cy_tree_t* const root)
 }
 
 // =====================================================================================================================
-//                                                  SCATTER BUFFER
+//                                                  MESSAGE BUFFER
 // =====================================================================================================================
 
-void cy_scatter_free(cy_scatter_t* const scatter)
+cy_message_t cy_message_move(cy_message_t* const msg)
 {
-    if ((scatter != NULL) && (scatter->vtable != NULL) && (scatter->vtable->free != NULL)) {
-        scatter->vtable->free(scatter);
-        (void)cy_scatter_move(scatter);
+    const cy_message_t ret = *msg;
+    *msg                   = (cy_message_t){ .state = { NULL, NULL }, .size = 0, .vtable = NULL };
+    return ret;
+}
+
+void cy_message_free(cy_message_t* const msg)
+{
+    if ((msg != NULL) && (msg->vtable != NULL) && (msg->vtable->free != NULL)) {
+        msg->vtable->free(msg);
+        (void)cy_message_move(msg);
     }
 }
 
-size_t cy_gather(cy_scatter_t* const cursor, const size_t offset, const size_t size, void* const destination)
+size_t cy_message_read(cy_message_t* const cursor, const size_t offset, const size_t size, void* const destination)
 {
-    if ((cursor != NULL) && (cursor->vtable != NULL) && (cursor->vtable->gather != NULL) && (destination != NULL)) {
-        return cursor->vtable->gather(cursor, offset, size, destination);
+    if ((cursor != NULL) && (cursor->vtable != NULL) && (destination != NULL)) {
+        return cursor->vtable->read(cursor, offset, size, destination);
     }
     return 0;
 }
@@ -1337,6 +1344,8 @@ wkv_str_t cy_topic_name(const cy_topic_t* const topic)
 {
     return (wkv_str_t){ .len = topic->index_name->key_len, .str = topic->name };
 }
+
+uint64_t cy_topic_hash(const cy_topic_t* const topic) { return topic->hash; }
 
 bool cy_has_substitution_tokens(const wkv_str_t name)
 {
