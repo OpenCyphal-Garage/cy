@@ -13,10 +13,6 @@
 
 #include "cy.h"
 
-// =====================================================================================================================
-//                                              BUILD TIME CONFIG OPTIONS
-// =====================================================================================================================
-
 /// Only for testing and debugging purposes; never redefine in production builds.
 /// All nodes obviously must use the same heartbeat topic, which is why it is pinned.
 #define CY_HEARTBEAT_TOPIC_NAME "/#1d55"
@@ -132,7 +128,7 @@ typedef struct cy_topic_t
     /// from the subject-ID index tree!
     uint64_t evictions;
 
-    /// hash=rapidhash(topic_name). For a pinned topic, the hash equals its subject-ID.
+    /// hash=rapidhash(topic_name); except for a pinned topic, hash=subject_id<=CY_PINNED_SUBJECT_ID_MAX.
     uint64_t hash;
 
     /// Event timestamps used for state management.
@@ -142,48 +138,48 @@ typedef struct cy_topic_t
     /// Used for matching pending response states against received responses by transfer-ID.
     cy_tree_t* response_by_transfer_id;
 
-    /// Only used if the application publishes data on this topic.
-    /// pub_count tracks the number of existing advertisements on this topic; when this number reaches zero
-    /// and there are no live subscriptions, the topic will be garbage collected by Cy.
-    uint64_t pub_transfer_id;
-    size_t   pub_count;
-
-    /// Only used if the application subscribes on this topic.
+    /// States related to tracking publishers and subscribers on this topic. The topic is removed when none left.
     struct cy_topic_coupling_t* couplings;
-    bool subscribed; ///< May be (tentatively) false even with couplings!=NULL on resubscription error.
+    bool   subscribed; ///< May be (tentatively) false even with couplings!=NULL on resubscription error.
+    size_t pub_count;  ///< Number of active advertisements; counted for garbage collection.
 
+    /// The vtable pointer must be initialized by the new_topic() factory.
     const struct cy_topic_vtable_t* vtable;
 } cy_topic_t;
 
 /// Platform-specific implementation of the topic operations.
 typedef struct cy_topic_vtable_t
 {
-    void (*destroy)(cy_topic_t*);
+    void (*destroy)(cy_topic_t* self);
 
-    /// Instructs the underlying transport layer to publish a new message on the topic.
-    /// The function shall not increment the transfer-ID counter; Cy will do it.
+    /// Instructs the underlying transport layer to non-blockingly publish a new message on the topic.
+    /// The transport will choose a new transfer-ID value for the message and return it,
+    /// which may be used later to match responses.
+    /// The feedback context is NULL iff best-effort mode is chosen, otherwise the reliable mode is used.
     /// If reliable mode is chosen, the outcome will ALWAYS be reported EXACTLY ONCE per successful publish() call
-    /// via cy_on_message_feedback().
-    cy_err_t (*publish)(cy_publisher_t*, cy_us_t, cy_bytes_t, bool reliable, cy_feedback_context_t context);
-
-    /// If there is a pending reliable transfer with the given transfer-ID, cancel it.
-    /// Returns true if such transfer was found and cancelled; false otherwise.
-    bool (*cancel)(cy_publisher_t*, uint64_t transfer_id);
+    /// via cy_on_message_feedback() with the provided context.
+    cy_err_t (*publish)(cy_topic_t*                  self,
+                        cy_us_t                      tx_deadline,
+                        cy_prio_t                    priority,
+                        cy_bytes_t                   message,
+                        const cy_feedback_context_t* reliable_context,
+                        uint64_t*                    out_transfer_id);
 
     /// Instructs the underlying transport layer to create a new subscription on the topic.
-    /// Importantly, this may be invoked on an already subscribed topic when the parameters have changed,
-    /// but the subject-ID remains the same.
-    /// On subject-ID change, this is always preceded by an unsubscribe() call.
-    cy_err_t (*subscribe)(cy_topic_t*, size_t, cy_us_t);
+    /// The topic is guaranteed to not be subscribed to when this function is invoked.
+    /// TODO: Should we implement an optimization to allow quick extent change without full resubscription?
+    /// The reordering window is negative if the unordered mode is desired.
+    cy_err_t (*subscribe)(cy_topic_t* self, size_t extent, cy_us_t reordering_window);
 
-    /// Instructs the underlying transport to destroy an existing subscription.
-    void (*unsubscribe)(cy_topic_t*);
+    /// Instructs the underlying transport to destroy an existing subscription. Infallible by design.
+    void (*unsubscribe)(cy_topic_t* self);
 
-    /// Invoked when a new publisher is created on the topic.
-    /// The main purpose here is to communicate the response extent (i.e., the maximum size of response messages
-    /// that is of interest for the application, allowing the transport to truncate the rest)
-    /// requested by this publisher to the platform layer, allowing it to configure the P2P port accordingly.
-    void (*advertise)(cy_topic_t*, size_t response_extent);
+    /// Hints the maximum size of response messages arriving in response to messages published on this topic
+    /// that is of interest for the application, allowing the transport to truncate the rest.
+    /// This is always invoked at least once before the first publication on the topic,
+    /// allowing the transport to configure any necessary resources.
+    /// It may be invoked an arbitrary number of times. The transport may disregard this setting.
+    void (*set_response_extent)(cy_topic_t* self, size_t);
 } cy_topic_vtable_t;
 
 /// Platform-specific implementation of cy_responder_t.

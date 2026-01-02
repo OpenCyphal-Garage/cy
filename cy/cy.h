@@ -102,7 +102,7 @@ typedef struct cy_user_context_t
 /// Do not access any of the fields directly; use the provided functions instead.
 typedef struct cy_message_t
 {
-    const void*                       state[2]; ///< Opaque implementation-specific soft state.
+    void*                             state[2]; ///< Opaque implementation-specific soft state.
     size_t                            size;     ///< Must contain the total size of the scattered buffer data in bytes.
     const struct cy_message_vtable_t* vtable;
 } cy_message_t;
@@ -169,8 +169,6 @@ const cy_topic_t* cy_publisher_topic(const cy_publisher_t* const pub);
 cy_prio_t cy_priority(cy_publisher_t* const pub);
 void      cy_priority_set(cy_publisher_t* const pub, const cy_prio_t priority);
 
-/// The transfer-ID is always incremented, even on failure, to signal lost messages.
-///
 /// If the delivery callback is provided, reliable delivery will be used, attempting to deliver the message
 /// until the specified deadline is reached. The outcome will be reported via the delivery callback,
 /// which is GUARANTEED to be invoked EXACTLY ONCE per published message unless the function did not return CY_OK.
@@ -265,6 +263,10 @@ typedef struct cy_substitution_set_t
 /// The substitution set specifies the subscription name pattern substitutions that were made to achieve the match.
 /// E.g., matching "ins/?/data/*" against topic "ins/0/data/foo/456" produces ("0", "foo", "456").
 /// The lifetime of the substitutions is at least as long as that of the subscriber.
+///
+/// Note that we do not report the transfer-ID here because this value is considered too low-level to be useful.
+/// In the future we may consider adding an API for signaling lost messages to the application, which may be based
+/// on the transfer-ID discontinuities, but it will likely be a separate callback.
 typedef void (*cy_subscriber_callback_t)(cy_user_context_t,
                                          const cy_topic_t*,
                                          cy_us_t        timestamp,
