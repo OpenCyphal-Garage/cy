@@ -13,8 +13,7 @@
 
 #include "cy.h"
 
-/// Only for testing and debugging purposes; never redefine in production builds.
-/// All nodes obviously must use the same heartbeat topic, which is why it is pinned.
+/// For compatibility with Cyphal v1.0, the heartbeat topic is pinned at subject-ID 7509.
 #define CY_HEARTBEAT_TOPIC_NAME "/#1d55"
 
 /// Only for testing and debugging purposes.
@@ -23,8 +22,18 @@
 /// This can be used to stress-test the consensus algorithm.
 /// This value shall be identical for all nodes in the network; otherwise, divergent allocations will occur.
 #ifndef CY_CONFIG_PREFERRED_TOPIC_OVERRIDE
-// Not defined by default; the normal subject expression is used instead: subject_id=(hash+evictions)%6144
+// Never define in production use.
 #endif
+
+/// The subject-ID modulus depends on the width of the subject-ID field in the transport protocol.
+/// All nodes in the network shall share the same value.
+/// If heterogeneously redundant transports are used, then the smallest modulus shall be used.
+/// The range of used subject-ID values is [0, CY_PINNED_SUBJECT_ID_MAX+modulus),
+/// where the values below or equal to CY_PINNED_SUBJECT_ID_MAX are used for pinned topics only.
+/// The modulus shall be a prime number; see https://github.com/OpenCyphal-Garage/cy/issues/12#issuecomment-3577831960
+#define CY_SUBJECT_ID_MODULUS_16bit 57349
+#define CY_SUBJECT_ID_MODULUS_23bit 8380417
+#define CY_SUBJECT_ID_MODULUS_32bit 4294959083U
 
 /// If CY_CONFIG_TRACE is defined and is non-zero, cy_trace() shall be defined externally.
 #ifndef CY_CONFIG_TRACE
@@ -153,17 +162,23 @@ typedef struct cy_topic_vtable_t
     void (*destroy)(cy_topic_t* self);
 
     /// Instructs the underlying transport layer to non-blockingly publish a new message on the topic.
-    /// The transport will choose a new transfer-ID value for the message and return it,
-    /// which may be used later to match responses.
+    /// The transport will choose a new transfer-ID value for the message and return it, which may be used later to
+    /// match responses if any are needed/expected.
+    ///
     /// The feedback context is NULL iff best-effort mode is chosen, otherwise the reliable mode is used.
     /// If reliable mode is chosen, the outcome will ALWAYS be reported EXACTLY ONCE per successful publish() call
     /// via cy_on_message_feedback() with the provided context.
+    ///
+    /// The response extent hints the maximum size of response messages arriving in response to the published message
+    /// that is of interest for the application, allowing the transport to truncate the rest. The transport may
+    /// disreagrd the hint and receive an arbitrarily larger response message.
     cy_err_t (*publish)(cy_topic_t*                  self,
                         cy_us_t                      tx_deadline,
                         cy_prio_t                    priority,
                         cy_bytes_t                   message,
                         const cy_feedback_context_t* reliable_context,
-                        uint64_t*                    out_transfer_id);
+                        uint64_t*                    out_transfer_id,
+                        size_t                       response_extent);
 
     /// Instructs the underlying transport layer to create a new subscription on the topic.
     /// The topic is guaranteed to not be subscribed to when this function is invoked.
@@ -173,13 +188,6 @@ typedef struct cy_topic_vtable_t
 
     /// Instructs the underlying transport to destroy an existing subscription. Infallible by design.
     void (*unsubscribe)(cy_topic_t* self);
-
-    /// Hints the maximum size of response messages arriving in response to messages published on this topic
-    /// that is of interest for the application, allowing the transport to truncate the rest.
-    /// This is always invoked at least once before the first publication on the topic,
-    /// allowing the transport to configure any necessary resources.
-    /// It may be invoked an arbitrary number of times. The transport may disregard this setting.
-    void (*set_response_extent)(cy_topic_t* self, size_t);
 } cy_topic_vtable_t;
 
 /// Platform-specific implementation of cy_responder_t.
@@ -338,7 +346,7 @@ uint32_t cy_topic_subject_id(const cy_topic_t* const topic);
 void cy_on_topic_collision(cy_topic_t* const topic);
 
 /// New message received on a topic.
-/// The transfer message ownership is taken by this function.
+/// The message ownership is taken by this function.
 /// No effect if the topic is NULL.
 void cy_on_message(cy_topic_t* const    topic,
                    const cy_us_t        timestamp,
@@ -350,7 +358,11 @@ void cy_on_message(cy_topic_t* const    topic,
 /// message are provided.
 /// This function accepts a topic hash instead of a topic pointer, which is to decouple it from the topic lifetime
 /// -- by the time the response is received, the topic may have been destroyed already.
-/// The transfer message ownership is taken by this function.
+/// The message ownership is taken by this function.
+///
+/// Observe that we do not pass a responder instance here because we assume that if any follow-up communication is
+/// needed, it will take place using the normal topic publication with P2P responses.
+/// At this time I am not certain if this assumption will hold. We may revise this based on empirical evidence.
 void cy_on_response(cy_t* const        cy,
                     const cy_us_t      timestamp,
                     const uint64_t     topic_hash,

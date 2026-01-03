@@ -7,6 +7,9 @@
 ///
 /// Copyright (c) Pavel Kirienko <pavel@opencyphal.org>
 
+// Blanket-disable the const ptr warning because we have a lot of vtable functions here.
+// ReSharper disable CppParameterMayBeConstPtrOrRef
+
 #include "cy_udp_posix.h"
 
 #ifndef __USE_POSIX199309 // NOLINT(bugprone-reserved-identifier,cert-dcl37-c,cert-dcl51-cpp)
@@ -23,18 +26,36 @@
 #include <time.h>
 #include <errno.h>
 #include <stdio.h>
+#include <limits.h>
 
 /// Maximum expected incoming datagram size. If larger jumbo frames are expected, this value should be increased.
 #ifndef CY_UDP_SOCKET_READ_BUFFER_SIZE
 #define CY_UDP_SOCKET_READ_BUFFER_SIZE 2000
 #endif
 
-/// Some arbitrary initial extent for P2P transfers. Will be increased as needed, but never decreased.
-#define P2P_INITIAL_EXTENT (UDPARD_P2P_HEADER_BYTES + 1024U)
-
 static size_t  smaller(const size_t a, const size_t b) { return (a < b) ? a : b; }
 static int64_t min_i64(const int64_t a, const int64_t b) { return (a < b) ? a : b; }
 static int64_t min_i64_3(const int64_t a, const int64_t b, const int64_t c) { return min_i64(a, min_i64(b, c)); }
+
+/// Taken from https://github.com/pavel-kirienko/o1heap
+static uint_fast8_t clz_size(const size_t x)
+{
+    assert(x > 0);
+    size_t       t = ((size_t)1U) << ((sizeof(size_t) * CHAR_BIT) - 1U);
+    uint_fast8_t r = 0;
+    while ((x & t) == 0) {
+        t >>= 1U;
+        r++;
+    }
+    return r;
+}
+
+/// Rounds the argument up to the nearest power of 2. Undefined for x < 2.
+static size_t ceil_pow2(const size_t x)
+{
+    assert(x >= 2U); // NOLINTNEXTLINE redundant cast to the same type.
+    return ((size_t)1U) << ((sizeof(x) * CHAR_BIT) - ((uint_fast8_t)clz_size(x - 1U)));
+}
 
 static bool is_valid_ip(const uint32_t ip) { return (ip > 0) && (ip < UINT32_MAX); }
 
@@ -115,38 +136,35 @@ static udpard_bytes_scattered_t cy_bytes_to_udpard_bytes(const cy_bytes_t messag
 
 // ----------------------------------------  MESSAGE BUFFER  ----------------------------------------
 
-// ReSharper disable once CppParameterMayBeConstPtrOrRef
-static void message_free(cy_message_t* const self)
+static void v_message_free(cy_message_t* const self)
 {
     const udpard_mem_resource_t mem = { .user = self->state[1], .alloc = &mem_alloc, .free = &mem_free };
     udpard_fragment_free_all((udpard_fragment_t*)self->state[0], mem);
 }
 
-// ReSharper disable once CppParameterMayBeConstPtrOrRef
-static size_t message_read(cy_message_t* const self, const size_t offset, const size_t size, void* const destination)
+static size_t v_message_read(cy_message_t* const self, const size_t offset, const size_t size, void* const dest)
 {
     const udpard_fragment_t** cursor = (const udpard_fragment_t**)&self->state[0];
-    return udpard_fragment_gather(cursor, offset, size, destination);
+    return udpard_fragment_gather(cursor, offset, size, dest);
 }
 
 /// Specialization for single-fragment messages.
-// ReSharper disable once CppParameterMayBeConstPtrOrRef
-static size_t message_read_1(cy_message_t* const self, const size_t offset, const size_t size, void* const destination)
+static size_t v_message_read_1(cy_message_t* const self, const size_t offset, const size_t size, void* const dest)
 {
     const udpard_fragment_t* const frag = (const udpard_fragment_t*)self->state[0];
     assert((frag->index_offset.lr[0] == NULL) && (frag->index_offset.lr[1] == NULL));
     size_t out = 0;
     if (offset < frag->view.size) {
         out = smaller(size, frag->view.size - offset);
-        memcpy(destination, ((const char*)frag->view.data) + offset, out);
+        memcpy(dest, ((const char*)frag->view.data) + offset, out);
     }
     return out;
 }
 
 static cy_message_t make_message(const size_t size, udpard_fragment_t* const frag, const udpard_mem_resource_t mem)
 {
-    static const cy_message_vtable_t vtable        = { .free = message_free, .read = message_read };
-    static const cy_message_vtable_t vtable_1frame = { .free = message_free, .read = message_read_1 };
+    static const cy_message_vtable_t vtable        = { .free = v_message_free, .read = v_message_read };
+    static const cy_message_vtable_t vtable_1frame = { .free = v_message_free, .read = v_message_read_1 };
     return (cy_message_t){ .state  = { frag, mem.user },
                            .size   = size,
                            .vtable = (frag->view.size == size) ? &vtable_1frame : &vtable };
@@ -163,7 +181,6 @@ typedef struct responder_context_t
 } responder_context_t;
 
 /// Invoked by libudpard when a response transmission attempt completes, whether successfully or not.
-// ReSharper disable once CppParameterMayBeConstPtrOrRef
 static void on_response_feedback(udpard_tx_t* const tx, const udpard_tx_feedback_t fb)
 {
     assert(tx->user != NULL);
@@ -171,11 +188,10 @@ static void on_response_feedback(udpard_tx_t* const tx, const udpard_tx_feedback
 }
 
 /// Invoked by Cy when the application desires to respond to a message received earlier.
-// ReSharper disable once CppParameterMayBeConstPtrOrRef
-static cy_err_t respond(cy_responder_t* const       self,
-                        const cy_us_t               tx_deadline,
-                        const cy_bytes_t            message,
-                        const cy_feedback_context_t context)
+static cy_err_t v_respond(cy_responder_t* const       self,
+                          const cy_us_t               tx_deadline,
+                          const cy_bytes_t            message,
+                          const cy_feedback_context_t context)
 {
     responder_context_t ctx;
     static_assert(sizeof(ctx) <= sizeof(self->state), "");
@@ -213,7 +229,7 @@ static cy_responder_t make_responder(cy_t* const           cy,
                                      const udpard_prio_t   priority,
                                      const udpard_remote_t remote)
 {
-    static const cy_responder_vtable_t vtable  = { .respond = respond };
+    static const cy_responder_vtable_t vtable  = { .respond = v_respond };
     cy_responder_t                     out     = { .cy = cy, .vtable = &vtable };
     const responder_context_t          context = {
                  .topic_hash = topic_hash, .transfer_id = transfer_id, .remote = remote, .priority = priority
@@ -224,7 +240,7 @@ static cy_responder_t make_responder(cy_t* const           cy,
     return out;
 }
 
-// ----------------------------------------  TOPIC  ----------------------------------------
+// ----------------------------------------  TOPIC VTABLE  ----------------------------------------
 
 typedef struct
 {
@@ -248,7 +264,7 @@ struct cy_udp_posix_topic_t
     transfer_uid_t history[2];
 };
 
-static void topic_destroy(cy_topic_t* const topic)
+static void v_topic_destroy(cy_topic_t* const topic)
 {
     cy_udp_posix_t* const       cy_udp    = (cy_udp_posix_t*)topic->cy;
     cy_udp_posix_topic_t* const udp_topic = (cy_udp_posix_topic_t*)topic;
@@ -259,19 +275,19 @@ static void topic_destroy(cy_topic_t* const topic)
     cy_udp->n_topics--;
 }
 
-// ReSharper disable once CppParameterMayBeConstPtrOrRef
 static void on_topic_feedback(udpard_tx_t* const tx, const udpard_tx_feedback_t fb)
 {
     assert(tx->user != NULL);
     cy_on_message_feedback(tx->user, fb.topic_hash, fb.transfer_id, fb.success, feedback_context_unbox(fb.user));
 }
 
-static cy_err_t topic_publish(cy_topic_t* const                  self,
-                              const cy_us_t                      tx_deadline,
-                              const cy_prio_t                    priority,
-                              const cy_bytes_t                   message,
-                              const cy_feedback_context_t* const reliable_context,
-                              uint64_t* const                    out_transfer_id)
+static cy_err_t v_topic_publish(cy_topic_t* const                  self,
+                                const cy_us_t                      tx_deadline,
+                                const cy_prio_t                    priority,
+                                const cy_bytes_t                   message,
+                                const cy_feedback_context_t* const reliable_context,
+                                uint64_t* const                    out_transfer_id,
+                                const size_t                       response_extent)
 {
     cy_udp_posix_t* const       cy                      = (cy_udp_posix_t*)self->cy;
     cy_udp_posix_topic_t* const self_low                = (cy_udp_posix_topic_t*)self;
@@ -282,6 +298,15 @@ static cy_err_t topic_publish(cy_topic_t* const                  self,
     const uint64_t transfer_id = self_low->pub_transfer_id++;
     if (out_transfer_id != NULL) {
         *out_transfer_id = transfer_id;
+    }
+    // In this transport, the P2P response extent is trivial to change -- just update a variable; no need for any
+    // complex reconfiguration. We are aware that changing the extent may sometimes, under very specific circumstances
+    // involving out-of-order frame arrival, cause some in-progress transfers to be lost, but it's exceedingly unlikely
+    // and we use reliable delivery for P2P anyway. To minimize the impact, we round it to some arbitrary threshold.
+    const size_t response_extent_final = ceil_pow2(response_extent + UDPARD_P2P_HEADER_BYTES);
+    if (response_extent_final > cy->p2p_port.base.extent) {
+        cy->p2p_port.base.extent = response_extent_final * 2U; // Keep changes minimal.
+        CY_TRACE(&cy->base, "📏 P2P response (extent+overhead) increased to %zu bytes", cy->p2p_port.base.extent);
     }
     const uint64_t e_oom      = cy->udpard_tx.errors_oom;
     const uint64_t e_capacity = cy->udpard_tx.errors_capacity;
@@ -318,8 +343,7 @@ static bool topic_is_subscribed(const cy_udp_posix_topic_t* const self)
     return false;
 }
 
-// ReSharper disable once CppParameterMayBeConstPtrOrRef
-static void on_msg(udpard_rx_t* const rx, udpard_rx_port_t* const port, const udpard_rx_transfer_t tr)
+static void v_on_msg(udpard_rx_t* const rx, udpard_rx_port_t* const port, const udpard_rx_transfer_t tr)
 {
     cy_udp_posix_t* const cy    = rx->user;
     cy_topic_t* const     topic = port->user;
@@ -329,8 +353,7 @@ static void on_msg(udpard_rx_t* const rx, udpard_rx_port_t* const port, const ud
     cy_on_message(topic, tr.timestamp, tr.transfer_id, msg, resp);
 }
 
-// ReSharper disable once CppParameterMayBeConstPtrOrRef
-static void on_msg_stateless(udpard_rx_t* const rx, udpard_rx_port_t* const port, const udpard_rx_transfer_t tr)
+static void v_on_msg_stateless(udpard_rx_t* const rx, udpard_rx_port_t* const port, const udpard_rx_transfer_t tr)
 {
     cy_udp_posix_topic_t* const topic = port->user;
     assert(topic != NULL);
@@ -347,12 +370,11 @@ static void on_msg_stateless(udpard_rx_t* const rx, udpard_rx_port_t* const port
         topic->history[1]             = topic->history[0];
         topic->history[0].transfer_id = tr.transfer_id;
         topic->history[0].source_uid  = tr.remote.uid;
-        on_msg(rx, port, tr);
+        v_on_msg(rx, port, tr);
     }
 }
 
-// ReSharper disable once CppParameterMayBeConstPtrOrRef
-static void on_collision(udpard_rx_t* const rx, udpard_rx_port_t* const port, const udpard_remote_t remote)
+static void v_on_collision(udpard_rx_t* const rx, udpard_rx_port_t* const port, const udpard_remote_t remote)
 {
     (void)rx;
     (void)remote;
@@ -360,13 +382,17 @@ static void on_collision(udpard_rx_t* const rx, udpard_rx_port_t* const port, co
     cy_on_topic_collision(port->user);
 }
 
-static cy_err_t topic_subscribe(cy_topic_t* const self, const size_t extent, cy_us_t reordering_window)
+static cy_err_t v_topic_subscribe(cy_topic_t* const self, const size_t extent, cy_us_t reordering_window)
 {
     cy_udp_posix_topic_t* const self_low = (cy_udp_posix_topic_t*)self;
     const cy_udp_posix_t* const cy       = (cy_udp_posix_t*)self->cy;
     assert(!topic_is_subscribed(self_low));
     assert(self_low->rx_port.user == self);
-
+    // We special-case the heartbeat topic to have STATELESS reassembly strategy to conserve CPU and RAM.
+    // Currently, the user API doesn't have the ability to select STATELESS mode, as it is uncertain if it
+    // will be useful for the application. It is useful for the network stack because the heartbeat topic
+    // is a bottleneck to be aware of -- every node publishes on it and every node is subscribed, so there is
+    // a lot of traffic, while the protocol stack itself is invariant to heartbeat message reordering/duplicates.
     if (reordering_window < 0) {
         const bool heartbeat = strncmp(self->name, CY_HEARTBEAT_TOPIC_NAME, sizeof(CY_HEARTBEAT_TOPIC_NAME)) == 0;
         reordering_window = heartbeat ? UDPARD_RX_REORDERING_WINDOW_STATELESS : UDPARD_RX_REORDERING_WINDOW_UNORDERED;
@@ -374,11 +400,11 @@ static cy_err_t topic_subscribe(cy_topic_t* const self, const size_t extent, cy_
     const bool stateless = (reordering_window == UDPARD_RX_REORDERING_WINDOW_STATELESS);
 
     // Set up the udpard port. This does not yet allocate any resources.
-    static const udpard_rx_port_vtable_t vtable     = { .on_message = on_msg, .on_collision = on_collision };
-    static const udpard_rx_port_vtable_t vtable_stl = { .on_message = on_msg_stateless, .on_collision = on_collision };
-    const udpard_rx_port_vtable_t*       vtbl       = stateless ? &vtable_stl : &vtable;
-    const udpard_rx_mem_resources_t      rx_mem     = { .fragment = cy->mem, .session = cy->mem };
-    if (!udpard_rx_port_new(&self_low->rx_port, self->hash, extent, reordering_window, rx_mem, vtbl)) {
+    static const udpard_rx_port_vtable_t vtbl   = { .on_message = v_on_msg, .on_collision = v_on_collision };
+    static const udpard_rx_port_vtable_t vtbl_s = { .on_message = v_on_msg_stateless, .on_collision = v_on_collision };
+    const udpard_rx_port_vtable_t*       vt     = stateless ? &vtbl_s : &vtbl;
+    const udpard_rx_mem_resources_t      rx_mem = { .fragment = cy->mem, .session = cy->mem };
+    if (!udpard_rx_port_new(&self_low->rx_port, self->hash, extent, reordering_window, rx_mem, vt)) {
         return CY_ERR_ARGUMENT;
     }
     const udpard_udpip_ep_t endpoint = udpard_make_subject_endpoint(cy_topic_subject_id(self));
@@ -402,7 +428,7 @@ static cy_err_t topic_subscribe(cy_topic_t* const self, const size_t extent, cy_
     return res;
 }
 
-static void topic_unsubscribe(cy_topic_t* const self)
+static void v_topic_unsubscribe(cy_topic_t* const self)
 {
     cy_udp_posix_topic_t* const topic  = (cy_udp_posix_topic_t*)self;
     cy_udp_posix_t* const       cy_udp = (cy_udp_posix_t*)self->cy;
@@ -413,26 +439,12 @@ static void topic_unsubscribe(cy_topic_t* const self)
     }
 }
 
-// ReSharper disable once CppParameterMayBeConstPtrOrRef
-static void topic_set_response_extent(cy_topic_t* const self, size_t response_extent)
-{
-    cy_udp_posix_t* const cy_udp = (cy_udp_posix_t*)self->cy;
-    response_extent += UDPARD_P2P_HEADER_BYTES;
-    if (response_extent > cy_udp->p2p_port.base.extent) {
-        // This may sometimes, under very specific circumstances involving out-of-order frame arrival,
-        // disrupt some in-progress transfers, but it's unlikely and we use reliable delivery for P2P anyway.
-        cy_udp->p2p_port.base.extent = response_extent;
-        CY_TRACE(&cy_udp->base, "📏 Response (extent+overhead) increased to %zu bytes", cy_udp->p2p_port.base.extent);
-    }
-}
+static const cy_topic_vtable_t topic_vtable = { .destroy     = v_topic_destroy,
+                                                .publish     = v_topic_publish,
+                                                .subscribe   = v_topic_subscribe,
+                                                .unsubscribe = v_topic_unsubscribe };
 
-static const cy_topic_vtable_t topic_vtable = { .destroy             = topic_destroy,
-                                                .publish             = topic_publish,
-                                                .subscribe           = topic_subscribe,
-                                                .unsubscribe         = topic_unsubscribe,
-                                                .set_response_extent = topic_set_response_extent };
-
-static cy_topic_t* topic_new(cy_t* const cy)
+static cy_topic_t* v_topic_new(cy_t* const cy)
 {
     cy_udp_posix_t* const       cy_udp = (cy_udp_posix_t*)cy;
     cy_udp_posix_topic_t* const topic  = (cy_udp_posix_topic_t*)mem_alloc(cy, sizeof(cy_udp_posix_topic_t));
@@ -450,7 +462,7 @@ static cy_topic_t* topic_new(cy_t* const cy)
     return (cy_topic_t*)topic;
 }
 
-// ----------------------------------------  CY  ----------------------------------------
+// ----------------------------------------  CY VTABLE  ----------------------------------------
 
 static cy_us_t v_now(const cy_t* const cy)
 {
@@ -458,7 +470,6 @@ static cy_us_t v_now(const cy_t* const cy)
     return cy_udp_posix_now();
 }
 
-// ReSharper disable once CppParameterMayBeConstPtrOrRef
 static void* v_realloc(cy_t* const cy, void* const ptr, const size_t new_size)
 {
     (void)cy;
@@ -480,7 +491,7 @@ static void v_on_subscription_error(cy_t* const cy, cy_topic_t* const cy_topic, 
 static const cy_vtable_t cy_vtable = { .now                   = v_now,
                                        .realloc               = v_realloc,
                                        .random                = v_random,
-                                       .new_topic             = topic_new,
+                                       .new_topic             = v_topic_new,
                                        .on_subscription_error = v_on_subscription_error };
 
 // ----------------------------------------  END OF PLATFORM INTERFACE  ----------------------------------------
@@ -510,137 +521,126 @@ static void default_rx_sock_err_handler(cy_udp_posix_t* const       cy_udp,
       &cy_udp->base, "⚠️ RX socket error on iface #%u topic '%s': %u", iface_index, topic->base.name, (unsigned)err_no);
 }
 
-bool tx_eject(udpard_tx_t* const tx, const udpard_tx_ejection_t ej)
+static void v_on_p2p_msg(udpard_rx_t* const rx, udpard_rx_port_p2p_t* const port, const udpard_rx_transfer_p2p_t tr)
 {
-    return false; //
+    cy_udp_posix_t* const cy = rx->user;
+    assert((cy != NULL) && (port == &cy->p2p_port));
+    (void)port;
+    const cy_message_t msg = make_message(tr.base.payload_size_stored, tr.base.payload, cy->mem);
+    cy_on_response(&cy->base, tr.base.timestamp, tr.topic_hash, tr.base.transfer_id, msg);
 }
 
-static const udpard_tx_vtable_t tx_vtable = {};
-
-static const udpard_rx_port_p2p_vtable_t rx_p2p_vtable = {};
+bool v_tx_eject(udpard_tx_t* const tx, udpard_tx_ejection_t* const ej)
+{
+    cy_udp_posix_t* const cy = (cy_udp_posix_t*)tx->user;
+    assert(cy != NULL);
+    assert((cy->iface_mask & (1U << ej->iface_index)) != 0); // the caller must ensure this
+    assert(ej->now >= ej->deadline);
+    // The libudpard TX API provides us with an opportunity to retain the ownership of the datagram payload
+    // via reference counting. This is useful in kernel space or in embedded systems with low-level NIC drivers,
+    // but the Berkeley socket API does not allow us to take advantage of that -- the data will be copied into the
+    // kernel space anyway. Therefore, we simply send it with copying and do not bother with reference counting.
+    const int16_t res = udp_wrapper_send(&cy->sock[ej->iface_index], //
+                                         ej->destination.ip,
+                                         ej->destination.port,
+                                         ej->dscp,
+                                         ej->datagram.size,
+                                         ej->datagram.data);
+    if (res < 0) {
+        assert(cy->tx_sock_err_handler != NULL);
+        cy->tx_sock_err_handler(cy, ej->iface_index, (uint32_t)-res);
+    }
+    return res != 0; // either transmitted successfully or dropped due to error
+}
 
 cy_err_t cy_udp_posix_new(cy_udp_posix_t* const cy_udp,
                           const uint64_t        uid,
                           const wkv_str_t       name,
                           const wkv_str_t       namespace_,
                           const uint32_t        local_iface_address[CY_UDP_POSIX_IFACE_COUNT_MAX],
-                          const size_t          tx_queue_capacity_per_iface)
+                          const size_t          tx_queue_capacity)
 {
     assert(cy_udp != NULL);
     memset(cy_udp, 0, sizeof(*cy_udp));
     cy_udp->n_topics = 0;
-    // Set up the memory resources. We could use block pool allocator here as well!
-    // At the moment we use a very simple configuration though.
-    cy_udp->mem.alloc               = mem_alloc;
-    cy_udp->mem.free                = mem_free;
-    cy_udp->mem.user                = cy_udp;
+    // We could use block pool allocators here if preferred.
+    // Also, in the spirit of the PX4 UAVCAN driver, we could use a high-watermark allocator, where we graft memory
+    // blocks from an ordinary heap (doesn't have to be constant-complexity even), and return them into
+    // size-segregated free lists on deallocation.
+    // This should suit most systems without the need for manual sizing of each fixed-size block pool.
+    // Libudpard has a natural cap for the maximum memory usage based on the number of interfaces and queue sizes,
+    // which helps avoiding heap exhaustion in this scenario; also, if exhaustion does occur, we can shrink the
+    // least used pools on-the-fly.
+    cy_udp->mem                     = (udpard_mem_resource_t){ .user = cy_udp, .alloc = &mem_alloc, .free = &mem_free };
+    cy_udp->iface_mask              = 0;
     cy_udp->rx_sock_err_handler     = default_rx_sock_err_handler;
     cy_udp->tx_sock_err_handler     = default_tx_sock_err_handler;
     cy_udp->mem_allocated_fragments = 0;
     cy_udp->mem_oom_count           = 0;
 
     // Set up the TX and RX pipelines.
-    udpard_tx_mem_resources_t tx_mem = { .transfer = cy_udp->mem };
+    static const udpard_tx_vtable_t tx_vtable = { .eject = v_tx_eject };
+    const udpard_rx_mem_resources_t rx_mem    = { .fragment = cy_udp->mem, .session = cy_udp->mem };
+    udpard_tx_mem_resources_t       tx_mem    = { .transfer = cy_udp->mem };
     for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
-        cy_udp->sock[i]     = udp_wrapper_new();
-        cy_udp->local_ip[i] = local_iface_address[i];
-        tx_mem.payload[i]   = cy_udp->mem;
+        cy_udp->sock[i] = udp_wrapper_new();
+        if (is_valid_ip(local_iface_address[i])) {
+            cy_udp->local_ip[i] = local_iface_address[i];
+            cy_udp->iface_mask |= 1U << i;
+        } else {
+            cy_udp->local_ip[i] = 0;
+        }
+        tx_mem.payload[i] = cy_udp->mem;
     }
-    if (!udpard_tx_new(&cy_udp->udpard_tx, uid, random64(uid), tx_queue_capacity_per_iface, tx_mem, &tx_vtable)) {
+    if (cy_udp->iface_mask == 0) {
+        return CY_ERR_ARGUMENT;
+    }
+    if (!udpard_tx_new(&cy_udp->udpard_tx, uid, random64(uid), tx_queue_capacity, tx_mem, &tx_vtable)) {
         return CY_ERR_ARGUMENT; // Cleanup not required -- no resources allocated yet.
     }
-    udpard_rx_new(&cy_udp->udpard_rx, &cy_udp->udpard_tx);
+    udpard_rx_new(&cy_udp->udpard_rx, &cy_udp->udpard_tx); // infallible
     cy_udp->udpard_tx.user = cy_udp;
     cy_udp->udpard_rx.user = cy_udp;
 
-    // Initialize the udpard P2P RX port.
-    const udpard_rx_mem_resources_t rx_mem = { .fragment = cy_udp->mem, .session = cy_udp->mem };
-    if (!udpard_rx_port_new_p2p(&cy_udp->p2p_port, uid, P2P_INITIAL_EXTENT, rx_mem, &rx_p2p_vtable)) {
+    // Initialize the udpard P2P RX port. We start with a zero initial extent, which will be increased ad-hoc.
+    static const udpard_rx_port_p2p_vtable_t rx_p2p_vtable = { .on_message = v_on_p2p_msg };
+    if (!udpard_rx_port_new_p2p(&cy_udp->p2p_port, uid, 0, rx_mem, &rx_p2p_vtable)) {
         return CY_ERR_ARGUMENT; // Cleanup not required -- no resources allocated yet.
     }
 
-    // Initialize the instance sockets.
+    // Initialize the sockets.
     cy_err_t res = CY_OK;
     for (uint_fast8_t i = 0; (i < CY_UDP_POSIX_IFACE_COUNT_MAX) && (res == CY_OK); i++) {
-        if (is_valid_ip(local_iface_address[i])) {
-            cy_udp->local_ip[i] = local_iface_address[i];
-            res                 = err_from_udp_wrapper(
-              udp_wrapper_open_unicast(&cy_udp->sock[i], local_iface_address[i], &cy_udp->local_tx_port[i]));
-        } else {
-            cy_udp->local_ip[i]      = 0;
-            cy_udp->local_tx_port[i] = 0;
+        if ((cy_udp->iface_mask & (1U << i)) != 0) {
+            res = err_from_udp_wrapper(
+              udp_wrapper_open_unicast(&cy_udp->sock[i], cy_udp->local_ip[i], &cy_udp->local_tx_port[i]));
         }
     }
 
-    // Initialize Cy. It will not emit any transfers; this only happens from cy_heartbeat() and cy_publish().
+    // Initialize Cy. It will not emit any transfers yet.
     if (res == CY_OK) {
         const char name_copy[CY_NAMESPACE_NAME_MAX + 1] = { 0 };
         wkv_str_t  name_key                             = name;
-        if (name_key.len == 0) {
+        if (!cy_name_valid(name_key)) {
             (void)snprintf((char*)name_copy, sizeof(name_copy), "#%016llx", (unsigned long long)uid);
             name_key = wkv_key(name_copy);
         }
-        res = cy_new(&cy_udp->base, &cy_vtable, name_key, namespace_, CY_UDP_POSIX_SUBJECT_ID_MODULUS_DEFAULT);
+        // Here we assume that any transport that Cyphal/UDP may work with in a redundant set will have
+        // a subject-ID modulus of at least 23 bits. If that is not the case and a smaller modulus is needed,
+        // we will need to modify this to accept the modulus from the user.
+        // Also, if/when we add support for IPv6, we will want to extend the modulus to 32 bits.
+        res = cy_new(&cy_udp->base, &cy_vtable, name_key, namespace_, CY_SUBJECT_ID_MODULUS_23bit);
     }
 
     // Cleanup on error.
     if (res != CY_OK) {
+        udpard_rx_port_free(&cy_udp->udpard_rx, &cy_udp->p2p_port.base);
+        udpard_tx_free(&cy_udp->udpard_tx);
         for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
             udp_wrapper_close(&cy_udp->sock[i]); // The handle may be invalid, but we don't care.
         }
     }
     return res;
-}
-
-/// Write as many frames as possible from the tx queues to the network interfaces without blocking.
-static void tx_offload(cy_udp_posix_t* const cy_udp)
-{
-    for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
-        if (cy_udp->udpard_tx[i].queue_capacity > 0) {
-            const cy_us_t     now = cy_udp_posix_now(); // Do not call it for every frame, it's costly.
-            udpard_tx_item_t* tqi = udpard_tx_peek(&cy_udp->udpard_tx[i], now);
-            while (tqi != NULL) {
-                const int16_t send_res = udp_wrapper_send(&cy_udp->sock[i],
-                                                          tqi->destination.ip,
-                                                          tqi->destination.port,
-                                                          cy_udp->map_priority_to_dscp[tqi->priority],
-                                                          tqi->datagram_payload.size,
-                                                          tqi->datagram_payload.data);
-                if (send_res == 0) {
-                    break; // The socket is no longer writable, stop sending for now to retry later.
-                }
-                if (send_res < 0) {
-                    assert(cy_udp->tx_sock_err_handler != NULL);
-                    cy_udp->tx_sock_err_handler(cy_udp, i, (uint32_t)-send_res);
-                }
-                udpard_tx_pop(&cy_udp->udpard_tx[i], tqi);
-                udpard_tx_free(cy_udp->udpard_tx[i].memory, tqi);
-                tqi = udpard_tx_peek(&cy_udp->udpard_tx[i], now);
-            }
-        }
-    }
-}
-
-static cy_transfer_metadata_t make_metadata(const struct udpard_rx_transfer_t* const tr)
-{
-    return (cy_transfer_metadata_t){ .priority    = (cy_prio_t)tr->priority,
-                                     .context     = remote_to_response_context(&tr->remote),
-                                     .transfer_id = tr->transfer_id };
-}
-
-static cy_buffer_owned_t make_rx_buffer(const struct UdpardFragment head)
-{
-    static_assert(sizeof(struct UdpardFragment) == sizeof(cy_buffer_owned_t), "");
-    static_assert(offsetof(struct UdpardFragment, next) == offsetof(cy_buffer_owned_t, base.next), "");
-    static_assert(offsetof(struct UdpardFragment, view) == offsetof(cy_buffer_owned_t, base.view), "");
-    static_assert(offsetof(struct UdpardFragment, origin) == offsetof(cy_buffer_owned_t, origin), "");
-    return ( cy_buffer_owned_t){
-        .base   = {
-            .next = ( cy_buffer_borrowed_t*)head.next,
-            .view = { .size = head.view.size, .data = head.view.data },
-        },
-        .origin = { .size = head.origin.size, .data = head.origin.data },
-    };
 }
 
 static void ingest_topic_frame(cy_udp_posix_t* const       cy_udp,

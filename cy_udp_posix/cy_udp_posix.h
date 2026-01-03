@@ -5,6 +5,9 @@
 ///                         `____/ .___/`___/_/ /_/`____/`__, / .___/_/ /_/`__,_/_/
 ///                             /_/                     /____/_/
 ///
+/// A Cy platform layer for POSIX-like OSes using standard BSD sockets and libUDPard for Cyphal over UDP.
+/// It can be adapted for other socket-based APIs with minimal changes.
+///
 /// Copyright (c) Pavel Kirienko <pavel@opencyphal.org>
 
 #pragma once
@@ -21,9 +24,6 @@ extern "C"
 #define CY_UDP_POSIX_IFACE_COUNT_MAX UDPARD_IFACE_COUNT_MAX
 #define CY_UDP_POSIX_SUBJECT_ID_MAX  UDPARD_IPv4_SUBJECT_ID_MAX
 
-// https://github.com/OpenCyphal-Garage/cy/issues/12#issuecomment-3577831960
-#define CY_UDP_POSIX_SUBJECT_ID_MODULUS_DEFAULT 8380417
-
 typedef struct cy_udp_posix_t       cy_udp_posix_t;
 typedef struct cy_udp_posix_topic_t cy_udp_posix_topic_t;
 
@@ -38,6 +38,7 @@ struct cy_udp_posix_t
     udp_wrapper_t         sock[CY_UDP_POSIX_IFACE_COUNT_MAX]; ///< All TX and P2P RX.
     uint32_t              local_ip[CY_UDP_POSIX_IFACE_COUNT_MAX];
     uint16_t              local_tx_port[CY_UDP_POSIX_IFACE_COUNT_MAX];
+    uint32_t              iface_mask; ///< Bitmask of valid interfaces based on local_ip[].
 
     /// Handler for errors occurring while reading from the socket of the topic on the specified iface.
     /// The default handler is provided which will use CY_TRACE() to report the error.

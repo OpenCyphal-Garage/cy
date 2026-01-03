@@ -457,7 +457,7 @@ static uint64_t topic_hash(const wkv_str_t name)
 static uint32_t topic_subject_id(const cy_t* const cy, const uint64_t hash, const uint64_t evictions)
 {
 #ifndef CY_CONFIG_PREFERRED_TOPIC_OVERRIDE
-    return (uint32_t)((hash + (evictions * evictions)) % cy->subject_id_modulus);
+    return CY_PINNED_SUBJECT_ID_MAX + (uint32_t)((hash + (evictions * evictions)) % cy->subject_id_modulus);
 #else
     (void)hash;
     return (uint32_t)((CY_CONFIG_PREFERRED_TOPIC_OVERRIDE + (evictions * evictions)) % cy->subject_id_modulus);
@@ -1352,6 +1352,14 @@ bool cy_has_substitution_tokens(const wkv_str_t name)
     wkv_t kv;
     wkv_init(&kv, &wkv_realloc);
     return wkv_has_substitution_tokens(&kv, name);
+}
+
+bool cy_name_valid(const wkv_str_t name)
+{
+    if ((name.len == 0) || (name.str == NULL)) {
+        return false;
+    }
+    return memchr(name.str, '\0', name.len) == NULL;
 }
 
 // =====================================================================================================================

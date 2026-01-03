@@ -78,9 +78,10 @@ typedef struct cy_bytes_t
 
 /// An opaque user context enabling the application to share data with callbacks. It is intended to be passed by value.
 /// The size is chosen to match most small closures, which is helpful when interfacing with Rust/C++ lambdas.
+/// The size can be increased as long as it doesn't break the compile-time size checks/limits in the platform layer.
 typedef struct cy_user_context_t
 {
-    CY_ALIGN void* data[3];
+    CY_ALIGN void* data[4];
 } cy_user_context_t;
 
 #ifdef __cplusplus
@@ -370,6 +371,10 @@ static inline bool cy_has_substitution_tokens0(const char* const name)
 {
     return cy_has_substitution_tokens(wkv_key(name));
 }
+
+/// True iff the given name is valid according to the Cy naming rules.
+bool               cy_name_valid(const wkv_str_t name);
+static inline bool cy_name_valid0(const char* const name) { return cy_name_valid(wkv_key(name)); }
 
 #ifdef __cplusplus
 }
