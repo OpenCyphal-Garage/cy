@@ -1598,12 +1598,12 @@ cy_err_t cy_new(cy_t* const              cy,
     cy->implicit_topic_timeout = IMPLICIT_TOPIC_DEFAULT_TIMEOUT_us;
 
     // Pub/sub on the heartbeat topic.
-    cy->heartbeat_pub = cy_advertise0(cy, CY_HEARTBEAT_TOPIC_NAME);
+    const wkv_str_t hb_name = wkv_key(CY_HEARTBEAT_TOPIC_NAME);
+    cy->heartbeat_pub       = cy_advertise(cy, hb_name);
     if (cy->heartbeat_pub == NULL) {
         return CY_ERR_MEMORY;
     }
-    cy->heartbeat_sub =
-      cy_subscribe0(cy, CY_HEARTBEAT_TOPIC_NAME, sizeof(heartbeat_t), CY_USER_CONTEXT_EMPTY, &on_heartbeat);
+    cy->heartbeat_sub = cy_subscribe(cy, hb_name, sizeof(heartbeat_t), CY_USER_CONTEXT_EMPTY, &on_heartbeat);
     if (cy->heartbeat_sub == NULL) {
         cy_unadvertise(cy->heartbeat_pub);
         return CY_ERR_MEMORY;

@@ -148,15 +148,6 @@ typedef struct cy_publisher_t cy_publisher_t;
 cy_publisher_t* cy_advertise(cy_t* const cy, const wkv_str_t name);
 cy_publisher_t* cy_advertise_client(cy_t* const cy, const wkv_str_t name, const size_t response_extent);
 
-static inline cy_publisher_t* cy_advertise0(cy_t* const cy, const char* const name)
-{
-    return cy_advertise(cy, wkv_key(name));
-}
-static inline cy_publisher_t* cy_advertise_client0(cy_t* const cy, const char* const name, const size_t response_extent)
-{
-    return cy_advertise_client(cy, wkv_key(name), response_extent);
-}
-
 void cy_unadvertise(cy_publisher_t* const pub);
 
 /// Each publisher is always linked to a specific single topic.
@@ -319,24 +310,6 @@ cy_err_t cy_respond(cy_responder_t* const        responder,
                     const cy_user_context_t      ctx_delivery,
                     const cy_delivery_callback_t cb_delivery);
 
-static inline cy_subscriber_t* cy_subscribe0(cy_t* const                    cy,
-                                             const char* const              name,
-                                             const size_t                   extent,
-                                             const cy_user_context_t        ctx,
-                                             const cy_subscriber_callback_t callback)
-{
-    return cy_subscribe(cy, wkv_key(name), extent, ctx, callback);
-}
-static inline cy_subscriber_t* cy_subscribe_ordered0(cy_t* const                    cy,
-                                                     const char* const              name,
-                                                     const size_t                   extent,
-                                                     const cy_us_t                  reordering_window,
-                                                     const cy_user_context_t        ctx,
-                                                     const cy_subscriber_callback_t callback)
-{
-    return cy_subscribe_ordered(cy, wkv_key(name), extent, reordering_window, ctx, callback);
-}
-
 // =====================================================================================================================
 //                                                  NODE & TOPIC
 // =====================================================================================================================
@@ -344,14 +317,12 @@ static inline cy_subscriber_t* cy_subscribe_ordered0(cy_t* const                
 /// Returns the current time in microseconds. Always non-negative.
 cy_us_t cy_now(const cy_t* const cy);
 
+// TODO: add a way to dump/restore topic configuration for instant initialization. This may be platform-specific.
+
 /// Complexity is logarithmic in the number of topics. NULL if not found.
 /// In practical terms, these queries are very fast and efficient.
-cy_topic_t*               cy_topic_find_by_hash(const cy_t* const cy, const uint64_t hash);
-cy_topic_t*               cy_topic_find_by_name(const cy_t* const cy, const wkv_str_t name);
-static inline cy_topic_t* cy_topic_find_by_name0(const cy_t* const cy, const char* const name)
-{
-    return cy_topic_find_by_name(cy, wkv_key(name));
-}
+cy_topic_t* cy_topic_find_by_hash(const cy_t* const cy, const uint64_t hash);
+cy_topic_t* cy_topic_find_by_name(const cy_t* const cy, const wkv_str_t name);
 
 /// Iterate over all topics in an unspecified order except that pinned topic are listed first.
 /// This is useful when handling IO multiplexing (building the list of descriptors to read) and for introspection.
@@ -368,19 +339,12 @@ cy_topic_t* cy_topic_iter_next(cy_topic_t* const topic);
 wkv_str_t cy_topic_name(const cy_topic_t* const topic);
 uint64_t  cy_topic_hash(const cy_topic_t* const topic);
 
-// TODO: add a way to dump/restore topic configuration for instant initialization. This may be platform-specific.
-
 /// Returns true iff the name can match more than one topic.
 /// This is useful for some applications that want to ensure that certain names can match only one topic.
-bool               cy_has_substitution_tokens(const wkv_str_t name);
-static inline bool cy_has_substitution_tokens0(const char* const name)
-{
-    return cy_has_substitution_tokens(wkv_key(name));
-}
+bool cy_has_substitution_tokens(const wkv_str_t name);
 
 /// True iff the given name is valid according to the Cy naming rules.
-bool               cy_name_valid(const wkv_str_t name);
-static inline bool cy_name_valid0(const char* const name) { return cy_name_valid(wkv_key(name)); }
+bool cy_name_valid(const wkv_str_t name);
 
 #ifdef __cplusplus
 }
