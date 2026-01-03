@@ -178,20 +178,34 @@ typedef void (*cy_delivery_callback_t)(cy_user_context_t, bool success);
 /// will be empty.
 typedef void (*cy_response_callback_t)(cy_user_context_t, cy_us_t response_timestamp, cy_message_t);
 
+/// Publish a best-effort (non-reliable) one-way message without expecting a response.
+cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t tx_deadline, const cy_bytes_t message);
+
+/// Publish a reliable one-way message without expecting a response.
+/// The delivery callback must be non-NULL; it is GUARANTEED to be invoked EXACTLY ONCE per published message
+/// to report the outcome (success/failure), unless this function returns anything other than CY_OK.
+cy_err_t cy_publish_reliable(cy_publisher_t* const        pub,
+                             const cy_us_t                tx_deadline,
+                             const cy_bytes_t             message,
+                             const cy_user_context_t      ctx_delivery,
+                             const cy_delivery_callback_t cb_delivery);
+
 /// If the delivery callback is provided, reliable delivery will be used, attempting to deliver the message
 /// until the specified deadline is reached. The outcome will be reported via the delivery callback,
 /// which is GUARANTEED to be invoked EXACTLY ONCE per published message unless the function did not return CY_OK.
-/// If the delivery callback is NULL, best-effort delivery will be used, and no outcome will be reported.
+/// If the delivery callback is NULL, best-effort delivery will be used.
 ///
-/// If the response callback is provided, a P2P response transfer will be awaited from a remote node that
-/// received the published message. The response or lack thereof will be reported via the response callback.
+/// The response callback is mandatory (otherwise use the simple publish functions instead of this one).
+/// A P2P response transfer will be awaited from any remote node that received the published message.
+/// The response or lack thereof will be reported via the response callback.
 /// The response callback is GUARANTEED to be invoked EXACTLY ONCE per published message unless the function
 /// did not return CY_OK. If no response is received before the deadline, the response callback will be invoked
-/// with a negative timestamp and empty data. If the response callback is NULL, no response will be awaited.
+/// with a negative timestamp and empty data.
 ///
-/// If both callbacks are given and the delivery fails, the response callback will still be invoked.
-/// The guaranteed callback invocation regardless of the outcome is taken very seriously because it simplifies
-/// resource management for the application.
+/// The reliability of the response transfer is up to the remote node.
+///
+/// If reliable delivery fails, the response callback will still be invoked. The guaranteed callback invocation
+/// regardless of the outcome is taken very seriously because it simplifies resource management for the application.
 cy_err_t cy_request(cy_publisher_t* const        pub,
                     const cy_us_t                tx_deadline,
                     const cy_us_t                response_deadline,
@@ -200,21 +214,6 @@ cy_err_t cy_request(cy_publisher_t* const        pub,
                     const cy_delivery_callback_t cb_delivery,
                     const cy_user_context_t      ctx_response,
                     const cy_response_callback_t cb_response);
-
-/// A convenience function for sending reliable one-way messages without response.
-static inline cy_err_t cy_publish_reliable(cy_publisher_t* const        pub,
-                                           const cy_us_t                deadline,
-                                           const cy_bytes_t             message,
-                                           const cy_user_context_t      ctx_delivery,
-                                           const cy_delivery_callback_t cb_delivery)
-{
-    return cy_request(pub, deadline, deadline, message, ctx_delivery, cb_delivery, CY_USER_CONTEXT_EMPTY, NULL);
-}
-/// A convenience function for sending best-effort (non-reliable) one-way messages without response.
-static inline cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t deadline, const cy_bytes_t message)
-{
-    return cy_request(pub, deadline, deadline, message, CY_USER_CONTEXT_EMPTY, NULL, CY_USER_CONTEXT_EMPTY, NULL);
-}
 
 // =====================================================================================================================
 //                                                      SUBSCRIBER

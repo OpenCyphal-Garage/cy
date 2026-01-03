@@ -335,26 +335,6 @@ static void pending_response_finalize(pending_response_t* const self, const cy_u
     cb(ctx, ts, msg);
 }
 
-/// Deadlines are not unique, so this comparator never returns 0.
-static int32_t cavl_comp_pending_response_deadline(const void* const user, const cy_tree_t* const node)
-{
-    assert((user != NULL) && (node != NULL));
-    const pending_response_t* const inner = CAVL2_TO_OWNER(node, pending_response_t, index_deadline);
-    return ((*(cy_us_t*)user) >= inner->deadline) ? +1 : -1;
-}
-
-/// To find a pending response, one needs to locate the topic by hash first, if it exists when the response arrives.
-static int32_t cavl_comp_pending_response_transfer_id(const void* const user, const cy_tree_t* const node)
-{
-    assert((user != NULL) && (node != NULL));
-    const uint64_t                  outer = *(uint64_t*)user;
-    const pending_response_t* const inner = CAVL2_TO_OWNER(node, pending_response_t, index_transfer_id);
-    if (outer == inner->transfer_id) {
-        return 0;
-    }
-    return (outer >= inner->transfer_id) ? +1 : -1;
-}
-
 static int32_t cavl_comp_topic_hash(const void* const user, const cy_tree_t* const node)
 {
     const uint64_t          outer = *(uint64_t*)user;
@@ -434,7 +414,7 @@ static void implicit_animate(cy_topic_t* const topic, const cy_us_t now)
 }
 
 /// Retires at most one at every call.
-static void implicit_retire_expired(cy_t* const cy, const cy_us_t now)
+static void retire_expired_implicit_topics(cy_t* const cy, const cy_us_t now)
 {
     cy_topic_t* const topic = LIST_TAIL(cy->list_implicit, cy_topic_t, list_implicit);
     if (topic != NULL) {
@@ -693,7 +673,7 @@ static void topic_allocate(cy_topic_t* const topic, const uint64_t new_evictions
 }
 
 /// UB if the topic under this name already exists.
-/// out_topic may be new if the reference is not immediately needed (it can be found later via indexes).
+/// out_topic may be NULL if the reference is not immediately needed (it can be found later via indexes).
 /// The log-age is -1 for newly created topics, as opposed to auto-subscription on pattern match,
 /// where the lage is taken from the gossip message.
 static cy_err_t topic_new(cy_t* const        cy,
@@ -1133,19 +1113,6 @@ static void on_heartbeat(const cy_user_context_t     ctx,
 //                                                      PUBLISHER
 // =====================================================================================================================
 
-static void pending_responses_retire_expired(cy_t* cy, const cy_us_t now)
-{
-    pending_response_t* pr =
-      CAVL2_TO_OWNER(cavl2_min(cy->pending_responses_by_deadline), pending_response_t, index_deadline);
-    while ((pr != NULL) && (pr->deadline < now)) {
-        pending_response_finalize(pr, BIG_BANG, message_empty);
-        // We could have avoided the second min lookup by replacing this with a cavl2_next_greater(), but the problem
-        // is that the user callback may modify the tree, and we don't want to put constraints on the callback behavior.
-        // A more sophisticated solution is to mark the tree as modified, but it's not worth the effort.
-        pr = CAVL2_TO_OWNER(cavl2_min(cy->pending_responses_by_deadline), pending_response_t, index_deadline);
-    }
-}
-
 cy_publisher_t* cy_advertise(cy_t* const cy, const wkv_str_t name) { return cy_advertise_client(cy, name, 0); }
 
 cy_publisher_t* cy_advertise_client(cy_t* const cy, const wkv_str_t name, const size_t response_extent)
@@ -1190,61 +1157,135 @@ void      cy_priority_set(cy_publisher_t* const pub, const cy_prio_t priority)
     }
 }
 
+cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t tx_deadline, const cy_bytes_t message)
+{
+    if ((pub == NULL) || (tx_deadline < 0)) {
+        return CY_ERR_ARGUMENT;
+    }
+    assert(pub->topic->pub_count > 0);
+    cy_err_t res = heartbeat_begin(pub->topic->cy);
+    if (res == CY_OK) {
+        res = pub->topic->vtable->publish(pub->topic, tx_deadline, pub->priority, message, NULL, NULL, 0);
+    }
+    return res;
+}
+
+cy_err_t cy_publish_reliable(cy_publisher_t* const        pub,
+                             const cy_us_t                tx_deadline,
+                             const cy_bytes_t             message,
+                             const cy_user_context_t      ctx_delivery,
+                             const cy_delivery_callback_t cb_delivery)
+{
+    if ((pub == NULL) || (tx_deadline < 0) || (cb_delivery == NULL)) {
+        return CY_ERR_ARGUMENT;
+    }
+    assert(pub->topic->pub_count > 0);
+    cy_err_t res = heartbeat_begin(pub->topic->cy);
+    if (res == CY_OK) {
+        const cy_feedback_context_t ctx = { .user = ctx_delivery, .fun = cb_delivery };
+        res = pub->topic->vtable->publish(pub->topic, tx_deadline, pub->priority, message, &ctx, NULL, 0);
+    }
+    return res;
+}
+
+/// Deadlines are not unique, so this comparator never returns 0.
+static int32_t cavl_comp_pending_response_deadline(const void* const user, const cy_tree_t* const node)
+{
+    assert((user != NULL) && (node != NULL));
+    const pending_response_t* const inner = CAVL2_TO_OWNER(node, pending_response_t, index_deadline);
+    return ((*(cy_us_t*)user) >= inner->deadline) ? +1 : -1;
+}
+
+/// To find a pending response, one needs to locate the topic by hash first, if it exists when the response arrives.
+static int32_t cavl_comp_pending_response_transfer_id(const void* const user, const cy_tree_t* const node)
+{
+    assert((user != NULL) && (node != NULL));
+    const uint64_t                  outer = *(uint64_t*)user;
+    const pending_response_t* const inner = CAVL2_TO_OWNER(node, pending_response_t, index_transfer_id);
+    if (outer == inner->transfer_id) {
+        return 0;
+    }
+    return (outer >= inner->transfer_id) ? +1 : -1;
+}
+
 cy_err_t cy_request(cy_publisher_t* const        pub,
                     const cy_us_t                tx_deadline,
                     const cy_us_t                response_deadline,
-                    const cy_bytes_t             message, // May be fragmented.
+                    const cy_bytes_t             message,
                     const cy_user_context_t      ctx_delivery,
                     const cy_delivery_callback_t cb_delivery,
                     const cy_user_context_t      ctx_response,
                     const cy_response_callback_t cb_response)
 {
-    if ((pub == NULL) || (response_deadline < tx_deadline)) {
+    if ((pub == NULL) || (response_deadline < tx_deadline) || (cb_response == NULL)) {
         return CY_ERR_ARGUMENT;
     }
-    cy_err_t res = heartbeat_begin(pub->topic->cy);
-    if (res != CY_OK) {
-        return res;
-    }
-
-    const bool                reliable       = cb_delivery != NULL;
-    const bool                needs_response = cb_response != NULL;
-    pending_response_t* const pr = needs_response ? mem_alloc_zero(pub->topic->cy, sizeof(pending_response_t)) : NULL;
-    if (needs_response && (pr == NULL)) {
-        return CY_ERR_MEMORY;
-    }
-
-    cy_topic_t* const topic = pub->topic;
-    assert(topic->pub_count > 0);
-    const cy_feedback_context_t fb_ctx      = { .user = ctx_delivery, .fun = cb_delivery };
-    uint64_t                    transfer_id = 0;
-
-    res = pub->topic->vtable->publish(topic, //
-                                      tx_deadline,
-                                      pub->priority,
-                                      message,
-                                      reliable ? &fb_ctx : NULL,
-                                      &transfer_id,
-                                      pub->response_extent);
-    if (res != CY_OK) {
-        if (pr != NULL) {
-            mem_free(pub->topic->cy, pr);
-        }
-        return res;
-    }
-    if (future != NULL) {
-        if (res == CY_OK) {
-            const cy_tree_t* const tr = cavl2_find_or_insert(&pub->topic->cy->futures_by_deadline,
-                                                             &response_deadline,
-                                                             &cavl_comp_future_deadline,
-                                                             future,
-                                                             &cavl_factory_future_deadline);
-            assert(tr == &future->index_deadline);
+    cy_t* const cy = pub->topic->cy;
+    assert(pub->topic->pub_count > 0);
+    cy_err_t res = heartbeat_begin(cy);
+    if (res == CY_OK) {
+        pending_response_t* const pr = mem_alloc_zero(cy, sizeof(pending_response_t));
+        if (pr == NULL) {
+            res = CY_ERR_MEMORY;
         } else {
-            cavl2_remove(&topic->futures_by_transfer_id, &future->index_transfer_id);
+            const bool                  reliable = cb_delivery != NULL;
+            const cy_feedback_context_t fb_ctx   = { .user = ctx_delivery, .fun = cb_delivery };
+            res = pub->topic->vtable->publish(pub->topic, // ----------------------------
+                                              tx_deadline,
+                                              pub->priority,
+                                              message,
+                                              reliable ? &fb_ctx : NULL,
+                                              &pr->transfer_id,
+                                              pub->response_extent);
+            if (res == CY_OK) {
+                pr->deadline     = response_deadline;
+                pr->topic        = pub->topic;
+                pr->user_context = ctx_response;
+                pr->callback     = cb_response;
+                // The transfer-ID values returned by the transport layer are meant to be unique. This is trivially
+                // ensured in most transports because they use 64-bit monotonically increasing sequence numbers.
+                // However, Cyphal/CAN is special in that its transfer-ID space is only 5 bits wide, which will
+                // cause the insertion operation to fail if there already are 31 pending requests. While this
+                // is highly unlikely to actually happen in practice, we must still handle this case gracefully;
+                // the solution is very simple -- finalize the old competed response early and replace it.
+                while (true) {
+                    pending_response_t* const pr2 =
+                      CAVL2_TO_OWNER(cavl2_find_or_insert(&pub->topic->pending_responses_by_transfer_id,
+                                                          &pr->transfer_id,
+                                                          cavl_comp_pending_response_transfer_id,
+                                                          &pr->index_transfer_id,
+                                                          cavl2_trivial_factory),
+                                     pending_response_t,
+                                     index_transfer_id);
+                    if (pr2 == pr) {
+                        break; // Successfully inserted.
+                    }
+                    pending_response_finalize(pr2, BIG_BANG, message_empty);
+                }
+                (void)cavl2_find_or_insert(&cy->pending_responses_by_deadline,
+                                           &pr->deadline,
+                                           cavl_comp_pending_response_deadline,
+                                           &pr->index_deadline,
+                                           cavl2_trivial_factory);
+            } else {
+                mem_free(cy, pr);
+            }
         }
     }
     return res;
+}
+
+static void retire_expired_pending_responses(cy_t* cy, const cy_us_t now)
+{
+    pending_response_t* pr =
+      CAVL2_TO_OWNER(cavl2_min(cy->pending_responses_by_deadline), pending_response_t, index_deadline);
+    while ((pr != NULL) && (pr->deadline < now)) {
+        pending_response_finalize(pr, BIG_BANG, message_empty);
+        // We could have avoided the second min lookup by replacing this with a cavl2_next_greater(), but the problem
+        // is that the user callback may modify the tree, and we don't want to put constraints on the callback behavior.
+        // A more sophisticated solution is to mark the tree as modified, but it's not worth the effort.
+        pr = CAVL2_TO_OWNER(cavl2_min(cy->pending_responses_by_deadline), pending_response_t, index_deadline);
+    }
 }
 
 // =====================================================================================================================
@@ -1591,8 +1632,8 @@ static void ingest_p2p_response(cy_t* const          cy,
 cy_err_t cy_update(cy_t* const cy)
 {
     const cy_us_t now = cy_now(cy);
-    pending_responses_retire_expired(cy, now);
-    implicit_retire_expired(cy, now);
+    retire_expired_pending_responses(cy, now);
+    retire_expired_implicit_topics(cy, now);
     return heartbeat_poll(cy, now);
 }
 
