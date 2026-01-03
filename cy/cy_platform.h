@@ -146,7 +146,7 @@ typedef struct cy_topic_t
     cy_us_t ts_animated; ///< Last time the topic saw activity that prevents it from being retired.
 
     /// Used for matching pending response states against received responses by transfer-ID.
-    cy_tree_t* response_by_transfer_id;
+    cy_tree_t* pending_responses_by_transfer_id;
 
     /// States related to tracking publishers and subscribers on this topic. The topic is removed when none left.
     struct cy_topic_coupling_t* couplings;
@@ -170,7 +170,7 @@ typedef struct cy_topic_vtable_t
     ///
     /// The response extent hints the maximum size of response messages arriving in response to the published message
     /// that is of interest for the application, allowing the transport to truncate the rest. The transport may
-    /// disregard the hint and receive an arbitrarily larger response message.
+    /// disregard the hint and receive an arbitrarily larger response message. If no responses are expected, use zero.
     cy_err_t (*publish)(cy_topic_t*                  self,
                         cy_us_t                      tx_deadline,
                         cy_prio_t                    priority,
@@ -242,18 +242,18 @@ struct cy_t
     cy_list_t list_implicit;      ///< Most recently animated topic is at the head.
     cy_list_t list_gossip_urgent; ///< High-priority gossips. Newest at the head.
     cy_list_t list_gossip;        ///< Normal-priority gossips. Newest at the head.
-    cy_list_t list_scout_pending; ///< Lists cy_subscriber_root_t that are due for gossiping.
+    cy_list_t list_scout_pending; ///< Lists subscriber_root_t that are due for gossiping.
 
     /// When a heartbeat is received, its topic name will be compared against the patterns,
     /// and if a match is found, a new subscription will be constructed automatically; if a new topic instance
     /// has to be created for that, such instance is called implicit. Implicit instances are retired automatically
     /// when there are no explicit counterparts left and there is no traffic on the topic for a while.
-    /// The values of these tree nodes point to instances of cy_subscriber_root_t.
+    /// The values of these tree nodes point to instances of subscriber_root_t.
     wkv_t subscribers_by_name;    ///< Both explicit and patterns.
     wkv_t subscribers_by_pattern; ///< Only patterns for implicit subscriptions on heartbeat.
 
     /// For detecting timed out responses. This index spans all topics.
-    cy_tree_t* responses_by_deadline;
+    cy_tree_t* pending_responses_by_deadline;
 
     /// The user can use this field for arbitrary purposes. The platform layer shall not touch it.
     void* user;

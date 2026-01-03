@@ -169,6 +169,10 @@ const cy_topic_t* cy_publisher_topic(const cy_publisher_t* const pub);
 cy_prio_t cy_priority(cy_publisher_t* const pub);
 void      cy_priority_set(cy_publisher_t* const pub, const cy_prio_t priority);
 
+/// If no response was received before the deadline, the response timestamp will be negative and the message
+/// will be empty.
+typedef void (*cy_response_callback_t)(cy_user_context_t, cy_us_t response_timestamp, cy_message_t);
+
 /// If the delivery callback is provided, reliable delivery will be used, attempting to deliver the message
 /// until the specified deadline is reached. The outcome will be reported via the delivery callback,
 /// which is GUARANTEED to be invoked EXACTLY ONCE per published message unless the function did not return CY_OK.
@@ -188,10 +192,8 @@ cy_err_t cy_request(cy_publisher_t* const   pub,
                     const cy_bytes_t        message, // May be fragmented.
                     const cy_user_context_t ctx_delivery,
                     void (*const cb_delivery)(cy_user_context_t, bool success),
-                    const cy_user_context_t ctx_response,
-                    void (*const cb_response)(cy_user_context_t,
-                                              cy_us_t      response_timestamp,
-                                              cy_message_t response_message));
+                    const cy_user_context_t      ctx_response,
+                    const cy_response_callback_t cb_response);
 
 /// A convenience wrapper on top of cy_request for sending reliable one-way messages without response.
 static inline cy_err_t cy_publish_reliable(cy_publisher_t* const   pub,
@@ -279,9 +281,8 @@ typedef void (*cy_subscriber_callback_t)(cy_user_context_t,
 /// There may be more than one subscriber with the same name (pattern). The library will only keep one
 /// reference-counted topic; upon message arrival, all matching subscribers will be invoked in an unspecified order.
 ///
-/// The extent of all subscriptions should be the same, or the values of subscriptions added later should be less
-/// than those of subscriptions added earlier. Otherwise, the library will be forced to resubscribe,
-/// which may cause momentary data loss and/or duplication across the point of resubscription.
+/// If there is more than one subscriber utilizing different parameters (extent, ordering, etc.) on the same topic,
+/// the library will attempt to disambiguate the parameters using simple heuristics.
 cy_subscriber_t* cy_subscribe(cy_t* const                    cy,
                               const wkv_str_t                name,
                               const size_t                   extent,
@@ -334,9 +335,7 @@ static inline cy_subscriber_t* cy_subscribe_ordered0(cy_t* const                
 //                                                  NODE & TOPIC
 // =====================================================================================================================
 
-// TODO: add a way to dump/restore topic configuration for instant initialization. This may be platform-specific.
-
-/// A convenience wrapper that returns the current time in microseconds. Always non-negative.
+/// Returns the current time in microseconds. Always non-negative.
 cy_us_t cy_now(const cy_t* const cy);
 
 /// Complexity is logarithmic in the number of topics. NULL if not found.
@@ -362,6 +361,8 @@ cy_topic_t* cy_topic_iter_next(cy_topic_t* const topic);
 /// The name pointer lifetime is bound to the topic.
 wkv_str_t cy_topic_name(const cy_topic_t* const topic);
 uint64_t  cy_topic_hash(const cy_topic_t* const topic);
+
+// TODO: add a way to dump/restore topic configuration for instant initialization. This may be platform-specific.
 
 /// Returns true iff the name can match more than one topic.
 /// This is useful for some applications that want to ensure that certain names can match only one topic.
