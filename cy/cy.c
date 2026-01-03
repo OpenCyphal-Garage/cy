@@ -1690,3 +1690,17 @@ void cy_on_response(cy_t* const    cy,
         cy_message_destroy(&message); // The topic was destroyed while waiting for the response.
     }
 }
+
+void cy_on_message_feedback(cy_t* const cy, const cy_feedback_context_t context, const bool success)
+{
+    assert(cy != NULL);
+    (void)cy; // Later we may want to add statistics.
+    context.fun(context.user, success);
+}
+
+void cy_on_response_feedback(cy_t* const cy, const cy_feedback_context_t context, const bool success)
+{
+    assert(cy != NULL);
+    (void)cy; // Later we may want to add statistics.
+    context.fun(context.user, success);
+}

@@ -181,7 +181,7 @@ typedef struct responder_context_t
 static void on_response_feedback(udpard_tx_t* const tx, const udpard_tx_feedback_t fb)
 {
     assert(tx->user != NULL);
-    cy_on_response_feedback(tx->user, fb.topic_hash, fb.transfer_id, fb.success, feedback_context_unbox(fb.user));
+    cy_on_response_feedback(tx->user, feedback_context_unbox(fb.user), fb.success);
 }
 
 /// Invoked by Cy when the application desires to respond to a message received earlier.
@@ -264,7 +264,7 @@ struct cy_udp_posix_topic_t
 static void on_topic_feedback(udpard_tx_t* const tx, const udpard_tx_feedback_t fb)
 {
     assert(tx->user != NULL);
-    cy_on_message_feedback(tx->user, fb.topic_hash, fb.transfer_id, fb.success, feedback_context_unbox(fb.user));
+    cy_on_message_feedback(tx->user, feedback_context_unbox(fb.user), fb.success);
 }
 
 static cy_err_t v_topic_publish(cy_topic_t* const                  self,

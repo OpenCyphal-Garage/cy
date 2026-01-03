@@ -365,24 +365,14 @@ void cy_on_response(cy_t* const    cy,
                     const uint64_t transfer_id,
                     cy_message_t   message);
 
-/// Communicates the delivery status of a reliable message published on a topic (with the topic hash and the
-/// transfer-ID of the message), and a P2P response sent to a previously received message (with the topic hash and
-/// the transfer-ID of the original request message).
+/// Communicates the delivery status of a reliable message published on a topic, and a P2P response sent to a
+/// previously received message. For the platform layer it is easy to also provide the topic hash and the transfer-ID,
+/// but at the moment Cy does not make use of that information, so it is omitted. This API may be revised later.
 ///
-/// This is GUARANTEED to be invoked EXACTLY ONCE per published message where the reliable option is set,
-/// unless the publish function did not return CY_OK.
-/// This function accepts a topic hash instead of a topic pointer, which is to decouple it from the topic lifetime
-/// -- by the time the delivery outcome is known, the topic may have been destroyed already.
-void cy_on_message_feedback(cy_t* const                 cy,
-                            const uint64_t              topic_hash,
-                            const uint64_t              transfer_id,
-                            const bool                  success,
-                            const cy_feedback_context_t context);
-void cy_on_response_feedback(cy_t* const                 cy,
-                             const uint64_t              topic_hash,
-                             const uint64_t              transfer_id,
-                             const bool                  success,
-                             const cy_feedback_context_t context);
+/// These are GUARANTEED to be invoked EXACTLY ONCE per reliable message, unless the publish/response function did
+/// not return CY_OK. This also involves the case when the associated resource is destroyed (e.g., unsubscribed etc).
+void cy_on_message_feedback(cy_t* const cy, const cy_feedback_context_t context, const bool success);
+void cy_on_response_feedback(cy_t* const cy, const cy_feedback_context_t context, const bool success);
 
 /// For diagnostics and logging only. Do not use in embedded and real-time applications.
 /// This function is only required if CY_CONFIG_TRACE is defined and is nonzero; otherwise it should be left undefined.
