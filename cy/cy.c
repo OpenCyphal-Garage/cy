@@ -5,10 +5,11 @@
 ///                         `____/ .___/`___/_/ /_/`____/`__, / .___/_/ /_/`__,_/_/
 ///                             /_/                     /____/_/
 ///
-/// This is just a PoC, a crude approximation of what it might look like when implemented properly.
 /// Copyright (c) Pavel Kirienko <pavel@opencyphal.org>
 
 // ReSharper disable CppDFATimeOver
+// ReSharper disable CppDFAConstantParameter
+
 #include "cy_platform.h"
 
 #define CAVL2_RELATION int32_t
@@ -22,10 +23,6 @@
 #include <string.h>
 #include <stdio.h> ///< TODO remove dependency on stdio.h! This is only for the name composition and easy to get rid of.
 
-// =====================================================================================================================
-//                                                      MISCELLANEOUS
-// =====================================================================================================================
-
 #define KILO 1000L
 #define MEGA 1000000LL
 
@@ -35,23 +32,13 @@
 
 /// The log-age of a newly created topic.
 #define LAGE_MIN (-1)
-
 /// A special log-age value that indicates that the gossip is a scout message (pattern match request).
 #define LAGE_SCOUT (-2)
-
-#define HEARTBEAT_PUB_TIMEOUT_us (1 * MEGA)
 
 /// A topic created based on a pattern subscription will be deleted after it's been idle for this long.
 /// Here, "idle" means no messages received from this topic and no gossips seen on the network.
 /// Topics created explicitly by the application (without substitution tokens) are not affected by this timeout.
 #define IMPLICIT_TOPIC_DEFAULT_TIMEOUT_us (3600 * MEGA)
-
-enum p2p_kind
-{
-    p2p_kind_ack_message  = 0,
-    p2p_kind_ack_response = 1,
-    p2p_kind_response     = 2,
-};
 
 static size_t  larger(const size_t a, const size_t b) { return (a > b) ? a : b; }
 static int64_t max_i64(const int64_t a, const int64_t b) { return (a > b) ? a : b; }
@@ -104,10 +91,6 @@ static void mem_free(cy_t* const cy, void* ptr)
 
 /// Simply returns the value of the first hit. Useful for existence checks.
 static void* wkv_cb_first(const wkv_event_t evt) { return evt.node->value; }
-
-// =====================================================================================================================
-//                                                      NAMES
-// =====================================================================================================================
 
 /// TODO this is ugly and dirty; use wkv_str_t
 static bool resolve_name(const char* const ns, const char* const user, const char* const name, char* const destination)
@@ -196,8 +179,8 @@ static void enlist_head(cy_list_t* const list, cy_list_member_t* const member)
     assert((list->head != NULL) && (list->tail != NULL));
 }
 
-#define LIST_MEMBER(ptr, owner_type, owner_field) ((owner_type*)unbias_ptr((ptr), offsetof(owner_type, owner_field)))
-static void* unbias_ptr(const void* const ptr, const size_t offset)
+#define LIST_MEMBER(ptr, owner_type, owner_field) ((owner_type*)ptr_unbias((ptr), offsetof(owner_type, owner_field)))
+static void* ptr_unbias(const void* const ptr, const size_t offset)
 {
     return (ptr == NULL) ? NULL : (void*)((char*)ptr - offset);
 }
@@ -654,8 +637,7 @@ static cy_err_t topic_new(cy_t* const        cy,
     topic->ts_origin   = now - (pow2us(lage) * MEGA);
     topic->ts_animated = now;
 
-    topic->pub_transfer_id = random_u64(cy); // https://forum.opencyphal.org/t/improve-the-transfer-id-timeout/2375
-    topic->pub_count       = 0;
+    topic->pub_count = 0;
 
     topic->couplings  = NULL;
     topic->subscribed = false;
@@ -860,9 +842,9 @@ static cy_err_t publish_heartbeat(cy_t* const cy, const cy_us_t now, heartbeat_t
     const size_t message_size = offsetof(heartbeat_t, topic_name) + message->topic_name_len;
     assert(message_size <= sizeof(heartbeat_t));
     assert(message->topic_name_len <= CY_TOPIC_NAME_MAX);
-    const cy_err_t res = cy->heartbeat_pub.topic->vtable->publish(
-      &cy->heartbeat_pub, now + HEARTBEAT_PUB_TIMEOUT_us, (cy_bytes_t){ .size = message_size, .data = message }, false);
-    cy->heartbeat_pub.topic->pub_transfer_id++;
+    const cy_err_t res = cy->heartbeat_pub->topic->vtable->publish(
+      &cy->heartbeat_pub, now + cy->heartbeat_period, (cy_bytes_t){ .size = message_size, .data = message }, false);
+    cy->heartbeat_pub->topic->pub_transfer_id++;
     return res;
 }
 
@@ -906,7 +888,7 @@ static cy_err_t heartbeat_poll(cy_t* const cy, const cy_us_t now)
         if ((now >= cy->heartbeat_next) || (topic != NULL) || (scout != NULL)) {
             if ((topic != NULL) || (scout == NULL)) {
                 topic = (topic != NULL) ? topic : LIST_TAIL(cy->list_gossip, cy_topic_t, list_gossip);
-                topic = (topic != NULL) ? topic : cy->heartbeat_pub.topic;
+                topic = (topic != NULL) ? topic : cy->heartbeat_pub->topic;
                 res   = publish_heartbeat_gossip(cy, topic, now);
             } else {
                 res = publish_heartbeat_scout(cy, scout, now);
@@ -1476,28 +1458,6 @@ void cy_ingest(cy_topic_t* const    topic,
     }
 }
 
-static void ingest_p2p_ack_message(cy_t* const cy, cy_topic_t* const topic, const uint64_t transfer_id)
-{
-    (void)cy;
-    (void)topic;
-    (void)transfer_id;
-    // TODO: implement reliable delivery https://github.com/OpenCyphal-Garage/cy/issues/21
-    // Specifically, find the pending future and mark it as completed.
-}
-
-static void ingest_p2p_ack_response(cy_t* const       cy,
-                                    cy_topic_t* const topic,
-                                    const uint64_t    transfer_id,
-                                    const uint32_t    cookie)
-{
-    (void)cy;
-    (void)topic;
-    (void)transfer_id;
-    (void)cookie;
-    // TODO: implement reliable delivery https://github.com/OpenCyphal-Garage/cy/issues/21
-    // Specifically, find the pending response state and delete it.
-}
-
 static void ingest_p2p_response(cy_t* const          cy,
                                 cy_topic_t* const    topic,
                                 const cy_us_t        timestamp,
@@ -1526,65 +1486,8 @@ static void ingest_p2p_response(cy_t* const          cy,
         fut->callback(fut);
     }
 
-    // TODO: send rack.
     (void)cookie;
     (void)responder;
-}
-
-void cy_ingest_p2p(cy_t* const cy, const cy_us_t timestamp, cy_scatter_t payload, const cy_responder_t responder)
-{
-    assert(cy != NULL);
-    // We require the first 24 bytes to be non-fragmented. This is trivially ensured because the MTU of all transports
-    // that fragment per-frame is much larger (UDP requires the MTU to be at least a few hundreds of bytes),
-    // while small-MTU transports reassemble the payload into a contiguous buffer anyway.
-    if (cy_scatter_size(payload) < P2P_HEADER_BYTES) {
-        CY_TRACE(cy, "⚠️ Malformed size=%zu bytes", cy_scatter_size(payload));
-        cy_scatter_free(&payload);
-        return; // Malformed response -- missing header.
-    }
-    // Deserialize the header. The rest of the payload is for the application.
-    // TODO: endian-agnostic deserialization
-    uint64_t response_header[3];
-    static_assert(sizeof(response_header) == P2P_HEADER_BYTES, "P2P header size mismatch");
-    const size_t header_size = cy_gather(&payload, 0, P2P_HEADER_BYTES, &response_header);
-    assert(header_size == P2P_HEADER_BYTES);
-    (void)header_size;
-    transfer.payload.base.view.size -= P2P_HEADER_BYTES;
-    transfer.payload.base.view.data = ((const char*)transfer.payload.base.view.data) + P2P_HEADER_BYTES;
-    const uint_fast8_t kind         = (uint_fast8_t)(response_header[0] & UINT8_MAX);
-    const uint32_t     cookie       = (uint32_t)((response_header[0] >> 32U) & UINT32_MAX);
-    const uint64_t     topic_hash   = response_header[1];
-    const uint64_t     transfer_id  = response_header[2];
-
-    // Find the topic -- log(N) lookup.
-    cy_topic_t* const topic = cy_topic_find_by_hash(cy, topic_hash);
-    if (topic == NULL) { // We don't know this topic, ignore it.
-        cy_scatter_free(&payload);
-        CY_TRACE(cy, "⚠️ Orphan kind=%u T%016llx", (unsigned)kind, (unsigned long long)topic_hash);
-    } else {
-        switch (kind) {
-            case p2p_kind_ack_message: {
-                cy_scatter_free(&payload);
-                ingest_p2p_ack_message(cy, topic, transfer_id);
-                break;
-            }
-            case p2p_kind_ack_response: {
-                cy_scatter_free(&payload);
-                ingest_p2p_ack_response(cy, topic, transfer_id, cookie);
-                break;
-            }
-            case p2p_kind_response: {
-                ingest_p2p_ack_message(cy, topic, transfer_id); // response automatically confirms message receipt
-                ingest_p2p_response(cy, topic, timestamp, transfer_id, cookie, payload, responder);
-                break;
-            }
-            default: {
-                cy_scatter_free(&payload);
-                CY_TRACE(cy, "⚠️ Unknown kind=%u T%016llx", (unsigned)kind, (unsigned long long)topic_hash);
-                break;
-            }
-        }
-    }
 }
 
 cy_err_t cy_update(cy_t* const cy)

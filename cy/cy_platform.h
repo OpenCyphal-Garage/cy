@@ -6,6 +6,7 @@
 ///                             /_/                     /____/_/
 ///
 /// Platform-side API of the Cy library.
+/// The application is not intended to have access to this header; this is only for the platform layer implementation.
 ///
 /// Copyright (c) Pavel Kirienko <pavel@opencyphal.org>
 
@@ -159,8 +160,6 @@ typedef struct cy_topic_t
 /// Platform-specific implementation of the topic operations.
 typedef struct cy_topic_vtable_t
 {
-    void (*destroy)(cy_topic_t* self);
-
     /// Instructs the underlying transport layer to non-blockingly publish a new message on the topic.
     /// The transport will choose a new transfer-ID value for the message and return it, which may be used later to
     /// match responses if any are needed/expected.
@@ -171,7 +170,7 @@ typedef struct cy_topic_vtable_t
     ///
     /// The response extent hints the maximum size of response messages arriving in response to the published message
     /// that is of interest for the application, allowing the transport to truncate the rest. The transport may
-    /// disreagrd the hint and receive an arbitrarily larger response message.
+    /// disregard the hint and receive an arbitrarily larger response message.
     cy_err_t (*publish)(cy_topic_t*                  self,
                         cy_us_t                      tx_deadline,
                         cy_prio_t                    priority,
@@ -188,6 +187,8 @@ typedef struct cy_topic_vtable_t
 
     /// Instructs the underlying transport to destroy an existing subscription. Infallible by design.
     void (*unsubscribe)(cy_topic_t* self);
+
+    void (*destroy)(cy_topic_t* self);
 } cy_topic_vtable_t;
 
 /// Platform-specific implementation of cy_responder_t.
@@ -268,9 +269,8 @@ typedef struct cy_vtable_t
     /// - If the fragment is not increased in size, reallocation MUST succeed.
     /// - If the size is zero, it must behave like free() (which is often the case in realloc() but technically an UB).
     /// - Constant-complexity is preferred -- the API complexity specs are given assuming O(1) alloc/free operations,
-    ///   unless memory needs to be moved, in which case the complexity is linear in the old size of the block.
+    ///   unless an expansion is needed, in which case the complexity is linear in the old size of the block.
     void* (*realloc)(cy_t*, void*, size_t);
-
     /// Returns a random 64-bit unsigned integer.
     /// A TRNG is preferred; if not available, a PRNG will suffice, but its initial state should be distinct across
     /// reboots, and it should be hashed with the node's unique identifier.

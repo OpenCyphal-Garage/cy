@@ -39,6 +39,7 @@ struct cy_udp_posix_t
     uint32_t              local_ip[CY_UDP_POSIX_IFACE_COUNT_MAX];
     uint16_t              local_tx_port[CY_UDP_POSIX_IFACE_COUNT_MAX];
     uint32_t              iface_mask; ///< Bitmask of valid interfaces based on local_ip[].
+    uint64_t              prng_state;
 
     /// Handler for errors occurring while reading from the socket of the topic on the specified iface.
     /// The default handler is provided which will use CY_TRACE() to report the error.
@@ -92,6 +93,8 @@ cy_err_t cy_udp_posix_spin_until(cy_udp_posix_t* const cy, const cy_us_t deadlin
 /// Wait for events (blocking), process them, and return. Invoke this in a tight superloop to maintain liveness.
 /// The function is guaranteed to return no later than in the heartbeat period, or in a few ms, whichever is sooner.
 cy_err_t cy_udp_posix_spin_once(cy_udp_posix_t* const cy);
+
+void cy_udp_posix_destroy(cy_udp_posix_t* const cy);
 
 #ifdef __cplusplus
 }
