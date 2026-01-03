@@ -65,6 +65,7 @@ typedef enum cy_prio_t
     cy_prio_slow        = 6,
     cy_prio_optional    = 7,
 } cy_prio_t;
+#define CY_PRIO_COUNT 8
 
 /// An immutable borrowed buffer, optionally fragmented if next is not NULL. The last entry has next==NULL.
 /// The optional fragmentation allows efficient handling of scatter/gather I/O without copying the data.
@@ -145,7 +146,7 @@ size_t cy_message_read(cy_message_t* const cursor, const size_t offset, const si
 
 typedef struct cy_publisher_t cy_publisher_t;
 
-/// Create a new publisher on the topic. The default priority value is cy_prio_nominal; can be changed later.
+/// Create a new publisher on the topic. The default priority value is cy_prio_nominal, it can be changed later.
 /// The response_extent is the extent (maximum size) of the response data if the publisher expects responses.
 cy_publisher_t* cy_advertise(cy_t* const cy, const wkv_str_t name);
 cy_publisher_t* cy_advertise_client(cy_t* const cy, const wkv_str_t name, const size_t response_extent);
@@ -169,6 +170,10 @@ const cy_topic_t* cy_publisher_topic(const cy_publisher_t* const pub);
 cy_prio_t cy_priority(cy_publisher_t* const pub);
 void      cy_priority_set(cy_publisher_t* const pub, const cy_prio_t priority);
 
+/// Notifies the application about the outcome of a reliable delivery attempt.
+/// It is ALWAYS invoked EXACTLY ONCE per published message if reliable delivery was requested.
+typedef void (*cy_delivery_callback_t)(cy_user_context_t, bool success);
+
 /// If no response was received before the deadline, the response timestamp will be negative and the message
 /// will be empty.
 typedef void (*cy_response_callback_t)(cy_user_context_t, cy_us_t response_timestamp, cy_message_t);
@@ -187,28 +192,28 @@ typedef void (*cy_response_callback_t)(cy_user_context_t, cy_us_t response_times
 /// If both callbacks are given and the delivery fails, the response callback will still be invoked.
 /// The guaranteed callback invocation regardless of the outcome is taken very seriously because it simplifies
 /// resource management for the application.
-cy_err_t cy_request(cy_publisher_t* const   pub,
-                    const cy_us_t           deadline,
-                    const cy_bytes_t        message, // May be fragmented.
-                    const cy_user_context_t ctx_delivery,
-                    void (*const cb_delivery)(cy_user_context_t, bool success),
+cy_err_t cy_request(cy_publisher_t* const        pub,
+                    const cy_us_t                tx_deadline,
+                    const cy_us_t                response_deadline,
+                    const cy_bytes_t             message, // May be fragmented.
+                    const cy_user_context_t      ctx_delivery,
+                    const cy_delivery_callback_t cb_delivery,
                     const cy_user_context_t      ctx_response,
                     const cy_response_callback_t cb_response);
 
-/// A convenience wrapper on top of cy_request for sending reliable one-way messages without response.
-static inline cy_err_t cy_publish_reliable(cy_publisher_t* const   pub,
-                                           const cy_us_t           deadline,
-                                           const cy_bytes_t        message,
-                                           const cy_user_context_t ctx_delivery,
-                                           void (*const cb_delivery)(cy_user_context_t, bool success))
+/// A convenience function for sending reliable one-way messages without response.
+static inline cy_err_t cy_publish_reliable(cy_publisher_t* const        pub,
+                                           const cy_us_t                deadline,
+                                           const cy_bytes_t             message,
+                                           const cy_user_context_t      ctx_delivery,
+                                           const cy_delivery_callback_t cb_delivery)
 {
-    return cy_request(pub, deadline, message, ctx_delivery, cb_delivery, CY_USER_CONTEXT_EMPTY, NULL);
+    return cy_request(pub, deadline, deadline, message, ctx_delivery, cb_delivery, CY_USER_CONTEXT_EMPTY, NULL);
 }
-static inline cy_err_t cy_publish_best_effort(cy_publisher_t* const pub,
-                                              const cy_us_t         deadline,
-                                              const cy_bytes_t      message)
+/// A convenience function for sending best-effort (non-reliable) one-way messages without response.
+static inline cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t deadline, const cy_bytes_t message)
 {
-    return cy_request(pub, deadline, message, CY_USER_CONTEXT_EMPTY, NULL, CY_USER_CONTEXT_EMPTY, NULL);
+    return cy_request(pub, deadline, deadline, message, CY_USER_CONTEXT_EMPTY, NULL, CY_USER_CONTEXT_EMPTY, NULL);
 }
 
 // =====================================================================================================================
@@ -307,11 +312,11 @@ void cy_subscriber_name(const cy_subscriber_t* const sub, char* const out_name);
 /// but there may be at most one such invocation per responder instance.
 /// The feedback may be NULL if no delivery status notification is needed; the absence of the callback does not imply
 /// that the transfer will not be sent in the reliable mode.
-cy_err_t cy_respond(cy_responder_t* const   responder,
-                    const cy_us_t           deadline,
-                    const cy_bytes_t        response_message,
-                    const cy_user_context_t ctx_delivery,
-                    void (*const cb_delivery)(cy_user_context_t, bool success));
+cy_err_t cy_respond(cy_responder_t* const        responder,
+                    const cy_us_t                deadline,
+                    const cy_bytes_t             response_message,
+                    const cy_user_context_t      ctx_delivery,
+                    const cy_delivery_callback_t cb_delivery);
 
 static inline cy_subscriber_t* cy_subscribe0(cy_t* const                    cy,
                                              const char* const              name,

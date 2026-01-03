@@ -82,6 +82,14 @@ static void* wkv_realloc(wkv_t* const self, void* ptr, const size_t new_size)
 }
 
 static void* mem_alloc(cy_t* const cy, const size_t size) { return cy->vtable->realloc(cy, NULL, size); }
+static void* mem_alloc_zero(cy_t* const cy, const size_t size)
+{
+    void* const out = mem_alloc(cy, size);
+    if (out != NULL) {
+        memset(out, 0, size);
+    }
+    return out;
+}
 
 static void mem_free(cy_t* const cy, void* ptr)
 {
@@ -805,7 +813,7 @@ static cy_err_t topic_couple(cy_topic_t* const         topic,
 #endif
     // Allocate the new coupling object with the substitutions flex array.
     // Each topic keeps its own couplings because the sets of subscription names and topic names are orthogonal.
-    cy_topic_coupling_t* const cpl = (cy_topic_coupling_t*)mem_alloc(
+    cy_topic_coupling_t* const cpl = (cy_topic_coupling_t*)mem_alloc_zero(
       topic->cy, sizeof(cy_topic_coupling_t) + (substitution_count * sizeof(cy_substitution_t)));
     if (cpl != NULL) {
         cpl->root               = subr;
@@ -983,6 +991,8 @@ static cy_err_t heartbeat_poll(cy_t* const cy, const cy_us_t now)
 }
 
 /// Will publish the first heartbeat if it hasn't been published yet. Does nothing otherwise.
+/// Lazy heartbeat publication commencement is an important feature for listen-only nodes,
+/// allowing them to avoid transmitting anything at all until they cease to be listen-only.
 static cy_err_t heartbeat_begin(cy_t* const cy)
 {
     cy_err_t res = CY_OK;
@@ -1136,24 +1146,26 @@ static void pending_responses_retire_expired(cy_t* cy, const cy_us_t now)
     }
 }
 
-cy_err_t cy_advertise(cy_t* const cy, cy_publisher_t* const pub, const wkv_str_t name, const size_t response_extent)
+cy_publisher_t* cy_advertise(cy_t* const cy, const wkv_str_t name) { return cy_advertise_client(cy, name, 0); }
+
+cy_publisher_t* cy_advertise_client(cy_t* const cy, const wkv_str_t name, const size_t response_extent)
 {
-    assert((pub != NULL) && (cy != NULL));
     char name_buf[CY_TOPIC_NAME_MAX + 1U];
-    if (!resolve_name(cy->namespace_, cy->name, name.str, name_buf)) {
-        return CY_ERR_NAME;
+    if ((cy == NULL) || !resolve_name(cy->namespace_, cy->name, name.str, name_buf)) {
+        return NULL;
     }
-    const wkv_str_t resolved_name = wkv_key(name_buf);
-    memset(pub, 0, sizeof(*pub));
-    const cy_err_t res = topic_ensure(cy, &pub->topic, resolved_name);
-    pub->priority      = cy_prio_nominal;
-    pub->user          = NULL;
+    const wkv_str_t       resolved_name = wkv_key(name_buf);
+    cy_publisher_t* const pub           = mem_alloc_zero(cy, sizeof(*pub));
+    if (pub == NULL) {
+        return NULL;
+    }
+    const cy_err_t res   = topic_ensure(cy, &pub->topic, resolved_name);
+    pub->priority        = cy_prio_nominal;
+    pub->response_extent = response_extent;
     if (res == CY_OK) {
         assert(pub->topic != NULL);
         pub->topic->pub_count++;
         delist(&cy->list_implicit, &pub->topic->list_implicit);
-        pub->topic->vtable->advertise(pub->topic, response_extent + P2P_HEADER_BYTES);
-        // We don't need to schedule gossip here because this is managed by topic_ensure et al.
     }
     CY_TRACE(cy,
              "✨ T%016llx@%08x '%s': topic_count=%zu pub_count=%zu res=%d",
@@ -1163,61 +1175,63 @@ cy_err_t cy_advertise(cy_t* const cy, cy_publisher_t* const pub, const wkv_str_t
              cavl_count(cy->topics_by_hash),
              pub->topic->pub_count,
              res);
-    return res;
+    return (res == CY_OK) ? pub : NULL;
 }
 
 void cy_unadvertise(cy_publisher_t* const pub) { (void)pub; }
 
-void cy_future_new(cy_future_t* const future, const cy_future_callback_t callback, void* const user)
+const cy_topic_t* cy_publisher_topic(const cy_publisher_t* const pub) { return (pub != NULL) ? pub->topic : NULL; }
+
+cy_prio_t cy_priority(cy_publisher_t* const pub) { return (pub != NULL) ? pub->priority : cy_prio_nominal; }
+void      cy_priority_set(cy_publisher_t* const pub, const cy_prio_t priority)
 {
-    assert(future != NULL);
-    memset(future, 0, sizeof(*future));
-    future->state    = cy_future_fresh;
-    future->callback = callback;
-    future->user     = user;
+    if ((pub != NULL) && (((int)priority) < CY_PRIO_COUNT)) {
+        pub->priority = priority;
+    }
 }
 
-cy_err_t cy_publish(cy_publisher_t* const pub,
-                    const cy_us_t         tx_deadline,
-                    const cy_bytes_t      payload,
-                    const cy_us_t         response_deadline,
-                    cy_future_t* const    future)
+cy_err_t cy_request(cy_publisher_t* const        pub,
+                    const cy_us_t                tx_deadline,
+                    const cy_us_t                response_deadline,
+                    const cy_bytes_t             message, // May be fragmented.
+                    const cy_user_context_t      ctx_delivery,
+                    const cy_delivery_callback_t cb_delivery,
+                    const cy_user_context_t      ctx_response,
+                    const cy_response_callback_t cb_response)
 {
-    assert(pub != NULL);
-    cy_topic_t* const topic = pub->topic;
-    assert(topic != NULL);
-    assert(topic->pub_count > 0);
-
+    if ((pub == NULL) || (response_deadline < tx_deadline)) {
+        return CY_ERR_ARGUMENT;
+    }
     cy_err_t res = heartbeat_begin(pub->topic->cy);
     if (res != CY_OK) {
         return res;
     }
 
-    // Set up the response future first. If publication fails, we will have to undo it later.
-    // The reason we can't do it afterward is that if the transport has a cyclic transfer-ID, insertion may fail if
-    // we have exhausted the transfer-ID set.
-    if (future != NULL) {
-        future->index_deadline     = (cy_tree_t){ 0 };
-        future->index_transfer_id  = (cy_tree_t){ 0 };
-        future->publisher          = pub;
-        future->state              = cy_future_pending;
-        future->transfer_id        = topic->pub_transfer_id;
-        future->deadline           = response_deadline;
-        future->response_timestamp = BIG_BANG;
-        future->response_payload   = (cy_scatter_t){ 0 };
-        // NB: we don't touch the callback and the user pointer, as they are to be initialized by the user.
-        const cy_tree_t* const tr = cavl2_find_or_insert(&topic->futures_by_transfer_id,
-                                                         &future->transfer_id,
-                                                         &cavl_comp_future_transfer_id,
-                                                         future,
-                                                         &cavl_factory_future_transfer_id);
-        if (tr != &future->index_transfer_id) {
-            return CY_ERR_CAPACITY;
-        }
+    const bool                reliable       = cb_delivery != NULL;
+    const bool                needs_response = cb_response != NULL;
+    pending_response_t* const pr = needs_response ? mem_alloc_zero(pub->topic->cy, sizeof(pending_response_t)) : NULL;
+    if (needs_response && (pr == NULL)) {
+        return CY_ERR_MEMORY;
     }
 
-    const bool ack_required = (future != NULL);
-    res                     = pub->topic->vtable->publish(pub, tx_deadline, payload, ack_required);
+    cy_topic_t* const topic = pub->topic;
+    assert(topic->pub_count > 0);
+    const cy_feedback_context_t fb_ctx      = { .user = ctx_delivery, .fun = cb_delivery };
+    uint64_t                    transfer_id = 0;
+
+    res = pub->topic->vtable->publish(topic, //
+                                      tx_deadline,
+                                      pub->priority,
+                                      message,
+                                      reliable ? &fb_ctx : NULL,
+                                      &transfer_id,
+                                      pub->response_extent);
+    if (res != CY_OK) {
+        if (pr != NULL) {
+            mem_free(pub->topic->cy, pr);
+        }
+        return res;
+    }
     if (future != NULL) {
         if (res == CY_OK) {
             const cy_tree_t* const tr = cavl2_find_or_insert(&pub->topic->cy->futures_by_deadline,
@@ -1230,8 +1244,6 @@ cy_err_t cy_publish(cy_publisher_t* const pub,
             cavl2_remove(&topic->futures_by_transfer_id, &future->index_transfer_id);
         }
     }
-
-    topic->pub_transfer_id++;
     return res;
 }
 
@@ -1285,13 +1297,12 @@ static cy_err_t ensure_subscriber_root(cy_t* const               cy,
     CY_TRACE(cy, "✨'%s'", resolved_name.str);
 
     // Otherwise, allocate a new root, if possible.
-    node->value = mem_alloc(cy, sizeof(subscriber_root_t));
+    node->value = mem_alloc_zero(cy, sizeof(subscriber_root_t));
     if (node->value == NULL) {
         wkv_del(&cy->subscribers_by_name, node);
         return CY_ERR_MEMORY;
     }
     subscriber_root_t* const root = (subscriber_root_t*)node->value;
-    memset(root, 0, sizeof(*root));
 
     // Insert the new root into the indexes.
     const bool wc    = cy_has_substitution_tokens(resolved_name);

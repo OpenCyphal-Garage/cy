@@ -82,8 +82,8 @@ typedef struct cy_message_vtable_t
 typedef struct cy_feedback_context_t cy_feedback_context_t;
 struct cy_feedback_context_t
 {
-    cy_user_context_t user;
-    void (*fun)(void); ///< May exceed sizeof(void*) depending on the platform; treat as opaque.
+    cy_user_context_t      user;
+    cy_delivery_callback_t fun; ///< May exceed sizeof(void*) depending on the platform; treat as opaque.
 };
 
 /// This is the base type that is extended by the platform layer with transport- and platform-specific entities,
