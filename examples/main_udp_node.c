@@ -154,7 +154,7 @@ static struct config_t load_config(const int argc, char* argv[])
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
 static void on_msg_trace(cy_t* const cy, const cy_arrival_t* const arv)
 {
-    CY_BUFFER_GATHER_ON_STACK(payload, arv->transfer->payload.base)
+    CY_MESSAGE_DUMP(payload, arv->transfer->payload.base)
 
     // Convert linearized payload to hex.
     char hex[(payload.size * 2) + 1];
@@ -173,9 +173,8 @@ static void on_msg_trace(cy_t* const cy, const cy_arrival_t* const arv)
 
     // Log the message.
     CY_TRACE(cy,
-             "💬 [sid=%04x nid=%04x tid=%016llx sz=%06zu ts=%09llu] @ '%s':\n%s\n%s",
+             "💬 [sid=%04x tid=%016llx sz=%06zu ts=%09llu] @ '%s':\n%s\n%s",
              cy_topic_subject_id(arv->topic),
-             arv->transfer->metadata.remote_node_id,
              (unsigned long long)arv->transfer->metadata.transfer_id,
              payload.size,
              (unsigned long long)arv->transfer->timestamp,
@@ -183,9 +182,8 @@ static void on_msg_trace(cy_t* const cy, const cy_arrival_t* const arv)
              hex,
              ascii);
     // TODO: log substitutions.
-
     // Optionally, send a direct p2p response to the publisher of this message.
-    if (cy_joined(cy) && ((rand() % 2) == 0)) {
+    if ((rand() % 2) == 0) {
         const cy_err_t err = cy_respond(cy,
                                         arv->topic, //
                                         arv->transfer->timestamp + 1000000,
@@ -203,7 +201,7 @@ static void on_response_trace(cy_t* const cy, cy_future_t* const future)
     cy_topic_t* topic = future->publisher->topic;
     if (future->state == cy_future_success) {
         cy_transfer_owned_t* const transfer = &future->last_response;
-        CY_BUFFER_GATHER_ON_STACK(payload, transfer->payload.base)
+        CY_MESSAGE_DUMP(payload, transfer->payload.base)
 
         // Convert payload to hex.
         char hex[(payload.size * 2) + 1];
@@ -309,27 +307,23 @@ int main(const int argc, char* argv[])
         // See https://github.com/Zubax/olga_scheduler
         const cy_us_t now = cy_now(cy);
         if (now >= next_publish_at) {
-            if (cy_joined(cy)) {
-                for (size_t i = 0; i < cfg.pub_count; i++) {
-                    if (futures[i].state == cy_future_pending) {
-                        continue;
-                    }
-                    char msg[256];
-                    sprintf(msg,
-                            "Hello from %016llx! The current time is %lld us.",
-                            (unsigned long long)cy->uid,
-                            (long long)now);
-                    const cy_err_t pub_res =
-                      cy_publish(cy,
-                                 &publishers[i],
-                                 now + 100000,
-                                 (cy_buffer_borrowed_t){ .view = { .data = msg, .size = strlen(msg) } },
-                                 now + 1000000,
-                                 &futures[i]);
-                    if (pub_res != CY_OK) {
-                        fprintf(stderr, "cy_publish: %d\n", pub_res);
-                        break;
-                    }
+            for (size_t i = 0; i < cfg.pub_count; i++) {
+                if (futures[i].state == cy_future_pending) {
+                    continue;
+                }
+                char msg[256];
+                sprintf(
+                  msg, "Hello from %016llx! The current time is %lld us.", (unsigned long long)cy->uid, (long long)now);
+                const cy_err_t pub_res =
+                  cy_publish(cy,
+                             &publishers[i],
+                             now + 100000,
+                             (cy_buffer_borrowed_t){ .view = { .data = msg, .size = strlen(msg) } },
+                             now + 1000000,
+                             &futures[i]);
+                if (pub_res != CY_OK) {
+                    fprintf(stderr, "cy_publish: %d\n", pub_res);
+                    break;
                 }
             }
             next_publish_at += 5000000U;

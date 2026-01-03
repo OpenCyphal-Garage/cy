@@ -171,6 +171,7 @@ typedef struct cy_topic_vtable_t
     /// The response extent hints the maximum size of response messages arriving in response to the published message
     /// that is of interest for the application, allowing the transport to truncate the rest. The transport may
     /// disregard the hint and receive an arbitrarily larger response message. If no responses are expected, use zero.
+    /// All received responses are reported via cy_on_response().
     cy_err_t (*publish)(cy_topic_t*                  self,
                         cy_us_t                      tx_deadline,
                         cy_prio_t                    priority,
@@ -180,6 +181,7 @@ typedef struct cy_topic_vtable_t
                         size_t                       response_extent);
 
     /// Instructs the underlying transport layer to create a new subscription on the topic.
+    /// Messages received on this topic will be reported via cy_on_message().
     /// The topic is guaranteed to not be subscribed to when this function is invoked.
     /// TODO: Should we implement an optimization to allow quick extent change without full resubscription?
     /// The reordering window is negative if the unordered mode is desired.
