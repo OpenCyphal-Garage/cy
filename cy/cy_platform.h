@@ -271,6 +271,7 @@ typedef struct cy_vtable_t
     /// - Constant-complexity is preferred -- the API complexity specs are given assuming O(1) alloc/free operations,
     ///   unless an expansion is needed, in which case the complexity is linear in the old size of the block.
     void* (*realloc)(cy_t*, void*, size_t);
+
     /// Returns a random 64-bit unsigned integer.
     /// A TRNG is preferred; if not available, a PRNG will suffice, but its initial state should be distinct across
     /// reboots, and it should be hashed with the node's unique identifier.
@@ -278,20 +279,17 @@ typedef struct cy_vtable_t
     /// A simple compliant solution that can be implemented in an embedded system without TRNG is:
     ///
     ///     static uint64_t g_prng_state __attribute__ ((section (".noinit")));
-    ///     g_prng_state += 0xA0761D6478BD642FULL;                // add Wyhash seed (64-bit prime)
-    ///     const uint64_t seed[2] = { g_prng_state, local_uid }; // if possible, add more entropy here, like ADC noise
-    ///     return rapidhash(seed, sizeof(seed));
+    ///     g_prng_state += 0xA0761D6478BD642FULL;     // add Wyhash seed (64-bit prime)
+    ///     const uint64_t seed[] = { g_prng_state }; // if possible, add more entropy here, like ADC noise
+    ///     return rapidhash_withSeed(seed, sizeof(seed), local_uid);
     ///
     /// It is desirable to save the PRNG state in a battery-backed memory, if available; otherwise, in small MCUs one
     /// could hash the entire RAM contents at startup to scavenge as much entropy as possible, or use ADC or clock
-    /// noise. If an RTC is available, then the following is sufficient:
+    /// noise. If an RTC is available, then the following is sufficient (extra entropy can be added via the seed array):
     ///
     ///     static uint_fast16_t g_counter = 0;
-    ///     const uint64_t seed[2] = {
-    ///         ((uint64_t)rtc_get_time() << 16U) + ++g_counter,
-    ///         local_uid,
-    ///     }; // if possible, add more entropy here, like ADC noise
-    ///     return rapidhash(seed, sizeof(seed));
+    ///     const uint64_t seed[] = { ((uint64_t)rtc_get_time() << 16U) + ++g_counter };
+    ///     return rapidhash_withSeed(seed, sizeof(seed), local_uid);
     uint64_t (*random)(cy_t*);
 
     /// Allocates a new topic that is initially neither subscribed nor advertised. NULL if out of memory.

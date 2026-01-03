@@ -97,10 +97,10 @@ static cy_err_t err_from_udp_wrapper(const int16_t e)
     }
 }
 
-static uint64_t random64(uint64_t* const state)
+static uint64_t random64(uint64_t* const state, const uint64_t local_uid)
 {
     *state += 0xA0761D6478BD642FULL; // add Wyhash seed (64-bit prime)
-    return rapidhash(state, sizeof(uint64_t));
+    return rapidhash_withSeed(state, sizeof(uint64_t), local_uid);
 }
 
 static cy_feedback_context_t feedback_context_unbox(const udpard_user_context_t ctx)
@@ -450,7 +450,7 @@ static cy_topic_t* v_topic_new(cy_t* const self)
     if (topic != NULL) {
         memset(topic, 0, sizeof(cy_udp_posix_topic_t));
         topic->base.vtable     = &topic_vtable;
-        topic->pub_transfer_id = random64(&cy->prng_state);
+        topic->pub_transfer_id = random64(&cy->prng_state, cy->udpard_tx.local_uid);
         for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
             topic->rx_sock[i] = udp_wrapper_new();
         }
@@ -478,7 +478,10 @@ static void* v_realloc(cy_t* const cy, void* const ptr, const size_t new_size)
     return NULL;
 }
 
-static uint64_t v_random(cy_t* const cy) { return random64(&((cy_udp_posix_t*)cy)->prng_state); }
+static uint64_t v_random(cy_t* const cy)
+{
+    return random64(&((cy_udp_posix_t*)cy)->prng_state, ((cy_udp_posix_t*)cy)->udpard_tx.local_uid);
+}
 
 static void v_on_subscription_error(cy_t* const cy, cy_topic_t* const cy_topic, const cy_err_t error)
 {
@@ -576,7 +579,7 @@ cy_err_t cy_udp_posix_new(cy_udp_posix_t* const cy,
 
     // This PRNG state seed is only valid if a true RTC is available. Otherwise, use other sources of entropy.
     // Refer to cy_platform.h docs for some hints on how to make it work on an MCU without a TRNG nor RTC.
-    cy->prng_state = uid ^ ((uint64_t)time(NULL) << 16U);
+    cy->prng_state = (uint64_t)time(NULL) << 16U;
 
     // Set up the TX and RX pipelines.
     static const udpard_tx_vtable_t tx_vtable = { .eject = v_tx_eject };
@@ -595,7 +598,7 @@ cy_err_t cy_udp_posix_new(cy_udp_posix_t* const cy,
     if (cy->iface_mask == 0) {
         return CY_ERR_ARGUMENT;
     }
-    if (!udpard_tx_new(&cy->udpard_tx, uid, random64(&cy->prng_state), tx_queue_capacity, tx_mem, &tx_vtable)) {
+    if (!udpard_tx_new(&cy->udpard_tx, uid, random64(&cy->prng_state, uid), tx_queue_capacity, tx_mem, &tx_vtable)) {
         return CY_ERR_ARGUMENT; // Cleanup not required -- no resources allocated yet.
     }
     udpard_rx_new(&cy->udpard_rx, &cy->udpard_tx); // infallible
