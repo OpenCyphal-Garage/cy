@@ -133,7 +133,7 @@ static udpard_bytes_scattered_t cy_bytes_to_udpard_bytes(const cy_bytes_t messag
 
 // ----------------------------------------  MESSAGE BUFFER  ----------------------------------------
 
-static void v_message_free(cy_message_t* const self)
+static void v_message_destroy(cy_message_t* const self)
 {
     const udpard_mem_resource_t mem = { .user = self->state[1], .alloc = &mem_alloc, .free = &mem_free };
     udpard_fragment_free_all((udpard_fragment_t*)self->state[0], mem);
@@ -160,8 +160,8 @@ static size_t v_message_read_1(cy_message_t* const self, const size_t offset, co
 
 static cy_message_t make_message(const size_t size, udpard_fragment_t* const frag, const udpard_mem_resource_t mem)
 {
-    static const cy_message_vtable_t vtable        = { .free = v_message_free, .read = v_message_read };
-    static const cy_message_vtable_t vtable_1frame = { .free = v_message_free, .read = v_message_read_1 };
+    static const cy_message_vtable_t vtable        = { .destroy = v_message_destroy, .read = v_message_read };
+    static const cy_message_vtable_t vtable_1frame = { .destroy = v_message_destroy, .read = v_message_read_1 };
     return (cy_message_t){ .state  = { frag, mem.user },
                            .size   = size,
                            .vtable = (frag->view.size == size) ? &vtable_1frame : &vtable };
@@ -338,7 +338,7 @@ static void v_on_msg(udpard_rx_t* const rx, udpard_rx_port_t* const port, const 
     assert((cy != NULL) && (topic != NULL));
     const cy_message_t   msg  = make_message(tr.payload_size_stored, tr.payload, cy->mem);
     const cy_responder_t resp = make_responder(&cy->base, port->topic_hash, tr.transfer_id, tr.priority, tr.remote);
-    cy_on_message(topic, tr.timestamp, tr.transfer_id, msg, resp);
+    cy_on_message(topic, tr.timestamp, msg, resp);
 }
 
 static void v_on_msg_stateless(udpard_rx_t* const rx, udpard_rx_port_t* const port, const udpard_rx_transfer_t tr)

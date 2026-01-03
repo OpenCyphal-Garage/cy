@@ -118,7 +118,7 @@ cy_message_t cy_message_move(cy_message_t* const msg);
 /// Must be invoked at least once on a message object obtained from a received transfer.
 /// No effect if the instance is already moved-from or if the pointer is NULL.
 /// Subsequent calls have no effect; the passed instance will be moved-from.
-void cy_message_free(cy_message_t* const msg);
+void cy_message_destroy(cy_message_t* const msg);
 
 /// This is the only way to access the received message data.
 /// It gathers `size` bytes of data located at `offset` bytes from the beginning of the transfer data
@@ -167,15 +167,15 @@ void cy_unadvertise(cy_publisher_t* const pub);
 /// It can be used to obtain the topic name, hash, etc. of this publisher.
 const cy_topic_t* cy_publisher_topic(const cy_publisher_t* const pub);
 
-cy_prio_t cy_priority(cy_publisher_t* const pub);
+cy_prio_t cy_priority(const cy_publisher_t* const pub);
 void      cy_priority_set(cy_publisher_t* const pub, const cy_prio_t priority);
 
 /// Notifies the application about the outcome of a reliable delivery attempt.
 /// It is ALWAYS invoked EXACTLY ONCE per published message if reliable delivery was requested.
 typedef void (*cy_delivery_callback_t)(cy_user_context_t, bool success);
 
-/// If no response was received before the deadline, the response timestamp will be negative and the message
-/// will be empty.
+/// The callback takes the ownership of the message and is responsible for its (eventual) destruction.
+/// If no response was received before the deadline, the timestamp will be negative and the message will be empty.
 typedef void (*cy_response_callback_t)(cy_user_context_t, cy_us_t response_timestamp, cy_message_t);
 
 /// Publish a best-effort (non-reliable) one-way message without expecting a response.
@@ -262,9 +262,10 @@ typedef struct cy_substitution_set_t
 /// Optionally, the user handler can take ownership of the transfer message using cy_message_move();
 /// however, to avoid use-after-free, the following rules must be followed:
 /// 1. At most one handler can move the message out of the arrival instance.
-/// 2. If message is moved out, it shall not be freed (see cy_message_free()) until after the callback returns,
+/// 2. If message is moved out, it shall not be destroyed (see cy_message_destroy()) until after the callback returns,
 ///    unless it is the last handler to process it.
-/// If the message is not moved out, it will be freed automatically after return from the callback.
+/// If the message is not moved out, it will be destroyed automatically after return from the callback.
+/// If these restrictions become too limiting, we may introduce simple reference counting for messages in the future.
 ///
 /// The substitution set specifies the subscription name pattern substitutions that were made to achieve the match.
 /// E.g., matching "ins/?/data/*" against topic "ins/0/data/foo/456" produces ("0", "foo", "456").
@@ -284,25 +285,27 @@ typedef void (*cy_subscriber_callback_t)(cy_user_context_t,
 ///
 /// There may be more than one subscriber with the same name (pattern). The library will only keep one
 /// reference-counted topic; upon message arrival, all matching subscribers will be invoked in an unspecified order.
-///
 /// If there is more than one subscriber utilizing different parameters (extent, ordering, etc.) on the same topic,
-/// the library will attempt to disambiguate the parameters using simple heuristics.
+/// the library will disambiguate the parameters using simple heuristics.
 cy_subscriber_t* cy_subscribe(cy_t* const                    cy,
                               const wkv_str_t                name,
                               const size_t                   extent,
-                              const cy_user_context_t        ctx,
+                              const cy_user_context_t        context,
                               const cy_subscriber_callback_t callback);
+
+/// The reordering window must be non-negative.
 cy_subscriber_t* cy_subscribe_ordered(cy_t* const                    cy,
                                       const wkv_str_t                name,
                                       const size_t                   extent,
                                       const cy_us_t                  reordering_window,
-                                      const cy_user_context_t        ctx,
+                                      const cy_user_context_t        context,
                                       const cy_subscriber_callback_t callback);
 
 /// No effect if the subscriber pointer is NULL.
 void cy_unsubscribe(cy_subscriber_t* const sub);
 
-/// Copies the subscriber name into the user-supplied buffer. Max size is CY_TOPIC_NAME_MAX.
+/// Copies the subscriber name into the user-supplied buffer. Max size is CY_TOPIC_NAME_MAX plus NUL terminator.
+/// The output string is always NUL-terminated.
 void cy_subscriber_name(const cy_subscriber_t* const sub, char* const out_name);
 
 /// Send a response to a message previously received from a topic subscription.
@@ -312,7 +315,7 @@ void cy_subscriber_name(const cy_subscriber_t* const sub, char* const out_name);
 /// The feedback may be NULL if no delivery status notification is needed; the absence of the callback does not imply
 /// that the transfer will not be sent in the reliable mode.
 cy_err_t cy_respond(cy_responder_t* const        responder,
-                    const cy_us_t                deadline,
+                    const cy_us_t                tx_deadline,
                     const cy_bytes_t             response_message,
                     const cy_user_context_t      ctx_delivery,
                     const cy_delivery_callback_t cb_delivery);

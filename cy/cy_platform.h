@@ -74,7 +74,7 @@ typedef struct cy_list_t
 /// Platform-specific implementation of cy_message_t.
 typedef struct cy_message_vtable_t
 {
-    void (*free)(cy_message_t*);
+    void (*destroy)(cy_message_t*);
     size_t (*read)(cy_message_t*, size_t, size_t, void*);
 } cy_message_vtable_t;
 
@@ -199,7 +199,8 @@ typedef struct cy_responder_vtable_t
     /// platform-specific manner.
     /// Implementations may optionally invalidate the responder object after use -- only a single use is guaranteed.
     /// Currently, all P2P response transfers are sent using the reliable delivery mode, and the result of the transfer
-    /// is reported via cy_on_message_feedback().
+    /// is reported via cy_on_message_feedback(). If needed, in the future we may consider adding support for
+    /// best-effort P2P responses by allowing NULL feedback context here.
     cy_err_t (*respond)(cy_responder_t*, cy_us_t tx_deadline, cy_bytes_t message, cy_feedback_context_t context);
 } cy_responder_vtable_t;
 
@@ -320,14 +321,14 @@ cy_err_t cy_new(cy_t* const              cy,
                 const uint32_t           subject_id_modulus);
 void     cy_destroy(cy_t* const cy);
 
+/// Hidden from the application because the application is not expected to need this.
+uint32_t cy_topic_subject_id(const cy_topic_t* const topic);
+
 /// This function must be invoked periodically to ensure liveness.
 /// The most efficient invocation schedule is guided by min(cy->heartbeat_next, cy->heartbeat_next_urgent),
 /// but not less often than every 10 ms; if fixed-rate updates are desired, then the recommended period is 1 ms.
 /// The returned value indicates the success of the heartbeat publication, if any took place, or zero.
 cy_err_t cy_update(cy_t* const cy);
-
-/// Hidden from the application because the application is not expected to need this.
-uint32_t cy_topic_subject_id(const cy_topic_t* const topic);
 
 static inline bool cy_topic_has_subscribers(const cy_topic_t* const topic) { return topic->couplings != NULL; }
 
@@ -346,8 +347,7 @@ void cy_on_topic_collision(cy_topic_t* const topic);
 /// No effect if the topic is NULL.
 void cy_on_message(cy_topic_t* const    topic,
                    const cy_us_t        timestamp,
-                   const uint64_t       transfer_id,
-                   const cy_message_t   message,
+                   cy_message_t         message,
                    const cy_responder_t responder);
 
 /// New P2P response to a message published earlier is received. The topic hash and the transfer-ID of the original
@@ -359,11 +359,11 @@ void cy_on_message(cy_topic_t* const    topic,
 /// Observe that we do not pass a responder instance here because we assume that if any follow-up communication is
 /// needed, it will take place using the normal topic publication with P2P responses.
 /// At this time I am not certain if this assumption will hold. We may revise this based on empirical evidence.
-void cy_on_response(cy_t* const        cy,
-                    const cy_us_t      timestamp,
-                    const uint64_t     topic_hash,
-                    const uint64_t     transfer_id,
-                    const cy_message_t message);
+void cy_on_response(cy_t* const    cy,
+                    const cy_us_t  timestamp,
+                    const uint64_t topic_hash,
+                    const uint64_t transfer_id,
+                    cy_message_t   message);
 
 /// Communicates the delivery status of a reliable message published on a topic (with the topic hash and the
 /// transfer-ID of the message), and a P2P response sent to a previously received message (with the topic hash and
