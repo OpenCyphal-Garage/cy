@@ -24,6 +24,7 @@
       <w>opencyphal</w>
       <w>pktinfo</w>
       <w>popcount</w>
+      <w>pushok</w>
       <w>remappings</w>
       <w>reuseport</w>
       <w>rnid</w>

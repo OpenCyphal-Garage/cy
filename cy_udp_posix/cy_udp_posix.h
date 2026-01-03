@@ -45,7 +45,7 @@ struct cy_udp_posix_t
     /// This is used to initialize the corresponding field in cy_udp_posix_topic_t when a new topic is created.
     /// This is also used to report RX socket errors for P2P transfers with the topic set to NULL.
     /// Changes to this handler will not affect existing topics.
-    void (*rx_sock_err_handler)(cy_udp_posix_t*       cy_udp,
+    void (*rx_sock_err_handler)(cy_udp_posix_t*       cy,
                                 cy_udp_posix_topic_t* topic,
                                 uint_fast8_t          iface_index,
                                 uint32_t              err_no);
@@ -53,7 +53,7 @@ struct cy_udp_posix_t
     /// Handler for errors occurring while writing into a tx socket on the specified iface.
     /// These are platform-specific.
     /// The default handler is provided which will use CY_TRACE() to report the error.
-    void (*tx_sock_err_handler)(cy_udp_posix_t* cy_udp, uint_fast8_t iface_index, uint32_t err_no);
+    void (*tx_sock_err_handler)(cy_udp_posix_t* cy, uint_fast8_t iface_index, uint32_t err_no);
 
     size_t   mem_allocated_fragments;
     uint64_t mem_oom_count;
@@ -66,20 +66,20 @@ cy_us_t cy_udp_posix_now(void);
 /// The name may be NULL or empty, in which case it defaults to the UID in lowercase hex.
 /// Unused interfaces should have address either 0 or 0xFFFFFFFF;
 /// to parse IP addresses from string see udp_wrapper_parse_iface_address().
-cy_err_t               cy_udp_posix_new(cy_udp_posix_t* const cy_udp,
+cy_err_t               cy_udp_posix_new(cy_udp_posix_t* const cy,
                                         const uint64_t        uid,
                                         const wkv_str_t       name,
                                         const wkv_str_t       namespace_,
                                         const uint32_t        local_iface_address[CY_UDP_POSIX_IFACE_COUNT_MAX],
                                         const size_t          tx_queue_capacity);
-static inline cy_err_t cy_udp_posix_new_c(cy_udp_posix_t* const cy_udp,
+static inline cy_err_t cy_udp_posix_new_c(cy_udp_posix_t* const cy,
                                           const uint64_t        uid,
                                           const char* const     name,
                                           const char* const     namespace_,
                                           const uint32_t        local_iface_address[CY_UDP_POSIX_IFACE_COUNT_MAX],
                                           const size_t          tx_queue_capacity)
 {
-    return cy_udp_posix_new(cy_udp, uid, wkv_key(name), wkv_key(namespace_), local_iface_address, tx_queue_capacity);
+    return cy_udp_posix_new(cy, uid, wkv_key(name), wkv_key(namespace_), local_iface_address, tx_queue_capacity);
 }
 
 /// Keep running the event loop until the deadline is reached or until the first error.
@@ -87,11 +87,11 @@ static inline cy_err_t cy_udp_posix_new_c(cy_udp_posix_t* const cy_udp,
 /// If the deadline is in the future and there are currently no events to process, the function will block until the
 /// deadline is reached or until an event arrives. The function may return early even if no events are available.
 /// The current monotonic time is as defined in cy_udp_posix_now().
-cy_err_t cy_udp_posix_spin_until(cy_udp_posix_t* const cy_udp, const cy_us_t deadline);
+cy_err_t cy_udp_posix_spin_until(cy_udp_posix_t* const cy, const cy_us_t deadline);
 
 /// Wait for events (blocking), process them, and return. Invoke this in a tight superloop to maintain liveness.
 /// The function is guaranteed to return no later than in the heartbeat period, or in a few ms, whichever is sooner.
-cy_err_t cy_udp_posix_spin_once(cy_udp_posix_t* const cy_udp);
+cy_err_t cy_udp_posix_spin_once(cy_udp_posix_t* const cy);
 
 #ifdef __cplusplus
 }

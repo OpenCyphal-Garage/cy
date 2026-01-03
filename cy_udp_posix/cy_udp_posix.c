@@ -61,13 +61,13 @@ static bool is_valid_ip(const uint32_t ip) { return (ip > 0) && (ip < UINT32_MAX
 
 static void* mem_alloc(void* const user, const size_t size)
 {
-    cy_udp_posix_t* const cy_udp = (cy_udp_posix_t*)user;
-    void* const           out    = malloc(size);
+    cy_udp_posix_t* const cy  = (cy_udp_posix_t*)user;
+    void* const           out = malloc(size);
     if (size > 0) {
         if (out != NULL) {
-            cy_udp->mem_allocated_fragments++;
+            cy->mem_allocated_fragments++;
         } else {
-            cy_udp->mem_oom_count++;
+            cy->mem_oom_count++;
         }
     }
     return out;
@@ -75,11 +75,11 @@ static void* mem_alloc(void* const user, const size_t size)
 
 static void mem_free(void* const user, const size_t size, void* const pointer)
 {
-    cy_udp_posix_t* const cy_udp = (cy_udp_posix_t*)user;
+    cy_udp_posix_t* const cy = (cy_udp_posix_t*)user;
     (void)size;
     if (pointer != NULL) {
-        assert(cy_udp->mem_allocated_fragments > 0);
-        cy_udp->mem_allocated_fragments--;
+        assert(cy->mem_allocated_fragments > 0);
+        cy->mem_allocated_fragments--;
         memset(pointer, 0xA5, size); // a simple diagnostic aid
         free(pointer);
     }
@@ -266,13 +266,13 @@ struct cy_udp_posix_topic_t
 
 static void v_topic_destroy(cy_topic_t* const topic)
 {
-    cy_udp_posix_t* const       cy_udp    = (cy_udp_posix_t*)topic->cy;
+    cy_udp_posix_t* const       cy        = (cy_udp_posix_t*)topic->cy;
     cy_udp_posix_topic_t* const udp_topic = (cy_udp_posix_topic_t*)topic;
     for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
         udp_wrapper_close(&udp_topic->rx_sock[i]);
     }
-    mem_free(cy_udp, sizeof(cy_udp_posix_topic_t), topic);
-    cy_udp->n_topics--;
+    mem_free(cy, sizeof(cy_udp_posix_topic_t), topic);
+    cy->n_topics--;
 }
 
 static void on_topic_feedback(udpard_tx_t* const tx, const udpard_tx_feedback_t fb)
@@ -289,13 +289,15 @@ static cy_err_t v_topic_publish(cy_topic_t* const                  self,
                                 uint64_t* const                    out_transfer_id,
                                 const size_t                       response_extent)
 {
-    cy_udp_posix_t* const       cy                      = (cy_udp_posix_t*)self->cy;
-    cy_udp_posix_topic_t* const self_low                = (cy_udp_posix_topic_t*)self;
-    udpard_udpip_ep_t endpoints[UDPARD_IFACE_COUNT_MAX] = { udpard_make_subject_endpoint(cy_topic_subject_id(self)) };
-    for (size_t i = 1; i < UDPARD_IFACE_COUNT_MAX; i++) {
-        endpoints[i] = endpoints[0];
+    cy_udp_posix_t* const   cy                                = (cy_udp_posix_t*)self->cy;
+    const udpard_udpip_ep_t ep                                = udpard_make_subject_endpoint(cy_topic_subject_id(self));
+    udpard_udpip_ep_t       endpoints[UDPARD_IFACE_COUNT_MAX] = { { 0 } };
+    for (size_t i = 0; i < UDPARD_IFACE_COUNT_MAX; i++) {
+        if ((cy->iface_mask & (1U << i)) != 0U) {
+            endpoints[i] = ep;
+        }
     }
-    const uint64_t transfer_id = self_low->pub_transfer_id++;
+    const uint64_t transfer_id = ((cy_udp_posix_topic_t*)self)->pub_transfer_id++;
     if (out_transfer_id != NULL) {
         *out_transfer_id = transfer_id;
     }
@@ -387,7 +389,6 @@ static cy_err_t v_topic_subscribe(cy_topic_t* const self, const size_t extent, c
     cy_udp_posix_topic_t* const self_low = (cy_udp_posix_topic_t*)self;
     const cy_udp_posix_t* const cy       = (cy_udp_posix_t*)self->cy;
     assert(!topic_is_subscribed(self_low));
-    assert(self_low->rx_port.user == self);
     // We special-case the heartbeat topic to have STATELESS reassembly strategy to conserve CPU and RAM.
     // Currently, the user API doesn't have the ability to select STATELESS mode, as it is uncertain if it
     // will be useful for the application. It is useful for the network stack because the heartbeat topic
@@ -407,6 +408,7 @@ static cy_err_t v_topic_subscribe(cy_topic_t* const self, const size_t extent, c
     if (!udpard_rx_port_new(&self_low->rx_port, self->hash, extent, reordering_window, rx_mem, vt)) {
         return CY_ERR_ARGUMENT;
     }
+    self_low->rx_port.user           = self;
     const udpard_udpip_ep_t endpoint = udpard_make_subject_endpoint(cy_topic_subject_id(self));
 
     // Open the sockets for this port.
@@ -430,10 +432,10 @@ static cy_err_t v_topic_subscribe(cy_topic_t* const self, const size_t extent, c
 
 static void v_topic_unsubscribe(cy_topic_t* const self)
 {
-    cy_udp_posix_topic_t* const topic  = (cy_udp_posix_topic_t*)self;
-    cy_udp_posix_t* const       cy_udp = (cy_udp_posix_t*)self->cy;
+    cy_udp_posix_topic_t* const topic = (cy_udp_posix_topic_t*)self;
+    cy_udp_posix_t* const       cy    = (cy_udp_posix_t*)self->cy;
     assert(topic_is_subscribed(topic));
-    udpard_rx_port_free(&cy_udp->udpard_rx, &topic->rx_port);
+    udpard_rx_port_free(&cy->udpard_rx, &topic->rx_port);
     for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
         udp_wrapper_close(&topic->rx_sock[i]);
     }
@@ -444,20 +446,19 @@ static const cy_topic_vtable_t topic_vtable = { .destroy     = v_topic_destroy,
                                                 .subscribe   = v_topic_subscribe,
                                                 .unsubscribe = v_topic_unsubscribe };
 
-static cy_topic_t* v_topic_new(cy_t* const cy)
+static cy_topic_t* v_topic_new(cy_t* const self)
 {
-    cy_udp_posix_t* const       cy_udp = (cy_udp_posix_t*)cy;
-    cy_udp_posix_topic_t* const topic  = (cy_udp_posix_topic_t*)mem_alloc(cy, sizeof(cy_udp_posix_topic_t));
+    cy_udp_posix_t* const       cy    = (cy_udp_posix_t*)self;
+    cy_udp_posix_topic_t* const topic = (cy_udp_posix_topic_t*)mem_alloc(cy, sizeof(cy_udp_posix_topic_t));
     if (topic != NULL) {
         memset(topic, 0, sizeof(cy_udp_posix_topic_t));
         topic->base.vtable     = &topic_vtable;
-        topic->rx_port.user    = topic;
-        topic->pub_transfer_id = random64(cy_udp->udpard_tx.local_uid);
+        topic->pub_transfer_id = random64(cy->udpard_tx.local_uid);
         for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
             topic->rx_sock[i] = udp_wrapper_new();
         }
-        topic->rx_sock_err_handler = cy_udp->rx_sock_err_handler;
-        cy_udp->n_topics++;
+        topic->rx_sock_err_handler = cy->rx_sock_err_handler;
+        cy->n_topics++;
     }
     return (cy_topic_t*)topic;
 }
@@ -505,20 +506,18 @@ cy_us_t cy_udp_posix_now(void)
     return (ts.tv_sec * 1000000) + (ts.tv_nsec / 1000);
 }
 
-static void default_tx_sock_err_handler(cy_udp_posix_t* const cy_udp,
-                                        const uint_fast8_t    iface_index,
-                                        const uint32_t        err_no)
+static void default_tx_sock_err_handler(cy_udp_posix_t* const cy, const uint_fast8_t iface_index, const uint32_t err_no)
 {
-    CY_TRACE(&cy_udp->base, "⚠️ TX socket error on iface #%u: %u", iface_index, (unsigned)err_no);
+    CY_TRACE(&cy->base, "⚠️ TX socket error on iface #%u: %u", iface_index, (unsigned)err_no);
 }
 
-static void default_rx_sock_err_handler(cy_udp_posix_t* const       cy_udp,
+static void default_rx_sock_err_handler(cy_udp_posix_t* const       cy,
                                         cy_udp_posix_topic_t* const topic,
                                         const uint_fast8_t          iface_index,
                                         const uint32_t              err_no)
 {
     CY_TRACE(
-      &cy_udp->base, "⚠️ RX socket error on iface #%u topic '%s': %u", iface_index, topic->base.name, (unsigned)err_no);
+      &cy->base, "⚠️ RX socket error on iface #%u topic '%s': %u", iface_index, topic->base.name, (unsigned)err_no);
 }
 
 static void v_on_p2p_msg(udpard_rx_t* const rx, udpard_rx_port_p2p_t* const port, const udpard_rx_transfer_p2p_t tr)
@@ -553,16 +552,16 @@ bool v_tx_eject(udpard_tx_t* const tx, udpard_tx_ejection_t* const ej)
     return res != 0; // either transmitted successfully or dropped due to error
 }
 
-cy_err_t cy_udp_posix_new(cy_udp_posix_t* const cy_udp,
+cy_err_t cy_udp_posix_new(cy_udp_posix_t* const cy,
                           const uint64_t        uid,
                           const wkv_str_t       name,
                           const wkv_str_t       namespace_,
                           const uint32_t        local_iface_address[CY_UDP_POSIX_IFACE_COUNT_MAX],
                           const size_t          tx_queue_capacity)
 {
-    assert(cy_udp != NULL);
-    memset(cy_udp, 0, sizeof(*cy_udp));
-    cy_udp->n_topics = 0;
+    assert(cy != NULL);
+    memset(cy, 0, sizeof(*cy));
+    cy->n_topics = 0;
     // We could use block pool allocators here if preferred.
     // Also, in the spirit of the PX4 UAVCAN driver, we could use a high-watermark allocator, where we graft memory
     // blocks from an ordinary heap (doesn't have to be constant-complexity even), and return them into
@@ -571,49 +570,48 @@ cy_err_t cy_udp_posix_new(cy_udp_posix_t* const cy_udp,
     // Libudpard has a natural cap for the maximum memory usage based on the number of interfaces and queue sizes,
     // which helps avoiding heap exhaustion in this scenario; also, if exhaustion does occur, we can shrink the
     // least used pools on-the-fly.
-    cy_udp->mem                     = (udpard_mem_resource_t){ .user = cy_udp, .alloc = &mem_alloc, .free = &mem_free };
-    cy_udp->iface_mask              = 0;
-    cy_udp->rx_sock_err_handler     = default_rx_sock_err_handler;
-    cy_udp->tx_sock_err_handler     = default_tx_sock_err_handler;
-    cy_udp->mem_allocated_fragments = 0;
-    cy_udp->mem_oom_count           = 0;
+    cy->mem                     = (udpard_mem_resource_t){ .user = cy, .alloc = &mem_alloc, .free = &mem_free };
+    cy->iface_mask              = 0;
+    cy->rx_sock_err_handler     = default_rx_sock_err_handler;
+    cy->tx_sock_err_handler     = default_tx_sock_err_handler;
+    cy->mem_allocated_fragments = 0;
+    cy->mem_oom_count           = 0;
 
     // Set up the TX and RX pipelines.
     static const udpard_tx_vtable_t tx_vtable = { .eject = v_tx_eject };
-    const udpard_rx_mem_resources_t rx_mem    = { .fragment = cy_udp->mem, .session = cy_udp->mem };
-    udpard_tx_mem_resources_t       tx_mem    = { .transfer = cy_udp->mem };
+    const udpard_rx_mem_resources_t rx_mem    = { .fragment = cy->mem, .session = cy->mem };
+    udpard_tx_mem_resources_t       tx_mem    = { .transfer = cy->mem };
     for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
-        cy_udp->sock[i] = udp_wrapper_new();
+        cy->sock[i] = udp_wrapper_new();
         if (is_valid_ip(local_iface_address[i])) {
-            cy_udp->local_ip[i] = local_iface_address[i];
-            cy_udp->iface_mask |= 1U << i;
+            cy->local_ip[i] = local_iface_address[i];
+            cy->iface_mask |= 1U << i;
         } else {
-            cy_udp->local_ip[i] = 0;
+            cy->local_ip[i] = 0;
         }
-        tx_mem.payload[i] = cy_udp->mem;
+        tx_mem.payload[i] = cy->mem;
     }
-    if (cy_udp->iface_mask == 0) {
+    if (cy->iface_mask == 0) {
         return CY_ERR_ARGUMENT;
     }
-    if (!udpard_tx_new(&cy_udp->udpard_tx, uid, random64(uid), tx_queue_capacity, tx_mem, &tx_vtable)) {
+    if (!udpard_tx_new(&cy->udpard_tx, uid, random64(uid), tx_queue_capacity, tx_mem, &tx_vtable)) {
         return CY_ERR_ARGUMENT; // Cleanup not required -- no resources allocated yet.
     }
-    udpard_rx_new(&cy_udp->udpard_rx, &cy_udp->udpard_tx); // infallible
-    cy_udp->udpard_tx.user = cy_udp;
-    cy_udp->udpard_rx.user = cy_udp;
+    udpard_rx_new(&cy->udpard_rx, &cy->udpard_tx); // infallible
+    cy->udpard_tx.user = cy;
+    cy->udpard_rx.user = cy;
 
     // Initialize the udpard P2P RX port. We start with a zero initial extent, which will be increased ad-hoc.
     static const udpard_rx_port_p2p_vtable_t rx_p2p_vtable = { .on_message = v_on_p2p_msg };
-    if (!udpard_rx_port_new_p2p(&cy_udp->p2p_port, uid, 0, rx_mem, &rx_p2p_vtable)) {
+    if (!udpard_rx_port_new_p2p(&cy->p2p_port, uid, 0, rx_mem, &rx_p2p_vtable)) {
         return CY_ERR_ARGUMENT; // Cleanup not required -- no resources allocated yet.
     }
 
     // Initialize the sockets.
     cy_err_t res = CY_OK;
     for (uint_fast8_t i = 0; (i < CY_UDP_POSIX_IFACE_COUNT_MAX) && (res == CY_OK); i++) {
-        if ((cy_udp->iface_mask & (1U << i)) != 0) {
-            res = err_from_udp_wrapper(
-              udp_wrapper_open_unicast(&cy_udp->sock[i], cy_udp->local_ip[i], &cy_udp->local_tx_port[i]));
+        if ((cy->iface_mask & (1U << i)) != 0) {
+            res = err_from_udp_wrapper(udp_wrapper_open_unicast(&cy->sock[i], cy->local_ip[i], &cy->local_tx_port[i]));
         }
     }
 
@@ -629,91 +627,37 @@ cy_err_t cy_udp_posix_new(cy_udp_posix_t* const cy_udp,
         // a subject-ID modulus of at least 23 bits. If that is not the case and a smaller modulus is needed,
         // we will need to modify this to accept the modulus from the user.
         // Also, if/when we add support for IPv6, we will want to extend the modulus to 32 bits.
-        res = cy_new(&cy_udp->base, &cy_vtable, name_key, namespace_, CY_SUBJECT_ID_MODULUS_23bit);
+        res = cy_new(&cy->base, &cy_vtable, name_key, namespace_, CY_SUBJECT_ID_MODULUS_23bit);
     }
 
     // Cleanup on error.
     if (res != CY_OK) {
-        udpard_rx_port_free(&cy_udp->udpard_rx, &cy_udp->p2p_port.base);
-        udpard_tx_free(&cy_udp->udpard_tx);
+        udpard_rx_port_free(&cy->udpard_rx, &cy->p2p_port.base);
+        udpard_tx_free(&cy->udpard_tx);
         for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
-            udp_wrapper_close(&cy_udp->sock[i]); // The handle may be invalid, but we don't care.
+            udp_wrapper_close(&cy->sock[i]); // The handle may be invalid, but we don't care.
         }
     }
     return res;
 }
 
-static void ingest_topic_frame(cy_udp_posix_t* const       cy_udp,
-                               cy_udp_posix_topic_t* const topic,
-                               const cy_us_t               ts,
-                               const uint_fast8_t          iface_index,
-                               const udpard_bytes_mut_t    dgram)
-{
-    if ((topic->base.couplings != NULL) && topic->base.subscribed) {
-        udpard_rx_transfer_t transfer = { 0 }; // udpard takes ownership of the dgram payload buffer.
-        const int_fast8_t er = udpard_rx_port_push(&cy_udp->udpard_rx, &topic->port, ts, dgram, iface_index, &transfer);
-        if (er == 1) {
-            const cy_transfer_owned_t tr = { .timestamp = (cy_us_t)transfer.timestamp_usec,
-                                             .metadata  = make_metadata(&transfer),
-                                             .payload   = make_rx_buffer(transfer.payload) };
-            cy_ingest(&cy_udp->base, &topic->base, tr);
-        } else if (er == 0) {
-            (void)0; // Transfer is not yet completed, nothing to do for now.
-        } else if (er == -UDPARD_ERROR_MEMORY) {
-            topic->rx_oom_count++;
-        } else {
-            assert(false); // Unreachable -- internal error: unanticipated UDPARD error state (not possible).
-        }
-    } else { // The subscription was disabled while processing other socket reads. Ignore it.
-        cy_udp->mem.free(cy_udp->mem.user, CY_UDP_SOCKET_READ_BUFFER_SIZE, dgram.data);
-    }
-}
-
-static void ingest_rpc_frame(cy_udp_posix_t* const    cy_udp,
-                             const cy_us_t            ts,
-                             const uint_fast8_t       iface_index,
-                             const udpard_bytes_mut_t dgram)
-{
-    struct UdpardRxRPCTransfer transfer = { 0 }; // udpard takes ownership of the dgram payload buffer.
-    struct UdpardRxRPCPort*    port     = NULL;
-    const int_fast8_t          er       = udpardRxRPCDispatcherReceive(
-      &cy_udp->rpc_rx_dispatcher, (UdpardMicrosecond)ts, dgram, iface_index, &port, &transfer);
-    if (er == 1) {
-        assert(port != NULL);
-        if (port == &cy_udp->rpc_rx_port_topic_response) {
-            assert(port->service_id == P2P_SERVICE_ID);
-            const cy_transfer_owned_t tr = { .timestamp = (cy_us_t)transfer.base.timestamp_usec,
-                                             .metadata  = make_metadata(&transfer.base),
-                                             .payload   = make_rx_buffer(transfer.base.payload) };
-            cy_ingest_p2p(&cy_udp->base, tr);
-        } else {
-            assert(false); // Forgot to handle?
-        }
-    } else if (er == 0) {
-        (void)0; // Transfer is not yet completed, nothing to do for now.
-    } else if (er == -UDPARD_ERROR_MEMORY) {
-        cy_udp->rpc_rx[iface_index].oom_count++;
-    } else {
-        assert(false); // Unreachable -- internal error: unanticipated UDPARD error state (not possible).
-    }
-}
-
-static void read_socket(cy_udp_posix_t* const       cy_udp,
+static void read_socket(cy_udp_posix_t* const       cy,
                         const cy_us_t               ts,
                         cy_udp_posix_topic_t* const topic,
                         udp_wrapper_t* const        sock,
                         const uint_fast8_t          iface_index)
 {
+    assert((cy->iface_mask & (1U << iface_index)) != 0);
+    assert(is_valid_ip(cy->local_ip[iface_index]));
+    assert(udp_wrapper_is_open(sock));
+
     // Allocate memory that we will read the data into. The ownership of this memory will be transferred
     // to LibUDPard, which will free it when it is no longer needed.
     // A deeply embedded system may be able to transfer this memory directly from the NIC driver to eliminate copy.
-    udpard_bytes_mut_t dgram = {
-        .size = CY_UDP_SOCKET_READ_BUFFER_SIZE,
-        .data = cy_udp->mem.alloc(cy_udp->mem.user, CY_UDP_SOCKET_READ_BUFFER_SIZE),
-    };
+    udpard_bytes_mut_t dgram = { .size = CY_UDP_SOCKET_READ_BUFFER_SIZE,
+                                 .data = cy->mem.alloc(cy->mem.user, CY_UDP_SOCKET_READ_BUFFER_SIZE) };
     if (NULL == dgram.data) { // ReSharper disable once CppRedundantDereferencingAndTakingAddress
-        ((topic != NULL) ? topic->rx_sock_err_handler
-                         : cy_udp->rx_sock_err_handler)(cy_udp, topic, iface_index, ENOMEM);
+        ((topic != NULL) ? topic->rx_sock_err_handler : cy->rx_sock_err_handler)(cy, topic, iface_index, ENOMEM);
         return;
     }
 
@@ -723,64 +667,66 @@ static void read_socket(cy_udp_posix_t* const       cy_udp,
     if (rx_result < 0) {
         // We end up here if the socket was closed while processing another datagram.
         // This happens if a subscriber chose to unsubscribe dynamically or caused the node-ID to be changed.
-        cy_udp->mem.free(cy_udp->mem.user, CY_UDP_SOCKET_READ_BUFFER_SIZE, dgram.data);
+        cy->mem.free(cy->mem.user, CY_UDP_SOCKET_READ_BUFFER_SIZE, dgram.data);
         ((topic != NULL) ? topic->rx_sock_err_handler
-                         : cy_udp->rx_sock_err_handler)(cy_udp, topic, iface_index, (uint32_t)-rx_result);
+                         : cy->rx_sock_err_handler)(cy, topic, iface_index, (uint32_t)-rx_result);
         return;
     }
     if (rx_result == 0) { // Nothing to read OR dgram dropped by filters.
-        cy_udp->mem.free(cy_udp->mem.user, CY_UDP_SOCKET_READ_BUFFER_SIZE, dgram.data);
+        cy->mem.free(cy->mem.user, CY_UDP_SOCKET_READ_BUFFER_SIZE, dgram.data);
         return;
     }
     // Ignore packets we sent ourselves. This can happen with multicast depending on the socket implementation.
-    if ((remote_ep.ip == cy_udp->local_ip[iface_index]) && (remote_ep.port == cy_udp->local_tx_port[iface_index])) {
-        cy_udp->mem.free(cy_udp->mem.user, CY_UDP_SOCKET_READ_BUFFER_SIZE, dgram.data);
+    if ((remote_ep.ip == cy->local_ip[iface_index]) && (remote_ep.port == cy->local_tx_port[iface_index])) {
+        cy->mem.free(cy->mem.user, CY_UDP_SOCKET_READ_BUFFER_SIZE, dgram.data);
         return;
     }
 
     // Realloc the buffer to fit the actual size of the datagram to avoid inner fragmentation.
     void* const dgram_realloc = realloc(dgram.data, dgram.size);
-    if (dgram_realloc != NULL) {
+    if (dgram_realloc != NULL) { // Sensible realloc implementations always succeed when shrinking.
         dgram.data = dgram_realloc;
     }
 
     // Pass the data buffer into LibUDPard then into Cy for further processing. It takes ownership of the buffer.
-    if (topic != NULL) {
-        ingest_topic_frame(cy_udp, topic, ts, iface_index, dgram);
-    } else {
-        ingest_rpc_frame(cy_udp, ts, iface_index, dgram);
-    }
+    udpard_rx_port_t* const    port          = (topic != NULL) ? &topic->rx_port : &cy->p2p_port.base;
+    const udpard_mem_deleter_t dgram_deleter = { .user = cy, .free = mem_free };
+    const bool pushok = udpard_rx_port_push(&cy->udpard_rx, port, ts, remote_ep, dgram, dgram_deleter, iface_index);
+    assert(pushok); // Push can only fail on invalid arguments, which we validate, so it must never fail.
+    (void)pushok;
 }
 
-static cy_err_t spin_once_until(cy_udp_posix_t* const cy_udp, const cy_us_t deadline)
+static cy_err_t spin_once_until(cy_udp_posix_t* const cy, const cy_us_t deadline)
 {
-    tx_offload(cy_udp); // Free up space in the TX queues and ensure all TX sockets are blocked before waiting.
+    // Free up space in the TX queues and ensure all TX sockets are blocked before waiting.
+    // This may invoke writes on sockets that are not really writeable but this is totally fine.
+    udpard_tx_poll(&cy->udpard_tx, cy_udp_posix_now(), cy->iface_mask);
 
     // Fill out the TX awaitable array. May be empty if there's nothing to transmit at the moment.
     size_t         tx_count                               = 0;
     udp_wrapper_t* tx_await[CY_UDP_POSIX_IFACE_COUNT_MAX] = { 0 };
+    const uint32_t tx_pending_iface_mask                  = udpard_tx_pending_iface_mask(&cy->udpard_tx);
     for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
-        if (cy_udp->udpard_tx[i].queue_size > 0) { // There's something to transmit!
-            tx_await[tx_count] = &cy_udp->sock[i];
+        if ((tx_pending_iface_mask & (1U << i)) != 0) {
+            assert((cy->iface_mask & (1U << i)) != 0);
+            tx_await[tx_count] = &cy->sock[i];
             tx_count++;
         }
     }
-
-    // Fill out the RX awaitable array. The total number of RX sockets is the interface count times number of topics
-    // we are subscribed to plus P2P RX sockets (exactly one per iface).  Currently, we don't have a simple value that
+    // Fill out the RX awaitable array. The total number of RX sockets is the interface count times the number of topics
+    // we are subscribed to plus P2P RX sockets (exactly one per iface). Currently, we don't have a simple value that
     // says how many topics we are subscribed to, so we simply use the total number of topics.
     // This is a rather cumbersome operation as we need to traverse the topic tree; perhaps we should switch to epoll?
-    const size_t          max_rx_count = CY_UDP_POSIX_IFACE_COUNT_MAX * (cy_udp->n_topics + 1);
+    const size_t          max_rx_count = CY_UDP_POSIX_IFACE_COUNT_MAX * (cy->n_topics + 1);
     size_t                rx_count     = 0;
     udp_wrapper_t*        rx_await[max_rx_count]; // Initialization is not possible and is very wasteful anyway.
     cy_udp_posix_topic_t* rx_topics[max_rx_count];
     uint_fast8_t          rx_iface_indexes[max_rx_count];
-    for (cy_udp_posix_topic_t* topic = (cy_udp_posix_topic_t*)cy_topic_iter_first(&cy_udp->base); topic != NULL;
+    for (cy_udp_posix_topic_t* topic = (cy_udp_posix_topic_t*)cy_topic_iter_first(&cy->base); topic != NULL;
          topic                       = (cy_udp_posix_topic_t*)cy_topic_iter_next(&topic->base)) {
-        if (topic->base.couplings != NULL) {
+        if (cy_topic_has_subscribers(&topic->base)) {
             for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
-                if (is_valid_ip(cy_udp->local_ip[i])) {
-                    assert(udp_wrapper_is_open(&topic->rx_sock[i]));
+                if (udp_wrapper_is_open(&topic->rx_sock[i])) {
                     assert(rx_count < max_rx_count);
                     rx_await[rx_count]         = &topic->rx_sock[i];
                     rx_topics[rx_count]        = topic;
@@ -790,47 +736,46 @@ static cy_err_t spin_once_until(cy_udp_posix_t* const cy_udp, const cy_us_t dead
             }
         }
     }
-    // Add the P2P socket for reading.
+    // Note that we may add the same socket both for reading and writing, which is fine.
     for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
-        if (udp_wrapper_is_open(&cy_udp->sock[i])) {
-            rx_await[rx_count]         = &cy_udp->sock[i];
+        if (udp_wrapper_is_open(&cy->sock[i])) {
+            assert(rx_count < max_rx_count);
+            rx_await[rx_count]         = &cy->sock[i];
             rx_topics[rx_count]        = NULL; // A P2P socket has no associated topic.
             rx_iface_indexes[rx_count] = i;
             rx_count++;
         }
     }
 
-    // Do a blocking wait.
+    // Do a blocking wait using the descriptors we have just prepared.
     const cy_us_t wait_timeout = deadline - min_i64(cy_udp_posix_now(), deadline);
     cy_err_t      res = err_from_udp_wrapper(udp_wrapper_wait(wait_timeout, tx_count, tx_await, rx_count, rx_await));
     if (res == CY_OK) {
-        const cy_us_t ts = cy_udp_posix_now(); // immediately after unblocking
-
-        // Process readable handles. The writable ones will be taken care of later.
+        const cy_us_t now = cy_udp_posix_now(); // after unblocking
         for (size_t i = 0; i < rx_count; i++) {
             if (rx_await[i] != NULL) {
-                read_socket(cy_udp, ts, rx_topics[i], rx_await[i], rx_iface_indexes[i]);
+                read_socket(cy, now, rx_topics[i], rx_await[i], rx_iface_indexes[i]);
             }
         }
-
         // Remember that we need to periodically poll cy_update() even if no traffic is received.
         // The update should be invoked after all incoming transfers are handled in this cycle, not before.
         assert(res == CY_OK);
-        res = cy_update(&cy_udp->base);
-
+        res = cy_update(&cy->base);
         // While handling the events, we could have generated additional TX items, so we need to process them again.
         // We do it even in case of failure such that transient errors do not stall the TX queue.
-        tx_offload(cy_udp);
+        // We blindly attempt to transmit on all sockets disregarding their writeability state; if this becomes
+        // a performance concern, we should consult with the wait results.
+        udpard_tx_poll(&cy->udpard_tx, now, cy->iface_mask);
     }
     return res;
 }
 
-cy_err_t cy_udp_posix_spin_until(cy_udp_posix_t* const cy_udp, const cy_us_t deadline)
+cy_err_t cy_udp_posix_spin_until(cy_udp_posix_t* const cy, const cy_us_t deadline)
 {
     cy_err_t res = CY_OK;
     while (res == CY_OK) {
-        const cy_us_t dl = min_i64_3(deadline, cy_udp->base.heartbeat_next, cy_udp->base.heartbeat_next_urgent);
-        res              = spin_once_until(cy_udp, dl);
+        const cy_us_t dl = min_i64_3(deadline, cy->base.heartbeat_next, cy->base.heartbeat_next_urgent);
+        res              = spin_once_until(cy, dl);
         if (deadline <= cy_udp_posix_now()) {
             break;
         }
@@ -838,11 +783,11 @@ cy_err_t cy_udp_posix_spin_until(cy_udp_posix_t* const cy_udp, const cy_us_t dea
     return res;
 }
 
-cy_err_t cy_udp_posix_spin_once(cy_udp_posix_t* const cy_udp)
+cy_err_t cy_udp_posix_spin_once(cy_udp_posix_t* const cy)
 {
-    assert(cy_udp != NULL);
+    assert(cy != NULL);
     const cy_us_t dl = min_i64_3(cy_udp_posix_now() + 1000, //
-                                 cy_udp->base.heartbeat_next,
-                                 cy_udp->base.heartbeat_next_urgent);
-    return spin_once_until(cy_udp, dl);
+                                 cy->base.heartbeat_next,
+                                 cy->base.heartbeat_next_urgent);
+    return spin_once_until(cy, dl);
 }

@@ -322,18 +322,16 @@ cy_err_t cy_new(cy_t* const              cy,
                 const uint32_t           subject_id_modulus);
 void     cy_destroy(cy_t* const cy);
 
-/// This function must be invoked periodically to let the library publish heartbeats and handle response timeouts.
-/// The most efficient invocation schedule is guided by cy->heartbeat_next_urgent, but not less often than every 10 ms;
-/// if fixed-rate updates are desired, then the recommended period is 1 millisecond.
-///
-/// This is the only function that generates heartbeat -- the only kind of auxiliary traffic needed by the protocol.
+/// This function must be invoked periodically to ensure liveness.
+/// The most efficient invocation schedule is guided by min(cy->heartbeat_next, cy->heartbeat_next_urgent),
+/// but not less often than every 10 ms; if fixed-rate updates are desired, then the recommended period is 1 ms.
 /// The returned value indicates the success of the heartbeat publication, if any took place, or zero.
-///
-/// Excluding the transport_publish dependency, the time complexity is logarithmic in the number of topics.
 cy_err_t cy_update(cy_t* const cy);
 
 /// Hidden from the application because the application is not expected to need this.
 uint32_t cy_topic_subject_id(const cy_topic_t* const topic);
+
+static inline bool cy_topic_has_subscribers(const cy_topic_t* const topic) { return topic->couplings != NULL; }
 
 /// When the transport library detects a topic hash mismatch, it will notify Cy about it to let it rectify the problem.
 /// Transport frames with mismatched topic hash must be dropped; no processing at the transport layer is needed.
