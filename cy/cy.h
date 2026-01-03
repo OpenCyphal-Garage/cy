@@ -29,9 +29,6 @@ extern "C"
 
 /// A sensible middle ground between worst-case gossip traffic and memory utilization vs. longest name support.
 /// In CAN FD networks, topic names should be short to avoid multi-frame heartbeats.
-///
-/// Max name length is chosen such that together with the 1-byte length prefix the result is a multiple of 8 bytes,
-/// because it helps with memory-aliased C structures for quick serialization.
 #define CY_TOPIC_NAME_MAX 88
 
 /// The max namespace length should also provide space for at least one separator and the one-character topic name.
@@ -134,11 +131,11 @@ size_t cy_message_read(cy_message_t* const cursor, const size_t offset, const si
 /// Usage example:
 ///     CY_MESSAGE_DUMP(my_bytes, my_message);
 ///     foo(my_bytes.size, my_bytes.data);
-#define CY_MESSAGE_DUMP(dest_bytes_name, msg)                         \
-    cy_bytes_t    dest_bytes_name = { .size = cy_message_size(msg) }; \
-    unsigned char dest_bytes_name##_storage[(dest_bytes_name).size];  \
-    (dest_bytes_name).data = &dest_bytes_name##_storage[0];           \
-    (dest_bytes_name).size = cy_message_read(&(msg), 0, (dest_bytes_name).size, dest_byt(dest_bytes_name) es_name.data)
+#define CY_MESSAGE_DUMP(dest_bytes_name, msg)                                                           \
+    cy_bytes_t    dest_bytes_name = { .size = cy_message_size(msg) };                                   \
+    unsigned char dest_bytes_name##_storage[(dest_bytes_name).size];                                    \
+    (dest_bytes_name).data = &dest_bytes_name##_storage[0];                                             \
+    (dest_bytes_name).size = cy_message_read(&(msg), 0, (dest_bytes_name).size, (dest_bytes_name).data)
 
 // =====================================================================================================================
 //                                                      PUBLISHER
@@ -281,6 +278,8 @@ typedef void (*cy_subscriber_callback_t)(cy_user_context_t,
                                          cy_responder_t responder, // Use cy_respond() to send a response if needed.
                                          cy_substitution_set_t);   // For pattern subscribers only, otherwise empty.
 
+/// We intentionally use the exact same API for both verbatim and pattern subscriptions; this is a key design feature.
+///
 /// It is allowed to remove the subscription from its own callback, but not from the callback of another subscription.
 ///
 /// There may be more than one subscriber with the same name (pattern). The library will only keep one

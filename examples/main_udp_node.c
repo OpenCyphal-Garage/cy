@@ -154,7 +154,7 @@ static struct config_t load_config(const int argc, char* argv[])
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
 static void on_msg_trace(cy_t* const cy, const cy_arrival_t* const arv)
 {
-    CY_MESSAGE_DUMP(payload, arv->transfer->payload.base)
+    CY_MESSAGE_DUMP(payload, arv->transfer->payload.base);
 
     // Convert linearized payload to hex.
     char hex[(payload.size * 2) + 1];

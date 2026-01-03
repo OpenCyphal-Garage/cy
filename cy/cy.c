@@ -1506,10 +1506,13 @@ cy_topic_t* cy_topic_iter_next(cy_topic_t* const topic) { return (cy_topic_t*)ca
 
 wkv_str_t cy_topic_name(const cy_topic_t* const topic)
 {
-    return (wkv_str_t){ .len = topic->index_name->key_len, .str = topic->name };
+    if (topic != NULL) {
+        return (wkv_str_t){ .len = topic->index_name->key_len, .str = topic->name };
+    }
+    return (wkv_str_t){ .len = 0, .str = "" };
 }
 
-uint64_t cy_topic_hash(const cy_topic_t* const topic) { return topic->hash; }
+uint64_t cy_topic_hash(const cy_topic_t* const topic) { return (topic != NULL) ? topic->hash : UINT64_MAX; }
 
 bool cy_has_substitution_tokens(const wkv_str_t name)
 {
