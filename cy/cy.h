@@ -27,13 +27,6 @@ extern "C"
 #define CY_ALIGN alignas(max_align_t)
 #endif
 
-/// A sensible middle ground between worst-case gossip traffic and memory utilization vs. longest name support.
-/// In CAN FD networks, topic names should be short to avoid multi-frame heartbeats.
-#define CY_TOPIC_NAME_MAX 88
-
-/// The max namespace length should also provide space for at least one separator and the one-character topic name.
-#define CY_NAMESPACE_NAME_MAX (CY_TOPIC_NAME_MAX - 2)
-
 /// https://github.com/OpenCyphal-Garage/cy/issues/12#issuecomment-2953184238
 #define CY_PINNED_SUBJECT_ID_MAX 8186U
 
@@ -368,6 +361,54 @@ bool cy_verbatim(const wkv_str_t name);
 
 /// True iff the given name is valid according to the Cy naming rules.
 bool cy_name_valid(const wkv_str_t name);
+
+// =====================================================================================================================
+//                                                      NAMES
+// =====================================================================================================================
+
+/// A sensible middle ground between worst-case gossip traffic and memory utilization vs. longest name support.
+/// In CAN FD networks, topic names should be short to avoid multi-frame heartbeats.
+#define CY_TOPIC_NAME_MAX 88
+
+/// The max namespace length should also provide space for at least one separator and the one-character topic name.
+#define CY_NAMESPACE_NAME_MAX (CY_TOPIC_NAME_MAX - 2)
+
+/// A valid name does not contain non-printable ASCII characters.
+/// A normalized name does not begin with a separator, does not end with a separator, and does not contain
+/// consecutive separators.
+extern const char cy_name_sep;  ///< '/'
+extern const char cy_name_home; ///< '~'
+
+/// Whether the name is relative to the home namespace ~ or is absolute.
+bool cy_name_is_homeful(const wkv_str_t name);
+bool cy_name_is_absolute(const wkv_str_t name);
+
+/// Joins two (potentially empty) names with cy_name_sep, normalizing both parts, such that the result is
+/// a normalized name. Either part may be empty, in which case it behaves like normalization of the other part.
+/// Returns the length of the joined name, or SIZE_MAX on failure (out of space or invalid names).
+/// The destination is not NUL-terminated.
+size_t cy_name_join(const wkv_str_t left, const wkv_str_t right, const size_t dest_size, char* const dest);
+
+/// If cy_name_is_homeful(name), expands the home prefix using the provided home string;
+/// otherwise, returns the normalized name.
+/// The result is normalized and written into dest, which must be at least dest_size bytes long.
+/// Returns the length of the expanded name, or SIZE_MAX on failure.
+/// The destination is not NUL-terminated.
+size_t cy_name_expand_home(wkv_str_t name, const wkv_str_t home, const size_t dest_size, char* const dest);
+
+/// Constructs the full normalized name as exchanged over the wire: homeful names are expanded,
+/// relative names are prefixed with the namespace, and absolute names are left as-is.
+/// The namespace may be homeful and will be expanded accordingly. Examples:
+///
+///     name="foo/bar"      namespace="ns1"     home="me"   => "ns1/foo/bar"
+///     name="~//foo/bar"   namespace="ns1"     home="me"   => "me/foo/bar"
+///     name="/foo//bar/"   namespace="ns1"     home="me"   => "foo/bar"
+///     name="foo/bar/"     namespace="~//ns1"  home="me"   => "me/ns1/foo/bar"
+///
+/// The dest points to a buffer at least dest_size bytes long.
+/// Returns the length of the resolved name, or SIZE_MAX if the name is invalid.
+/// The destination is not NUL-terminated.
+size_t cy_name_resolve(const wkv_str_t name, wkv_str_t namespace_, const wkv_str_t home, size_t dest_size, char* dest);
 
 /// String conversion helpers for composing names without reliance on snprintf etc, which is useful in deep embedded.
 /// The output string must be at least ceil(bit_width/4)+1 chars long: 17 bytes for uint64, 9 bytes for uint32, etc.

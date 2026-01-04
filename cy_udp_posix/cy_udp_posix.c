@@ -430,7 +430,7 @@ static cy_err_t v_topic_subscribe(cy_topic_t* const self, const size_t extent, c
     }
     CY_TRACE(self->cy,
              "🔔 '%s' (extent=%zu reordering_window=%lld) res=%d",
-             self->name,
+             self->name_z,
              extent,
              (long long)reordering_window,
              (int)res);
@@ -446,12 +446,12 @@ static void v_topic_unsubscribe(cy_topic_t* const self)
     for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
         udp_wrapper_close(&topic->rx_sock[i]);
     }
-    CY_TRACE(self->cy, "🔕 '%s'", self->name);
+    CY_TRACE(self->cy, "🔕 '%s'", self->name_z);
 }
 
 static void v_topic_destroy(cy_topic_t* const topic)
 {
-    CY_TRACE(topic->cy, "🗑️ '%s'", topic->name);
+    CY_TRACE(topic->cy, "🗑️ '%s'", topic->name_z);
     cy_udp_posix_t* const       cy        = (cy_udp_posix_t*)topic->cy;
     cy_udp_posix_topic_t* const udp_topic = (cy_udp_posix_topic_t*)topic;
     for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
@@ -511,7 +511,7 @@ static uint64_t v_random(cy_t* const cy)
 static void v_on_subscription_error(cy_t* const cy, cy_topic_t* const cy_topic, const cy_err_t error)
 {
     // No action is needed -- Cy will keep attempting to repair the media until it succeeds.
-    CY_TRACE(cy, "⚠️ Subscription error on topic '%s': %d", (cy_topic != NULL) ? cy_topic->name : "", error);
+    CY_TRACE(cy, "⚠️ Subscription error on topic '%s': %d", (cy_topic != NULL) ? cy_topic->name_z : "", error);
 }
 
 static const cy_vtable_t cy_vtable = { .now                   = v_now,
@@ -542,7 +542,7 @@ static void default_rx_sock_err_handler(cy_udp_posix_t* const       cy,
                                         const uint32_t              err_no)
 {
     CY_TRACE(
-      &cy->base, "⚠️ RX socket error on iface #%u topic '%s': %u", iface_index, topic->base.name, (unsigned)err_no);
+      &cy->base, "⚠️ RX socket error on iface #%u topic '%s': %u", iface_index, topic->base.name_z, (unsigned)err_no);
 }
 
 static void v_on_p2p_msg(udpard_rx_t* const rx, udpard_rx_port_p2p_t* const port, const udpard_rx_transfer_p2p_t tr)
@@ -579,7 +579,7 @@ bool v_tx_eject(udpard_tx_t* const tx, udpard_tx_ejection_t* const ej)
 
 cy_err_t cy_udp_posix_new(cy_udp_posix_t* const cy,
                           const uint64_t        uid,
-                          const wkv_str_t       name,
+                          const wkv_str_t       home,
                           const wkv_str_t       namespace_,
                           const uint32_t        local_iface_address[CY_UDP_POSIX_IFACE_COUNT_MAX],
                           const size_t          tx_queue_capacity)
@@ -647,7 +647,7 @@ cy_err_t cy_udp_posix_new(cy_udp_posix_t* const cy,
     // Initialize Cy. It will not emit any transfers yet.
     if (res == CY_OK) {
         char      name_copy[CY_NAMESPACE_NAME_MAX + 1];
-        wkv_str_t name_key = name;
+        wkv_str_t name_key = home;
         if (!cy_name_valid(name_key)) {
             name_copy[0] = '#';
             (void)cy_u64_to_hex(uid, &name_copy[1]);

@@ -132,7 +132,7 @@ typedef struct cy_topic_t
 
     /// The name length is stored in index_name.
     /// We need to store the full name to allow valid references from name substitutions during pattern matching.
-    char name[CY_TOPIC_NAME_MAX + 1];
+    char name_z[CY_TOPIC_NAME_MAX + 1];
 
     /// Whenever a topic conflicts with another one locally, arbitration is performed, and the loser has its
     /// eviction counter incremented. The eviction counter is used as a Lamport clock counting the loss events.
@@ -216,11 +216,14 @@ struct cy_t
     const struct cy_vtable_t* vtable;
 
     /// Namespace is a prefix added to all topics created on this instance, unless the topic name starts with "/".
-    /// Local node name is prefixed to the topic name if it starts with `~`.
+    /// Local node name is prefixed to the topic name if it starts with `~/`.
     /// Note that the leading / and ~ are only used as directives when creating a topic; they are never actually present
-    /// in the final topic name.
-    char namespace_[CY_NAMESPACE_NAME_MAX + 1];
-    char name[CY_NAMESPACE_NAME_MAX + 1];
+    /// in the final resolved topic name that is exchanged on the wire.
+    /// These shall not be changed after initialization.
+    char      ns_z[CY_NAMESPACE_NAME_MAX + 1];
+    char      home_z[CY_NAMESPACE_NAME_MAX + 1];
+    wkv_str_t ns;
+    wkv_str_t home;
 
     cy_us_t ts_started;
 
@@ -320,7 +323,7 @@ typedef struct cy_vtable_t
 /// The node name should be unique in the network; one way to ensure this is to default it to the node UID as hex.
 cy_err_t cy_new(cy_t* const              cy,
                 const cy_vtable_t* const vtable,
-                const wkv_str_t          name,
+                const wkv_str_t          home,
                 const wkv_str_t          namespace_,
                 const uint32_t           subject_id_modulus);
 void     cy_destroy(cy_t* const cy);

@@ -22,7 +22,6 @@ extern "C"
 #endif
 
 #define CY_UDP_POSIX_IFACE_COUNT_MAX UDPARD_IFACE_COUNT_MAX
-#define CY_UDP_POSIX_SUBJECT_ID_MAX  UDPARD_IPv4_SUBJECT_ID_MAX
 
 typedef struct cy_udp_posix_t       cy_udp_posix_t;
 typedef struct cy_udp_posix_topic_t cy_udp_posix_topic_t;
@@ -65,24 +64,15 @@ struct cy_udp_posix_t
 cy_us_t cy_udp_posix_now(void);
 
 /// The namespace may be NULL or empty, in which case it defaults to "~".
-/// The name may be NULL or empty, in which case it defaults to #-prefixed UID in zero-padded lowercase hex;
+/// The home may be NULL or empty, in which case it defaults to #-prefixed UID in zero-padded lowercase hex;
 /// for example, `#0000000000abcdef`.
 /// Unused interfaces should have zero addresses; to parse IP address strings see udp_wrapper_parse_iface_address().
-cy_err_t               cy_udp_posix_new(cy_udp_posix_t* const cy,
-                                        const uint64_t        uid,
-                                        const wkv_str_t       name,
-                                        const wkv_str_t       namespace_,
-                                        const uint32_t        local_iface_address[CY_UDP_POSIX_IFACE_COUNT_MAX],
-                                        const size_t          tx_queue_capacity);
-static inline cy_err_t cy_udp_posix_new_c(cy_udp_posix_t* const cy,
-                                          const uint64_t        uid,
-                                          const char* const     name,
-                                          const char* const     namespace_,
-                                          const uint32_t        local_iface_address[CY_UDP_POSIX_IFACE_COUNT_MAX],
-                                          const size_t          tx_queue_capacity)
-{
-    return cy_udp_posix_new(cy, uid, wkv_key(name), wkv_key(namespace_), local_iface_address, tx_queue_capacity);
-}
+cy_err_t cy_udp_posix_new(cy_udp_posix_t* const cy,
+                          const uint64_t        uid,
+                          const wkv_str_t       home,
+                          const wkv_str_t       namespace_,
+                          const uint32_t        local_iface_address[CY_UDP_POSIX_IFACE_COUNT_MAX],
+                          const size_t          tx_queue_capacity);
 
 /// Keep running the event loop until the deadline is reached or until the first error.
 /// If the deadline is not in the future, the function will process pending events once and return without blocking.
