@@ -15,7 +15,10 @@
 #include "cy.h"
 
 /// For compatibility with Cyphal v1.0, the heartbeat topic is pinned at subject-ID 7509.
+/// Historical trivia: number 0x1D55==7509==0b1110101010101 was chosen because it has a long alternating bit pattern,
+/// which enables a more robust automatic bit rate detection in CAN bus networks.
 #define CY_HEARTBEAT_TOPIC_NAME "/#1d55"
+#define CY_HEARTBEAT_TOPIC_HASH 0x1D55U
 
 /// Only for testing and debugging purposes.
 /// Makes all non-pinned topics prefer the same subject-ID that equals the value of this macro,
@@ -203,7 +206,7 @@ typedef struct cy_responder_vtable_t
     /// Currently, all P2P response transfers are sent using the reliable delivery mode, and the result of the transfer
     /// is reported via cy_on_message_feedback(). If needed, in the future we may consider adding support for
     /// best-effort P2P responses by allowing NULL feedback context here.
-    cy_err_t (*respond)(cy_responder_t*, cy_us_t tx_deadline, cy_bytes_t message, cy_feedback_context_t context);
+    cy_err_t (*respond)(const cy_responder_t*, cy_us_t tx_deadline, cy_bytes_t message, cy_feedback_context_t context);
 } cy_responder_vtable_t;
 
 /// Instances of cy are not copyable; they are always accessed via pointer provided during initialization.
@@ -344,8 +347,7 @@ static inline bool cy_topic_has_subscribers(const cy_topic_t* const topic) { ret
 /// No effect if the topic is NULL.
 void cy_on_topic_collision(cy_topic_t* const topic);
 
-/// New message received on a topic.
-/// The message ownership is taken by this function.
+/// New message received on a topic. The message ownership is taken by this function.
 /// No effect if the topic is NULL.
 void cy_on_message(cy_topic_t* const    topic,
                    const cy_us_t        timestamp,

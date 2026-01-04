@@ -45,7 +45,7 @@ static size_t  larger(const size_t a, const size_t b) { return (a > b) ? a : b; 
 static int64_t max_i64(const int64_t a, const int64_t b) { return (a > b) ? a : b; }
 static int64_t min_i64(const int64_t a, const int64_t b) { return (a < b) ? a : b; }
 
-/// Returns -1 if the argument is zero to allow linear comparison.
+/// Returns -1 if the argument is zero to allow contiguous comparison.
 static int_fast8_t log2_floor(const uint64_t x) { return (int_fast8_t)((x == 0) ? -1 : (63 - __builtin_clzll(x))); }
 
 /// The inverse of log2_floor() with the same special case: exp=-1 returns 0.
@@ -60,13 +60,11 @@ static cy_us_t pow2us(const int_fast8_t exp)
     return 1LL << (uint_fast8_t)exp; // NOLINT(*-signed-bitwise)
 }
 
-static uint64_t random_u64(cy_t* const cy) { return cy->vtable->random(cy); }
-
 /// The limits are inclusive. Returns min unless min < max.
 static int64_t random_int(cy_t* const cy, const int64_t min, const int64_t max)
 {
     if (min < max) {
-        return (int64_t)(random_u64(cy) % (uint64_t)(max - min)) + min;
+        return (int64_t)(cy->vtable->random(cy) % (uint64_t)(max - min)) + min;
     }
     return min;
 }
@@ -986,24 +984,18 @@ static cy_err_t heartbeat_begin(cy_t* const cy)
 }
 
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
-static void on_heartbeat(const cy_user_context_t     ctx,
-                         const cy_topic_t* const     topic,
-                         const cy_us_t               ts,
-                         cy_message_t* const         message,
-                         const cy_responder_t        responder,
-                         const cy_substitution_set_t substitutions)
+static void on_heartbeat(const cy_user_context_t ctx, cy_arrival_t* const arrival)
 {
     (void)ctx;
-    (void)responder;
-    (void)substitutions;
-    assert(substitutions.count == 0); // This is a verbatim subscriber.
-    cy_t* const cy = topic->cy;
+    assert(arrival->substitutions.count == 0); // This is a verbatim subscriber.
+    cy_t* const cy = arrival->topic->cy;
     // Deserialize the message. TODO: deserialize properly and check version.
     heartbeat_t  heartbeat = { 0 };
-    const size_t msg_size  = cy_message_read(message, 0, sizeof(heartbeat), &heartbeat);
+    const size_t msg_size  = cy_message_read(&arrival->message, 0, sizeof(heartbeat), &heartbeat);
     if ((msg_size < offsetof(heartbeat_t, topic_name)) || (heartbeat.version != 1)) {
         return;
     }
+    const cy_us_t     ts              = arrival->timestamp;
     const uint64_t    other_hash      = heartbeat.topic_hash;
     const uint64_t    other_evictions = heartbeat.topic_evictions + (((uint64_t)heartbeat.topic_evictions_msb) << 32U);
     const int_fast8_t other_lage      = heartbeat.topic_lage;
@@ -1122,8 +1114,11 @@ cy_publisher_t* cy_advertise_client(cy_t* const cy, const wkv_str_t name, const 
     if ((cy == NULL) || !resolve_name(cy->namespace_, cy->name, name.str, name_buf)) {
         return NULL;
     }
-    const wkv_str_t       resolved_name = wkv_key(name_buf);
-    cy_publisher_t* const pub           = mem_alloc_zero(cy, sizeof(*pub));
+    const wkv_str_t resolved_name = wkv_key(name_buf);
+    if (!cy_verbatim(resolved_name)) {
+        return NULL; // Wildcard publishers are not defined.
+    }
+    cy_publisher_t* const pub = mem_alloc_zero(cy, sizeof(*pub));
     if (pub == NULL) {
         return NULL;
     }
@@ -1353,9 +1348,8 @@ static cy_err_t ensure_subscriber_root(cy_t* const               cy,
     subscriber_root_t* const root = (subscriber_root_t*)node->value;
 
     // Insert the new root into the indexes.
-    const bool wc    = cy_has_substitution_tokens(resolved_name);
     root->index_name = node;
-    if (wc) {
+    if (!cy_verbatim(resolved_name)) {
         root->index_pattern = wkv_set(&cy->subscribers_by_pattern, resolved_name);
         if (root->index_pattern == NULL) {
             wkv_del(&cy->subscribers_by_name, node);
@@ -1454,24 +1448,22 @@ static void dummy_delivery_callback(const cy_user_context_t ctx, const bool succ
     (void)success;
 }
 
-cy_err_t cy_respond(cy_responder_t* const        responder,
+cy_err_t cy_respond(const cy_responder_t         responder,
                     const cy_us_t                tx_deadline,
                     const cy_bytes_t             response_message,
                     const cy_user_context_t      ctx_delivery,
                     const cy_delivery_callback_t cb_delivery)
 {
-    if ((responder == NULL) || (tx_deadline < 0) || (cb_delivery == NULL)) {
+    if (tx_deadline < 0) {
         return CY_ERR_ARGUMENT;
     }
-    const cy_err_t res = heartbeat_begin(responder->cy);
+    const cy_err_t res = heartbeat_begin(responder.cy);
     if (res != CY_OK) {
         return res;
     }
-    const cy_feedback_context_t fb_ctx = {
-        .user = ctx_delivery,
-        .fun  = (cb_delivery == NULL) ? dummy_delivery_callback : cb_delivery,
-    };
-    return responder->vtable->respond(responder, tx_deadline, response_message, fb_ctx);
+    const cy_feedback_context_t fb_ctx = { .user = ctx_delivery,
+                                           .fun  = (cb_delivery == NULL) ? dummy_delivery_callback : cb_delivery };
+    return responder.vtable->respond(&responder, tx_deadline, response_message, fb_ctx);
 }
 
 // =====================================================================================================================
@@ -1498,6 +1490,7 @@ cy_topic_t* cy_topic_find_by_hash(const cy_t* const cy, const uint64_t hash)
     assert(cy != NULL);
     cy_topic_t* const topic = (cy_topic_t*)cavl2_find(cy->topics_by_hash, &hash, &cavl_comp_topic_hash);
     assert((topic == NULL) || (topic->hash == hash));
+    assert((topic == NULL) || cy_verbatim(wkv_key(topic->name)) || (topic->pub_count == 0)); // pub only verbatim
     return topic;
 }
 
@@ -1514,11 +1507,11 @@ wkv_str_t cy_topic_name(const cy_topic_t* const topic)
 
 uint64_t cy_topic_hash(const cy_topic_t* const topic) { return (topic != NULL) ? topic->hash : UINT64_MAX; }
 
-bool cy_has_substitution_tokens(const wkv_str_t name)
+bool cy_verbatim(const wkv_str_t name)
 {
     wkv_t kv;
     wkv_init(&kv, &wkv_realloc);
-    return wkv_has_substitution_tokens(&kv, name);
+    return !wkv_has_substitution_tokens(&kv, name);
 }
 
 bool cy_name_valid(const wkv_str_t name)
@@ -1651,13 +1644,20 @@ void cy_on_message(cy_topic_t* const    topic,
         const cy_topic_coupling_t* const next_cpl = cpl->next;
         cy_subscriber_t*                 sub      = cpl->root->head;
         assert(sub != NULL);
-        const cy_substitution_set_t subs = { .count = cpl->substitution_count, .substitutions = cpl->substitutions };
         while (sub != NULL) {
             cy_subscriber_t* const next_sub = sub->next;
-            cy_message_t           msg_copy = message;
             assert(sub->callback != NULL);
-            sub->callback(sub->user_context, topic, timestamp, &msg_copy, responder, subs);
-            if (cy_message_size(msg_copy) < cy_message_size(message)) {
+            // Rebuild the struct before every callback because the callbacks are allowed to mutate it.
+            // Most topics only have a single subscription so this is not too expensive in practice.
+            cy_arrival_t arrival = {
+                .timestamp     = timestamp,
+                .message       = message,
+                .responder     = responder,
+                .topic         = topic,
+                .substitutions = { .count = cpl->substitution_count, .substitutions = cpl->substitutions },
+            };
+            sub->callback(sub->user_context, &arrival);
+            if (cy_message_size(arrival.message) < cy_message_size(message)) {
                 assert(!moved); // At most one handler can take ownership of the payload.
                 moved = true;
             }

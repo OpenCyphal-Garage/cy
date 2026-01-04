@@ -73,19 +73,22 @@ typedef struct cy_bytes_t
     const struct cy_bytes_t* next;
 } cy_bytes_t;
 
-/// An opaque user context enabling the application to share data with callbacks. It is intended to be passed by value.
 /// The size is chosen to match most small closures, which is helpful when interfacing with Rust/C++ lambdas.
 /// The size can be increased as long as it doesn't break the compile-time size checks/limits in the platform layer.
-typedef struct cy_user_context_t
+#define CY_USER_CONTEXT_PTR_COUNT 4
+
+/// An opaque user context enabling the application to share data with callbacks. It is intended to be passed by value.
+typedef union cy_user_context_t
 {
-    CY_ALIGN void* data[4];
+    CY_ALIGN void*         ptr[CY_USER_CONTEXT_PTR_COUNT];
+    CY_ALIGN unsigned char bytes[sizeof(void*) * CY_USER_CONTEXT_PTR_COUNT];
 } cy_user_context_t;
 
 #ifdef __cplusplus
 #define CY_USER_CONTEXT_EMPTY \
     cy_user_context_t {}
 #else
-#define CY_USER_CONTEXT_EMPTY ((cy_user_context_t){ .data = { NULL } })
+#define CY_USER_CONTEXT_EMPTY ((cy_user_context_t){ .ptr = { NULL } })
 #endif
 
 // =====================================================================================================================
@@ -197,7 +200,7 @@ cy_err_t cy_publish_reliable(cy_publisher_t* const        pub,
 cy_err_t cy_request(cy_publisher_t* const        pub,
                     const cy_us_t                tx_deadline,
                     const cy_us_t                response_deadline,
-                    const cy_bytes_t             message, // May be fragmented.
+                    const cy_bytes_t             message,
                     const cy_user_context_t      ctx_delivery,
                     const cy_delivery_callback_t cb_delivery,
                     const cy_user_context_t      ctx_response,
@@ -232,42 +235,61 @@ typedef struct cy_substitution_t
     size_t    ordinal; ///< Zero-based index of the substitution token as occurred in the pattern.
 } cy_substitution_t;
 
-/// When a pattern match occurs, the matcher will store the string substitutions that had to be made to
+/// When a name pattern match occurs, Cy will store the string substitutions that had to be made to
 /// achieve the match. The substitutions are listed in the order of their occurrence in the pattern.
 /// For example, if the pattern is "ins/?/data/*" and the key is "ins/0/data/foo/456",
 /// then the substitutions will be (together with their ordinals):
-///  1. #0 "0"          2. #1 "foo"         3. #1 "456"
-/// The lifetime of the substitutions is specified per usage site.
+///  1. #0 "0"
+///  2. #1 "foo"
+///  3. #1 "456"
 typedef struct cy_substitution_set_t
 {
     size_t                   count;         ///< The size of the following substitutions array.
-    const cy_substitution_t* substitutions; ///< A contiguous array of substitutions.
+    const cy_substitution_t* substitutions; ///< A contiguous array of substitutions of size `count`.
 } cy_substitution_set_t;
 
-/// For pattern subscribers, the topic pointer refers to the matched topic instance, which may change.
-/// For verbatim subscribers, the topic pointer is always the same.
-///
-/// Optionally, the user handler can take ownership of the transfer message using cy_message_move();
-/// however, to avoid use-after-free, the following rules must be followed:
-/// 1. At most one handler can move the message out of the arrival instance.
-/// 2. If message is moved out, it shall not be destroyed (see cy_message_destroy()) until after the callback returns,
-///    unless it is the last handler to process it.
-/// If the message is not moved out, it will be destroyed automatically after return from the callback.
-/// If these restrictions become too limiting, we may introduce simple reference counting for messages in the future.
-///
-/// The substitution set specifies the subscription name pattern substitutions that were made to achieve the match.
-/// E.g., matching "ins/?/data/*" against topic "ins/0/data/foo/456" produces ("0", "foo", "456").
-/// The lifetime of the substitutions is at least as long as that of the subscriber.
+/// Event information for a received message from a topic subscription.
 ///
 /// Note that we do not report the transfer-ID here because this value is considered too low-level to be useful.
 /// In the future we may consider adding an API for signaling lost messages to the application, which may be based
 /// on the transfer-ID discontinuities, but it will likely be a separate callback.
-typedef void (*cy_subscriber_callback_t)(cy_user_context_t,
-                                         const cy_topic_t*,
-                                         cy_us_t        timestamp,
-                                         cy_message_t*  message,   // Use cy_message_move() to take ownership if needed.
-                                         cy_responder_t responder, // Use cy_respond() to send a response if needed.
-                                         cy_substitution_set_t);   // For pattern subscribers only, otherwise empty.
+typedef struct cy_arrival_t
+{
+    /// The timestamp is carried over from the low-level NIC driver, which defines the accuracy,
+    /// which is typically high -- hardware timestamping in the driver can achieve microsecond accuracy.
+    /// The timestamp of a multi-frame transfer equals the arrival time of the first frame of that transfer.
+    /// The timestamp is always non-negative.
+    cy_us_t timestamp;
+
+    /// Optionally, the user callback can take ownership of the message using cy_message_move();
+    /// however, to avoid use-after-free, the following rules must be followed:
+    /// 1. At most one callback can move the message out of the arrival instance.
+    /// 2. If the message is moved out, it shall not be destroyed (see cy_message_destroy()) until after the last
+    ///    callback returns, unless it is the last callback to process it.
+    /// If the message is not moved out, it will be destroyed automatically after return from the callback.
+    /// If these restrictions become too limiting, we may introduce simple reference counting for messages.
+    cy_message_t message;
+
+    /// Use cy_respond() to send a P2P response directly to the publisher of this message if needed.
+    cy_responder_t responder;
+
+    /// The topic that the message was received from; always non-NULL.
+    ///
+    /// For verbatim subscribers, the topic pointer is always the same, and the substitution set is always empty.
+    /// For pattern subscribers, the topic pointer refers to the matched topic instance, which may change,
+    /// and the substitution set contains at least one entry.
+    ///
+    /// The lifetime of the substitutions is bound to the lifetime of the topic, which is guaranteed to remain alive
+    /// as long as there is at least one verbatim subscriber or at least one publisher on it. Topics that only have
+    /// pattern subscribers are eventually destroyed after a long time of inactivity, which is reset after every
+    /// received message (among some other events not necessarily visible to the application).
+    const cy_topic_t*     topic;
+    cy_substitution_set_t substitutions;
+} cy_arrival_t;
+
+/// The arrival pointer is mutable to allow moving the message out of it if needed.
+/// The lifetime of the arrival struct ends upon return from the current callback.
+typedef void (*cy_subscriber_callback_t)(cy_user_context_t, cy_arrival_t*);
 
 /// We intentionally use the exact same API for both verbatim and pattern subscriptions; this is a key design feature.
 ///
@@ -304,7 +326,7 @@ void cy_subscriber_name(const cy_subscriber_t* const sub, char* const out_name);
 /// but there may be at most one such invocation per responder instance.
 /// The feedback may be NULL if no delivery status notification is needed; the absence of the callback does not imply
 /// that the transfer will not be sent in the reliable mode.
-cy_err_t cy_respond(cy_responder_t* const        responder,
+cy_err_t cy_respond(const cy_responder_t         responder,
                     const cy_us_t                tx_deadline,
                     const cy_bytes_t             response_message,
                     const cy_user_context_t      ctx_delivery,
@@ -339,9 +361,10 @@ cy_topic_t* cy_topic_iter_next(cy_topic_t* const topic);
 wkv_str_t cy_topic_name(const cy_topic_t* const topic);
 uint64_t  cy_topic_hash(const cy_topic_t* const topic);
 
-/// Returns true iff the name can match more than one topic.
+/// Returns true iff the name can only match a single topic, which is called a verbatim name;
+/// conversely, returns false for patterns that can match more than one topic.
 /// This is useful for some applications that want to ensure that certain names can match only one topic.
-bool cy_has_substitution_tokens(const wkv_str_t name);
+bool cy_verbatim(const wkv_str_t name);
 
 /// True iff the given name is valid according to the Cy naming rules.
 bool cy_name_valid(const wkv_str_t name);

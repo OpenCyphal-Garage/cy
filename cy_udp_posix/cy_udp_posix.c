@@ -185,7 +185,7 @@ static void on_response_feedback(udpard_tx_t* const tx, const udpard_tx_feedback
 }
 
 /// Invoked by Cy when the application desires to respond to a message received earlier.
-static cy_err_t v_respond(cy_responder_t* const       self,
+static cy_err_t v_respond(const cy_responder_t* const self,
                           const cy_us_t               tx_deadline,
                           const cy_bytes_t            message,
                           const cy_feedback_context_t context)
@@ -381,8 +381,8 @@ static cy_err_t v_topic_subscribe(cy_topic_t* const self, const size_t extent, c
     // is a bottleneck to be aware of -- every node publishes on it and every node is subscribed, so there is
     // a lot of traffic, while the protocol stack itself is invariant to heartbeat message reordering/duplicates.
     if (reordering_window < 0) {
-        const bool heartbeat = strncmp(self->name, CY_HEARTBEAT_TOPIC_NAME, sizeof(CY_HEARTBEAT_TOPIC_NAME)) == 0;
-        reordering_window = heartbeat ? UDPARD_RX_REORDERING_WINDOW_STATELESS : UDPARD_RX_REORDERING_WINDOW_UNORDERED;
+        reordering_window = (self->hash == CY_HEARTBEAT_TOPIC_HASH) ? UDPARD_RX_REORDERING_WINDOW_STATELESS
+                                                                    : UDPARD_RX_REORDERING_WINDOW_UNORDERED;
     }
     const bool stateless = (reordering_window == UDPARD_RX_REORDERING_WINDOW_STATELESS);
 
