@@ -272,7 +272,6 @@ typedef struct cy_vtable_t
     cy_us_t (*now)(const cy_t*);
 
     /// The semantics are per the standard realloc from stdlib, except:
-    /// - If the fragment is not increased in size, reallocation MUST succeed.
     /// - If the size is zero, it must behave like free() (which is often the case in realloc() but technically an UB).
     /// - Constant-complexity is preferred -- the API complexity specs are given assuming O(1) alloc/free operations,
     ///   unless an expansion is needed, in which case the complexity is linear in the old size of the block.

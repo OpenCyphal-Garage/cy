@@ -115,11 +115,6 @@ static inline size_t cy_message_size(const cy_message_t msg) { return msg.size; 
 /// Use this to transfer the ownership of the message to another message object.
 cy_message_t cy_message_move(cy_message_t* const msg);
 
-/// Must be invoked at least once on a message object obtained from a received transfer.
-/// No effect if the instance is already moved-from or if the pointer is NULL.
-/// Subsequent calls have no effect; the passed instance will be moved-from.
-void cy_message_destroy(cy_message_t* const msg);
-
 /// This is the only way to access the received message data.
 /// It gathers `size` bytes of data located at `offset` bytes from the beginning of the transfer data
 /// into the provided contiguous buffer. The function returns the number of bytes copied.
@@ -127,6 +122,11 @@ void cy_message_destroy(cy_message_t* const msg);
 /// The implementation may be optimized for highly efficient sequential access by caching soft states in the cursor
 /// instance. This is particularly useful for message deserialization by reading the fields out one by one.
 size_t cy_message_read(cy_message_t* const cursor, const size_t offset, const size_t size, void* const destination);
+
+/// Must be invoked at least once on a message object obtained from a received transfer.
+/// No effect if the instance is already moved-from or if the pointer is NULL.
+/// Subsequent calls have no effect; the passed instance will be moved-from.
+void cy_message_destroy(cy_message_t* const msg);
 
 /// Creates a local stack-allocated array of bytes and gathers the data from the scattered buffer into it.
 /// The output is an instance of cy_bytes_t with next=NULL because it is a single contiguous buffer.
@@ -150,16 +150,6 @@ typedef struct cy_publisher_t cy_publisher_t;
 /// The response_extent is the extent (maximum size) of the response data if the publisher expects responses.
 cy_publisher_t* cy_advertise(cy_t* const cy, const wkv_str_t name);
 cy_publisher_t* cy_advertise_client(cy_t* const cy, const wkv_str_t name, const size_t response_extent);
-
-void cy_unadvertise(cy_publisher_t* const pub);
-
-/// Each publisher is always linked to a specific single topic.
-/// This pointer remains valid for the entire lifetime of the publisher.
-/// It can be used to obtain the topic name, hash, etc. of this publisher.
-const cy_topic_t* cy_publisher_topic(const cy_publisher_t* const pub);
-
-cy_prio_t cy_priority(const cy_publisher_t* const pub);
-void      cy_priority_set(cy_publisher_t* const pub, const cy_prio_t priority);
 
 /// Notifies the application about the outcome of a reliable delivery attempt.
 /// It is ALWAYS invoked EXACTLY ONCE per published message if reliable delivery was requested.
@@ -205,6 +195,16 @@ cy_err_t cy_request(cy_publisher_t* const        pub,
                     const cy_delivery_callback_t cb_delivery,
                     const cy_user_context_t      ctx_response,
                     const cy_response_callback_t cb_response);
+
+cy_prio_t cy_priority(const cy_publisher_t* const pub);
+void      cy_priority_set(cy_publisher_t* const pub, const cy_prio_t priority);
+
+/// Each publisher is always linked to a specific single topic.
+/// This pointer remains valid for the entire lifetime of the publisher.
+/// It can be used to obtain the topic name, hash, etc. of this publisher.
+const cy_topic_t* cy_publisher_topic(const cy_publisher_t* const pub);
+
+void cy_unadvertise(cy_publisher_t* const pub);
 
 // =====================================================================================================================
 //                                                      SUBSCRIBER
@@ -313,13 +313,6 @@ cy_subscriber_t* cy_subscribe_ordered(cy_t* const                    cy,
                                       const cy_user_context_t        context,
                                       const cy_subscriber_callback_t callback);
 
-/// No effect if the subscriber pointer is NULL.
-void cy_unsubscribe(cy_subscriber_t* const sub);
-
-/// Copies the subscriber name into the user-supplied buffer. Max size is CY_TOPIC_NAME_MAX plus NUL terminator.
-/// The output string is always NUL-terminated.
-void cy_subscriber_name(const cy_subscriber_t* const sub, char* const out_name);
-
 /// Send a response to a message previously received from a topic subscription.
 /// The response will be sent directly to the publisher using peer-to-peer transport, not affecting other nodes.
 /// This can be invoked from a subscription callback or at any later point as long as the responder object is available,
@@ -331,6 +324,13 @@ cy_err_t cy_respond(const cy_responder_t         responder,
                     const cy_bytes_t             response_message,
                     const cy_user_context_t      ctx_delivery,
                     const cy_delivery_callback_t cb_delivery);
+
+/// Copies the subscriber name into the user-supplied buffer. Max size is CY_TOPIC_NAME_MAX plus NUL terminator.
+/// The output string is always NUL-terminated.
+void cy_subscriber_name(const cy_subscriber_t* const sub, char* const out_name);
+
+/// No effect if the subscriber pointer is NULL.
+void cy_unsubscribe(cy_subscriber_t* const sub);
 
 // =====================================================================================================================
 //                                                  NODE & TOPIC

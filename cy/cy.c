@@ -273,20 +273,20 @@ cy_message_t cy_message_move(cy_message_t* const msg)
     return ret;
 }
 
-void cy_message_destroy(cy_message_t* const msg)
-{
-    if ((msg != NULL) && (msg->vtable != NULL)) {
-        msg->vtable->destroy(msg);
-        (void)cy_message_move(msg);
-    }
-}
-
 size_t cy_message_read(cy_message_t* const cursor, const size_t offset, const size_t size, void* const destination)
 {
     if ((cursor != NULL) && (cursor->vtable != NULL) && (destination != NULL)) {
         return cursor->vtable->read(cursor, offset, size, destination);
     }
     return 0;
+}
+
+void cy_message_destroy(cy_message_t* const msg)
+{
+    if ((msg != NULL) && (msg->vtable != NULL)) {
+        msg->vtable->destroy(msg);
+        (void)cy_message_move(msg);
+    }
 }
 
 // ReSharper restore CppParameterMayBeConstPtrOrRef
@@ -1135,18 +1135,6 @@ cy_publisher_t* cy_advertise_client(cy_t* const cy, const wkv_str_t name, const 
     return (res == CY_OK) ? pub : NULL;
 }
 
-void cy_unadvertise(cy_publisher_t* const pub) { (void)pub; }
-
-const cy_topic_t* cy_publisher_topic(const cy_publisher_t* const pub) { return (pub != NULL) ? pub->topic : NULL; }
-
-cy_prio_t cy_priority(const cy_publisher_t* const pub) { return (pub != NULL) ? pub->priority : cy_prio_nominal; }
-void      cy_priority_set(cy_publisher_t* const pub, const cy_prio_t priority)
-{
-    if ((pub != NULL) && (((int)priority) < CY_PRIO_COUNT)) {
-        pub->priority = priority;
-    }
-}
-
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
 cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t tx_deadline, const cy_bytes_t message)
 {
@@ -1322,6 +1310,18 @@ static void retire_expired_pending_responses(const cy_t* cy, const cy_us_t now)
     }
 }
 
+cy_prio_t cy_priority(const cy_publisher_t* const pub) { return (pub != NULL) ? pub->priority : cy_prio_nominal; }
+void      cy_priority_set(cy_publisher_t* const pub, const cy_prio_t priority)
+{
+    if ((pub != NULL) && (((int)priority) < CY_PRIO_COUNT)) {
+        pub->priority = priority;
+    }
+}
+
+const cy_topic_t* cy_publisher_topic(const cy_publisher_t* const pub) { return (pub != NULL) ? pub->topic : NULL; }
+
+void cy_unadvertise(cy_publisher_t* const pub) { (void)pub; }
+
 // =====================================================================================================================
 //                                                      SUBSCRIBER
 // =====================================================================================================================
@@ -1475,13 +1475,6 @@ cy_subscriber_t* cy_subscribe_ordered(cy_t* const                    cy,
     return NULL;
 }
 
-void cy_unsubscribe(cy_subscriber_t* const sub) { (void)sub; }
-
-void cy_subscriber_name(const cy_subscriber_t* const sub, char* const out_name)
-{
-    wkv_get_key(&sub->root->cy->subscribers_by_name, sub->root->index_name, out_name);
-}
-
 static void dummy_delivery_callback(const cy_user_context_t ctx, const bool success)
 {
     (void)ctx;
@@ -1505,6 +1498,13 @@ cy_err_t cy_respond(const cy_responder_t         responder,
                                            .fun  = (cb_delivery == NULL) ? dummy_delivery_callback : cb_delivery };
     return responder.vtable->respond(&responder, tx_deadline, response_message, fb_ctx);
 }
+
+void cy_subscriber_name(const cy_subscriber_t* const sub, char* const out_name)
+{
+    wkv_get_key(&sub->root->cy->subscribers_by_name, sub->root->index_name, out_name);
+}
+
+void cy_unsubscribe(cy_subscriber_t* const sub) { (void)sub; }
 
 // =====================================================================================================================
 //                                                  NODE & TOPIC
@@ -1636,6 +1636,7 @@ cy_err_t cy_new(cy_t* const              cy,
     if (cy->heartbeat_pub == NULL) {
         return CY_ERR_MEMORY;
     }
+    assert(cy->heartbeat_pub->topic->hash == CY_HEARTBEAT_TOPIC_HASH);
     cy->heartbeat_sub = cy_subscribe(cy, hb_name, sizeof(heartbeat_t), CY_USER_CONTEXT_EMPTY, &on_heartbeat);
     if (cy->heartbeat_sub == NULL) {
         cy_unadvertise(cy->heartbeat_pub);
