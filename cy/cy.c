@@ -118,11 +118,11 @@ static topic_repr_t topic_repr(const cy_topic_t* const topic)
 {
     assert(topic != NULL);
     topic_repr_t out;
-    char*        ptr     = out.str;
-    *ptr++               = 'T';
-    ptr                  = cy_u64_to_hex(topic->hash, ptr);
-    *ptr++               = '@';
-    ptr                  = cy_u32_to_hex(cy_topic_subject_id(topic), ptr);
+    char*        ptr = out.str;
+    *ptr++           = 'T';
+    ptr += cy_u64_to_hex(topic->hash, ptr).len;
+    *ptr++ = '@';
+    ptr += cy_u32_to_hex(cy_topic_subject_id(topic), ptr).len;
     *ptr++               = '\'';
     const wkv_str_t name = cy_topic_name(topic);
     memcpy(ptr, name.str, name.len);
@@ -1829,18 +1829,20 @@ wkv_str_t cy_name_resolve(const wkv_str_t name,
 
 /// Converts `bit_width` least significant bits rounded up to the nearest nibble to hexadecimal.
 /// The output string must be at least ceil(bit_width/4)+1 chars long. It will be left-zero-padded and NUL-terminated.
-/// Returns the pointer to the NUL terminator to allow easy concatenation.
-static char* to_hex(uint64_t value, const size_t bit_width, char* const out)
+static wkv_str_t to_hex(uint64_t value, const size_t bit_width, char* const out)
 {
+    if (out == NULL) {
+        return str_invalid;
+    }
     const size_t len = (bit_width + 3) / 4;
     for (int_fast8_t i = (int_fast8_t)(len - 1U); i >= 0; --i) {
         out[i] = "0123456789abcdef"[value & 15U];
         value >>= 4U;
     }
     out[len] = '\0';
-    return &out[len];
+    return (wkv_str_t){ .len = len, .str = out };
 }
-char* cy_u64_to_hex(const uint64_t value, char* const out) { return to_hex(value, 64U, out); }
-char* cy_u32_to_hex(const uint32_t value, char* const out) { return to_hex(value, 32U, out); }
-char* cy_u16_to_hex(const uint16_t value, char* const out) { return to_hex(value, 16U, out); }
-char* cy_u8_to_hex(const uint_fast8_t value, char* const out) { return to_hex(value, 8U, out); }
+wkv_str_t cy_u64_to_hex(const uint64_t value, char* const out) { return to_hex(value, 64U, out); }
+wkv_str_t cy_u32_to_hex(const uint32_t value, char* const out) { return to_hex(value, 32U, out); }
+wkv_str_t cy_u16_to_hex(const uint16_t value, char* const out) { return to_hex(value, 16U, out); }
+wkv_str_t cy_u8_to_hex(const uint_fast8_t value, char* const out) { return to_hex(value, 8U, out); }
