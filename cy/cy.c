@@ -1051,7 +1051,7 @@ cy_publisher_t* cy_advertise_client(cy_t* const cy, const wkv_str_t name, const 
     if ((cy == NULL) || (resolved.len > sizeof(name_buf))) {
         return NULL;
     }
-    if (!cy_verbatim(resolved)) {
+    if (!cy_name_is_verbatim(resolved)) {
         return NULL; // Wildcard publishers are not defined.
     }
     cy_publisher_t* const pub = mem_alloc_zero(cy, sizeof(*pub));
@@ -1330,7 +1330,7 @@ static cy_err_t ensure_subscriber_root(cy_t* const               cy,
 
     // Insert the new root into the indexes.
     root->index_name = node;
-    if (!cy_verbatim(resolved_name)) {
+    if (!cy_name_is_verbatim(resolved_name)) {
         root->index_pattern = wkv_set(&cy->subscribers_by_pattern, resolved_name);
         if (root->index_pattern == NULL) {
             wkv_del(&cy->subscribers_by_name, node);
@@ -1471,7 +1471,8 @@ cy_topic_t* cy_topic_find_by_hash(const cy_t* const cy, const uint64_t hash)
     assert(cy != NULL);
     cy_topic_t* const topic = (cy_topic_t*)cavl2_find(cy->topics_by_hash, &hash, &cavl_comp_topic_hash);
     assert((topic == NULL) || (topic->hash == hash));
-    assert((topic == NULL) || cy_verbatim(wkv_key(topic->name_z)) || (topic->pub_count == 0)); // pub only verbatim
+    assert((topic == NULL) || cy_name_is_verbatim(wkv_key(topic->name_z)) ||
+           (topic->pub_count == 0)); // pub only verbatim
     return topic;
 }
 
@@ -1515,7 +1516,7 @@ cy_err_t cy_new(cy_t* const              cy,
         !is_prime_u32(subject_id_modulus)) {
         return CY_ERR_ARGUMENT;
     }
-    if (!cy_name_valid(home) || !cy_name_valid(namespace_) || (home.len > CY_NAMESPACE_NAME_MAX) ||
+    if (!cy_name_is_valid(home) || !cy_name_is_valid(namespace_) || (home.len > CY_NAMESPACE_NAME_MAX) ||
         (namespace_.len > CY_NAMESPACE_NAME_MAX)) {
         return CY_ERR_NAME;
     }
@@ -1697,7 +1698,7 @@ static const wkv_str_t str_invalid = { .len = SIZE_MAX, .str = NULL };
 
 static bool is_valid_char(const char c) { return (c >= 32) && (c <= 126); }
 
-bool cy_name_valid(const wkv_str_t name)
+bool cy_name_is_valid(const wkv_str_t name)
 {
     if ((name.len == 0) || (name.len > CY_TOPIC_NAME_MAX) || (name.str == NULL)) {
         return false;
@@ -1711,12 +1712,19 @@ bool cy_name_valid(const wkv_str_t name)
     return true;
 }
 
-bool cy_verbatim(const wkv_str_t name)
+bool cy_name_is_verbatim(const wkv_str_t name)
 {
     wkv_t kv;
     wkv_init(&kv, &wkv_realloc);
     return !wkv_has_substitution_tokens(&kv, name);
 }
+
+bool cy_name_is_homeful(const wkv_str_t name)
+{
+    return (name.len >= 1) && (name.str[0] == cy_name_home) && ((name.len == 1) || (name.str[1] == cy_name_sep));
+}
+
+bool cy_name_is_absolute(const wkv_str_t name) { return (name.len >= 1) && (name.str[0] == cy_name_sep); }
 
 /// Writes the normalized and validated version of `name` into `dest`, which must be at least `dest_size` bytes long.
 /// Normalization at least removes duplicate, leading, and trailing name separators.
@@ -1778,13 +1786,6 @@ wkv_str_t cy_name_join(const wkv_str_t left, const wkv_str_t right, const size_t
     }
     return (wkv_str_t){ .len = len + right_len, .str = dest };
 }
-
-bool cy_name_is_homeful(const wkv_str_t name)
-{
-    return (name.len >= 1) && (name.str[0] == cy_name_home) && //
-           ((name.len == 1) || (name.str[1] == cy_name_sep));
-}
-bool cy_name_is_absolute(const wkv_str_t name) { return (name.len >= 1) && (name.str[0] == cy_name_sep); }
 
 wkv_str_t cy_name_expand_home(wkv_str_t name, const wkv_str_t home, const size_t dest_size, char* const dest)
 {

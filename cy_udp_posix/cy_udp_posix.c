@@ -648,7 +648,7 @@ cy_err_t cy_udp_posix_new(cy_udp_posix_t* const cy,
     if (res == CY_OK) {
         char      name_copy[CY_NAMESPACE_NAME_MAX + 1];
         wkv_str_t name_key = home;
-        if (!cy_name_valid(name_key)) {
+        if (!cy_name_is_valid(name_key)) {
             name_copy[0] = '#';
             (void)cy_u64_to_hex(uid, &name_copy[1]);
             name_key = wkv_key(name_copy);

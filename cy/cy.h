@@ -372,12 +372,12 @@ extern const char cy_name_sep;  ///< '/'
 extern const char cy_name_home; ///< '~'
 
 /// True iff the given name is valid according to the Cy naming rules. An empty name is not a valid name.
-bool cy_name_valid(const wkv_str_t name);
+bool cy_name_is_valid(const wkv_str_t name);
 
 /// Returns true iff the name can only match a single topic, which is called a verbatim name;
 /// conversely, returns false for patterns that can match more than one topic.
 /// This is useful for some applications that want to ensure that certain names can match only one topic.
-bool cy_verbatim(const wkv_str_t name);
+bool cy_name_is_verbatim(const wkv_str_t name);
 
 /// Whether the name is relative to the home namespace ~ or is absolute.
 bool cy_name_is_homeful(const wkv_str_t name);
