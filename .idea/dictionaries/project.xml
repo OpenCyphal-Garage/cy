@@ -20,6 +20,7 @@
       <w>libcanard</w>
       <w>libserard</w>
       <w>libudpard</w>
+      <w>msize</w>
       <w>noinit</w>
       <w>opencyphal</w>
       <w>pktinfo</w>

@@ -66,6 +66,7 @@ static void* mem_alloc(void* const user, const size_t size)
     if (size > 0) {
         if (out != NULL) {
             cy->mem_allocated_fragments++;
+            cy->mem_allocated_bytes += size;
         } else {
             cy->mem_oom_count++;
         }
@@ -80,6 +81,8 @@ static void mem_free(void* const user, const size_t size, void* const pointer)
     if (pointer != NULL) {
         assert(cy->mem_allocated_fragments > 0);
         cy->mem_allocated_fragments--;
+        assert(cy->mem_allocated_bytes >= size);
+        cy->mem_allocated_bytes -= size;
         memset(pointer, 0xA5, size); // a simple diagnostic aid
         free(pointer);
     }
@@ -97,7 +100,7 @@ static cy_err_t err_from_udp_wrapper(const int16_t e)
     }
 }
 
-static uint64_t random64(uint64_t* const state, const uint64_t local_uid)
+static uint64_t prng64(uint64_t* const state, const uint64_t local_uid)
 {
     *state += 0xA0761D6478BD642FULL; // add Wyhash seed (64-bit prime)
     return rapidhash_withSeed(state, sizeof(uint64_t), local_uid);
@@ -114,7 +117,7 @@ static cy_feedback_context_t feedback_context_unbox(const udpard_user_context_t 
 static udpard_user_context_t feedback_context_box(const cy_feedback_context_t ctx)
 {
     static_assert(sizeof(cy_feedback_context_t) <= sizeof(udpard_user_context_t), "");
-    udpard_user_context_t out = { NULL };
+    udpard_user_context_t out = { .ptr = { NULL } };
     memcpy(&out, &ctx, sizeof(ctx));
     return out;
 }
@@ -207,6 +210,12 @@ static cy_err_t v_respond(const cy_responder_t* const self,
                                             cy_bytes_to_udpard_bytes(message),
                                             on_response_feedback,
                                             feedback_context_box(context));
+    CY_TRACE(&cy->base,
+             "💬 T%016llx #%llu N%016llx res=%u",
+             (unsigned long long)ctx.topic_hash,
+             (unsigned long long)ctx.transfer_id,
+             (unsigned long long)ctx.remote.uid,
+             res);
     if (res > 0U) {
         return CY_OK;
     }
@@ -359,6 +368,12 @@ static void v_on_msg_stateless(udpard_rx_t* const rx, udpard_rx_port_t* const po
         topic->history[0].transfer_id = tr.transfer_id;
         topic->history[0].source_uid  = tr.remote.uid;
         v_on_msg(rx, port, tr);
+    } else {
+        CY_TRACE(topic->base.cy,
+                 "🍒️ T%016llx #%llu N%016llx duplicate transfer dropped",
+                 (unsigned long long)port->topic_hash,
+                 (unsigned long long)tr.transfer_id,
+                 (unsigned long long)tr.remote.uid);
     }
 }
 
@@ -413,6 +428,12 @@ static cy_err_t v_topic_subscribe(cy_topic_t* const self, const size_t extent, c
             udp_wrapper_close(&self_low->rx_sock[i]);
         }
     }
+    CY_TRACE(self->cy,
+             "🔔 '%s' (extent=%zu reordering_window=%lld) res=%d",
+             self->name,
+             extent,
+             (long long)reordering_window,
+             (int)res);
     return res;
 }
 
@@ -425,10 +446,12 @@ static void v_topic_unsubscribe(cy_topic_t* const self)
     for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
         udp_wrapper_close(&topic->rx_sock[i]);
     }
+    CY_TRACE(self->cy, "🔕 '%s'", self->name);
 }
 
 static void v_topic_destroy(cy_topic_t* const topic)
 {
+    CY_TRACE(topic->cy, "🗑️ '%s'", topic->name);
     cy_udp_posix_t* const       cy        = (cy_udp_posix_t*)topic->cy;
     cy_udp_posix_topic_t* const udp_topic = (cy_udp_posix_topic_t*)topic;
     for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
@@ -450,12 +473,13 @@ static cy_topic_t* v_topic_new(cy_t* const self)
     if (topic != NULL) {
         memset(topic, 0, sizeof(cy_udp_posix_topic_t));
         topic->base.vtable     = &topic_vtable;
-        topic->pub_transfer_id = random64(&cy->prng_state, cy->udpard_tx.local_uid);
+        topic->pub_transfer_id = prng64(&cy->prng_state, cy->udpard_tx.local_uid);
         for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
             topic->rx_sock[i] = udp_wrapper_new();
         }
         topic->rx_sock_err_handler = cy->rx_sock_err_handler;
         cy->n_topics++;
+        CY_TRACE(self, "🆕 n_topics=%zu", cy->n_topics);
     }
     return (cy_topic_t*)topic;
 }
@@ -471,6 +495,7 @@ static cy_us_t v_now(const cy_t* const cy)
 static void* v_realloc(cy_t* const cy, void* const ptr, const size_t new_size)
 {
     (void)cy;
+    // TODO: currently we do not track the memory usage by Cy, but it would be useful to do so.
     if (new_size > 0) {
         return realloc(ptr, new_size);
     }
@@ -480,7 +505,7 @@ static void* v_realloc(cy_t* const cy, void* const ptr, const size_t new_size)
 
 static uint64_t v_random(cy_t* const cy)
 {
-    return random64(&((cy_udp_posix_t*)cy)->prng_state, ((cy_udp_posix_t*)cy)->udpard_tx.local_uid);
+    return prng64(&((cy_udp_posix_t*)cy)->prng_state, ((cy_udp_posix_t*)cy)->udpard_tx.local_uid);
 }
 
 static void v_on_subscription_error(cy_t* const cy, cy_topic_t* const cy_topic, const cy_err_t error)
@@ -598,7 +623,7 @@ cy_err_t cy_udp_posix_new(cy_udp_posix_t* const cy,
     if (cy->iface_mask == 0) {
         return CY_ERR_ARGUMENT;
     }
-    if (!udpard_tx_new(&cy->udpard_tx, uid, random64(&cy->prng_state, uid), tx_queue_capacity, tx_mem, &tx_vtable)) {
+    if (!udpard_tx_new(&cy->udpard_tx, uid, prng64(&cy->prng_state, uid), tx_queue_capacity, tx_mem, &tx_vtable)) {
         return CY_ERR_ARGUMENT; // Cleanup not required -- no resources allocated yet.
     }
     udpard_rx_new(&cy->udpard_rx, &cy->udpard_tx); // infallible
@@ -621,10 +646,11 @@ cy_err_t cy_udp_posix_new(cy_udp_posix_t* const cy,
 
     // Initialize Cy. It will not emit any transfers yet.
     if (res == CY_OK) {
-        const char name_copy[CY_NAMESPACE_NAME_MAX + 1] = { 0 };
-        wkv_str_t  name_key                             = name;
+        char      name_copy[CY_NAMESPACE_NAME_MAX + 1];
+        wkv_str_t name_key = name;
         if (!cy_name_valid(name_key)) {
-            (void)snprintf((char*)name_copy, sizeof(name_copy), "#%016llx", (unsigned long long)uid);
+            name_copy[0] = '#';
+            (void)cy_u64_to_hex(uid, &name_copy[1]);
             name_key = wkv_key(name_copy);
         }
         // Here we assume that any transport that Cyphal/UDP may work with in a redundant set will have
@@ -690,6 +716,7 @@ static void read_socket(cy_udp_posix_t* const       cy,
     void* const dgram_realloc = realloc(dgram.data, dgram.size);
     if (dgram_realloc != NULL) { // Sensible realloc implementations always succeed when shrinking.
         dgram.data = dgram_realloc;
+        cy->mem_allocated_bytes -= (CY_UDP_SOCKET_READ_BUFFER_SIZE - dgram.size);
     }
 
     // Pass the data buffer into LibUDPard then into Cy for further processing. It takes ownership of the buffer.

@@ -57,6 +57,7 @@ struct cy_udp_posix_t
     void (*tx_sock_err_handler)(cy_udp_posix_t* cy, uint_fast8_t iface_index, uint32_t err_no);
 
     size_t   mem_allocated_fragments;
+    size_t   mem_allocated_bytes;
     uint64_t mem_oom_count;
 };
 
@@ -64,9 +65,9 @@ struct cy_udp_posix_t
 cy_us_t cy_udp_posix_now(void);
 
 /// The namespace may be NULL or empty, in which case it defaults to "~".
-/// The name may be NULL or empty, in which case it defaults to the UID in lowercase hex.
-/// Unused interfaces should have address either 0 or 0xFFFFFFFF;
-/// to parse IP addresses from string see udp_wrapper_parse_iface_address().
+/// The name may be NULL or empty, in which case it defaults to #-prefixed UID in zero-padded lowercase hex;
+/// for example, `#0000000000abcdef`.
+/// Unused interfaces should have zero addresses; to parse IP address strings see udp_wrapper_parse_iface_address().
 cy_err_t               cy_udp_posix_new(cy_udp_posix_t* const cy,
                                         const uint64_t        uid,
                                         const wkv_str_t       name,

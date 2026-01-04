@@ -109,6 +109,48 @@ static size_t cavl_count(cy_tree_t* const root)
     return count;
 }
 
+/// Converts `bit_width` least significant bits rounded up to the nearest nibble to hexadecimal.
+/// The output string must be at least ceil(bit_width/4)+1 chars long. It will be left-zero-padded and NUL-terminated.
+/// Returns the pointer to the NUL terminator to allow easy concatenation.
+static char* to_hex(uint64_t value, const size_t bit_width, char* const out)
+{
+    const size_t len = (bit_width + 3) / 4;
+    for (int_fast8_t i = (int_fast8_t)(len - 1U); i >= 0; --i) {
+        out[i] = "0123456789abcdef"[value & 15U];
+        value >>= 4U;
+    }
+    out[len] = '\0';
+    return &out[len];
+}
+char* cy_u64_to_hex(const uint64_t value, char* const out) { return to_hex(value, 64U, out); }
+char* cy_u32_to_hex(const uint32_t value, char* const out) { return to_hex(value, 32U, out); }
+char* cy_u16_to_hex(const uint16_t value, char* const out) { return to_hex(value, 16U, out); }
+char* cy_u8_to_hex(const uint_fast8_t value, char* const out) { return to_hex(value, 8U, out); }
+
+/// A human-friendly representation of the topic for logging and diagnostics.
+typedef struct
+{
+    char str[CY_TOPIC_NAME_MAX + 32];
+} topic_repr_t;
+static topic_repr_t topic_repr(const cy_topic_t* const topic)
+{
+    assert(topic != NULL);
+    topic_repr_t out;
+    char*        ptr     = out.str;
+    *ptr++               = 'T';
+    ptr                  = cy_u64_to_hex(topic->hash, ptr);
+    *ptr++               = '@';
+    ptr                  = cy_u32_to_hex(cy_topic_subject_id(topic), ptr);
+    *ptr++               = '\'';
+    const wkv_str_t name = cy_topic_name(topic);
+    memcpy(ptr, name.str, name.len);
+    ptr += name.len;
+    *ptr++ = '\'';
+    *ptr   = '\0';
+    assert((ptr - out.str) <= (ptrdiff_t)sizeof(out.str));
+    return out;
+}
+
 /// TODO this is ugly and dirty; use wkv_str_t
 static bool resolve_name(const char* const ns, const char* const user, const char* const name, char* const dest)
 {
@@ -308,32 +350,6 @@ struct cy_subscriber_t
     cy_subscriber_callback_t callback;
 };
 
-typedef struct
-{
-    cy_tree_t index_deadline;    ///< Global across all topics.
-    cy_tree_t index_transfer_id; ///< Per-topic transfer-ID index.
-
-    uint64_t transfer_id; ///< As returned by the platform publish() method.
-    cy_us_t  deadline;
-
-    cy_topic_t* topic;
-
-    cy_user_context_t      user_context;
-    cy_response_callback_t callback;
-} pending_response_t;
-
-/// Unlink from everywhere and deallocate the instance. The callback takes the ownership of the message.
-static void pending_response_finalize(pending_response_t* const self, const cy_us_t ts, const cy_message_t msg)
-{
-    cavl2_remove(&self->topic->cy->pending_responses_by_deadline, &self->index_deadline);
-    cavl2_remove(&self->topic->pending_responses_by_transfer_id, &self->index_transfer_id);
-    assert(self->callback != NULL);
-    const cy_response_callback_t cb  = self->callback;
-    const cy_user_context_t      ctx = self->user_context;
-    mem_free(self->topic->cy, self); // It is best to free the memory before invoking the callback.
-    cb(ctx, ts, msg);
-}
-
 static int32_t cavl_comp_topic_hash(const void* const user, const cy_tree_t* const node)
 {
     const uint64_t          outer = *(uint64_t*)user;
@@ -419,8 +435,7 @@ static void retire_expired_implicit_topics(cy_t* const cy, const cy_us_t now)
     if (topic != NULL) {
         assert(is_implicit(topic) && validate_is_implicit(topic));
         if ((topic->ts_animated + cy->implicit_topic_timeout) < now) {
-            CY_TRACE(
-              cy, "⚰️ T%016llx@%08x '%s'", (unsigned long long)topic->hash, cy_topic_subject_id(topic), topic->name);
+            CY_TRACE(cy, "⚰️ %s", topic_repr(topic).str);
             topic_destroy(topic);
         }
     }
@@ -438,8 +453,7 @@ static void schedule_gossip_urgent(cy_topic_t* const topic)
     if (!is_listed(&topic->cy->list_gossip_urgent, &topic->list_gossip_urgent)) {
         delist(&topic->cy->list_gossip, &topic->list_gossip);
         enlist_head(&topic->cy->list_gossip_urgent, &topic->list_gossip_urgent);
-        CY_TRACE(
-          topic->cy, "⏰ T%016llx@%08x '%s'", (unsigned long long)topic->hash, cy_topic_subject_id(topic), topic->name);
+        CY_TRACE(topic->cy, "⏰ %s", topic_repr(topic).str);
     }
 }
 
@@ -539,6 +553,11 @@ static subscriber_params_t deduce_subscription_params(const cy_topic_t* const to
         final.reordering_window = max_i64(final.reordering_window, agg.reordering_window);
         cpl                     = cpl->next;
     }
+    CY_TRACE(topic->cy,
+             "📬 %s extent=%zu rwin=%lld",
+             topic_repr(topic).str,
+             final.extent,
+             (long long) final.reordering_window);
     return final;
 }
 
@@ -551,11 +570,10 @@ static void topic_ensure_subscribed(cy_topic_t* const topic)
         const cy_err_t            res    = topic->vtable->subscribe(topic, params.extent, params.reordering_window);
         topic->subscribed                = res == CY_OK;
         CY_TRACE(topic->cy,
-                 "🗞️ T%016llx@%08x '%s' extent=%zu result=%d",
-                 (unsigned long long)topic->hash,
-                 cy_topic_subject_id(topic),
-                 topic->name,
+                 "🗞️ %s extent=%zu rwin=%lld result=%d",
+                 topic_repr(topic).str,
                  params.extent,
+                 (long long)params.reordering_window,
                  res);
         if (!topic->subscribed) {
             topic->cy->vtable->on_subscription_error(topic->cy, topic, res); // not our problem anymore
@@ -580,12 +598,10 @@ static void topic_allocate(cy_topic_t* const topic, const uint64_t new_evictions
     static _Thread_local int call_depth        = 0U;
     call_depth++;
     CY_TRACE(cy,
-             "🔍%*s T%016llx@%08x '%s' evict=%llu->%llu lage=%+d subscribed=%d couplings=%p",
+             "🔍%*s %s evict=%llu->%llu lage=%+d subscribed=%d couplings=%p",
              (call_depth - 1) * call_depth_indent,
              "",
-             (unsigned long long)topic->hash,
-             cy_topic_subject_id(topic),
-             topic->name,
+             topic_repr(topic).str,
              (unsigned long long)topic->evictions,
              (unsigned long long)new_evictions,
              topic_lage(topic, now),
@@ -657,12 +673,10 @@ static void topic_allocate(cy_topic_t* const topic, const uint64_t new_evictions
 
 #if CY_CONFIG_TRACE
     CY_TRACE(cy,
-             "🔎%*s T%016llx@%08x '%s' evict=%llu lage=%+d subscribed=%d",
+             "🔎%*s %s evict=%llu lage=%+d subscribed=%d",
              (call_depth - 1) * call_depth_indent,
              "",
-             (unsigned long long)topic->hash,
-             cy_topic_subject_id(topic),
-             topic->name,
+             topic_repr(topic).str,
              (unsigned long long)topic->evictions,
              topic_lage(topic, now),
              (int)topic->subscribed);
@@ -740,13 +754,7 @@ static cy_err_t topic_new(cy_t* const        cy,
             *out_topic = topic;
         }
     }
-
-    CY_TRACE(cy,
-             "✨ T%016llx@%08x '%s': topic_count=%zu",
-             (unsigned long long)topic->hash,
-             cy_topic_subject_id(topic),
-             topic->name,
-             cavl_count(cy->topics_by_hash));
+    CY_TRACE(cy, "✨ %s topic_count=%zu", topic_repr(topic).str, cavl_count(cy->topics_by_hash));
     return 0;
 
 oom: // TODO correct deinitialization
@@ -782,13 +790,7 @@ static cy_err_t topic_couple(cy_topic_t* const         topic,
 #if CY_CONFIG_TRACE
     char subr_name[CY_TOPIC_NAME_MAX + 1];
     wkv_get_key(&topic->cy->subscribers_by_name, subr->index_name, subr_name);
-    CY_TRACE(topic->cy,
-             "🔗 T%016llx@%08x '%s' <=> '%s' substitutions=%zu",
-             (unsigned long long)topic->hash,
-             cy_topic_subject_id(topic),
-             topic->name,
-             subr_name,
-             substitution_count);
+    CY_TRACE(topic->cy, "🔗 %s <=> '%s' substitutions=%zu", topic_repr(topic).str, subr_name, substitution_count);
 #endif
     // Allocate the new coupling object with the substitutions flex array.
     // Each topic keeps its own couplings because the sets of subscription names and topic names are orthogonal.
@@ -811,11 +813,7 @@ static cy_err_t topic_couple(cy_topic_t* const         topic,
         // If this is a verbatim subscriber, the topic is no (longer) implicit.
         if ((subr->index_pattern == NULL) && is_implicit(topic)) {
             delist(&topic->cy->list_implicit, &topic->list_implicit);
-            CY_TRACE(topic->cy,
-                     "🧛 Promoted to explicit T%016llx@%08x '%s'",
-                     (unsigned long long)topic->hash,
-                     cy_topic_subject_id(topic),
-                     topic->name);
+            CY_TRACE(topic->cy, "🧛 %s promoted to explicit", topic_repr(topic).str);
         }
     }
     return (cpl == NULL) ? CY_ERR_MEMORY : CY_OK;
@@ -869,11 +867,7 @@ static cy_topic_t* topic_subscribe_if_matching(cy_t* const       cy,
 static void* wkv_cb_topic_scout_response(const wkv_event_t evt)
 {
     cy_topic_t* const topic = (cy_topic_t*)evt.node->value;
-    CY_TRACE((cy_t*)evt.context,
-             "📢 T%016llx@%08x '%s'",
-             (unsigned long long)(topic->hash),
-             cy_topic_subject_id(topic),
-             topic->name);
+    CY_TRACE(topic->cy, "📢 %s", topic_repr(topic).str);
     schedule_gossip_urgent(topic);
     return NULL;
 }
@@ -927,7 +921,7 @@ static cy_err_t publish_heartbeat_gossip(cy_t* const cy, cy_topic_t* const topic
                         ._reserved_1_        = 0,
                         .topic_name_len      = (uint_fast8_t)topic->index_name->key_len };
     memcpy(msg.topic_name, topic->name, topic->index_name->key_len);
-    CY_TRACE(cy, "🗣️ T%016llx@%08x '%s'", (unsigned long long)topic->hash, cy_topic_subject_id(topic), topic->name);
+    CY_TRACE(cy, "🗣️ %s", topic_repr(topic).str);
     // Update gossip even if failed so we don't get stuck publishing same gossip if error reporting is broken.
     schedule_gossip(topic);
     return publish_heartbeat(cy, now, &msg);
@@ -976,6 +970,7 @@ static cy_err_t heartbeat_begin(cy_t* const cy)
 {
     cy_err_t res = CY_OK;
     if (cy->heartbeat_next == HEAT_DEATH) {
+        CY_TRACE(cy, "🚀");
         const cy_us_t now  = cy_now(cy);
         cy->heartbeat_next = now;
         res                = heartbeat_poll(cy, now);
@@ -1098,7 +1093,7 @@ static void on_heartbeat(const cy_user_context_t ctx, cy_arrival_t* const arriva
                  heartbeat.topic_name);
         (void)wkv_match(&cy->topics_by_name, key, cy, wkv_cb_topic_scout_response);
     } else {
-        CY_TRACE(cy, "⚠️ Invalid heartbeat message version=%d: lage=%+d", (int)heartbeat.version, heartbeat.topic_lage);
+        CY_TRACE(cy, "⚠️ Invalid message version=%d: lage=%+d", (int)heartbeat.version, heartbeat.topic_lage);
     }
 }
 
@@ -1131,12 +1126,11 @@ cy_publisher_t* cy_advertise_client(cy_t* const cy, const wkv_str_t name, const 
         delist(&cy->list_implicit, &pub->topic->list_implicit);
     }
     CY_TRACE(cy,
-             "✨ T%016llx@%08x '%s': topic_count=%zu pub_count=%zu res=%d",
-             (unsigned long long)pub->topic->hash,
-             cy_topic_subject_id(pub->topic),
-             pub->topic->name,
+             "✨ %s topic_count=%zu pub_count=%zu response_extent=%zu res=%d",
+             topic_repr(pub->topic).str,
              cavl_count(cy->topics_by_hash),
              pub->topic->pub_count,
+             response_extent,
              res);
     return (res == CY_OK) ? pub : NULL;
 }
@@ -1184,6 +1178,39 @@ cy_err_t cy_publish_reliable(cy_publisher_t* const        pub,
         res = pub->topic->vtable->publish(pub->topic, tx_deadline, pub->priority, message, &ctx, NULL, 0);
     }
     return res;
+}
+
+typedef struct
+{
+    cy_tree_t index_deadline;    ///< Global across all topics.
+    cy_tree_t index_transfer_id; ///< Per-topic transfer-ID index.
+
+    uint64_t transfer_id; ///< As returned by the platform publish() method.
+    cy_us_t  deadline;
+
+    cy_topic_t* topic;
+
+    cy_user_context_t      user_context;
+    cy_response_callback_t callback;
+} pending_response_t;
+
+/// Unlink from everywhere and deallocate the instance. The callback takes the ownership of the message.
+static void pending_response_finalize(pending_response_t* const self, const cy_us_t ts, const cy_message_t msg)
+{
+    cy_t* const cy = self->topic->cy;
+    CY_TRACE(cy,
+             "📩 %s #%llu msize=%zu %s",
+             topic_repr(self->topic).str,
+             (unsigned long long)self->transfer_id,
+             msg.size,
+             (ts >= 0) ? "✅SUCCESS" : "❌FAILURE");
+    cavl2_remove(&cy->pending_responses_by_deadline, &self->index_deadline);
+    cavl2_remove(&self->topic->pending_responses_by_transfer_id, &self->index_transfer_id);
+    assert(self->callback != NULL);
+    const cy_response_callback_t cb  = self->callback;
+    const cy_user_context_t      ctx = self->user_context;
+    mem_free(cy, self); // It is best to free the memory before invoking the callback.
+    cb(ctx, ts, msg);
 }
 
 /// Deadlines are not unique, so this comparator never returns 0.
@@ -1259,6 +1286,10 @@ cy_err_t cy_request(cy_publisher_t* const        pub,
                     if (pr2 == pr) {
                         break; // Successfully inserted.
                     }
+                    CY_TRACE(cy,
+                             "⚠️ %s response transfer-ID exhaustion on #%llu",
+                             topic_repr(pub->topic).str,
+                             (unsigned long long)pr->transfer_id);
                     pending_response_finalize(pr2, BIG_BANG, message_empty);
                 }
                 (void)cavl2_find_or_insert(&cy->pending_responses_by_deadline,
@@ -1266,6 +1297,10 @@ cy_err_t cy_request(cy_publisher_t* const        pub,
                                            cavl_comp_pending_response_deadline,
                                            &pr->index_deadline,
                                            cavl2_trivial_factory);
+                CY_TRACE(cy,
+                         "📩 %s new pending response #%llu",
+                         topic_repr(pr->topic).str,
+                         (unsigned long long)pr->transfer_id);
             } else {
                 mem_free(cy, pr);
             }
@@ -1311,6 +1346,11 @@ static void* wkv_cb_couple_new_subscription(const wkv_event_t evt)
                                    (param_new.reordering_window != param_old.reordering_window);
         }
         if (refresh_subscription) {
+            CY_TRACE(topic->cy,
+                     "🚧 %s subscription refresh params: extent=%zu rwin=%lld",
+                     topic_repr(topic).str,
+                     param_old.extent,
+                     (long long)param_old.reordering_window);
             topic->vtable->unsubscribe(topic);
             topic->subscribed = false;
         }
@@ -1601,6 +1641,12 @@ cy_err_t cy_new(cy_t* const              cy,
         cy_unadvertise(cy->heartbeat_pub);
         return CY_ERR_MEMORY;
     }
+    CY_TRACE(cy,
+             "🚀 name='%s' namespace='%s' ts_started=%llu subject_id_modulus=%lu",
+             cy->name,
+             cy->namespace_,
+             (unsigned long long)cy->ts_started,
+             (unsigned long)cy->subject_id_modulus);
     return CY_OK;
 }
 
@@ -1624,6 +1670,7 @@ cy_err_t cy_update(cy_t* const cy)
 void cy_on_topic_collision(cy_topic_t* const topic)
 {
     if (topic != NULL) {
+        CY_TRACE(topic->cy, "💥 %s", topic_repr(topic).str);
         schedule_gossip_urgent(topic);
     }
 }
@@ -1687,9 +1734,11 @@ void cy_on_response(cy_t* const    cy,
         if (pr != NULL) {
             pending_response_finalize(pr, timestamp, message); // Takes ownership of the message.
         } else {
+            CY_TRACE(cy, "❓ %s orphan #%llu", topic_repr(topic).str, (unsigned long long)transfer_id);
             cy_message_destroy(&message); // Unexpected or duplicate response.
         }
     } else {
+        CY_TRACE(cy, "❓ T%016llx no such topic", (unsigned long long)topic_hash);
         cy_message_destroy(&message); // The topic was destroyed while waiting for the response.
     }
 }

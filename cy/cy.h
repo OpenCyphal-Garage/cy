@@ -369,6 +369,15 @@ bool cy_verbatim(const wkv_str_t name);
 /// True iff the given name is valid according to the Cy naming rules.
 bool cy_name_valid(const wkv_str_t name);
 
+/// String conversion helpers for composing names without reliance on snprintf etc, which is useful in deep embedded.
+/// The output string must be at least ceil(bit_width/4)+1 chars long: 17 bytes for uint64, 9 bytes for uint32, etc.
+/// The hex representation will be left-zero-padded to fixed length and NUL-terminated.
+/// Returns the pointer to the final NUL terminator to allow easy concatenation and chaining.
+char* cy_u64_to_hex(const uint64_t value, char* const out);
+char* cy_u32_to_hex(const uint32_t value, char* const out);
+char* cy_u16_to_hex(const uint16_t value, char* const out);
+char* cy_u8_to_hex(const uint_fast8_t value, char* const out);
+
 #ifdef __cplusplus
 }
 #endif
