@@ -354,14 +354,6 @@ cy_topic_t* cy_topic_iter_next(cy_topic_t* const topic);
 wkv_str_t cy_topic_name(const cy_topic_t* const topic);
 uint64_t  cy_topic_hash(const cy_topic_t* const topic);
 
-/// Returns true iff the name can only match a single topic, which is called a verbatim name;
-/// conversely, returns false for patterns that can match more than one topic.
-/// This is useful for some applications that want to ensure that certain names can match only one topic.
-bool cy_verbatim(const wkv_str_t name);
-
-/// True iff the given name is valid according to the Cy naming rules.
-bool cy_name_valid(const wkv_str_t name);
-
 // =====================================================================================================================
 //                                                      NAMES
 // =====================================================================================================================
@@ -379,22 +371,30 @@ bool cy_name_valid(const wkv_str_t name);
 extern const char cy_name_sep;  ///< '/'
 extern const char cy_name_home; ///< '~'
 
+/// True iff the given name is valid according to the Cy naming rules. An empty name is not a valid name.
+bool cy_name_valid(const wkv_str_t name);
+
+/// Returns true iff the name can only match a single topic, which is called a verbatim name;
+/// conversely, returns false for patterns that can match more than one topic.
+/// This is useful for some applications that want to ensure that certain names can match only one topic.
+bool cy_verbatim(const wkv_str_t name);
+
 /// Whether the name is relative to the home namespace ~ or is absolute.
 bool cy_name_is_homeful(const wkv_str_t name);
 bool cy_name_is_absolute(const wkv_str_t name);
 
 /// Joins two (potentially empty) names with cy_name_sep, normalizing both parts, such that the result is
 /// a normalized name. Either part may be empty, in which case it behaves like normalization of the other part.
-/// Returns the length of the joined name, or SIZE_MAX on failure (out of space or invalid names).
+/// On failure, the output string has length SIZE_MAX and NULL data pointer.
 /// The destination is not NUL-terminated.
-size_t cy_name_join(const wkv_str_t left, const wkv_str_t right, const size_t dest_size, char* const dest);
+wkv_str_t cy_name_join(const wkv_str_t left, const wkv_str_t right, const size_t dest_size, char* const dest);
 
 /// If cy_name_is_homeful(name), expands the home prefix using the provided home string;
 /// otherwise, returns the normalized name.
 /// The result is normalized and written into dest, which must be at least dest_size bytes long.
-/// Returns the length of the expanded name, or SIZE_MAX on failure.
+/// On failure, the output string has length SIZE_MAX and NULL data pointer.
 /// The destination is not NUL-terminated.
-size_t cy_name_expand_home(wkv_str_t name, const wkv_str_t home, const size_t dest_size, char* const dest);
+wkv_str_t cy_name_expand_home(wkv_str_t name, const wkv_str_t home, const size_t dest_size, char* const dest);
 
 /// Constructs the full normalized name as exchanged over the wire: homeful names are expanded,
 /// relative names are prefixed with the namespace, and absolute names are left as-is.
@@ -406,9 +406,13 @@ size_t cy_name_expand_home(wkv_str_t name, const wkv_str_t home, const size_t de
 ///     name="foo/bar/"     namespace="~//ns1"  home="me"   => "me/ns1/foo/bar"
 ///
 /// The dest points to a buffer at least dest_size bytes long.
-/// Returns the length of the resolved name, or SIZE_MAX if the name is invalid.
+/// On failure, the output string has length SIZE_MAX and NULL data pointer.
 /// The destination is not NUL-terminated.
-size_t cy_name_resolve(const wkv_str_t name, wkv_str_t namespace_, const wkv_str_t home, size_t dest_size, char* dest);
+wkv_str_t cy_name_resolve(const wkv_str_t name,
+                          wkv_str_t       namespace_,
+                          const wkv_str_t home,
+                          size_t          dest_size,
+                          char*           dest);
 
 /// String conversion helpers for composing names without reliance on snprintf etc, which is useful in deep embedded.
 /// The output string must be at least ceil(bit_width/4)+1 chars long: 17 bytes for uint64, 9 bytes for uint32, etc.

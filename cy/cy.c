@@ -1047,8 +1047,7 @@ cy_publisher_t* cy_advertise(cy_t* const cy, const wkv_str_t name) { return cy_a
 cy_publisher_t* cy_advertise_client(cy_t* const cy, const wkv_str_t name, const size_t response_extent)
 {
     char            name_buf[CY_TOPIC_NAME_MAX];
-    const wkv_str_t resolved = { .len = cy_name_resolve(name, cy->ns, cy->home, sizeof(name_buf), name_buf),
-                                 .str = name_buf };
+    const wkv_str_t resolved = cy_name_resolve(name, cy->ns, cy->home, sizeof(name_buf), name_buf);
     if ((cy == NULL) || (resolved.len > sizeof(name_buf))) {
         return NULL;
     }
@@ -1363,8 +1362,7 @@ static cy_subscriber_t* subscribe(cy_t* const                    cy,
 {
     assert((cy != NULL) && (callback != NULL) && (params.reordering_window >= -1));
     char            name_buf[CY_TOPIC_NAME_MAX];
-    const wkv_str_t resolved = { .len = cy_name_resolve(name, cy->ns, cy->home, sizeof(name_buf), name_buf),
-                                 .str = name_buf };
+    const wkv_str_t resolved = cy_name_resolve(name, cy->ns, cy->home, sizeof(name_buf), name_buf);
     if (resolved.len > sizeof(name_buf)) {
         return NULL;
     }
@@ -1489,21 +1487,6 @@ wkv_str_t cy_topic_name(const cy_topic_t* const topic)
 }
 
 uint64_t cy_topic_hash(const cy_topic_t* const topic) { return (topic != NULL) ? topic->hash : UINT64_MAX; }
-
-bool cy_verbatim(const wkv_str_t name)
-{
-    wkv_t kv;
-    wkv_init(&kv, &wkv_realloc);
-    return !wkv_has_substitution_tokens(&kv, name);
-}
-
-bool cy_name_valid(const wkv_str_t name)
-{
-    if ((name.len == 0) || (name.len > CY_TOPIC_NAME_MAX) || (name.str == NULL)) {
-        return false;
-    }
-    return memchr(name.str, '\0', name.len) == NULL;
-}
 
 // =====================================================================================================================
 //                                              PLATFORM LAYER INTERFACE
@@ -1710,14 +1693,39 @@ void cy_on_response_feedback(cy_t* const cy, const cy_feedback_context_t context
 const char cy_name_sep  = '/';
 const char cy_name_home = '~';
 
+static const wkv_str_t str_invalid = { .len = SIZE_MAX, .str = NULL };
+
+static bool is_valid_char(const char c) { return (c >= 32) && (c <= 126); }
+
+bool cy_name_valid(const wkv_str_t name)
+{
+    if ((name.len == 0) || (name.len > CY_TOPIC_NAME_MAX) || (name.str == NULL)) {
+        return false;
+    }
+    for (size_t i = 0; i < name.len; ++i) {
+        const char c = name.str[i];
+        if (!is_valid_char(c)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool cy_verbatim(const wkv_str_t name)
+{
+    wkv_t kv;
+    wkv_init(&kv, &wkv_realloc);
+    return !wkv_has_substitution_tokens(&kv, name);
+}
+
 /// Writes the normalized and validated version of `name` into `dest`, which must be at least `dest_size` bytes long.
 /// Normalization at least removes duplicate, leading, and trailing name separators.
 /// The input string length must not include NUL terminator; the output string is also not NUL-terminated.
 /// In case of failure, the destination buffer may be partially written.
-static size_t name_normalize(const size_t in_size, const char* in, const size_t dest_size, char* const dest)
+static wkv_str_t name_normalize(const size_t in_size, const char* in, const size_t dest_size, char* const dest)
 {
     if ((in == NULL) || (dest == NULL)) {
-        return SIZE_MAX;
+        return str_invalid;
     }
     const char* const in_end      = in + in_size;
     char*             out         = dest;
@@ -1725,8 +1733,8 @@ static size_t name_normalize(const size_t in_size, const char* in, const size_t 
     bool              pending_sep = false;
     while (in < in_end) {
         const char c = *in++;
-        if ((c < 32) || (c > 126)) {
-            return SIZE_MAX;
+        if (!is_valid_char(c)) {
+            return str_invalid;
         }
         if (c == cy_name_sep) {
             pending_sep = out > dest; // skip duplicate and leading separators
@@ -1739,36 +1747,36 @@ static size_t name_normalize(const size_t in_size, const char* in, const size_t 
             }
         }
         if (out >= out_end) {
-            return SIZE_MAX;
+            return str_invalid;
         }
         *out++ = c;
     }
     assert(out <= out_end);
-    return (size_t)(out - dest);
+    return (wkv_str_t){ .len = (size_t)(out - dest), .str = dest };
 }
 
-size_t cy_name_join(const wkv_str_t left, const wkv_str_t right, const size_t dest_size, char* const dest)
+wkv_str_t cy_name_join(const wkv_str_t left, const wkv_str_t right, const size_t dest_size, char* const dest)
 {
     if (dest == NULL) {
-        return SIZE_MAX;
+        return str_invalid;
     }
-    size_t len = name_normalize(left.len, left.str, dest_size, dest);
+    size_t len = name_normalize(left.len, left.str, dest_size, dest).len;
     if (len >= dest_size) {
-        return SIZE_MAX;
+        return str_invalid;
     }
     assert(len < dest_size);
     if (len > 0) {
         dest[len++] = cy_name_sep;
     }
     assert(len <= dest_size);
-    const size_t right_len = name_normalize(right.len, right.str, dest_size - len, &dest[len]);
+    const size_t right_len = name_normalize(right.len, right.str, dest_size - len, &dest[len]).len;
     if (right_len > (dest_size - len)) {
-        return SIZE_MAX;
+        return str_invalid;
     }
     if ((right_len == 0) && (len > 0)) {
         len--;
     }
-    return len + right_len;
+    return (wkv_str_t){ .len = len + right_len, .str = dest };
 }
 
 bool cy_name_is_homeful(const wkv_str_t name)
@@ -1778,10 +1786,10 @@ bool cy_name_is_homeful(const wkv_str_t name)
 }
 bool cy_name_is_absolute(const wkv_str_t name) { return (name.len >= 1) && (name.str[0] == cy_name_sep); }
 
-size_t cy_name_expand_home(wkv_str_t name, const wkv_str_t home, const size_t dest_size, char* const dest)
+wkv_str_t cy_name_expand_home(wkv_str_t name, const wkv_str_t home, const size_t dest_size, char* const dest)
 {
     if (dest == NULL) {
-        return SIZE_MAX;
+        return str_invalid;
     }
     if (!cy_name_is_homeful(name)) {
         return name_normalize(name.len, name.str, dest_size, dest);
@@ -1792,10 +1800,14 @@ size_t cy_name_expand_home(wkv_str_t name, const wkv_str_t home, const size_t de
     return cy_name_join(home, name, dest_size, dest);
 }
 
-size_t cy_name_resolve(const wkv_str_t name, wkv_str_t namespace_, const wkv_str_t home, size_t dest_size, char* dest)
+wkv_str_t cy_name_resolve(const wkv_str_t name,
+                          wkv_str_t       namespace_,
+                          const wkv_str_t home,
+                          size_t          dest_size,
+                          char*           dest)
 {
     if (dest == NULL) {
-        return SIZE_MAX;
+        return str_invalid;
     }
     if (cy_name_is_absolute(name)) {
         return name_normalize(name.len, name.str, dest_size, dest);
@@ -1804,9 +1816,9 @@ size_t cy_name_resolve(const wkv_str_t name, wkv_str_t namespace_, const wkv_str
         return cy_name_expand_home(name, home, dest_size, dest);
     }
     if (cy_name_is_homeful(namespace_)) {
-        namespace_.len = cy_name_expand_home(namespace_, home, dest_size, dest);
+        namespace_ = cy_name_expand_home(namespace_, home, dest_size, dest);
         if (namespace_.len >= dest_size) {
-            return SIZE_MAX;
+            return str_invalid;
         }
         namespace_.str = dest;
         dest_size -= namespace_.len;

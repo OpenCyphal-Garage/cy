@@ -604,7 +604,7 @@ cy_err_t cy_udp_posix_new(cy_udp_posix_t* const cy,
 
     // This PRNG state seed is only valid if a true RTC is available. Otherwise, use other sources of entropy.
     // Refer to cy_platform.h docs for some hints on how to make it work on an MCU without a TRNG nor RTC.
-    cy->prng_state = (uint64_t)time(NULL) << 16U;
+    cy->prng_state = (uint64_t)time(NULL);
 
     // Set up the TX and RX pipelines.
     static const udpard_tx_vtable_t tx_vtable = { .eject = v_tx_eject };
