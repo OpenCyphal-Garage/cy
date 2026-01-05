@@ -41,7 +41,6 @@
 #define IMPLICIT_TOPIC_DEFAULT_TIMEOUT_us (3600 * MEGA)
 
 static size_t  larger(const size_t a, const size_t b) { return (a > b) ? a : b; }
-static size_t  smaller(const size_t a, const size_t b) { return (a < b) ? a : b; }
 static int64_t max_i64(const int64_t a, const int64_t b) { return (a > b) ? a : b; }
 static int64_t min_i64(const int64_t a, const int64_t b) { return (a < b) ? a : b; }
 
@@ -637,16 +636,21 @@ static cy_err_t topic_new(cy_t* const        cy,
                           const uint64_t     evictions,
                           const int_fast8_t  lage)
 {
+    // TODO error handling is broken
+    if ((resolved_name.len == 0) || (resolved_name.len > CY_TOPIC_NAME_MAX)) {
+        return CY_ERR_NAME;
+    }
     cy_topic_t* const topic = cy->vtable->new_topic(cy);
     if (topic == NULL) {
         return CY_ERR_MEMORY;
     }
     memset(topic, 0, sizeof(*topic));
-    if ((resolved_name.len == 0) || (resolved_name.len > CY_TOPIC_NAME_MAX)) {
-        goto bad_name;
+    topic->name = mem_alloc(cy, resolved_name.len + 1);
+    if (topic->name == NULL) {
+        goto oom;
     }
-    memcpy(topic->name_z, resolved_name.str, resolved_name.len);
-    topic->name_z[resolved_name.len] = '\0';
+    memcpy(topic->name, resolved_name.str, resolved_name.len);
+    topic->name[resolved_name.len] = '\0';
 
     const cy_us_t now = cy_now(cy);
 
@@ -861,7 +865,7 @@ static cy_err_t publish_heartbeat_gossip(cy_t* const cy, cy_topic_t* const topic
                         .topic_lage          = topic_lage(topic, now),
                         ._reserved_1_        = 0,
                         .topic_name_len      = (uint_fast8_t)topic->index_name->key_len };
-    memcpy(msg.topic_name, topic->name_z, topic->index_name->key_len);
+    memcpy(msg.topic_name, topic->name, topic->index_name->key_len);
     CY_TRACE(cy, "🗣️ %s", topic_repr(topic).str);
     // Update gossip even if failed so we don't get stuck publishing same gossip if error reporting is broken.
     schedule_gossip(topic);
@@ -955,7 +959,7 @@ static void on_heartbeat(const cy_user_context_t ctx, cy_arrival_t* const arriva
                          "🔀 Divergence on '%s':\n"
                          "\t local  %s T%016llx@%08x evict=%llu lage=%+d\n"
                          "\t remote %s T%016llx@%08x evict=%llu lage=%+d",
-                         mine->name_z,
+                         mine->name,
                          win ? "✅" : "❌",
                          (unsigned long long)mine->hash,
                          cy_topic_subject_id(mine),
@@ -1005,7 +1009,7 @@ static void on_heartbeat(const cy_user_context_t ctx, cy_arrival_t* const arriva
                      cy_topic_subject_id(mine),
                      (unsigned long long)mine->evictions,
                      topic_lage(mine, ts),
-                     mine->name_z,
+                     mine->name,
                      win ? "❌" : "✅",
                      (unsigned long long)other_hash,
                      topic_subject_id(cy, other_hash, other_evictions),
@@ -1471,7 +1475,7 @@ cy_topic_t* cy_topic_find_by_hash(const cy_t* const cy, const uint64_t hash)
     assert(cy != NULL);
     cy_topic_t* const topic = (cy_topic_t*)cavl2_find(cy->topics_by_hash, &hash, &cavl_comp_topic_hash);
     assert((topic == NULL) || (topic->hash == hash));
-    assert((topic == NULL) || cy_name_is_verbatim(wkv_key(topic->name_z)) ||
+    assert((topic == NULL) || cy_name_is_verbatim(cy_topic_name(topic)) ||
            (topic->pub_count == 0)); // pub only verbatim
     return topic;
 }
@@ -1482,7 +1486,7 @@ cy_topic_t* cy_topic_iter_next(cy_topic_t* const topic) { return (cy_topic_t*)ca
 wkv_str_t cy_topic_name(const cy_topic_t* const topic)
 {
     if (topic != NULL) {
-        return (wkv_str_t){ .len = topic->index_name->key_len, .str = topic->name_z };
+        return (wkv_str_t){ .len = topic->index_name->key_len, .str = topic->name };
     }
     return (wkv_str_t){ .len = 0, .str = "" };
 }
@@ -1523,17 +1527,25 @@ cy_err_t cy_new(cy_t* const              cy,
     memset(cy, 0, sizeof(*cy));
     cy->vtable             = vtable;
     cy->subject_id_modulus = subject_id_modulus;
-    if (namespace_.len > 0) {
-        memcpy(cy->ns_z, namespace_.str, namespace_.len);
-        cy->ns_z[namespace_.len] = '\0';
-    } else {
-        cy->ns_z[0] = '~';
-        cy->ns_z[1] = '\0';
+
+    // Only home needs to be freed at destruction.
+    char* const home_z = mem_alloc(cy, (home.len + 1) + (larger(namespace_.len, 1) + 1));
+    if (home_z == NULL) {
+        return CY_ERR_MEMORY;
     }
-    cy->ns = wkv_key(cy->ns_z);
-    memcpy(cy->home_z, home.str, home.len);
-    cy->home_z[home.len] = '\0';
-    cy->home             = wkv_key(cy->home_z);
+    memcpy(home_z, home.str, home.len);
+    home_z[home.len] = '\0';
+    cy->home         = (wkv_str_t){ .len = home.len, .str = home_z };
+    char* const ns_z = &home_z[home.len + 1];
+    if (namespace_.len > 0) {
+        memcpy(ns_z, namespace_.str, namespace_.len);
+        ns_z[namespace_.len] = '\0';
+        cy->ns               = (wkv_str_t){ .len = namespace_.len, .str = ns_z };
+    } else {
+        ns_z[0] = '~';
+        ns_z[1] = '\0';
+        cy->ns  = (wkv_str_t){ .len = 1, .str = ns_z };
+    }
 
     cy->topics_by_hash       = NULL;
     cy->topics_by_subject_id = NULL;
@@ -1573,8 +1585,8 @@ cy_err_t cy_new(cy_t* const              cy,
     }
     CY_TRACE(cy,
              "🚀 home='%s' ns='%s' ts_started=%llu subject_id_modulus=%lu",
-             cy->home_z,
-             cy->ns_z,
+             cy->home.str,
+             cy->ns.str,
              (unsigned long long)cy->ts_started,
              (unsigned long)cy->subject_id_modulus);
     return CY_OK;

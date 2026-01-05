@@ -130,9 +130,9 @@ typedef struct cy_topic_t
 
     cy_t* cy;
 
-    /// The name length is stored in index_name.
+    /// The name length is stored in index_name. This string is also NUL-terminated for convenience.
     /// We need to store the full name to allow valid references from name substitutions during pattern matching.
-    char name_z[CY_TOPIC_NAME_MAX + 1];
+    char* name;
 
     /// Whenever a topic conflicts with another one locally, arbitration is performed, and the loser has its
     /// eviction counter incremented. The eviction counter is used as a Lamport clock counting the loss events.
@@ -215,13 +215,10 @@ struct cy_t
 {
     const struct cy_vtable_t* vtable;
 
-    /// Namespace is a prefix added to all topics created on this instance, unless the topic name starts with "/".
+    /// Namespace is a prefix added to all topics created on this instance, unless the topic name starts with `/`.
     /// Local node name is prefixed to the topic name if it starts with `~/`.
-    /// Note that the leading / and ~ are only used as directives when creating a topic; they are never actually present
-    /// in the final resolved topic name that is exchanged on the wire.
-    /// These shall not be changed after initialization.
-    char      ns_z[CY_NAMESPACE_NAME_MAX + 1];
-    char      home_z[CY_NAMESPACE_NAME_MAX + 1];
+    /// The final resolved topic name exchanged on the wire has the leading/trailing/duplicate separators removed.
+    /// Both strings are stored in the same heap block pointed to by `home`. Both are NUL-terminated.
     wkv_str_t ns;
     wkv_str_t home;
 
