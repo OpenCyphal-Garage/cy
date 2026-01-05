@@ -144,6 +144,11 @@ typedef struct cy_publisher_t cy_publisher_t;
 cy_publisher_t* cy_advertise(cy_t* const cy, const wkv_str_t name);
 cy_publisher_t* cy_advertise_client(cy_t* const cy, const wkv_str_t name, const size_t response_extent);
 
+/// Create a new publisher that ensures that there is at most one, the most recent, message pending for transmission.
+/// If a new message is published while another one is still pending, the previous one is cancelled.
+/// TODO not implemented; this is a simple idea -- store the last transfer-ID in the topic and cancel it on new publish.
+cy_publisher_t* cy_advertise_sample(cy_t* const cy, const wkv_str_t name);
+
 /// Notifies the application about the outcome of a reliable delivery attempt.
 /// It is ALWAYS invoked EXACTLY ONCE per published message if reliable delivery was requested.
 typedef void (*cy_delivery_callback_t)(cy_user_context_t, bool success);

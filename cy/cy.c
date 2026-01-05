@@ -40,6 +40,8 @@
 /// Topics created explicitly by the application (without substitution tokens) are not affected by this timeout.
 #define IMPLICIT_TOPIC_DEFAULT_TIMEOUT_us (3600 * MEGA)
 
+typedef unsigned char byte_t;
+
 static size_t  larger(const size_t a, const size_t b) { return (a > b) ? a : b; }
 static int64_t max_i64(const int64_t a, const int64_t b) { return (a > b) ? a : b; }
 static int64_t min_i64(const int64_t a, const int64_t b) { return (a < b) ? a : b; }
@@ -821,64 +823,99 @@ static void* wkv_cb_topic_scout_response(const wkv_event_t evt)
 //                                                      HEARTBEAT
 // =====================================================================================================================
 
-/// We could have used Nunavut, but we only need a single message and it's very simple, so we do it manually.
-typedef struct
-{
-    uint32_t uptime;
-    uint8_t  user_word[3]; ///< Used to be: health, mode, vendor-specific status code. Now opaque user-defined 24 bits.
-    uint8_t  version;      ///< Union tag; Cyphal v1.0 -- 0; Cyphal v1.1 -- 1.
-    // The following fields are conditional on version=1.
-    uint64_t topic_hash;
-    uint32_t topic_evictions;
-    uint8_t  topic_evictions_msb; ///< 40-bit continuation of topic_evictions.
-    int8_t   topic_lage;          ///< floor(log2(topic_age)), where -1=floor(log2(0)), -2 if scout.
-    uint8_t  _reserved_1_;
-    uint8_t  topic_name_len;
-    char     topic_name[CY_TOPIC_NAME_MAX + 1]; ///< Provide space for NUL terminator for convenience.
-} heartbeat_t;
+#define HEARTBEAT_OFFSET_TOPIC_NAME 24U
+#define HEARTBEAT_SIZE_MAX          (HEARTBEAT_OFFSET_TOPIC_NAME + CY_TOPIC_NAME_MAX)
 
-static cy_err_t publish_heartbeat(const cy_t* const cy, const cy_us_t now, heartbeat_t* const message)
+static byte_t* serialize_u32(byte_t* ptr, const uint32_t value)
 {
-    // TODO proper serialization
-    message->uptime           = (uint32_t)((now - cy->ts_started) / MEGA);
-    message->version          = 1;
-    const size_t message_size = offsetof(heartbeat_t, topic_name) + message->topic_name_len;
-    assert(message_size <= sizeof(heartbeat_t));
-    assert(message->topic_name_len <= CY_TOPIC_NAME_MAX);
-    const cy_err_t res =
-      cy->heartbeat_pub->topic->vtable->publish(cy->heartbeat_pub->topic,
-                                                now + cy->heartbeat_period,
-                                                cy->heartbeat_pub->priority,
-                                                (cy_bytes_t){ .size = message_size, .data = message },
-                                                NULL,
-                                                NULL,
-                                                0);
-    return res;
+    for (size_t i = 0; i < 4; i++) {
+        *ptr++ = (byte_t)((byte_t)(value >> (i * 8U)) & 0xFFU);
+    }
+    return ptr;
+}
+static byte_t* serialize_u40(byte_t* ptr, const uint64_t value)
+{
+    for (size_t i = 0; i < 5; i++) {
+        *ptr++ = (byte_t)((byte_t)(value >> (i * 8U)) & 0xFFU);
+    }
+    return ptr;
+}
+static byte_t* serialize_u64(byte_t* ptr, const uint64_t value)
+{
+    for (size_t i = 0; i < 8; i++) {
+        *ptr++ = (byte_t)((byte_t)(value >> (i * 8U)) & 0xFFU);
+    }
+    return ptr;
+}
+static uint64_t deserialize_u40(const byte_t* ptr)
+{
+    uint64_t value = 0;
+    for (size_t i = 0; i < 5; i++) {
+        value |= ((uint64_t)*ptr++ << (i * 8U));
+    }
+    return value;
+}
+static uint64_t deserialize_u64(const byte_t* ptr)
+{
+    uint64_t value = 0;
+    for (size_t i = 0; i < 8; i++) {
+        value |= ((uint64_t)*ptr++ << (i * 8U));
+    }
+    return value;
+}
+
+static cy_err_t publish_heartbeat(const cy_t* const cy,
+                                  const cy_us_t     now,
+                                  const uint64_t    topic_hash,
+                                  const uint64_t    topic_evictions,
+                                  const int8_t      topic_lage,
+                                  const wkv_str_t   topic_name)
+{
+    assert(topic_name.len <= CY_TOPIC_NAME_MAX);
+    const size_t message_size = HEARTBEAT_OFFSET_TOPIC_NAME + topic_name.len;
+    byte_t       buf[HEARTBEAT_SIZE_MAX];
+    byte_t*      ptr = buf;
+    // uptime and user_word[3]
+    ptr    = serialize_u32(ptr, (uint32_t)((now - cy->ts_started) / MEGA));
+    *ptr++ = 0;
+    *ptr++ = 0;
+    *ptr++ = 0;
+    // version
+    *ptr++ = 1;
+    // topic fields
+    ptr    = serialize_u64(ptr, topic_hash);
+    ptr    = serialize_u40(ptr, topic_evictions);
+    *ptr++ = (byte_t)topic_lage; // signed to unsigned sign-bit conversion is well-defined per the C standard
+    *ptr++ = 0;                  // reserved
+    // topic name
+    *ptr++ = (byte_t)topic_name.len;
+    memcpy(ptr, topic_name.str, topic_name.len);
+    // send
+    return cy->heartbeat_pub->topic->vtable->publish(cy->heartbeat_pub->topic,
+                                                     now + cy->heartbeat_period,
+                                                     cy->heartbeat_pub->priority,
+                                                     (cy_bytes_t){ .size = message_size, .data = buf },
+                                                     NULL,
+                                                     NULL,
+                                                     0);
 }
 
 static cy_err_t publish_heartbeat_gossip(cy_t* const cy, cy_topic_t* const topic, const cy_us_t now)
 {
-    topic_ensure_subscribed(topic); // use this opportunity to repair the subscription if broken
-    heartbeat_t msg = { .topic_hash          = topic->hash,
-                        .topic_evictions     = topic->evictions & UINT32_MAX,
-                        .topic_evictions_msb = (uint8_t)(topic->evictions >> 32U),
-                        .topic_lage          = topic_lage(topic, now),
-                        ._reserved_1_        = 0,
-                        .topic_name_len      = (uint_fast8_t)topic->index_name->key_len };
-    memcpy(msg.topic_name, topic->name, topic->index_name->key_len);
     CY_TRACE(cy, "🗣️ %s", topic_repr(topic).str);
-    // Update gossip even if failed so we don't get stuck publishing same gossip if error reporting is broken.
-    schedule_gossip(topic);
-    return publish_heartbeat(cy, now, &msg);
+    topic_ensure_subscribed(topic); // use this opportunity to repair the subscription if broken
+    schedule_gossip(topic);         // reschedule even if failed -- some other node might pick up the gossip
+    return publish_heartbeat(cy, now, topic->hash, topic->evictions, topic_lage(topic, now), cy_topic_name(topic));
 }
 
 static cy_err_t publish_heartbeat_scout(cy_t* const cy, subscriber_root_t* const subr, const cy_us_t now)
 {
     assert(subr != NULL); // https://github.com/pavel-kirienko/cy/issues/12#issuecomment-2953184238
-    heartbeat_t msg = { .topic_lage = LAGE_SCOUT, .topic_name_len = (uint_fast8_t)subr->index_name->key_len };
-    wkv_get_key(&cy->subscribers_by_name, subr->index_name, msg.topic_name);
-    const cy_err_t res = publish_heartbeat(cy, now, &msg);
-    CY_TRACE(cy, "📢'%s' result=%d", msg.topic_name, res);
+    char name[CY_TOPIC_NAME_MAX + 1];
+    wkv_get_key(&cy->subscribers_by_name, subr->index_name, name);
+    const cy_err_t res =
+      publish_heartbeat(cy, now, 0, 0, LAGE_SCOUT, (wkv_str_t){ .len = subr->index_name->key_len, .str = name });
+    CY_TRACE(cy, "📢'%s' result=%d", name, res);
     if (res == CY_OK) {
         delist(&cy->list_scout_pending, &subr->list_scout_pending);
     }
@@ -923,38 +960,68 @@ static cy_err_t heartbeat_begin(cy_t* const cy)
     return res;
 }
 
+typedef struct
+{
+    byte_t      version;
+    uint64_t    topic_hash;
+    uint64_t    topic_evictions;
+    int_fast8_t topic_lage;
+    wkv_str_t   topic_name;
+} hb_t;
+
+/// The name buffer shall be at least CY_TOPIC_NAME_MAX+1 bytes long.
+/// On failure, the version is set to zero (which corresponds to Cyphal v1.0 heartbeat with no topic information).
+static hb_t heartbeat_deserialize(cy_message_t msg, byte_t* const name_buf)
+{
+    hb_t out = { .version = 0, .topic_name = { .len = 0, .str = (const char*)name_buf } };
+    // implicit zero extension rule -- assume zero if absent from the message
+    (void)cy_message_read(&msg, 7, 1, &out.version);
+    if (out.version == 0) {
+        return (hb_t){ 0 }; // Cyphal v1.0 heartbeat carries no topic information. Simply ignore.
+    }
+    if (out.version == 1) {
+        static const size_t prefix_size = 8 + 5 + 1 + 1;
+        assert(prefix_size <= CY_TOPIC_NAME_MAX + 1);
+        if (prefix_size != cy_message_read(&msg, 8, prefix_size, name_buf)) {
+            return (hb_t){ 0 }; // invalid size
+        }
+        out.topic_hash      = deserialize_u64(name_buf + 0);
+        out.topic_evictions = deserialize_u40(name_buf + 8);
+        out.topic_lage      = (int_fast8_t)name_buf[13];
+        out.topic_name.len  = name_buf[15];
+        if ((out.topic_name.len > CY_TOPIC_NAME_MAX) ||
+            (out.topic_name.len != cy_message_read(&msg, 16, out.topic_name.len, name_buf))) {
+            return (hb_t){ 0 }; // invalid size
+        }
+        name_buf[out.topic_name.len] = 0;
+        return out;
+    }
+    return (hb_t){ 0 }; // unsupported version
+}
+
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
 static void on_heartbeat(const cy_user_context_t ctx, cy_arrival_t* const arrival)
 {
     (void)ctx;
     assert(arrival->substitutions.count == 0); // This is a verbatim subscriber.
-    cy_t* const cy = arrival->topic->cy;
-    // Deserialize the message. TODO: deserialize properly and check version.
-    heartbeat_t  heartbeat = { 0 };
-    const size_t msg_size  = cy_message_read(&arrival->message, 0, sizeof(heartbeat), &heartbeat);
-    if ((msg_size < offsetof(heartbeat_t, topic_name)) || (heartbeat.version != 1)) {
-        return;
-    }
-    const cy_us_t     ts              = arrival->timestamp;
-    const uint64_t    other_hash      = heartbeat.topic_hash;
-    const uint64_t    other_evictions = heartbeat.topic_evictions + (((uint64_t)heartbeat.topic_evictions_msb) << 32U);
-    const int_fast8_t other_lage      = heartbeat.topic_lage;
-    const wkv_str_t   key             = { .len = heartbeat.topic_name_len, .str = heartbeat.topic_name };
-    //
-    if (heartbeat.topic_lage >= -1) {
+    const cy_us_t ts = arrival->timestamp;
+    cy_t* const   cy = arrival->topic->cy;
+    byte_t        scratchpad[CY_TOPIC_NAME_MAX + 1];
+    const hb_t    hb = heartbeat_deserialize(arrival->message, scratchpad);
+    if (hb.topic_lage >= -1) {
         // Find the topic in our local database. Create if there is a pattern match.
-        cy_topic_t* mine = cy_topic_find_by_hash(cy, other_hash);
+        cy_topic_t* mine = cy_topic_find_by_hash(cy, hb.topic_hash);
         if (mine == NULL) {
-            mine = topic_subscribe_if_matching(cy, key, other_hash, other_evictions, other_lage);
+            mine = topic_subscribe_if_matching(cy, hb.topic_name, hb.topic_hash, hb.topic_evictions, hb.topic_lage);
         }
         if (mine != NULL) {        // We have this topic! Check if we have consensus on the subject-ID.
             schedule_gossip(mine); // suppress next gossip -- the network just heard about it
             implicit_animate(mine, ts);
-            assert(mine->hash == other_hash);
+            assert(mine->hash == hb.topic_hash);
             const int_fast8_t mine_lage = topic_lage(mine, ts);
-            if (mine->evictions != other_evictions) {
-                const bool win =
-                  (mine_lage > other_lage) || ((mine_lage == other_lage) && (mine->evictions > other_evictions));
+            if (mine->evictions != hb.topic_evictions) {
+                const bool win = (mine_lage > hb.topic_lage) ||
+                                 ((mine_lage == hb.topic_lage) && (mine->evictions > hb.topic_evictions));
                 CY_TRACE(cy,
                          "🔀 Divergence on '%s':\n"
                          "\t local  %s T%016llx@%08x evict=%llu lage=%+d\n"
@@ -967,9 +1034,9 @@ static void on_heartbeat(const cy_user_context_t ctx, cy_arrival_t* const arriva
                          mine_lage,
                          win ? "❌" : "✅",
                          (unsigned long long)mine->hash,
-                         topic_subject_id(cy, other_hash, other_evictions),
-                         (unsigned long long)other_evictions,
-                         other_lage);
+                         topic_subject_id(cy, hb.topic_hash, hb.topic_evictions),
+                         (unsigned long long)hb.topic_evictions,
+                         hb.topic_lage);
                 if (win) {
                     // Critically, if we win, we ignore possible allocation collisions. Even if the remote sits on
                     // a subject-ID that is currently used by another topic that we have, which could even lose
@@ -979,26 +1046,26 @@ static void on_heartbeat(const cy_user_context_t ctx, cy_arrival_t* const arriva
                     assert(!is_pinned(mine->hash));
                     schedule_gossip_urgent(mine);
                 } else {
-                    assert((mine_lage <= other_lage) &&
-                           ((mine_lage < other_lage) || (mine->evictions < other_evictions)));
-                    assert(mine_lage <= other_lage);
-                    topic_merge_lage(mine, ts, other_lage);
-                    topic_allocate(mine, other_evictions, false, ts);
-                    if (mine->evictions == other_evictions) { // perfect sync, lower the gossip priority
+                    assert((mine_lage <= hb.topic_lage) &&
+                           ((mine_lage < hb.topic_lage) || (mine->evictions < hb.topic_evictions)));
+                    assert(mine_lage <= hb.topic_lage);
+                    topic_merge_lage(mine, ts, hb.topic_lage);
+                    topic_allocate(mine, hb.topic_evictions, false, ts);
+                    if (mine->evictions == hb.topic_evictions) { // perfect sync, lower the gossip priority
                         schedule_gossip(mine);
                     }
                 }
             } else {
                 topic_ensure_subscribed(mine); // use this opportunity to repair the subscription if broken
             }
-            topic_merge_lage(mine, ts, other_lage);
+            topic_merge_lage(mine, ts, hb.topic_lage);
         } else { // We don't know this topic; check for a subject-ID collision and do auto-subscription.
-            mine = topic_find_by_subject_id(cy, topic_subject_id(cy, other_hash, other_evictions));
+            mine = topic_find_by_subject_id(cy, topic_subject_id(cy, hb.topic_hash, hb.topic_evictions));
             if (mine == NULL) {
                 return; // We are not using this subject-ID, no collision.
             }
-            assert(cy_topic_subject_id(mine) == topic_subject_id(cy, other_hash, other_evictions));
-            const bool win = left_wins(mine, ts, other_lage, other_hash);
+            assert(cy_topic_subject_id(mine) == topic_subject_id(cy, hb.topic_hash, hb.topic_evictions));
+            const bool win = left_wins(mine, ts, hb.topic_lage, hb.topic_hash);
             CY_TRACE(cy,
                      "💥 Collision on @%08x:\n"
                      "\t local  %s T%016llx@%08x evict=%llu lage=%+d '%s'\n"
@@ -1011,11 +1078,11 @@ static void on_heartbeat(const cy_user_context_t ctx, cy_arrival_t* const arriva
                      topic_lage(mine, ts),
                      mine->name,
                      win ? "❌" : "✅",
-                     (unsigned long long)other_hash,
-                     topic_subject_id(cy, other_hash, other_evictions),
-                     (unsigned long long)other_evictions,
-                     other_lage,
-                     heartbeat.topic_name);
+                     (unsigned long long)hb.topic_hash,
+                     topic_subject_id(cy, hb.topic_hash, hb.topic_evictions),
+                     (unsigned long long)hb.topic_evictions,
+                     hb.topic_lage,
+                     hb.topic_name.str);
             // We don't need to do anything if we won, but we need to announce to the network (in particular to the
             // infringing node) that we are using this subject-ID, so that the loser knows that it has to move.
             // If we lost, we need to gossip this topic ASAP as well because every other participant on this topic
@@ -1028,17 +1095,17 @@ static void on_heartbeat(const cy_user_context_t ctx, cy_arrival_t* const arriva
                 schedule_gossip_urgent(mine);
             }
         }
-    } else if (heartbeat.topic_lage == LAGE_SCOUT) {
+    } else if (hb.topic_lage == LAGE_SCOUT) {
         // A scout message is simply asking us to check if we have any matching topics, and gossip them ASAP if so.
         CY_TRACE(cy,
                  "📢 Scout: T%016llx evict=%llu lage=%+d '%s'",
-                 (unsigned long long)other_hash,
-                 (unsigned long long)other_evictions,
-                 other_lage,
-                 heartbeat.topic_name);
-        (void)wkv_match(&cy->topics_by_name, key, cy, wkv_cb_topic_scout_response);
+                 (unsigned long long)hb.topic_hash,
+                 (unsigned long long)hb.topic_evictions,
+                 hb.topic_lage,
+                 hb.topic_name.str);
+        (void)wkv_match(&cy->topics_by_name, hb.topic_name, cy, wkv_cb_topic_scout_response);
     } else {
-        CY_TRACE(cy, "⚠️ Invalid message version=%d: lage=%+d", (int)heartbeat.version, heartbeat.topic_lage);
+        CY_TRACE(cy, "⚠️ Invalid message: version=%d lage=%+d", (int)hb.version, hb.topic_lage);
     }
 }
 
@@ -1578,7 +1645,7 @@ cy_err_t cy_new(cy_t* const              cy,
         return CY_ERR_MEMORY;
     }
     assert(cy->heartbeat_pub->topic->hash == CY_HEARTBEAT_TOPIC_HASH);
-    cy->heartbeat_sub = cy_subscribe(cy, hb_name, sizeof(heartbeat_t), CY_USER_CONTEXT_EMPTY, &on_heartbeat);
+    cy->heartbeat_sub = cy_subscribe(cy, hb_name, HEARTBEAT_SIZE_MAX, CY_USER_CONTEXT_EMPTY, &on_heartbeat);
     if (cy->heartbeat_sub == NULL) {
         cy_unadvertise(cy->heartbeat_pub);
         return CY_ERR_MEMORY;
