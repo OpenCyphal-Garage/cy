@@ -31,6 +31,7 @@ uint8 version
 # If a node has no topics to gossip (which is the case when a node only uses pinned topics and/or implicit topics
 # that don't need repair), it will gossip the heartbeat topic as a placeholder.
 
+@assert _offset_ == {8 * 8}
 uint64 topic_hash
 # The topic hash is computed as:
 # - If the name names a pinned topic, which means it matches `^#([0-9a-f]{4})$`, where the capture group
@@ -40,7 +41,6 @@ uint64 topic_hash
 # received gossip message, since there is necessarily a large number of them. We still need to transmit the full
 # name because it is necessary for pattern matching and topic discovery.
 
-@assert _offset_ == {24 * 8}
 uint40 topic_evictions
 # The number of times the topic had to be moved due to subject-ID collisions.
 
