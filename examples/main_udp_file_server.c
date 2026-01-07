@@ -9,15 +9,6 @@
 #include <errno.h>
 #include <err.h>
 
-/// Constructs a random locally-administered EUI-64. The collision probability given 1 million of identifiers is ≈10^-7.
-static uint64_t random_eui64(void)
-{
-    uint64_t x = (((uint64_t)rand()) << 32U) | (uint32_t)rand(); // first octet is bits 63..56
-    x &= ~(1ULL << 56U);                                         // clear bit I/G (unicast)
-    x |= (1ULL << 57U);                                          // set bit U/L (locally administered)
-    return x;
-}
-
 /// Request schema:
 ///     uint64      read_offset
 ///     utf8[<=256] file_path

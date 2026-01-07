@@ -555,7 +555,7 @@ static void v_on_p2p_msg(udpard_rx_t* const rx, udpard_rx_port_p2p_t* const port
     cy_on_response(&cy->base, tr.base.timestamp, tr.topic_hash, tr.base.transfer_id, msg);
 }
 
-bool v_tx_eject(udpard_tx_t* const tx, udpard_tx_ejection_t* const ej)
+static bool v_tx_eject(udpard_tx_t* const tx, udpard_tx_ejection_t* const ej)
 {
     cy_udp_posix_t* const cy = (cy_udp_posix_t*)tx->user;
     assert(cy != NULL);

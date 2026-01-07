@@ -1004,10 +1004,10 @@ static void on_heartbeat(const cy_user_context_t ctx, cy_arrival_t* const arriva
 {
     (void)ctx;
     assert(arrival->substitutions.count == 0); // This is a verbatim subscriber.
-    const cy_us_t ts = arrival->timestamp;
+    const cy_us_t ts = arrival->message.timestamp;
     cy_t* const   cy = arrival->topic->cy;
     byte_t        scratchpad[CY_TOPIC_NAME_MAX + 1];
-    const hb_t    hb = heartbeat_deserialize(arrival->message, scratchpad);
+    const hb_t    hb = heartbeat_deserialize(arrival->message.content, scratchpad);
     if (hb.topic_lage >= -1) {
         // Find the topic in our local database. Create if there is a pattern match.
         cy_topic_t* mine = cy_topic_find_by_hash(cy, hb.topic_hash);
@@ -1206,11 +1206,21 @@ static void pending_response_finalize(pending_response_t* const self, const cy_u
              (ts >= 0) ? "✅SUCCESS" : "❌FAILURE");
     cavl2_remove(&cy->pending_responses_by_deadline, &self->index_deadline);
     cavl2_remove(&self->topic->pending_responses_by_transfer_id, &self->index_transfer_id);
+
+    // Store the context needed to invoke the callback, then free the memory BEFORE invoking the callback.
     assert(self->callback != NULL);
     const cy_response_callback_t cb  = self->callback;
     const cy_user_context_t      ctx = self->user_context;
-    mem_free(cy, self); // It is best to free the memory before invoking the callback.
-    cb(ctx, ts, msg);
+    mem_free(cy, self);
+
+    // Invoke the callback to deliver the response. It may take ownership of the message.
+    cy_message_ts_t mt = { .timestamp = ts, .content = msg };
+    cb(ctx, (ts >= 0) ? &mt : NULL);
+
+    // If the handler didn't take ownership of the message, destroy it here.
+    if (cy_message_size(mt.content) > 0) {
+        cy_message_destroy(&mt.content);
+    }
 }
 
 /// Deadlines are not unique, so this comparator never returns 0.
@@ -1659,6 +1669,8 @@ cy_err_t cy_new(cy_t* const              cy,
     return CY_OK;
 }
 
+void cy_destroy(cy_t* const cy) { (void)cy; }
+
 uint32_t cy_topic_subject_id(const cy_topic_t* const topic)
 {
     assert(topic != NULL);
@@ -1706,14 +1718,13 @@ void cy_on_message(cy_topic_t* const    topic,
             // Rebuild the struct before every callback because the callbacks are allowed to mutate it.
             // Most topics only have a single subscription so this is not too expensive in practice.
             cy_arrival_t arrival = {
-                .timestamp     = timestamp,
-                .message       = message,
+                .message       = { .timestamp = timestamp, .content = message },
                 .responder     = responder,
                 .topic         = topic,
                 .substitutions = { .count = cpl->substitution_count, .substitutions = cpl->substitutions },
             };
             sub->callback(sub->user_context, &arrival);
-            if (cy_message_size(arrival.message) < cy_message_size(message)) {
+            if (cy_message_size(arrival.message.content) < cy_message_size(message)) {
                 assert(!moved); // At most one handler can take ownership of the payload.
                 moved = true;
             }

@@ -121,17 +121,15 @@ size_t cy_message_read(cy_message_t* const cursor, const size_t offset, const si
 /// Subsequent calls have no effect; the passed instance will be moved-from.
 void cy_message_destroy(cy_message_t* const msg);
 
-/// Creates a local stack-allocated array of bytes and gathers the data from the scattered buffer into it.
-/// The output is an instance of cy_bytes_t with next=NULL because it is a single contiguous buffer.
-/// Doing this is only a good idea for small messages.
-/// Usage example:
-///     CY_MESSAGE_DUMP(my_bytes, my_message);
-///     foo(my_bytes.size, my_bytes.data);
-#define CY_MESSAGE_DUMP(dest_bytes_name, msg)                                                           \
-    cy_bytes_t    dest_bytes_name = { .size = cy_message_size(msg) };                                   \
-    unsigned char dest_bytes_name##_storage[(dest_bytes_name).size];                                    \
-    (dest_bytes_name).data = &dest_bytes_name##_storage[0];                                             \
-    (dest_bytes_name).size = cy_message_read(&(msg), 0, (dest_bytes_name).size, (dest_bytes_name).data)
+/// A message with an associated non-negative arrival timestamp.
+/// The timestamp is carried over from the low-level NIC driver, which defines the accuracy, which is typically high
+/// -- hardware timestamping in the driver can achieve microsecond accuracy.
+/// The timestamp of a multi-frame transfer equals the arrival time of the first frame of that transfer.
+typedef struct cy_message_ts_t
+{
+    cy_us_t      timestamp;
+    cy_message_t content;
+} cy_message_ts_t;
 
 // =====================================================================================================================
 //                                                      PUBLISHER
@@ -155,9 +153,10 @@ cy_publisher_t* cy_advertise_sample(cy_t* const cy, const wkv_str_t name);
 /// For responses, the value is either zero (failure) or one (success).
 typedef void (*cy_delivery_callback_t)(cy_user_context_t, uint16_t acknowledgements);
 
-/// The callback takes the ownership of the message and is responsible for its (eventual) destruction.
-/// If no response was received before the deadline, the timestamp will be negative and the message will be empty.
-typedef void (*cy_response_callback_t)(cy_user_context_t, cy_us_t response_timestamp, cy_message_t);
+/// Optionally, the user callback can take ownership of the message using cy_message_move().
+/// If the message is not moved out, it will be destroyed automatically after return from the callback.
+/// If no response was received before the deadline, the message pointer will be NULL.
+typedef void (*cy_response_callback_t)(cy_user_context_t, cy_message_ts_t*);
 
 /// Publish a best-effort (non-reliable) one-way message without expecting a response.
 cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t tx_deadline, const cy_bytes_t message);
@@ -255,12 +254,6 @@ typedef struct cy_substitution_set_t
 /// on the transfer-ID discontinuities, but it will likely be a separate callback.
 typedef struct cy_arrival_t
 {
-    /// The timestamp is carried over from the low-level NIC driver, which defines the accuracy,
-    /// which is typically high -- hardware timestamping in the driver can achieve microsecond accuracy.
-    /// The timestamp of a multi-frame transfer equals the arrival time of the first frame of that transfer.
-    /// The timestamp is always non-negative.
-    cy_us_t timestamp;
-
     /// Optionally, the user callback can take ownership of the message using cy_message_move();
     /// however, to avoid use-after-free, the following rules must be followed:
     /// 1. At most one callback can move the message out of the arrival instance.
@@ -268,7 +261,7 @@ typedef struct cy_arrival_t
     ///    callback returns, unless it is the last callback to process it.
     /// If the message is not moved out, it will be destroyed automatically after return from the callback.
     /// If these restrictions become too limiting, we may introduce simple reference counting for messages.
-    cy_message_t message;
+    cy_message_ts_t message;
 
     /// Use cy_respond() to send a P2P response directly to the publisher of this message if needed.
     cy_responder_t responder;
