@@ -150,8 +150,10 @@ cy_publisher_t* cy_advertise_client(cy_t* const cy, const wkv_str_t name, const 
 cy_publisher_t* cy_advertise_sample(cy_t* const cy, const wkv_str_t name);
 
 /// Notifies the application about the outcome of a reliable delivery attempt.
-/// It is ALWAYS invoked EXACTLY ONCE per published message if reliable delivery was requested.
-typedef void (*cy_delivery_callback_t)(cy_user_context_t, bool success);
+/// It is ALWAYS invoked EXACTLY ONCE per published message or a sent response if reliable delivery was requested.
+/// For published messages, the value indicates the number of remote subscribers that acknowledged the message.
+/// For responses, the value is either zero (failure) or one (success).
+typedef void (*cy_delivery_callback_t)(cy_user_context_t, uint16_t acknowledgements);
 
 /// The callback takes the ownership of the message and is responsible for its (eventual) destruction.
 /// If no response was received before the deadline, the timestamp will be negative and the message will be empty.

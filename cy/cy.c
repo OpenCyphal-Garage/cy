@@ -1487,10 +1487,10 @@ cy_subscriber_t* cy_subscribe_ordered(cy_t* const                    cy,
     return NULL;
 }
 
-static void dummy_delivery_callback(const cy_user_context_t ctx, const bool success)
+static void dummy_delivery_callback(const cy_user_context_t ctx, const uint16_t acknowledgements)
 {
     (void)ctx;
-    (void)success;
+    (void)acknowledgements;
 }
 
 cy_err_t cy_respond(const cy_responder_t         responder,
@@ -1752,18 +1752,18 @@ void cy_on_response(cy_t* const    cy,
     }
 }
 
-void cy_on_message_feedback(cy_t* const cy, const cy_feedback_context_t context, const bool success)
+void cy_on_message_feedback(cy_t* const cy, const cy_feedback_context_t context, const uint16_t acknowledgements)
 {
     assert(cy != NULL);
     (void)cy; // Later we may want to add statistics.
-    context.fun(context.user, success);
+    context.fun(context.user, acknowledgements);
 }
 
 void cy_on_response_feedback(cy_t* const cy, const cy_feedback_context_t context, const bool success)
 {
     assert(cy != NULL);
     (void)cy; // Later we may want to add statistics.
-    context.fun(context.user, success);
+    context.fun(context.user, success ? 1 : 0);
 }
 
 // =====================================================================================================================

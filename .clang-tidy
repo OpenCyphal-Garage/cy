@@ -41,3 +41,4 @@ Checks: >-
   -*-use-designated-initializers,
   -*macro-to-enum,
   -*-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  -*-avoid-pragma-once,

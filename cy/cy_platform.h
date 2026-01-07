@@ -374,7 +374,7 @@ void cy_on_response(cy_t* const    cy,
 ///
 /// These are GUARANTEED to be invoked EXACTLY ONCE per reliable message, unless the publish/response function did
 /// not return CY_OK. This also involves the case when the associated resource is destroyed (e.g., unsubscribed etc).
-void cy_on_message_feedback(cy_t* const cy, const cy_feedback_context_t context, const bool success);
+void cy_on_message_feedback(cy_t* const cy, const cy_feedback_context_t context, const uint16_t acknowledgements);
 void cy_on_response_feedback(cy_t* const cy, const cy_feedback_context_t context, const bool success);
 
 /// For diagnostics and logging only. Do not use in embedded and real-time applications.
