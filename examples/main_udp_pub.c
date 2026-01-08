@@ -1,5 +1,5 @@
 #include "cy_udp_posix.h"
-#include "util.h"
+#include "eui64.h"
 #include "arg_kv.h"
 #include "hexdump.h"
 #include <time.h>
@@ -29,7 +29,7 @@ struct config_t
 static struct config_t load_config(const int argc, char* argv[])
 {
     struct config_t cfg = {
-        .local_uid         = volatile_eui64(),
+        .local_uid         = eui64_semirandom(),
         .tx_queue_capacity = 1000,
         .pub_count         = 0,
         .pubs              = calloc((size_t)(argc - 1), sizeof(struct config_publication_t)),

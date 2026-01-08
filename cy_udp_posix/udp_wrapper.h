@@ -118,6 +118,12 @@ int16_t udp_wrapper_wait(const int64_t         timeout_us,
 /// Returns zero if the address is not recognized.
 uint32_t udp_wrapper_parse_iface_address(const char* const address);
 
+/// This is only used for default interface selection convenience; not mandatory to implement.
+/// The function uses platform-specific means to obtain the list of local interface addresses that can be used
+/// with a local Cyphal/UDP node in a default configuration.
+/// Returns the number of addresses written into out_iface_address, or a negative error code.
+int16_t udp_wrapper_get_default_ifaces(const size_t iface_max, uint32_t out_iface_address[]);
+
 #ifdef __cplusplus
 }
 #endif

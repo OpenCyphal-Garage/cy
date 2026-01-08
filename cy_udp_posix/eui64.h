@@ -5,17 +5,14 @@
 #include <unistd.h>
 #include <stdint.h>
 
-#define KILO 1000L
-#define MEGA (KILO * 1LL * KILO)
-
 /// Generates a new random locally administered unicast EUI-64 identifier suitable for use as a 64-bit Cyphal node-ID.
 /// Returns zero on failure, which is not a valid EUI-64.
 ///
 /// For node identification convenience, a few of the most significant bits are the same for nodes running on the same
 /// host, while the least significant bits are random. The random part is much wider to avoid collisions among nodes
-/// running on the same host. Collisions of the host part are harmless because the protocol doesn't really care
-/// about the UID structure -- the only issue is that diagnostics may become slightly ambiguous.
-static inline uint64_t volatile_eui64(void)
+/// running on the same host. Collisions of the host part are more likely but are harmless because the protocol doesn't
+/// really care about the UID structure -- the only downside is that diagnostics/logs may become somewhat ambiguous.
+static inline uint64_t eui64_semirandom(void)
 {
     uint32_t host_20 = 0; // 2 of these bits are used for EUI-64 flags, 18 bits remain. These are first 5 hex digits.
     uint64_t rand_44 = 0; // The remaining 44 random bits, which are the last 11 hex digits.
@@ -45,7 +42,7 @@ static inline uint64_t volatile_eui64(void)
         close(fd);
     }
 #else
-#error "volatile_eui64() is not implemented for this platform yet."
+#error "eui64_semirandom() is not implemented for this platform yet."
 #endif
     uint64_t out = (((uint64_t)host_20) << 44U) | (rand_44 & ((1ULL << 44U) - 1U));
     out &= ~(1ULL << 56U); // clear bit I/G (unicast)

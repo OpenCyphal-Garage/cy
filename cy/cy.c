@@ -1476,6 +1476,7 @@ static cy_subscriber_t* subscribe(cy_t* const                    cy,
     if (resolved.len > sizeof(name_buf)) {
         return NULL;
     }
+    name_buf[resolved.len]     = 0; // this is not needed for the logic but helps with tracing (if enabled)
     cy_subscriber_t* const sub = mem_alloc_zero(cy, sizeof(*sub));
     if (sub == NULL) {
         return NULL;

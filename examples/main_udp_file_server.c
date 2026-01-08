@@ -1,6 +1,4 @@
 #include "cy_udp_posix.h"
-#include "util.h"
-#include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -67,12 +65,7 @@ static void on_file_read_msg(const cy_user_context_t user, cy_arrival_t* const a
 int main(void)
 {
     cy_udp_posix_t cy_udp;
-    cy_err_t       res = cy_udp_posix_new(&cy_udp,
-                                    volatile_eui64(),
-                                    wkv_key(""),
-                                    wkv_key(""),
-                                    (uint32_t[3]){ udp_wrapper_parse_iface_address("127.0.0.1") },
-                                    1000);
+    cy_err_t       res = cy_udp_posix_new_simple(&cy_udp);
     if (res != CY_OK) {
         errx(res, "cy_udp_posix_new");
     }

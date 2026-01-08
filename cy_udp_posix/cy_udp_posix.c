@@ -17,6 +17,8 @@
 #endif
 #include "udp_wrapper.h"
 
+#include "eui64.h"
+
 #define RAPIDHASH_COMPACT
 #include <rapidhash.h>
 
@@ -670,6 +672,35 @@ cy_err_t cy_udp_posix_new(cy_udp_posix_t* const cy,
         }
     }
     return res;
+}
+
+cy_err_t cy_udp_posix_new_simple(cy_udp_posix_t* const cy)
+{
+    const uint64_t uid = eui64_semirandom();
+    if (uid == 0) {
+        return CY_ERR_MEDIA;
+    }
+    uint32_t      ifaces[CY_UDP_POSIX_IFACE_COUNT_MAX] = { 0 };
+    const int16_t n_if = udp_wrapper_get_default_ifaces(CY_UDP_POSIX_IFACE_COUNT_MAX, ifaces);
+    if (n_if < 0) {
+        return err_from_udp_wrapper(n_if);
+    }
+    assert(n_if > 0);
+    const cy_err_t out = cy_udp_posix_new(cy, uid, wkv_key(""), wkv_key(""), ifaces, 50000);
+#if CY_CONFIG_TRACE
+    for (int16_t i = 0; i < n_if; i++) {
+        const uint32_t f = ifaces[i];
+        CY_TRACE(&cy->base,
+                 "Autodetected default iface #%d of %d: %u.%u.%u.%u",
+                 i,
+                 n_if,
+                 (f >> 24U) & 0xFFU,
+                 (f >> 16U) & 0xFFU,
+                 (f >> 8U) & 0xFFU,
+                 f & 0xFFU);
+    }
+#endif
+    return out;
 }
 
 static void read_socket(cy_udp_posix_t* const       cy,

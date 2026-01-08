@@ -77,8 +77,12 @@ cy_err_t cy_udp_posix_new(cy_udp_posix_t* const cy,
                           const uint32_t        local_iface_address[CY_UDP_POSIX_IFACE_COUNT_MAX],
                           const size_t          tx_queue_capacity);
 
-// TODO: provide a shortcut constructor that obtains a random UID, empty home/namespace, uses the default
-// gateway interface and a reasonable TX queue capacity.
+/// A shortcut constructor helper that automatically assigns the node parameters that fit most applications:
+/// - A semi-random EUI-64: a few of the most-significant bits are host-specific, the rest are random.
+/// - The home name is set to `#<uid>`.
+/// - The namespace is read from the CYPHAL_NAMESPACE environment variable; if not set, empty namespace is used.
+/// - The local interfaces are chosen per the defaults configured on the local system.
+/// - The TX queue capacity is set to a reasonable large value.
 cy_err_t cy_udp_posix_new_simple(cy_udp_posix_t* const cy);
 
 /// Keep running the event loop until the deadline is reached or until the first error.

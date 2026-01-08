@@ -317,3 +317,32 @@ uint32_t udp_wrapper_parse_iface_address(const char* const address)
     }
     return out;
 }
+
+int16_t udp_wrapper_get_default_ifaces(const size_t iface_max, uint32_t out_iface_address[])
+{
+    if (iface_max == 0) {
+        return 0;
+    }
+    for (size_t i = 0; i < iface_max; i++) {
+        out_iface_address[i] = 0;
+    }
+    // Here we're using a very simple implementation that only picks a single best outgoing interface.
+    // It is possible to extend it such that multiple interfaces are returned.
+    const int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        return -EIO;
+    }
+    struct sockaddr_in dst = { .sin_family = AF_INET, .sin_port = htons(80) };
+    inet_pton(AF_INET, "1.1.1.1", &dst.sin_addr);
+    if (connect(fd, (struct sockaddr*)&dst, sizeof(dst)) != 0) {
+        return -ENETUNREACH;
+    }
+    struct sockaddr_in src;
+    socklen_t          len = sizeof(src);
+    if (getsockname(fd, (struct sockaddr*)&src, &len) != 0) {
+        return -EIO;
+    }
+    close(fd);
+    out_iface_address[0] = ntohl(src.sin_addr.s_addr);
+    return 1;
+}
