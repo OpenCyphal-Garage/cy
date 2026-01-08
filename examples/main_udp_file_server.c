@@ -1,11 +1,9 @@
 #include "cy_udp_posix.h"
+#include "util.h"
 #include <time.h>
 #include <stdio.h>
-#include <string.h>
-#include <assert.h>
 #include <stdlib.h>
 #include <stdint.h>
-#include <unistd.h>
 #include <errno.h>
 #include <err.h>
 
@@ -15,26 +13,21 @@
 /// Response schema:
 ///     uint32      errno
 ///     byte[<=256] data
-static void on_file_read_msg(cy_t* const cy, const cy_arrival_t* const arv)
+static void on_file_read_msg(const cy_user_context_t user, cy_arrival_t* const arv)
 {
-    CY_BUFFER_GATHER_ON_STACK(payload, arv->transfer->payload.base)
-    if ((payload.size < 10) || (payload.size > (256 + 2 + 8))) {
-        CY_TRACE(cy, "Malformed request: Payload size %zu is invalid", payload.size);
-        return;
-    }
-    assert(payload.data != NULL);
+    (void)user;
+    cy_t* const cy = arv->topic->cy;
 
-    // Deserialize the payload.
+    // Deserialize the payload, assuming the local machine is little-endian, for simplicity.
     uint64_t read_offset = 0;
-    memcpy(&read_offset, payload.data, 8);
-    uint16_t path_len = 0;
-    memcpy(&path_len, ((const char*)payload.data) + 8, 2);
-    char file_name[257];
-    if (path_len > 256) {
-        CY_TRACE(cy, "Malformed request: File path length %u is too long", path_len);
+    uint16_t path_len    = 0;
+    char     file_name[257];
+    if ((8 != cy_message_read(&arv->message.content, 0, 8, &read_offset)) ||
+        (2 != cy_message_read(&arv->message.content, 8, 2, &path_len)) || (path_len == 0) || (path_len > 256) ||
+        (path_len != cy_message_read(&arv->message.content, 10, path_len, file_name))) {
+        CY_TRACE(cy, "Malformed request of size %zu", cy_message_size(arv->message.content));
         return;
     }
-    memcpy(file_name, ((const char*)payload.data) + 10, path_len);
     file_name[path_len] = '\0';
 
     // Prepare response buffer.
@@ -53,54 +46,50 @@ static void on_file_read_msg(cy_t* const cy, const cy_arrival_t* const arv)
         response.data_len = (uint16_t)fread(response.data, 1, 256, file);
     }
     response.error = (uint32_t)errno;
-    (void)fclose(file);
+    if (file != NULL) {
+        (void)fclose(file);
+    }
 
     // Send the response.
     CY_TRACE(cy,
-             "Responding to file read request [tid=%016llx]: %s, offset %llu, size %u, error %u",
-             (unsigned long long)arv->transfer->metadata.transfer_id,
+             "Responding: file='%s' offset=%llu size=%u error=%u",
              file_name,
              (unsigned long long)read_offset,
              response.data_len,
              response.error);
-    (void)cy_respond(cy,
-                     arv->topic, //
-                     arv->transfer->timestamp + 1000000,
-                     arv->transfer->metadata,
-                     (cy_buffer_borrowed_t){ .view = { .data = &response, .size = response.data_len + 6 } });
+    (void)cy_respond(arv->responder,
+                     arv->message.timestamp + 1000000,
+                     (cy_bytes_t){ .size = 4 + 2 + response.data_len, .data = &response },
+                     CY_USER_CONTEXT_EMPTY,
+                     NULL);
 }
 
-/// The only command line argument is the node namespace.
-int main(const int argc, char* argv[])
+int main(void)
 {
-    srand((unsigned)time(NULL));
-
-    // SET UP THE NODE. This is the only platform-specific part; the rest is platform- and transport-agnostic.
     cy_udp_posix_t cy_udp;
-    cy_err_t       res = cy_udp_posix_new_c(&cy_udp,
-                                      random_eui64(),
-                                      (argc > 1) ? argv[1] : "~",
-                                      (uint32_t[3]){ udp_wrapper_parse_iface_address("127.0.0.1") },
-                                      1000);
+    cy_err_t       res = cy_udp_posix_new(&cy_udp,
+                                    volatile_eui64(),
+                                    wkv_key(""),
+                                    wkv_key(""),
+                                    (uint32_t[3]){ udp_wrapper_parse_iface_address("127.0.0.1") },
+                                    1000);
     if (res != CY_OK) {
         errx(res, "cy_udp_posix_new");
     }
     cy_t* const cy = &cy_udp.base;
 
-    // SET UP THE FILE READ SUBSCRIBER.
-    cy_subscriber_t sub_file_read;
-    res = cy_subscribe_c(cy, &sub_file_read, "file/read", 1024, on_file_read_msg);
-    if (res != CY_OK) {
-        errx(res, "cy_subscribe_c");
+    cy_subscriber_t* const sub_file_read =
+      cy_subscribe(cy, wkv_key("file/read"), 1024, CY_USER_CONTEXT_EMPTY, on_file_read_msg);
+    if (sub_file_read == NULL) {
+        errx(res, "cy_subscribe");
     }
 
-    // SPIN THE EVENT LOOP.
-    while (1) {
+    while (true) {
         res = cy_udp_posix_spin_once(&cy_udp);
         if (res != CY_OK) {
             errx(res, "cy_udp_posix_spin_once");
         }
     }
-
+    // ReSharper disable once CppDFAUnreachableCode
     return 0;
 }

@@ -3,7 +3,6 @@
 #include "rapidhash.h"
 #include <fcntl.h>
 #include <unistd.h>
-#include <string.h>
 #include <stdint.h>
 
 #define KILO 1000L

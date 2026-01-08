@@ -1626,8 +1626,9 @@ cy_err_t cy_new(cy_t* const              cy,
         !is_prime_u32(subject_id_modulus)) {
         return CY_ERR_ARGUMENT;
     }
-    if (!cy_name_is_valid(home) || !cy_name_is_valid(namespace_) || (home.len > CY_NAMESPACE_NAME_MAX) ||
-        (namespace_.len > CY_NAMESPACE_NAME_MAX)) {
+    const bool home_valid = cy_name_is_valid(home) || (home.len == 0);
+    const bool ns_valid   = cy_name_is_valid(namespace_) || (namespace_.len == 0);
+    if (!home_valid || !ns_valid) {
         return CY_ERR_NAME;
     }
     memset(cy, 0, sizeof(*cy));
@@ -1641,17 +1642,11 @@ cy_err_t cy_new(cy_t* const              cy,
     }
     memcpy(home_z, home.str, home.len);
     home_z[home.len] = '\0';
-    cy->home         = (wkv_str_t){ .len = home.len, .str = home_z };
     char* const ns_z = &home_z[home.len + 1];
-    if (namespace_.len > 0) {
-        memcpy(ns_z, namespace_.str, namespace_.len);
-        ns_z[namespace_.len] = '\0';
-        cy->ns               = (wkv_str_t){ .len = namespace_.len, .str = ns_z };
-    } else {
-        ns_z[0] = '~';
-        ns_z[1] = '\0';
-        cy->ns  = (wkv_str_t){ .len = 1, .str = ns_z };
-    }
+    memcpy(ns_z, namespace_.str, namespace_.len);
+    ns_z[namespace_.len] = '\0';
+    cy->home             = (wkv_str_t){ .len = home.len, .str = home_z };
+    cy->ns               = (wkv_str_t){ .len = namespace_.len, .str = ns_z };
 
     cy->topics_by_hash       = NULL;
     cy->topics_by_subject_id = NULL;

@@ -63,9 +63,12 @@ struct cy_udp_posix_t
 /// A simple helper that returns monotonic time in microseconds. The time value is always non-negative.
 cy_us_t cy_udp_posix_now(void);
 
-/// The namespace may be NULL or empty, in which case it defaults to "~".
+/// If the namespace is NULL or empty, the value from CYPHAL_NAMESPACE environment variable is used;
+/// if the environment variable is also not set, it defaults to an empty string.
+///
 /// The home may be NULL or empty, in which case it defaults to #-prefixed UID in zero-padded lowercase hex;
 /// for example, `#0000000000abcdef`.
+///
 /// Unused interfaces should have zero addresses; to parse IP address strings see udp_wrapper_parse_iface_address().
 cy_err_t cy_udp_posix_new(cy_udp_posix_t* const cy,
                           const uint64_t        uid,
@@ -73,6 +76,10 @@ cy_err_t cy_udp_posix_new(cy_udp_posix_t* const cy,
                           const wkv_str_t       namespace_,
                           const uint32_t        local_iface_address[CY_UDP_POSIX_IFACE_COUNT_MAX],
                           const size_t          tx_queue_capacity);
+
+// TODO: provide a shortcut constructor that obtains a random UID, empty home/namespace, uses the default
+// gateway interface and a reasonable TX queue capacity.
+cy_err_t cy_udp_posix_new_simple(cy_udp_posix_t* const cy);
 
 /// Keep running the event loop until the deadline is reached or until the first error.
 /// If the deadline is not in the future, the function will process pending events once and return without blocking.

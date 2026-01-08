@@ -315,8 +315,7 @@ typedef struct cy_vtable_t
     void (*on_subscription_error)(cy_t*, cy_topic_t*, cy_err_t);
 } cy_vtable_t;
 
-/// The namespace may be NULL or empty, in which case it defaults to `~`.
-/// It may begin with `~`, which expands into the node name.
+/// See cy_name_... for name resolution details.
 /// The node name should be unique in the network; one way to ensure this is to default it to the node UID as hex.
 cy_err_t cy_new(cy_t* const              cy,
                 const cy_vtable_t* const vtable,

@@ -21,8 +21,6 @@ struct config_t
     uint64_t local_uid;
     size_t   tx_queue_capacity;
 
-    const char* namespace;
-
     size_t                        sub_count;
     struct config_subscription_t* subs;
 };
@@ -32,7 +30,6 @@ static struct config_t load_config(const int argc, char* argv[])
     struct config_t cfg = {
         .local_uid         = volatile_eui64(),
         .tx_queue_capacity = 1000,
-        .namespace         = NULL, // will use the default namespace by default.
         .sub_count         = 0,
         .subs              = calloc((size_t)(argc - 1), sizeof(struct config_subscription_t)),
     };
@@ -46,8 +43,6 @@ static struct config_t load_config(const int argc, char* argv[])
             cfg.local_uid = strtoull(arg.value, NULL, 0);
         } else if (arg_kv_hash("txq") == arg.key_hash) {
             cfg.tx_queue_capacity = strtoul(arg.value, NULL, 0);
-        } else if (arg_kv_hash("ns") == arg.key_hash) {
-            cfg.namespace = arg.value;
         } else if ((arg_kv_hash("sub") == arg.key_hash) || (arg_kv_hash("subord") == arg.key_hash)) {
             struct config_subscription_t* x = NULL;
             for (size_t i = 0; i < cfg.sub_count; i++) {
@@ -128,8 +123,8 @@ int main(const int argc, char* argv[])
     cy_udp_posix_t cy_udp_posix;
     const cy_err_t res = cy_udp_posix_new(&cy_udp_posix, //
                                           cfg.local_uid,
-                                          wkv_key(NULL),
-                                          wkv_key(cfg.namespace),
+                                          wkv_key(""),
+                                          wkv_key(""),
                                           cfg.iface_address,
                                           cfg.tx_queue_capacity);
     if (res != CY_OK) {

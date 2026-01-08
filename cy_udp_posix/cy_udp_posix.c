@@ -647,17 +647,18 @@ cy_err_t cy_udp_posix_new(cy_udp_posix_t* const cy,
 
     // Initialize Cy. It will not emit any transfers yet.
     if (res == CY_OK) {
-        char      name_copy[CY_NAMESPACE_NAME_MAX + 1];
-        wkv_str_t name_key = home;
-        if (!cy_name_is_valid(name_key)) { // If the home is not defined, default to the '#<uid>' format.
-            name_key.str = name_copy;
-            name_key.len = (size_t)snprintf(name_copy, sizeof(name_copy), "#%016llx", (unsigned long long)uid);
+        char      home_copy[CY_NAMESPACE_NAME_MAX + 1];
+        wkv_str_t home_key = home;         // home is where ~ is
+        if (!cy_name_is_valid(home_key)) { // If the home is not defined, default to the '#<uid>' format.
+            home_key.str = home_copy;
+            home_key.len = (size_t)snprintf(home_copy, sizeof(home_copy), "#%016llx", (unsigned long long)uid);
         }
+        const wkv_str_t ns_key = cy_name_is_valid(namespace_) ? namespace_ : wkv_key(getenv("CYPHAL_NAMESPACE"));
         // Here we assume that any transport that Cyphal/UDP may work with in a redundant set will have
         // a subject-ID modulus of at least 23 bits. If that is not the case and a smaller modulus is needed,
         // we will need to modify this to accept the modulus from the user.
         // Also, if/when we add support for IPv6, we will want to extend the modulus to 32 bits.
-        res = cy_new(&cy->base, &cy_vtable, name_key, namespace_, CY_SUBJECT_ID_MODULUS_23bit);
+        res = cy_new(&cy->base, &cy_vtable, home_key, ns_key, CY_SUBJECT_ID_MODULUS_23bit);
     }
 
     // Cleanup on error.
