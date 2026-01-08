@@ -6,6 +6,9 @@
 #include <string.h>
 #include <stdint.h>
 
+#define KILO 1000L
+#define MEGA (KILO * 1LL * KILO)
+
 /// Generates a new random locally administered unicast EUI-64 identifier suitable for use as a 64-bit Cyphal node-ID.
 /// Returns zero on failure, which is not a valid EUI-64.
 ///
@@ -15,8 +18,8 @@
 /// about the UID structure -- the only issue is that diagnostics may become slightly ambiguous.
 static inline uint64_t volatile_eui64(void)
 {
-    uint32_t host_20 = 0; // 0x12345 (two of these are used for EUI-64 flags)
-    uint64_t rand_44 = 0; //      0x6789abcdeff
+    uint32_t host_20 = 0; // 2 of these bits are used for EUI-64 flags, 18 bits remain. These are first 5 hex digits.
+    uint64_t rand_44 = 0; // The remaining 44 random bits, which are the last 11 hex digits.
 #ifdef __linux__
     {
         const int fd = open("/etc/machine-id", O_RDONLY);

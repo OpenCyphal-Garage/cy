@@ -3,6 +3,7 @@
     <words>
       <w>acks</w>
       <w>ards</w>
+      <w>autowidth</w>
       <w>bday</w>
       <w>blockingly</w>
       <w>cbuf</w>
@@ -26,6 +27,7 @@
       <w>mebi</w>
       <w>msize</w>
       <w>noinit</w>
+      <w>nolintbegin</w>
       <w>nsubs</w>
       <w>opencyphal</w>
       <w>pktinfo</w>
@@ -35,6 +37,7 @@
       <w>reuseport</w>
       <w>rnid</w>
       <w>splitmix</w>
+      <w>subord</w>
       <w>tfer</w>
       <w>udpard</w>
       <w>udpip</w>
