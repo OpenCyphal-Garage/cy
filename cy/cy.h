@@ -205,6 +205,10 @@ const cy_topic_t* cy_publisher_topic(const cy_publisher_t* const pub);
 
 void cy_unadvertise(cy_publisher_t* const pub);
 
+/// This dummy callback is used when a reliable delivery is needed, but the application does not care
+/// about the actual delivery outcome. It does not do anything.
+void cy_delivery_callback_stub(const cy_user_context_t ctx, const uint16_t acknowledgements);
+
 // =====================================================================================================================
 //                                                      SUBSCRIBER
 // =====================================================================================================================

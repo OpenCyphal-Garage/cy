@@ -688,6 +688,7 @@ cy_err_t cy_udp_posix_new_simple(cy_udp_posix_t* const cy)
     assert(n_if > 0);
     const cy_err_t out = cy_udp_posix_new(cy, uid, wkv_key(""), wkv_key(""), ifaces, 50000);
 #if CY_CONFIG_TRACE
+    CY_TRACE(&cy->base, "Semirandom EUI-64 %016llx", (unsigned long long)uid);
     for (int16_t i = 0; i < n_if; i++) {
         const uint32_t f = ifaces[i];
         CY_TRACE(&cy->base,

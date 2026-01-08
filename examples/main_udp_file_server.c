@@ -67,7 +67,7 @@ int main(void)
     cy_udp_posix_t cy_udp;
     cy_err_t       res = cy_udp_posix_new_simple(&cy_udp);
     if (res != CY_OK) {
-        errx(res, "cy_udp_posix_new");
+        errx(res, "cy_udp_posix_new_simple");
     }
     cy_t* const cy = &cy_udp.base;
 

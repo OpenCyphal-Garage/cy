@@ -9,7 +9,8 @@
 #include <stdint.h>
 #include <string.h>
 
-// ReSharper disable CppDFAMemoryLeak
+#define KILO 1000L
+#define MEGA (KILO * 1LL * KILO)
 
 struct config_publication_t
 {

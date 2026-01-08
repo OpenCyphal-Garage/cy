@@ -9,6 +9,9 @@
 #include <stdint.h>
 #include <string.h>
 
+#define KILO 1000L
+#define MEGA (KILO * 1LL * KILO)
+
 struct config_subscription_t
 {
     const char* name;

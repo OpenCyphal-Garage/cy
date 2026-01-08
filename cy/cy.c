@@ -1005,7 +1005,7 @@ static hb_t heartbeat_deserialize(cy_message_t msg, byte_t* const name_buf)
         return (hb_t){ 0 }; // Cyphal v1.0 heartbeat carries no topic information. Simply ignore.
     }
     if (out.version == 1) {
-        static const size_t prefix_size = 8 + 5 + 1 + 1;
+        static const size_t prefix_size = 8 + 5 + 1 + 1 + 1; // hash, evictions, lage, reserved, name_len
         assert(prefix_size <= CY_TOPIC_NAME_MAX + 1);
         if (prefix_size != cy_message_read(&msg, 8, prefix_size, name_buf)) {
             return (hb_t){ 0 }; // invalid size
@@ -1018,7 +1018,7 @@ static hb_t heartbeat_deserialize(cy_message_t msg, byte_t* const name_buf)
             (out.topic_name.len != cy_message_read(&msg, 16, out.topic_name.len, name_buf))) {
             return (hb_t){ 0 }; // invalid size
         }
-        name_buf[out.topic_name.len] = 0;
+        name_buf[out.topic_name.len] = 0; // this is not mandatory but convenient for logging/debugging
         return out;
     }
     return (hb_t){ 0 }; // unsupported version
@@ -1373,6 +1373,12 @@ const cy_topic_t* cy_publisher_topic(const cy_publisher_t* const pub) { return (
 
 void cy_unadvertise(cy_publisher_t* const pub) { (void)pub; }
 
+void cy_delivery_callback_stub(const cy_user_context_t ctx, const uint16_t acknowledgements)
+{
+    (void)ctx;
+    (void)acknowledgements;
+}
+
 // =====================================================================================================================
 //                                                      SUBSCRIBER
 // =====================================================================================================================
@@ -1527,12 +1533,6 @@ cy_subscriber_t* cy_subscribe_ordered(cy_t* const                    cy,
     return NULL;
 }
 
-static void dummy_delivery_callback(const cy_user_context_t ctx, const uint16_t acknowledgements)
-{
-    (void)ctx;
-    (void)acknowledgements;
-}
-
 cy_err_t cy_respond(const cy_responder_t         responder,
                     const cy_us_t                tx_deadline,
                     const cy_bytes_t             response_message,
@@ -1547,7 +1547,7 @@ cy_err_t cy_respond(const cy_responder_t         responder,
         return res;
     }
     const cy_feedback_context_t fb_ctx = { .user = ctx_delivery,
-                                           .fun  = (cb_delivery == NULL) ? dummy_delivery_callback : cb_delivery };
+                                           .fun  = (cb_delivery == NULL) ? cy_delivery_callback_stub : cb_delivery };
     return responder.vtable->respond(&responder, tx_deadline, response_message, fb_ctx);
 }
 

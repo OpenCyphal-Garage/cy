@@ -6,9 +6,6 @@
 #include <stdint.h>
 #include <string.h>
 
-#define KILO 1000L
-#define MEGA (KILO * 1LL * KILO)
-
 /// The pointed strings have a static lifetime.
 typedef struct arg_kv_t
 {
