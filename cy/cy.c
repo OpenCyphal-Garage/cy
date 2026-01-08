@@ -1015,7 +1015,7 @@ static hb_t heartbeat_deserialize(cy_message_t msg, byte_t* const name_buf)
         out.topic_lage      = (int_fast8_t)name_buf[13];
         out.topic_name.len  = name_buf[15];
         if ((out.topic_name.len > CY_TOPIC_NAME_MAX) ||
-            (out.topic_name.len != cy_message_read(&msg, 16, out.topic_name.len, name_buf))) {
+            (out.topic_name.len != cy_message_read(&msg, 24, out.topic_name.len, name_buf))) {
             return (hb_t){ 0 }; // invalid size
         }
         name_buf[out.topic_name.len] = 0; // this is not mandatory but convenient for logging/debugging
