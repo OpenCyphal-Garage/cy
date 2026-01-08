@@ -649,10 +649,9 @@ cy_err_t cy_udp_posix_new(cy_udp_posix_t* const cy,
     if (res == CY_OK) {
         char      name_copy[CY_NAMESPACE_NAME_MAX + 1];
         wkv_str_t name_key = home;
-        if (!cy_name_is_valid(name_key)) {
-            name_copy[0] = '#';
-            (void)cy_u64_to_hex(uid, &name_copy[1]);
-            name_key = wkv_key(name_copy);
+        if (!cy_name_is_valid(name_key)) { // If the home is not defined, default to the '#<uid>' format.
+            name_key.str = name_copy;
+            name_key.len = (size_t)snprintf(name_copy, sizeof(name_copy), "#%016llx", (unsigned long long)uid);
         }
         // Here we assume that any transport that Cyphal/UDP may work with in a redundant set will have
         // a subject-ID modulus of at least 23 bits. If that is not the case and a smaller modulus is needed,

@@ -40,6 +40,8 @@
 /// Topics created explicitly by the application (without substitution tokens) are not affected by this timeout.
 #define IMPLICIT_TOPIC_DEFAULT_TIMEOUT_us (3600 * MEGA)
 
+static const wkv_str_t str_invalid = { .len = SIZE_MAX, .str = NULL };
+
 typedef unsigned char byte_t;
 
 static size_t  larger(const size_t a, const size_t b) { return (a > b) ? a : b; }
@@ -110,6 +112,24 @@ static size_t cavl_count(cy_tree_t* const root)
     return count;
 }
 
+#if CY_CONFIG_TRACE
+
+/// Converts `bit_width` least significant bits rounded up to the nearest nibble to hexadecimal.
+/// The output string must be at least ceil(bit_width/4)+1 chars long. It will be left-zero-padded and NUL-terminated.
+static wkv_str_t to_hex(uint64_t value, const size_t bit_width, char* const out)
+{
+    if (out == NULL) {
+        return str_invalid;
+    }
+    const size_t len = (bit_width + 3) / 4;
+    for (int_fast8_t i = (int_fast8_t)(len - 1U); i >= 0; --i) {
+        out[i] = "0123456789abcdef"[value & 15U];
+        value >>= 4U;
+    }
+    out[len] = '\0';
+    return (wkv_str_t){ .len = len, .str = out };
+}
+
 /// A human-friendly representation of the topic for logging and diagnostics.
 typedef struct
 {
@@ -121,9 +141,9 @@ static topic_repr_t topic_repr(const cy_topic_t* const topic)
     topic_repr_t out;
     char*        ptr = out.str;
     *ptr++           = 'T';
-    ptr += cy_u64_to_hex(topic->hash, ptr).len;
+    ptr += to_hex(topic->hash, 64, ptr).len;
     *ptr++ = '@';
-    ptr += cy_u32_to_hex(cy_topic_subject_id(topic), ptr).len;
+    ptr += to_hex(cy_topic_subject_id(topic), 32, ptr).len;
     *ptr++               = '\'';
     const wkv_str_t name = cy_topic_name(topic);
     memcpy(ptr, name.str, name.len);
@@ -133,6 +153,8 @@ static topic_repr_t topic_repr(const cy_topic_t* const topic)
     assert((ptr - out.str) <= (ptrdiff_t)sizeof(out.str));
     return out;
 }
+
+#endif
 
 // =====================================================================================================================
 //                                                    LIST UTILITIES
@@ -1791,8 +1813,6 @@ void cy_on_response_feedback(cy_t* const cy, const cy_feedback_context_t context
 const char cy_name_sep  = '/';
 const char cy_name_home = '~';
 
-static const wkv_str_t str_invalid = { .len = SIZE_MAX, .str = NULL };
-
 static bool is_valid_char(const char c) { return (c >= 32) && (c <= 126); }
 
 bool cy_name_is_valid(const wkv_str_t name)
@@ -1924,23 +1944,3 @@ wkv_str_t cy_name_resolve(const wkv_str_t name,
     }
     return cy_name_join(namespace_, name, dest_size, dest);
 }
-
-/// Converts `bit_width` least significant bits rounded up to the nearest nibble to hexadecimal.
-/// The output string must be at least ceil(bit_width/4)+1 chars long. It will be left-zero-padded and NUL-terminated.
-static wkv_str_t to_hex(uint64_t value, const size_t bit_width, char* const out)
-{
-    if (out == NULL) {
-        return str_invalid;
-    }
-    const size_t len = (bit_width + 3) / 4;
-    for (int_fast8_t i = (int_fast8_t)(len - 1U); i >= 0; --i) {
-        out[i] = "0123456789abcdef"[value & 15U];
-        value >>= 4U;
-    }
-    out[len] = '\0';
-    return (wkv_str_t){ .len = len, .str = out };
-}
-wkv_str_t cy_u64_to_hex(const uint64_t value, char* const out) { return to_hex(value, 64U, out); }
-wkv_str_t cy_u32_to_hex(const uint32_t value, char* const out) { return to_hex(value, 32U, out); }
-wkv_str_t cy_u16_to_hex(const uint16_t value, char* const out) { return to_hex(value, 16U, out); }
-wkv_str_t cy_u8_to_hex(const uint_fast8_t value, char* const out) { return to_hex(value, 8U, out); }
