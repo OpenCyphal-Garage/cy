@@ -560,7 +560,7 @@ static bool v_tx_eject(udpard_tx_t* const tx, udpard_tx_ejection_t* const ej)
     cy_udp_posix_t* const cy = (cy_udp_posix_t*)tx->user;
     assert(cy != NULL);
     assert((cy->iface_mask & (1U << ej->iface_index)) != 0); // the caller must ensure this
-    assert(ej->now >= ej->deadline);
+    assert(ej->now <= ej->deadline);
     // The libudpard TX API provides us with an opportunity to retain the ownership of the datagram payload
     // via reference counting. This is useful in kernel space or in embedded systems with low-level NIC drivers,
     // but the Berkeley socket API does not allow us to take advantage of that -- the data will be copied into the

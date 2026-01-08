@@ -76,16 +76,10 @@ static struct config_t load_config(const int argc, char* argv[])
     return cfg;
 }
 
-static void on_message_delivery_result(const cy_user_context_t user, const uint16_t acknowledgements)
+static void on_message_delivery_result(const cy_user_context_t user, const uint16_t acks)
 {
-    bool* const done_flag = (bool*)user.ptr[0];
-    assert((done_flag != NULL) && !*done_flag);
-    *done_flag              = true;
     cy_topic_t* const topic = user.ptr[1];
-    printf("Message delivery on '%s': %s %u acks\n",
-           topic->name,
-           (acknowledgements > 0) ? "✅" : "❌",
-           (unsigned)acknowledgements);
+    CY_TRACE(topic->cy, "'%s' %s %u acks", topic->name, (acks > 0) ? "✅" : "❌", (unsigned)acks);
 }
 
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
@@ -163,15 +157,15 @@ int main(const int argc, char* argv[])
                     .ptr = { NULL, (void*)cy_publisher_topic(publishers[i]), NULL, NULL },
                 };
                 const cy_err_t pub_res = cy_request(publishers[i],
-                                                    now + (KILO * 100),
-                                                    now + (MEGA * 60),
+                                                    now + (MEGA * 2),
+                                                    now + (MEGA * 10),
                                                     (cy_bytes_t){ .size = strlen(msg), .data = msg },
                                                     ctx,
                                                     on_message_delivery_result,
                                                     ctx,
                                                     on_response);
                 if (pub_res != CY_OK) {
-                    (void)fprintf(stderr, "cy_publish: %d\n", pub_res);
+                    (void)fprintf(stderr, "cy_request: %d\n", pub_res);
                     break;
                 }
             }

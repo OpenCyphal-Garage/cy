@@ -85,7 +85,7 @@ static void on_response_delivery_result(const cy_user_context_t user, const uint
     *done_flag = true;
     assert(acknowledgements <= 1);
     const cy_topic_t* const topic = user.ptr[1];
-    printf("Response delivery on '%s': %s\n", topic->name, (acknowledgements == 1) ? "✅" : "❌");
+    CY_TRACE(topic->cy, "'%s' %s", topic->name, (acknowledgements == 1) ? "✅" : "❌");
 }
 
 // ReSharper disable once CppParameterMayBeConstPtrOrRef

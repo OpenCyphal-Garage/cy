@@ -646,7 +646,6 @@ static cy_err_t topic_new(cy_t* const        cy,
     if (topic == NULL) {
         return CY_ERR_MEMORY;
     }
-    memset(topic, 0, sizeof(*topic));
     topic->name = mem_alloc(cy, resolved_name.len + 1);
     if (topic->name == NULL) {
         goto oom;
@@ -656,6 +655,7 @@ static cy_err_t topic_new(cy_t* const        cy,
 
     const cy_us_t now = cy_now(cy);
 
+    topic->cy        = cy;
     topic->hash      = hash;
     topic->evictions = evictions;
 
@@ -1203,7 +1203,7 @@ static void pending_response_finalize(pending_response_t* const self, const cy_u
              topic_repr(self->topic).str,
              (unsigned long long)self->transfer_id,
              msg.size,
-             (ts >= 0) ? "✅SUCCESS" : "❌FAILURE");
+             (ts >= 0) ? "✅ SUCCESS" : "❌ NO RESPONSE");
     cavl2_remove(&cy->pending_responses_by_deadline, &self->index_deadline);
     cavl2_remove(&self->topic->pending_responses_by_transfer_id, &self->index_transfer_id);
 
