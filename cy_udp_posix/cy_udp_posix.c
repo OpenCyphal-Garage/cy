@@ -542,8 +542,8 @@ static void default_rx_sock_err_handler(cy_udp_posix_t* const       cy,
                                         const uint_fast8_t          iface_index,
                                         const uint32_t              err_no)
 {
-    CY_TRACE(
-      &cy->base, "⚠️ RX socket error on iface #%u topic '%s': %u", iface_index, topic->base.name, (unsigned)err_no);
+    const char* const topic_name = (topic != NULL) ? topic->base.name : "";
+    CY_TRACE(&cy->base, "⚠️ RX socket error on iface #%u topic '%s': %u", iface_index, topic_name, (unsigned)err_no);
 }
 
 static void v_on_p2p_msg(udpard_rx_t* const rx, udpard_rx_port_p2p_t* const port, const udpard_rx_transfer_p2p_t tr)

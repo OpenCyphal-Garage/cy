@@ -73,6 +73,7 @@ int16_t udp_wrapper_open_unicast(udp_wrapper_t* const self,
     int16_t res = -EINVAL;
     if ((self != NULL) && (local_iface_address > 0)) {
         memset(self, 0, sizeof(*self));
+        const int one                 = 1;
         self->iface_index             = get_local_iface_index(local_iface_address);
         self->fd                      = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
         const uint32_t local_iface_be = htonl(local_iface_address);
@@ -93,6 +94,8 @@ int16_t udp_wrapper_open_unicast(udp_wrapper_t* const self,
             *out_local_port       = ntohs(sa.sin_port);
         }
         ok = ok && fcntl(self->fd, F_SETFL, O_NONBLOCK) == 0;
+        // Request extended metadata on rx.
+        ok = ok && (setsockopt(self->fd, IPPROTO_IP, IP_PKTINFO, &one, sizeof(one)) == 0);
         ok = ok && setsockopt(self->fd, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl)) == 0;
         // Specify the egress interface for multicast traffic.
         ok = ok && setsockopt(self->fd, IPPROTO_IP, IP_MULTICAST_IF, &local_iface_be, sizeof(local_iface_be)) == 0;
@@ -239,7 +242,7 @@ int16_t udp_wrapper_receive(udp_wrapper_t* const self,
             if (pi == NULL) {
                 res = -EIO;
             } else if (pi->ipi_ifindex != self->iface_index) { // NOLINT(*-branch-clone)
-                res = 0;                                       // wrong iface -- ignore
+                res = 0; // wrong iface -- ignore; relevant for multicast sockets only
             } else {
                 *inout_payload_size = (size_t)n;
                 res                 = 1;

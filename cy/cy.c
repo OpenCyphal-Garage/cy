@@ -1011,10 +1011,14 @@ static void on_heartbeat(const cy_user_context_t ctx, cy_arrival_t* const arriva
     cy_t* const   cy = arrival->topic->cy;
     byte_t        scratchpad[CY_TOPIC_NAME_MAX + 1];
     const hb_t    hb = heartbeat_deserialize(arrival->message.content, scratchpad);
+    if (hb.version == 0) {
+        CY_TRACE(cy, "⚠️ Ignoring invalid or Cyphal v1.0 heartbeat");
+        return; // Cyphal v1.0 heartbeat or invalid message; nothing to do.
+    }
     if (hb.topic_lage >= -1) {
         // Find the topic in our local database. Create if there is a pattern match.
         cy_topic_t* mine = cy_topic_find_by_hash(cy, hb.topic_hash);
-        if (mine == NULL) {
+        if ((mine == NULL) && (hb.topic_name.len > 0)) { // a name is required but maybe the publisher is non-compliant
             mine = topic_subscribe_if_matching(cy, hb.topic_name, hb.topic_hash, hb.topic_evictions, hb.topic_lage);
         }
         if (mine != NULL) {        // We have this topic! Check if we have consensus on the subject-ID.
