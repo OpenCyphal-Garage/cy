@@ -5,9 +5,6 @@
 # while obsoleting the mode and health fields as they do not belong to its scope. New nodes should use
 # application-specific means of status reporting instead; Cyphal does not define the application layer.
 
-uint16 PUBLICATION_PERIOD_MIN_ms =  100
-uint16 PUBLICATION_PERIOD_MAX_ms = 2000 - PUBLICATION_PERIOD_MIN_ms  # mean 1 s
-
 uint32 uptime  # [second]
 # One may detect that a remote node has restarted when this value leaps backward.
 

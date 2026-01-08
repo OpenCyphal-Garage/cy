@@ -447,6 +447,9 @@ static uint64_t topic_hash(const wkv_str_t name)
 
 static uint32_t topic_subject_id(const cy_t* const cy, const uint64_t hash, const uint64_t evictions)
 {
+    if (is_pinned(hash)) {
+        return (uint32_t)hash;
+    }
 #ifndef CY_CONFIG_PREFERRED_TOPIC_OVERRIDE
     return CY_PINNED_SUBJECT_ID_MAX + (uint32_t)((hash + (evictions * evictions)) % cy->subject_id_modulus);
 #else
