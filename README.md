@@ -11,13 +11,15 @@ _pub/sub without steroids_
 
 A C implementation of Cyphal v1.1: robust decentralized zero-configuration pub/sub with tunable reliability and service discovery in only a couple thousand lines of straightforward C. Runs anywhere, including small baremetal MCUs. The key design goals are simplicity and robustness.
 
+🚧 **WORK IN PROGRESS** 🏗️ The library is under active development; the API and functionality may change. Bugs afoot.
+
 Build-time dependencies, all single-header-only:
 
 - [`cavl2.h`](https://github.com/pavel-kirienko/cavl) -- AVL tree.
 - [`wkv.h`](https://github.com/pavel-kirienko/wild_key_value) -- key-value container with fast pattern matching & key routing.
 - [`rapidhash.h`](https://github.com/Nicoshev/rapidhash) -- a good 64-bit hash by Nicolas De Carli (BSD 2-clause license).
 
-## API crash course
+## 📚 API crash course
 
 The library is extremely simple and easy to use on any platform.
 The entire API header is just a few hundred lines of code, mostly comments.
@@ -117,7 +119,7 @@ while (true)
 
 That's it! See the `examples/` folder for more complete examples.
 
-## Prior art
+## 🎨 Prior art
 
 ### [Group Address Allocation Protocol (GAAP)](https://datatracker.ietf.org/doc/html/draft-ietf-pim-gaap-03)
 
@@ -132,7 +134,7 @@ Similar to GAAP.
 
 These include DDS, Zenoh, etc. Cyphal does not attempt to directly compete with these, but instead offers an alternative for applications where the complexity of the competitors is undesirable.
 
-## Compatibility with Cyphal/CAN v1.0
+## 🚌 Compatibility with Cyphal/CAN v1.0
 
 Cyphal v1.1 is wire-compatible with Cyphal/CAN v1.0.
 
@@ -140,7 +142,7 @@ To publish or subscribe to v1.0 subjects, use pinned topics of the form `/#abcd`
 
 Cyphal v1.1 has no RPC in the same way as Cyphal/CAN v1.0 does; instead, it uses pub/sub for everything, including request/response interactions. Thus, to use RPC in a legacy CAN network, a low-level CAN transport access is required.
 
-## Design notes
+## 📝 Design notes
 
 ```mermaid
 classDiagram
