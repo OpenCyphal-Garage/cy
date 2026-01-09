@@ -844,14 +844,6 @@ static cy_topic_t* topic_subscribe_if_matching(cy_t* const       cy,
     return topic;
 }
 
-static void* wkv_cb_topic_scout_response(const wkv_event_t evt)
-{
-    cy_topic_t* const topic = (cy_topic_t*)evt.node->value;
-    CY_TRACE(topic->cy, "📢 %s", topic_repr(topic).str);
-    schedule_gossip_urgent(topic);
-    return NULL;
-}
-
 // =====================================================================================================================
 //                                                      HEARTBEAT
 // =====================================================================================================================
@@ -955,42 +947,29 @@ static cy_err_t publish_heartbeat_scout(cy_t* const cy, subscriber_root_t* const
     return res;
 }
 
-static cy_err_t heartbeat_poll(cy_t* const cy, const cy_us_t now)
-{
-    // Decide if it is time to publish a heartbeat. We use a very simple minimal-state scheduler that runs two
-    // periods and offers an opportunity to publish a heartbeat every now and then.
-    cy_err_t res = CY_OK;
-    if ((now >= cy->heartbeat_next) || (now >= cy->heartbeat_next_urgent)) {
-        cy_topic_t*              topic = LIST_TAIL(cy->list_gossip_urgent, cy_topic_t, list_gossip_urgent);
-        subscriber_root_t* const scout = LIST_TAIL(cy->list_scout_pending, subscriber_root_t, list_scout_pending);
-        if ((now >= cy->heartbeat_next) || (topic != NULL) || (scout != NULL)) {
-            if ((topic != NULL) || (scout == NULL)) {
-                topic = (topic != NULL) ? topic : LIST_TAIL(cy->list_gossip, cy_topic_t, list_gossip);
-                topic = (topic != NULL) ? topic : cy->heartbeat_pub->topic;
-                res   = publish_heartbeat_gossip(cy, topic, now);
-            } else {
-                res = publish_heartbeat_scout(cy, scout, now);
-            }
-            cy->heartbeat_next = now + dither_int(cy, cy->heartbeat_period, cy->heartbeat_period / 8);
-        }
-        cy->heartbeat_next_urgent = now + (cy->heartbeat_period / 32);
-    }
-    return res;
-}
-
-/// Will publish the first heartbeat if it hasn't been published yet. Does nothing otherwise.
+/// Will schedule the first heartbeat for publication if it hasn't been published yet. Does nothing otherwise.
 /// Lazy heartbeat publication commencement is an important feature for listen-only nodes,
 /// allowing them to avoid transmitting anything at all until they cease to be listen-only.
-static cy_err_t heartbeat_begin(cy_t* const cy)
+/// Heartbeat publication will commence when the local node does any of the following:
+/// - Publishes on a topic. See cy_publish(), cy_request(), etc.
+/// - Sends a response. See cy_respond().
+/// - Wins arbitration on a collision or a divergence. See on_heartbeat().
+/// - Encounters a scout request match. See on_heartbeat().
+static void heartbeat_begin(cy_t* const cy)
 {
-    cy_err_t res = CY_OK;
     if (cy->heartbeat_next == HEAT_DEATH) {
         CY_TRACE(cy, "🚀");
-        const cy_us_t now  = cy_now(cy);
-        cy->heartbeat_next = now;
-        res                = heartbeat_poll(cy, now);
+        cy->heartbeat_next = cy_now(cy);
     }
-    return res;
+}
+
+static void* wkv_cb_topic_scout_response(const wkv_event_t evt)
+{
+    cy_topic_t* const topic = (cy_topic_t*)evt.node->value;
+    CY_TRACE(topic->cy, "📢 %s", topic_repr(topic).str);
+    heartbeat_begin(topic->cy);
+    schedule_gossip_urgent(topic);
+    return NULL;
 }
 
 typedef struct
@@ -1081,6 +1060,7 @@ static void on_heartbeat(const cy_user_context_t ctx, cy_arrival_t* const arriva
                     // thus resolving the collision.
                     // See https://github.com/OpenCyphal-Garage/cy/issues/28 and AcceptGossip() in Core.tla.
                     assert(!is_pinned(mine->hash));
+                    heartbeat_begin(cy);
                     schedule_gossip_urgent(mine);
                 } else {
                     assert((mine_lage <= hb.topic_lage) &&
@@ -1125,11 +1105,12 @@ static void on_heartbeat(const cy_user_context_t ctx, cy_arrival_t* const arriva
             // If we lost, we need to gossip this topic ASAP as well because every other participant on this topic
             // will also move, but the trick is that the others could have settled on different subject-IDs.
             // Everyone needs to publish their own new allocation and then we will pick max subject-ID out of that.
-            if (!win) {
-                topic_allocate(mine, mine->evictions + 1U, false, ts);
-            } else {
+            if (win) {
                 assert(!is_pinned(mine->hash));
+                heartbeat_begin(cy);
                 schedule_gossip_urgent(mine);
+            } else {
+                topic_allocate(mine, mine->evictions + 1U, false, ts);
             }
         }
     } else if (hb.topic_lage == LAGE_SCOUT) {
@@ -1191,11 +1172,8 @@ cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t tx_deadline, const 
         return CY_ERR_ARGUMENT;
     }
     assert(pub->topic->pub_count > 0);
-    cy_err_t res = heartbeat_begin(pub->topic->cy);
-    if (res == CY_OK) {
-        res = pub->topic->vtable->publish(pub->topic, tx_deadline, pub->priority, message, NULL, NULL, 0);
-    }
-    return res;
+    heartbeat_begin(pub->topic->cy);
+    return pub->topic->vtable->publish(pub->topic, tx_deadline, pub->priority, message, NULL, NULL, 0);
 }
 
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
@@ -1209,13 +1187,10 @@ cy_err_t cy_publish_reliable(cy_publisher_t* const        pub,
         return CY_ERR_ARGUMENT;
     }
     assert(pub->topic->pub_count > 0);
-    cy_err_t res = heartbeat_begin(pub->topic->cy);
-    if (res == CY_OK) {
-        const cy_feedback_context_t ctx = { .user = ctx_delivery,
-                                            .fun  = (cb_delivery == NULL) ? delivery_callback_stub : cb_delivery };
-        res = pub->topic->vtable->publish(pub->topic, tx_deadline, pub->priority, message, &ctx, NULL, 0);
-    }
-    return res;
+    heartbeat_begin(pub->topic->cy);
+    const cy_feedback_context_t ctx = { .user = ctx_delivery,
+                                        .fun  = (cb_delivery == NULL) ? delivery_callback_stub : cb_delivery };
+    return pub->topic->vtable->publish(pub->topic, tx_deadline, pub->priority, message, &ctx, NULL, 0);
 }
 
 typedef struct
@@ -1294,65 +1269,58 @@ cy_err_t cy_request(cy_publisher_t* const        pub,
     }
     cy_t* const cy = pub->topic->cy;
     assert(pub->topic->pub_count > 0);
-    cy_err_t res = heartbeat_begin(cy);
-    if (res == CY_OK) {
-        pending_response_t* const pr = mem_alloc_zero(cy, sizeof(pending_response_t));
-        if (pr == NULL) {
-            res = CY_ERR_MEMORY;
-        } else {
-            const bool                  reliable = cb_delivery != NULL;
-            const cy_feedback_context_t fb_ctx   = { .user = ctx_delivery, .fun = cb_delivery };
-            res = pub->topic->vtable->publish(pub->topic, // ----------------------------
-                                              tx_deadline,
-                                              pub->priority,
-                                              message,
-                                              reliable ? &fb_ctx : NULL,
-                                              &pr->transfer_id,
-                                              pub->response_extent);
-            if (res == CY_OK) {
-                pr->deadline     = response_deadline;
-                pr->topic        = pub->topic;
-                pr->user_context = ctx_response;
-                pr->callback     = cb_response;
-                // The transfer-ID values returned by the transport layer are meant to be unique. This is trivially
-                // ensured in most transports because they use 64-bit monotonically increasing sequence numbers.
-                // However, Cyphal/CAN is special in that its transfer-ID space is only 5 bits wide, which will
-                // cause the insertion operation to fail if there already are 31 pending requests. While this
-                // is highly unlikely to actually happen in practice, we must still handle this case gracefully;
-                // the solution is very simple -- finalize the old competed response early and replace it.
-                while (true) {
-                    pending_response_t* const pr2 =
-                      CAVL2_TO_OWNER(cavl2_find_or_insert(&pub->topic->pending_responses_by_transfer_id,
-                                                          &pr->transfer_id,
-                                                          cavl_comp_pending_response_transfer_id,
-                                                          &pr->index_transfer_id,
-                                                          cavl2_trivial_factory),
-                                     pending_response_t,
-                                     index_transfer_id);
-                    if (pr2 == pr) {
-                        break; // Successfully inserted.
-                    }
-                    CY_TRACE(cy,
-                             "⚠️ %s response transfer-ID exhaustion on #%llu",
-                             topic_repr(pub->topic).str,
-                             (unsigned long long)pr->transfer_id);
-                    pending_response_finalize(pr2, BIG_BANG, message_empty);
-                }
-                (void)cavl2_find_or_insert(&cy->pending_responses_by_deadline,
-                                           &pr->deadline,
-                                           cavl_comp_pending_response_deadline,
-                                           &pr->index_deadline,
-                                           cavl2_trivial_factory);
-                CY_TRACE(cy,
-                         "📩 %s new pending response #%llu",
-                         topic_repr(pr->topic).str,
-                         (unsigned long long)pr->transfer_id);
-            } else {
-                mem_free(cy, pr);
-            }
-        }
+    pending_response_t* const pr = mem_alloc_zero(cy, sizeof(pending_response_t));
+    if (pr == NULL) {
+        return CY_ERR_MEMORY;
     }
-    return res;
+    const bool                  reliable = (cb_delivery != NULL);
+    const cy_feedback_context_t fb_ctx   = { .user = ctx_delivery, .fun = cb_delivery };
+    heartbeat_begin(cy);
+    const cy_err_t res = pub->topic->vtable->publish(pub->topic,
+                                                     tx_deadline,
+                                                     pub->priority,
+                                                     message,
+                                                     reliable ? &fb_ctx : NULL,
+                                                     &pr->transfer_id,
+                                                     pub->response_extent);
+    if (res != CY_OK) {
+        mem_free(cy, pr);
+        return res;
+    }
+    pr->deadline     = response_deadline;
+    pr->topic        = pub->topic;
+    pr->user_context = ctx_response;
+    pr->callback     = cb_response;
+    // The transfer-ID values returned by the transport layer are meant to be unique. This is trivially ensured in most
+    // transports because they use 64-bit monotonically increasing sequence numbers. However, Cyphal/CAN is special in
+    // that its transfer-ID space is only 5 bits wide, which will cause the insertion operation to fail if there already
+    // are 31 pending requests. While this is highly unlikely to actually happen in practice, we must still handle this
+    // case gracefully; the solution is very simple -- finalize the old competed response early and replace it.
+    while (true) {
+        pending_response_t* const pr2 =
+          CAVL2_TO_OWNER(cavl2_find_or_insert(&pub->topic->pending_responses_by_transfer_id,
+                                              &pr->transfer_id,
+                                              cavl_comp_pending_response_transfer_id,
+                                              &pr->index_transfer_id,
+                                              cavl2_trivial_factory),
+                         pending_response_t,
+                         index_transfer_id);
+        if (pr2 == pr) {
+            break; // Successfully inserted.
+        }
+        CY_TRACE(cy,
+                 "⚠️ %s response transfer-ID exhaustion on #%llu",
+                 topic_repr(pub->topic).str,
+                 (unsigned long long)pr->transfer_id);
+        pending_response_finalize(pr2, BIG_BANG, message_empty);
+    }
+    (void)cavl2_find_or_insert(&cy->pending_responses_by_deadline,
+                               &pr->deadline,
+                               cavl_comp_pending_response_deadline,
+                               &pr->index_deadline,
+                               cavl2_trivial_factory);
+    CY_TRACE(cy, "📩 %s new pending response #%llu", topic_repr(pr->topic).str, (unsigned long long)pr->transfer_id);
+    return CY_OK;
 }
 
 static void retire_expired_pending_responses(const cy_t* cy, const cy_us_t now)
@@ -1543,10 +1511,7 @@ cy_err_t cy_respond(const cy_responder_t         responder,
     if (tx_deadline < 0) {
         return CY_ERR_ARGUMENT;
     }
-    const cy_err_t res = heartbeat_begin(responder.cy);
-    if (res != CY_OK) {
-        return res;
-    }
+    heartbeat_begin(responder.cy);
     const cy_feedback_context_t fb_ctx = { .user = ctx_delivery,
                                            .fun  = (cb_delivery == NULL) ? delivery_callback_stub : cb_delivery };
     return responder.vtable->respond(&responder, tx_deadline, response_message, fb_ctx);
@@ -1707,6 +1672,29 @@ uint32_t cy_topic_subject_id(const cy_topic_t* const topic)
     return topic_subject_id(topic->cy, topic->hash, topic->evictions);
 }
 
+static cy_err_t heartbeat_poll(cy_t* const cy, const cy_us_t now)
+{
+    // Decide if it is time to publish a heartbeat. We use a very simple minimal-state scheduler that runs two
+    // periods and offers an opportunity to publish a heartbeat every now and then.
+    cy_err_t res = CY_OK;
+    if ((now >= cy->heartbeat_next) || (now >= cy->heartbeat_next_urgent)) {
+        cy_topic_t*              topic = LIST_TAIL(cy->list_gossip_urgent, cy_topic_t, list_gossip_urgent);
+        subscriber_root_t* const scout = LIST_TAIL(cy->list_scout_pending, subscriber_root_t, list_scout_pending);
+        if ((now >= cy->heartbeat_next) || (topic != NULL) || (scout != NULL)) {
+            if ((topic != NULL) || (scout == NULL)) {
+                topic = (topic != NULL) ? topic : LIST_TAIL(cy->list_gossip, cy_topic_t, list_gossip);
+                topic = (topic != NULL) ? topic : cy->heartbeat_pub->topic;
+                res   = publish_heartbeat_gossip(cy, topic, now);
+            } else {
+                res = publish_heartbeat_scout(cy, scout, now);
+            }
+            cy->heartbeat_next = now + dither_int(cy, cy->heartbeat_period, cy->heartbeat_period / 8);
+        }
+        cy->heartbeat_next_urgent = now + (cy->heartbeat_period / 32);
+    }
+    return res;
+}
+
 cy_err_t cy_update(cy_t* const cy)
 {
     if (cy == NULL) {
@@ -1721,7 +1709,11 @@ cy_err_t cy_update(cy_t* const cy)
 void cy_on_topic_collision(cy_topic_t* const topic)
 {
     if (topic != NULL) {
-        CY_TRACE(topic->cy, "💥 %s", topic_repr(topic).str);
+        // A remote node may keep triggering collisions even after the protocol has reconfigured itself
+        // if the colliding message is stuck in the transport tx buffer being retransmitted repeatedly,
+        // waiting for acknowledgement. This is benign though because the exponential backoff will eventually
+        // reduce the collision rate and avoid flooding the network with the redundant gossips.
+        // In the future we should introduce some rate limiting for urgent gossips.
         schedule_gossip_urgent(topic);
     }
 }
