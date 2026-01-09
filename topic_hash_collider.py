@@ -53,7 +53,7 @@ def find_subject_id_collision(subject_id_modulus: int, topic_name: str, *, suffi
 
 
 def main() -> None:
-    if len(sys.argv) != 3:
+    if len(sys.argv) < 3:
         sys.exit(f"Usage: {sys.argv[0]} <subject-ID-modulus> <topic-name> [suffix-len]")
     subject_id_modulus = int(sys.argv[1], 0)
     original = sys.argv[2]
