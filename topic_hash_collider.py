@@ -66,10 +66,13 @@ def main() -> None:
     ho = c["original_hash"]
     hc = c["collision_hash"]
     nc = c["collision_name"]
+    psid = preferred_subject_id(subject_id_modulus, ho)
+    assert psid == preferred_subject_id(subject_id_modulus, hc)
     print(
-        f"hash_original:  {ho:016x}",
-        f"hash_collision: {hc:016x}",
+        f"hash_original:  0x{ho:016x}",
+        f"hash_collision: 0x{hc:016x}",
         f"name_collision: {nc!r}",
+        f"preferred_subject_id: 0x{psid:08x}",
         sep="\n",
     )
 
