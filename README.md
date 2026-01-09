@@ -1,4 +1,12 @@
+<div align="center">
+
 # Cyphal v1.1 in C
+
+_pub/sub without steroids_
+
+</div>
+
+-----
 
 A C implementation of Cyphal v1.1: robust decentralized zero-configuration pub/sub with tunable reliability and service discovery in only a couple thousand lines of straightforward C. Runs anywhere, including small baremetal MCUs. The key design goals are simplicity and robustness.
 

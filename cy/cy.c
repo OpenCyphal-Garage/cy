@@ -900,7 +900,7 @@ static cy_err_t publish_heartbeat(const cy_t* const cy,
     const size_t message_size = HEARTBEAT_OFFSET_TOPIC_NAME + topic_name.len;
     byte_t       buf[HEARTBEAT_SIZE_MAX];
     byte_t*      ptr = buf;
-    // uptime and user_word[3]
+    // uptime and reserved
     ptr    = serialize_u32(ptr, (uint32_t)((now - cy->ts_started) / MEGA));
     *ptr++ = 0;
     *ptr++ = 0;

@@ -8,15 +8,13 @@
 uint32 uptime  # [second]
 # One may detect that a remote node has restarted when this value leaps backward.
 
-uint24 user_word
-# An arbitrary number with application-defined semantics. If not used, set to zero.
-#
+void24
 # In the v1 Heartbeat, this place used to contain the health, mode, and vendor-specific status code fields.
 # These have been removed because they pertain to the application layer and are thus outside of the scope of
 # the heartbeat message. Subscribers using the old v1.0 Heartbeat type will interpret the bytes of this field as
 # health (byte 0), mode (byte 1), and the vendor-specific status code (byte 2).
-# If the 16 least significant bits of the user word are set to zero, old subscribers will interpret it as
-# nominal health and operational mode.
+# Old subscribers will interpret this field as nominal health and operational mode.
+# Eventually, it may be reused for the needs of the transport layer.
 
 uint8 version
 # Shall be 1 in this specification revision. This number may change in a future revision of the heartbeat message,
