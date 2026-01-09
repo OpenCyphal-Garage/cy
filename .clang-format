@@ -6,6 +6,7 @@ Standard: c++20
 IndentExternBlock: NoIndent
 AlwaysBreakAfterDefinitionReturnType: None
 BreakAfterReturnType: None
+AllowShortFunctionsOnASingleLine: All
 AlignConsecutiveAssignments: true
 AlignConsecutiveBitFields: true
 AlignConsecutiveDeclarations: true

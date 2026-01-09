@@ -1,7 +1,19 @@
 skip wkv_key
-skip cy_advertise_c
-skip cy_publish1
-skip cy_subscribe_c
-skip cy_subscribe_with_params_c
 skip topic_hash
 skip cy_trace
+skip cy_bytes_to_udpard_bytes
+skip cy_udp_posix_now
+skip cy_now
+
+skip strlen
+skip strnlen
+skip strcmp
+skip strncmp
+skip strcpy
+skip strncpy
+skip strcat
+skip strncat
+skip memcmp
+skip memcpy
+skip memmove
+skip memset

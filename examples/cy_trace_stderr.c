@@ -25,13 +25,8 @@ void cy_trace(cy_t* const         cy,
 
     // Extract the file name.
     const char* file_name = strrchr(file, '/');
-    if (file_name != NULL) {
-        file_name++;
-    } else if ((file_name = strrchr(file, '\\')) != NULL) {
-        file_name++;
-    } else {
-        file_name = file;
-    }
+    file_name             = (file_name == NULL) ? strrchr(file, '\\') : file_name;
+    file_name             = (file_name != NULL) ? (file_name + 1) : file;
 
     // Update the longest seen file name and function name.
     static _Thread_local int longest_file_name = 15;
@@ -43,26 +38,25 @@ void cy_trace(cy_t* const         cy,
 
     // Print the header.
     static const int32_t mega = 1000000;
-    fprintf(stderr,
-            "CY(%016llx %05lld.%06lld) %s.%03lld %*s:%04u:%*s: ",
-            (unsigned long long)cy->uid,
-            (long long)(uptime_us / mega),
-            (long long)(uptime_us % mega),
-            hhmmss,
-            (long long)ts.tv_nsec / mega,
-            longest_file_name,
-            file_name,
-            (unsigned)line,
-            longest_func_name,
-            func);
+    (void)fprintf(stderr,
+                  "CY(%05lld.%06lld) %s.%03lld %*s:%04u:%*s: ",
+                  (long long)(uptime_us / mega),
+                  (long long)(uptime_us % mega),
+                  hhmmss,
+                  (long long)ts.tv_nsec / mega,
+                  longest_file_name,
+                  file_name,
+                  (unsigned)line,
+                  longest_func_name,
+                  func);
 
     // Print the message.
     va_list args;
     va_start(args, format);
-    vfprintf(stderr, format, args);
+    (void)vfprintf(stderr, format, args);
     va_end(args);
 
     // Finalize.
-    fputc('\n', stderr);
-    fflush(stderr);
+    (void)fputc('\n', stderr);
+    (void)fflush(stderr);
 }

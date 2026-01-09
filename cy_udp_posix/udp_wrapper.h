@@ -32,96 +32,73 @@ extern "C"
 {
 #endif
 
-#ifndef __cplusplus
-typedef struct udp_wrapper_tx_t udp_wrapper_tx_t;
-typedef struct udp_wrapper_rx_t udp_wrapper_rx_t;
-#endif
-
-/// These definitions are highly platform-specific.
-/// Note that LibUDPard does not require the same socket to be usable for both transmission and reception.
-struct udp_wrapper_tx_t
+/// These definitions are highly platform-specific; the application normally should not rely on the internal fields.
+typedef struct udp_wrapper_t
 {
-    int fd;
-};
-struct udp_wrapper_rx_t
-{
-    int fd;
-    // dgram accepted if iface index matches AND (src adr OR src port differ). The latter is to discard own traffic.
-    uint32_t allow_iface_index;
-    uint32_t deny_source_address;
-    uint16_t deny_source_port;
-};
+    int    fd;
+    size_t iface_index;
+} udp_wrapper_t;
 
 /// Helpers for constructing uninitialized handles.
-udp_wrapper_tx_t udp_wrapper_tx_new(void);
-udp_wrapper_rx_t udp_wrapper_rx_new(void);
+udp_wrapper_t udp_wrapper_new(void);
 
-/// Return false unless the handle has been successfully initialized and not yet closed.
-bool udp_wrapper_tx_is_initialized(const udp_wrapper_tx_t* const self);
-bool udp_wrapper_rx_is_initialized(const udp_wrapper_rx_t* const self);
+/// Return false unless the handle has been successfully opened and not yet closed.
+bool udp_wrapper_is_open(const udp_wrapper_t* const self);
 
-/// Initialize a TX socket for use with LibUDPard.
-/// The local iface address is used to specify the egress interface for multicast traffic.
+/// Initialize a socket for use with LibUDPard for transmission of datagrams to arbitrary remote endpoints,
+/// including multicast, and for the reception of unicast P2P traffic.
+/// The local iface address is used to specify the egress interface for multicast traffic sent over this socket.
 /// Per LibUDPard design, there is one TX socket per redundant interface, so the application needs to invoke
 /// this function once per interface.
-///
-/// The local port will be chosen automatically (ephemeral); if the local_port pointer is not NULL, the actual port
-/// number will be stored there. This should be used later to drop datagrams looped back from the TX socket to the
-/// local RX sockets by comparing the origin endpoint of the received datagrams with the local port & iface address
-/// of the TX socket. I am not sure if there is a better way of ignoring own datagrams.
-///
+/// The local port is chosen for the socket automatically and returned via out_local_port.
+/// On error returns a negative errno.
+int16_t udp_wrapper_open_unicast(udp_wrapper_t* const self,
+                                 const uint32_t       local_iface_address,
+                                 uint16_t* const      out_local_port);
+
+/// Initialize an RX socket for use with LibUDPard, for listening to multicast groups.
+/// The socket will be bound to the specified multicast endpoint (group and port).
+/// The local iface address specifies which egress port to send IGMP membership reports over.
 /// On error returns a negative error code.
-int16_t udp_wrapper_tx_init(udp_wrapper_tx_t* const self,
-                            const uint32_t          local_iface_address,
-                            uint16_t* const         local_port);
+int16_t udp_wrapper_open_multicast(udp_wrapper_t* const self,
+                                   const uint32_t       local_iface_address,
+                                   const uint32_t       multicast_group,
+                                   const uint16_t       remote_port);
+
+/// No effect if the argument is invalid.
+/// This function is guaranteed to invalidate the handle.
+void udp_wrapper_close(udp_wrapper_t* const self);
 
 /// Send a datagram to the specified endpoint without blocking using the specified IP DSCP field value.
 /// A real-time embedded system should normally accept a transmission deadline here for the networking stack.
 /// Returns 1 on success, 0 if the socket is not ready for sending, or a negative error code.
-int16_t udp_wrapper_tx_send(udp_wrapper_tx_t* const self,
-                            const uint32_t          remote_address,
-                            const uint16_t          remote_port,
-                            const uint8_t           dscp,
-                            const size_t            payload_size,
-                            const void* const       payload);
-
-/// No effect if the argument is invalid.
-/// This function is guaranteed to invalidate the handle.
-void udp_wrapper_tx_close(udp_wrapper_tx_t* const self);
-
-/// Initialize an RX socket for use with LibUDPard, for subscription to subjects or for RPC traffic.
-/// The socket will be bound to the specified multicast group and port.
-/// Most socket APIs, in particular the Berkeley sockets, require the local iface address to be known,
-/// because it is used to decide which egress port to send IGMP membership reports over.
-/// Dgrams whose source port matches the specified deny_source_port will be ignored; this is to ignore own tx dgrams.
-/// On error returns a negative error code.
-int16_t udp_wrapper_rx_init(udp_wrapper_rx_t* const self,
-                            const uint32_t          local_iface_address,
-                            const uint32_t          multicast_group,
-                            const uint16_t          remote_port,
-                            const uint16_t          deny_source_port);
+int16_t udp_wrapper_send(udp_wrapper_t* const self,
+                         const uint32_t       remote_address,
+                         const uint16_t       remote_port,
+                         const uint8_t        dscp,
+                         const size_t         payload_size,
+                         const void* const    payload);
 
 /// Read one datagram from the socket without blocking.
 /// The size of the destination buffer is specified in inout_payload_size; it is updated to the actual size of the
 /// received datagram upon return.
-///
-/// The remote address and port are reported to allow the reader filter out own datagrams that were looped back
-/// from the TX socket to the local RX sockets.
-///
+/// The returned data may have originated from the local tx socket; filtering may be needed.
+/// It is guaranteed that the returned datagram has arrived via the local interface set when opening the socket.
 /// Returns:
 ///     1 on success
 ///     0 if the socket is not ready for reading OR if the received dgram is a looped back own datagram
 ///     negative error code
-int16_t udp_wrapper_rx_receive(udp_wrapper_rx_t* const self, size_t* const inout_payload_size, void* const out_payload);
-
-/// No effect if the argument is invalid.
-/// This function is guaranteed to invalidate the handle.
-void udp_wrapper_rx_close(udp_wrapper_rx_t* const self);
+int16_t udp_wrapper_receive(udp_wrapper_t* const self,
+                            size_t* const        inout_payload_size,
+                            void* const          out_payload,
+                            uint32_t* const      out_src_address,
+                            uint16_t* const      out_src_port);
 
 /// Suspend execution until the expiration of the timeout (in microseconds) or until any of the specified handles
 /// become ready for reading (the RX group) or writing (the TX group). Upon completion, handle pointers that are
 /// ready to read/write will be left intact, while those that are NOT ready will be set to NULL.
 /// The function may return earlier than the timeout even if no handles are ready.
+/// The same handle can appear in both TX and RX groups.
 /// On error returns a negative error code.
 ///
 /// The recommended usage pattern is to keep parallel arrays of handle pointers and some context data, e.g.:
@@ -131,15 +108,21 @@ void udp_wrapper_rx_close(udp_wrapper_rx_t* const self);
 ///     void* rx_context[max_rx_handles];                // Parallel array of context data.
 ///     int16_t err = udp_wrapper_wait(timeout_us, UDPARD_IFACE_COUNT_MAX, tx_handles, max_rx_handles, rx_handles);
 ///     // Then handle the results.
-int16_t udp_wrapper_wait(const int64_t            timeout_us,
-                         const size_t             tx_count,
-                         udp_wrapper_tx_t** const tx,
-                         const size_t             rx_count,
-                         udp_wrapper_rx_t** const rx);
+int16_t udp_wrapper_wait(const int64_t         timeout_us,
+                         const size_t          tx_count,
+                         udp_wrapper_t** const tx,
+                         const size_t          rx_count,
+                         udp_wrapper_t** const rx);
 
 /// Convert an interface address from string to binary representation; e.g., "127.0.0.1" --> 0x7F000001.
 /// Returns zero if the address is not recognized.
 uint32_t udp_wrapper_parse_iface_address(const char* const address);
+
+/// This is only used for default interface selection convenience; not mandatory to implement.
+/// The function uses platform-specific means to obtain the list of local interface addresses that can be used
+/// with a local Cyphal/UDP node in a default configuration.
+/// Returns the number of addresses written into out_iface_address, or a negative error code.
+int16_t udp_wrapper_get_default_ifaces(const size_t iface_max, uint32_t out_iface_address[]);
 
 #ifdef __cplusplus
 }

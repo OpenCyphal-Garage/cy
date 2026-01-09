@@ -1,83 +1,85 @@
 #include "cy_udp_posix.h"
-#include <time.h>
 #include <stdio.h>
 #include <string.h>
 #include <assert.h>
-#include <stdlib.h>
 #include <stdint.h>
 #include <unistd.h>
 #include <err.h>
 
 #define MEGA 1000000LL
 
-#define RESPONSE_TIMEOUT (3 * MEGA)
+#define RESPONSE_TIMEOUT (30 * MEGA)
+#define PATH_CAPACITY    256
 
-struct file_read_request_t
+typedef struct file_read_request_t
 {
     uint64_t read_offset;
     uint16_t path_len;
-    char     path[256];
-};
-struct file_read_response_t
+    char     path[PATH_CAPACITY];
+} file_read_request_t;
+
+typedef struct file_read_response_t
 {
     uint32_t error;
     uint16_t data_len;
-    uint8_t  data[256];
-};
+    uint8_t  data[PATH_CAPACITY];
+} file_read_response_t;
 
-static uint64_t random_uid(void)
+typedef struct future_t
 {
-    const uint16_t vid = UINT16_MAX; // This is the reserved public VID.
-    const uint16_t pid = (uint16_t)rand();
-    const uint32_t iid = (uint32_t)rand();
-    return (((uint64_t)vid) << 48U) | (((uint64_t)pid) << 32U) | iid;
+    bool         done;
+    bool         success;
+    cy_message_t message;
+} future_t;
+
+static void on_request_delivery_result(const cy_user_context_t ctx, const uint16_t acknowledgements)
+{
+    (void)ctx;
+    (void)acknowledgements;
+}
+
+static void on_response(const cy_user_context_t ctx, cy_message_ts_t* const msg)
+{
+    future_t* const fut = (future_t* const)ctx.ptr[0];
+    assert(!fut->done);
+    fut->done    = true;
+    fut->success = msg != NULL;
+    if (fut->success) {
+        fut->message = cy_message_move(&msg->content);
+    }
 }
 
 /// Command line arguments: namespace, file name.
 /// The read file will be written into stdout as-is.
 int main(const int argc, char* argv[])
 {
-    if (argc < 3) {
-        fprintf(stderr, "Usage: %s <namespace> <file>\n", argv[0]);
+    if (argc < 2) {
+        (void)fprintf(stderr, "Usage: %s <file>\n", argv[0]);
         return 1;
     }
-    srand((unsigned)time(NULL));
 
     // PREPARE THE FILE REQUEST OBJECT.
-    struct file_read_request_t req;
+    file_read_request_t req;
     req.read_offset = 0;
-    req.path_len    = (uint16_t)strlen(argv[2]);
-    if (req.path_len > 256) {
-        fprintf(stderr, "File path length %u is too long\n", req.path_len);
+    req.path_len    = (uint16_t)strlen(argv[1]);
+    if (req.path_len > PATH_CAPACITY) {
+        (void)fprintf(stderr, "File path length %u is too long\n", req.path_len);
         return 1;
     }
-    memcpy(req.path, argv[2], req.path_len);
+    memcpy(req.path, argv[1], req.path_len);
 
-    // SET UP THE NODE. This is the only platform-specific part; the rest is platform- and transport-agnostic.
+    // SET UP THE NODE.
     cy_udp_posix_t cy_udp;
-    cy_err_t       res = cy_udp_posix_new_c(
-      &cy_udp, random_uid(), argv[1], (uint32_t[3]){ udp_wrapper_parse_iface_address("127.0.0.1") }, 1000);
+    cy_err_t       res = cy_udp_posix_new_simple(&cy_udp);
     if (res != CY_OK) {
-        errx(res, "cy_udp_posix_new");
+        errx(res, "cy_udp_posix_new_simple");
     }
     cy_t* const cy = &cy_udp.base;
 
     // SET UP THE FILE READ PUBLISHER.
-    cy_publisher_t pub_file_read;
-    res = cy_advertise_c(cy, &pub_file_read, "file/read", 1024);
-    if (res != CY_OK) {
-        errx(res, "cy_advertise_c");
-    }
-
-    // WAIT FOR THE NODE TO JOIN THE NETWORK.
-    // We consider the node joined when it has a node-ID.
-    // This stage is skipped if we have a configuration hint recovered from nonvolatile storage.
-    fprintf(stderr, "Waiting for the node to join the network...\n");
-    while (!cy_joined(&cy_udp.base)) {
-        res = cy_udp_posix_spin_once(&cy_udp);
-        if (res != CY_OK) {
-            errx(res, "cy_udp_posix_spin_once");
-        }
+    cy_publisher_t* const pub_file_read = cy_advertise_client(cy, wkv_key("file/read"), sizeof(file_read_response_t));
+    if (pub_file_read == NULL) {
+        errx(res, "cy_advertise_client");
     }
 
     // READ THE FILE SEQUENTIALLY.
@@ -85,43 +87,38 @@ int main(const int argc, char* argv[])
         const cy_us_t now = cy_udp_posix_now();
 
         // Send the request.
-        cy_future_t future;
-        cy_future_new(&future, NULL, NULL);
-        fprintf(stderr, "\nRequesting offset %llu...\n", (unsigned long long)req.read_offset);
-        res = cy_publish(cy,
-                         &pub_file_read,
-                         now + MEGA,
-                         (cy_buffer_borrowed_t){ .view = { .size = req.path_len + 10, .data = &req } },
+        (void)fprintf(stderr, "\nRequesting offset %llu...\n", (unsigned long long)req.read_offset);
+        future_t future = { .done = false };
+        res             = cy_request(pub_file_read,
+                         now + (RESPONSE_TIMEOUT / 2),
                          now + RESPONSE_TIMEOUT,
-                         &future);
+                         (cy_bytes_t){ .size = 8 + 2 + req.path_len, .data = &req },
+                         CY_USER_CONTEXT_EMPTY,
+                         on_request_delivery_result,
+                         (cy_user_context_t){ .ptr = { &future, NULL, NULL, NULL } },
+                         on_response);
         if (res != CY_OK) {
-            errx(res, "cy_publish");
+            errx(res, "cy_request");
         }
 
         // Wait for the response while spinning the event loop.
         // We could do it asynchronously as well, but in this simple application it is easier to do it synchronously.
         // We could also spin the loop in a background thread and use a condition variable to wake up the main thread.
-        assert(future.state == cy_future_pending);
-        while (future.state == cy_future_pending) {
+        while (!future.done) {
             res = cy_udp_posix_spin_once(&cy_udp);
             if (res != CY_OK) {
                 errx(res, "cy_udp_posix_spin_once");
             }
         }
-        if (future.state == cy_future_timeout_response) {
+        if (!future.success) {
             errx(0, "Request timed out");
         }
-        assert(future.state == cy_future_success);
 
         // Process the next chunk.
-        CY_TRACE(cy,
-                 "Received response [rnid=%04x tid=%016llx]: offset %llu",
-                 future.last_response.metadata.remote_node_id,
-                 (unsigned long long)future.last_response.metadata.transfer_id,
-                 (unsigned long long)req.read_offset);
-        struct file_read_response_t resp;
-        const size_t                resp_size =
-          cy_buffer_owned_gather(future.last_response.payload, (cy_bytes_mut_t){ .size = sizeof(resp), .data = &resp });
+        CY_TRACE(cy, "Received response: offset %llu", (unsigned long long)req.read_offset);
+        file_read_response_t resp;
+        const size_t         resp_size = cy_message_read(&future.message, 0, sizeof(resp), &resp);
+        cy_message_destroy(&future.message); // release the memory asap
         if (resp_size < 6) {
             errx(0, "Invalid response size %zu", resp_size);
         }
@@ -129,14 +126,13 @@ int main(const int argc, char* argv[])
             errx((int)resp.error, "Remote error");
         }
         if (resp.data_len > 0) {
-            fwrite(resp.data, 1, resp.data_len, stdout);
-            fflush(stdout);
+            (void)fwrite(resp.data, 1, resp.data_len, stdout);
+            (void)fflush(stdout);
             req.read_offset += resp.data_len;
         } else {
-            fprintf(stderr, "\nFinished transferring %llu bytes\n", (unsigned long long)req.read_offset);
+            (void)fprintf(stderr, "\nFinished transferring %llu bytes\n", (unsigned long long)req.read_offset);
             break;
         }
     }
-
     return 0;
 }

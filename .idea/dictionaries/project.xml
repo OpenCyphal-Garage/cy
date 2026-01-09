@@ -1,8 +1,14 @@
 <component name="ProjectDictionaryState">
   <dictionary name="project">
     <words>
+      <w>Autodetected</w>
+      <w>Zenoh</w>
+      <w>acks</w>
       <w>ards</w>
+      <w>autodetected</w>
+      <w>autowidth</w>
       <w>bday</w>
+      <w>blockingly</w>
       <w>cbuf</w>
       <w>connext</w>
       <w>csma</w>
@@ -12,23 +18,37 @@
       <w>dscp</w>
       <w>gaap</w>
       <w>gettime</w>
+      <w>homeful</w>
       <w>ifaces</w>
       <w>iiiiiiii</w>
+      <w>issuecomment</w>
+      <w>kibi</w>
       <w>kirienko</w>
       <w>libcanard</w>
       <w>libserard</w>
       <w>libudpard</w>
+      <w>mebi</w>
+      <w>msize</w>
+      <w>noinit</w>
+      <w>nolintbegin</w>
+      <w>nsubs</w>
       <w>opencyphal</w>
       <w>pktinfo</w>
       <w>popcount</w>
+      <w>pushok</w>
       <w>remappings</w>
       <w>reuseport</w>
       <w>rnid</w>
+      <w>rtps</w>
       <w>splitmix</w>
+      <w>subord</w>
       <w>tfer</w>
+      <w>tonumber</w>
       <w>udpard</w>
+      <w>udpip</w>
       <w>unadvertise</w>
       <w>usec</w>
+      <w>vtbl</w>
       <w>zmaap</w>
     </words>
   </dictionary>
