@@ -201,7 +201,7 @@ void      cy_priority_set(cy_publisher_t* const pub, const cy_prio_t priority);
 /// Each publisher is always linked to a specific single topic.
 /// This pointer remains valid for the entire lifetime of the publisher.
 /// It can be used to obtain the topic name, hash, etc. of this publisher.
-const cy_topic_t* cy_publisher_topic(const cy_publisher_t* const pub);
+cy_topic_t* cy_publisher_topic(const cy_publisher_t* const pub);
 
 void cy_unadvertise(cy_publisher_t* const pub);
 
@@ -276,7 +276,7 @@ typedef struct cy_arrival_t
     /// as long as there is at least one verbatim subscriber or at least one publisher on it. Topics that only have
     /// pattern subscribers are eventually destroyed after a long time of inactivity, which is reset after every
     /// received message (among some other events not necessarily visible to the application).
-    const cy_topic_t*     topic;
+    cy_topic_t*           topic;
     cy_substitution_set_t substitutions;
 } cy_arrival_t;
 
@@ -318,8 +318,8 @@ cy_err_t cy_respond(const cy_responder_t         responder,
                     const cy_user_context_t      ctx_delivery,
                     const cy_delivery_callback_t cb_delivery);
 
-/// Copies the subscriber name into the user-supplied buffer. Max size is CY_TOPIC_NAME_MAX plus NUL terminator.
-/// The output string is always NUL-terminated.
+/// Copies the subscriber name into the user-supplied buffer. Max size is CY_TOPIC_NAME_MAX plus NUL-terminator.
+/// The output string is NUL-terminated.
 void cy_subscriber_name(const cy_subscriber_t* const sub, char* const out_name);
 
 /// No effect if the subscriber pointer is NULL.
@@ -331,6 +331,8 @@ void cy_unsubscribe(cy_subscriber_t* const sub);
 
 /// Returns the current time in microseconds. Always non-negative.
 cy_us_t cy_now(const cy_t* const cy);
+
+// TODO: cy_err_t cy_remap(cy_t*, wkv_str_t from, wkv_str_t to);
 
 // TODO: add a way to dump/restore topic configuration for instant initialization. This may be platform-specific.
 
@@ -350,9 +352,17 @@ cy_topic_t* cy_topic_find_by_name(const cy_t* const cy, const wkv_str_t name);
 cy_topic_t* cy_topic_iter_first(const cy_t* const cy);
 cy_topic_t* cy_topic_iter_next(cy_topic_t* const topic);
 
-/// The name pointer lifetime is bound to the topic.
+/// The name pointer lifetime is bound to the topic. The name is NUL-terminated.
 wkv_str_t cy_topic_name(const cy_topic_t* const topic);
 uint64_t  cy_topic_hash(const cy_topic_t* const topic);
+
+/// Provides access to the application-specific context associated per topic.
+/// By default it is set to CY_USER_CONTEXT_EMPTY when the topic is created.
+/// It can be used to associate arbitrary application-specific data with the topic.
+/// Returns NULL iff the topic pointer is NULL.
+cy_user_context_t* cy_topic_user_context(cy_topic_t* const topic);
+
+// TODO: topic hooks: extern functions similar to cy_trace invoked when a topic is created/destroyed/(un)subscribed/etc.
 
 // =====================================================================================================================
 //                                                      NAMES
@@ -367,7 +377,7 @@ uint64_t  cy_topic_hash(const cy_topic_t* const topic);
 /// The max namespace length should also provide space for at least one separator and a one-character topic name.
 #define CY_NAMESPACE_NAME_MAX (CY_TOPIC_NAME_MAX - 2)
 
-/// A valid name does not contain non-printable ASCII characters.
+/// A valid name consists of printable ASCII characters except SPACE.
 /// A normalized name does not begin with a separator, does not end with a separator, and does not contain
 /// consecutive separators.
 extern const char cy_name_sep;  ///< '/'

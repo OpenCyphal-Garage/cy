@@ -34,6 +34,10 @@ int main(void)
 }
 ```
 
+The library uses Pascal strings represented as `wkv_str_t` throughout;
+these strings are normally not nul-terminated, unless specifically noted otherwise.
+Use `wkv_key(const char*)` to create such strings from ordinary C strings.
+
 Create a publisher:
 
 ```c++
@@ -62,6 +66,8 @@ res = cy_publish_reliable(my_pub,
 if (res != CY_OK) { ... }
 ```
 
+There may be an arbitrary number of pending reliable messages per publisher, each with a dedicated callback.
+
 Subscribe to a topic:
 
 ```c++
@@ -82,7 +88,7 @@ static void on_message(cy_user_context_t user_context, cy_arrival_t* const arriv
     unsigned char data[size];
     cy_message_read(&arrival->message.content, 0, size, data);  // feel free to read only the parts of interest
     char* const dump = hexdump(size, data, 32);
-    printf("Received message on topic %s:\n%s\n", arrival->topic->name, dump);
+    printf("Received message on topic %s:\n%s\n", cy_topic_name(arrival->topic).str, dump);
     // If relevant, you can optionally send a response back to the publisher here using cy_respond():
     // res = cy_respond(arrival->responder, deadline, response_data, ...);
     // It is also possible to store the responder instance to send the response at any time later.

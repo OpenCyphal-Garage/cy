@@ -158,6 +158,9 @@ typedef struct cy_topic_t
 
     /// The vtable pointer must be initialized by the new_topic() factory.
     const struct cy_topic_vtable_t* vtable;
+
+    /// User context for application-specific use, such as linking it with external data.
+    cy_user_context_t user_context;
 } cy_topic_t;
 
 /// Platform-specific implementation of the topic operations.
@@ -260,9 +263,6 @@ struct cy_t
 
     /// For detecting timed out responses. This index spans all topics.
     cy_tree_t* pending_responses_by_deadline;
-
-    /// The user can use this field for arbitrary purposes. The platform layer shall not touch it.
-    void* user;
 };
 
 /// Platform-specific implementation of cy_t.

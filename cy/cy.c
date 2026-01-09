@@ -698,6 +698,8 @@ static cy_err_t topic_new(cy_t* const        cy,
     topic->couplings  = NULL;
     topic->subscribed = false;
 
+    topic->user_context = CY_USER_CONTEXT_EMPTY;
+
     if (cavl_count(cy->topics_by_hash) >= (cy->subject_id_modulus / 4)) {
         goto bad_name;
     }
@@ -1374,7 +1376,7 @@ void      cy_priority_set(cy_publisher_t* const pub, const cy_prio_t priority)
     }
 }
 
-const cy_topic_t* cy_publisher_topic(const cy_publisher_t* const pub) { return (pub != NULL) ? pub->topic : NULL; }
+cy_topic_t* cy_publisher_topic(const cy_publisher_t* const pub) { return (pub != NULL) ? pub->topic : NULL; }
 
 void cy_unadvertise(cy_publisher_t* const pub) { (void)pub; }
 
@@ -1599,6 +1601,11 @@ wkv_str_t cy_topic_name(const cy_topic_t* const topic)
 
 uint64_t cy_topic_hash(const cy_topic_t* const topic) { return (topic != NULL) ? topic->hash : UINT64_MAX; }
 
+cy_user_context_t* cy_topic_user_context(cy_topic_t* const topic)
+{
+    return (topic != NULL) ? &topic->user_context : NULL;
+}
+
 // =====================================================================================================================
 //                                              PLATFORM LAYER INTERFACE
 // =====================================================================================================================
@@ -1650,7 +1657,6 @@ cy_err_t cy_new(cy_t* const              cy,
 
     cy->topics_by_hash       = NULL;
     cy->topics_by_subject_id = NULL;
-    cy->user                 = NULL;
 
     wkv_init(&cy->topics_by_name, &wkv_realloc);
     cy->topics_by_name.context = cy;
@@ -1808,7 +1814,8 @@ void cy_on_response_feedback(cy_t* const cy, const cy_feedback_context_t context
 const char cy_name_sep  = '/';
 const char cy_name_home = '~';
 
-static bool is_valid_char(const char c) { return (c >= 32) && (c <= 126); }
+/// Accepts all printable ASCII characters except SPACE.
+static bool is_valid_char(const char c) { return (c >= 33) && (c <= 126); }
 
 bool cy_name_is_valid(const wkv_str_t name)
 {
