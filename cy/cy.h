@@ -162,7 +162,7 @@ typedef void (*cy_response_callback_t)(cy_user_context_t, cy_message_ts_t*);
 cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t tx_deadline, const cy_bytes_t message);
 
 /// Publish a reliable one-way message without expecting a response.
-/// The delivery callback must be non-NULL; it is GUARANTEED to be invoked EXACTLY ONCE per published message
+/// The delivery callback, unless NULL, is GUARANTEED to be invoked EXACTLY ONCE per published message
 /// to report the outcome (success/failure), unless this function returns anything other than CY_OK.
 cy_err_t cy_publish_reliable(cy_publisher_t* const        pub,
                              const cy_us_t                tx_deadline,
@@ -204,10 +204,6 @@ void      cy_priority_set(cy_publisher_t* const pub, const cy_prio_t priority);
 const cy_topic_t* cy_publisher_topic(const cy_publisher_t* const pub);
 
 void cy_unadvertise(cy_publisher_t* const pub);
-
-/// This dummy callback is used when a reliable delivery is needed, but the application does not care
-/// about the actual delivery outcome. It does not do anything.
-void cy_delivery_callback_stub(const cy_user_context_t ctx, const uint16_t acknowledgements);
 
 // =====================================================================================================================
 //                                                      SUBSCRIBER

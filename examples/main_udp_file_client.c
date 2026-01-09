@@ -32,6 +32,12 @@ typedef struct future_t
     cy_message_t message;
 } future_t;
 
+static void on_request_delivery_result(const cy_user_context_t ctx, const uint16_t acknowledgements)
+{
+    (void)ctx;
+    (void)acknowledgements;
+}
+
 static void on_response(const cy_user_context_t ctx, cy_message_ts_t* const msg)
 {
     future_t* const fut = (future_t* const)ctx.ptr[0];
@@ -71,7 +77,7 @@ int main(const int argc, char* argv[])
     cy_t* const cy = &cy_udp.base;
 
     // SET UP THE FILE READ PUBLISHER.
-    cy_publisher_t* const pub_file_read = cy_advertise_client(cy, wkv_key("file/read"), 16 + PATH_CAPACITY);
+    cy_publisher_t* const pub_file_read = cy_advertise_client(cy, wkv_key("file/read"), sizeof(file_read_response_t));
     if (pub_file_read == NULL) {
         errx(res, "cy_advertise_client");
     }
@@ -88,7 +94,7 @@ int main(const int argc, char* argv[])
                          now + RESPONSE_TIMEOUT,
                          (cy_bytes_t){ .size = 8 + 2 + req.path_len, .data = &req },
                          CY_USER_CONTEXT_EMPTY,
-                         cy_delivery_callback_stub,
+                         on_request_delivery_result,
                          (cy_user_context_t){ .ptr = { &future, NULL, NULL, NULL } },
                          on_response);
         if (res != CY_OK) {

@@ -22,10 +22,10 @@ static inline uint64_t eui64_semirandom(void)
         if (fd < 0) {
             return 0;
         }
-        char          buf[64];
+        char          buf[32];
         const ssize_t n = read(fd, buf, sizeof(buf));
         close(fd);
-        if (n < 32) { // min required size
+        if (n < 32) {
             return 0;
         }
         host_20 = (uint32_t)(rapidhash(buf, (size_t)n) & 0xFFFFFU);

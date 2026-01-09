@@ -156,6 +156,12 @@ static topic_repr_t topic_repr(const cy_topic_t* const topic)
 
 #endif
 
+static void delivery_callback_stub(const cy_user_context_t ctx, const uint16_t acknowledgements)
+{
+    (void)ctx;
+    (void)acknowledgements;
+}
+
 // =====================================================================================================================
 //                                                    LIST UTILITIES
 // =====================================================================================================================
@@ -1197,13 +1203,14 @@ cy_err_t cy_publish_reliable(cy_publisher_t* const        pub,
                              const cy_user_context_t      ctx_delivery,
                              const cy_delivery_callback_t cb_delivery)
 {
-    if ((pub == NULL) || (tx_deadline < 0) || (cb_delivery == NULL)) {
+    if ((pub == NULL) || (tx_deadline < 0)) {
         return CY_ERR_ARGUMENT;
     }
     assert(pub->topic->pub_count > 0);
     cy_err_t res = heartbeat_begin(pub->topic->cy);
     if (res == CY_OK) {
-        const cy_feedback_context_t ctx = { .user = ctx_delivery, .fun = cb_delivery };
+        const cy_feedback_context_t ctx = { .user = ctx_delivery,
+                                            .fun  = (cb_delivery == NULL) ? delivery_callback_stub : cb_delivery };
         res = pub->topic->vtable->publish(pub->topic, tx_deadline, pub->priority, message, &ctx, NULL, 0);
     }
     return res;
@@ -1373,12 +1380,6 @@ const cy_topic_t* cy_publisher_topic(const cy_publisher_t* const pub) { return (
 
 void cy_unadvertise(cy_publisher_t* const pub) { (void)pub; }
 
-void cy_delivery_callback_stub(const cy_user_context_t ctx, const uint16_t acknowledgements)
-{
-    (void)ctx;
-    (void)acknowledgements;
-}
-
 // =====================================================================================================================
 //                                                      SUBSCRIBER
 // =====================================================================================================================
@@ -1547,7 +1548,7 @@ cy_err_t cy_respond(const cy_responder_t         responder,
         return res;
     }
     const cy_feedback_context_t fb_ctx = { .user = ctx_delivery,
-                                           .fun  = (cb_delivery == NULL) ? cy_delivery_callback_stub : cb_delivery };
+                                           .fun  = (cb_delivery == NULL) ? delivery_callback_stub : cb_delivery };
     return responder.vtable->respond(&responder, tx_deadline, response_message, fb_ctx);
 }
 
