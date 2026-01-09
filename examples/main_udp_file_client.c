@@ -72,7 +72,7 @@ int main(const int argc, char* argv[])
 
     // SET UP THE FILE READ PUBLISHER.
     cy_publisher_t* const pub_file_read = cy_advertise_client(cy, wkv_key("file/read"), 16 + PATH_CAPACITY);
-    if (res != CY_OK) {
+    if (pub_file_read == NULL) {
         errx(res, "cy_advertise_client");
     }
 

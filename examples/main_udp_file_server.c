@@ -5,6 +5,8 @@
 #include <errno.h>
 #include <err.h>
 
+#define MEGA 1000000LL
+
 /// Request schema:
 ///     uint64      read_offset
 ///     utf8[<=256] file_path
@@ -48,7 +50,7 @@ static void on_file_read_msg(const cy_user_context_t user, cy_arrival_t* const a
         (void)fclose(file);
     }
 
-    // Send the response.
+    // Send the response back to the client.
     CY_TRACE(cy,
              "Responding: file='%s' offset=%llu size=%u error=%u",
              file_name,
@@ -56,7 +58,7 @@ static void on_file_read_msg(const cy_user_context_t user, cy_arrival_t* const a
              response.data_len,
              response.error);
     (void)cy_respond(arv->responder,
-                     arv->message.timestamp + 1000000,
+                     arv->message.timestamp + (10 * MEGA),
                      (cy_bytes_t){ .size = 4 + 2 + response.data_len, .data = &response },
                      CY_USER_CONTEXT_EMPTY,
                      NULL);
