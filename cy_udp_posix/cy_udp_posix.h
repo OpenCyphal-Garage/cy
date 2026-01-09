@@ -66,8 +66,7 @@ cy_us_t cy_udp_posix_now(void);
 /// If the namespace is NULL or empty, the value from CYPHAL_NAMESPACE environment variable is used;
 /// if the environment variable is also not set, it defaults to an empty string.
 ///
-/// The home may be NULL or empty, in which case it defaults to #-prefixed UID in zero-padded lowercase hex;
-/// for example, `#0000000000abcdef`.
+/// The home may be empty, in which case it defaults to the UID in zero-padded lowercase hex; e.g., `0000000000abcdef`.
 ///
 /// Unused interfaces should have zero addresses; to parse IP address strings see udp_wrapper_parse_iface_address().
 cy_err_t cy_udp_posix_new(cy_udp_posix_t* const cy,
@@ -79,7 +78,7 @@ cy_err_t cy_udp_posix_new(cy_udp_posix_t* const cy,
 
 /// A shortcut constructor helper that automatically assigns the node parameters that fit most applications:
 /// - A semi-random EUI-64: a few of the most-significant bits are host-specific, the rest are random.
-/// - The home name is set to `#<uid>`.
+/// - The home name is set to hex UID (16 lowercase hex digits).
 /// - The namespace is read from the CYPHAL_NAMESPACE environment variable; if not set, empty namespace is used.
 /// - The local interfaces are chosen per the defaults configured on the local system.
 /// - The TX queue capacity is set to a reasonable large value.

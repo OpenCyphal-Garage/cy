@@ -653,7 +653,7 @@ cy_err_t cy_udp_posix_new(cy_udp_posix_t* const cy,
         wkv_str_t home_key = home;         // home is where ~ is
         if (!cy_name_is_valid(home_key)) { // If the home is not defined, default to the '#<uid>' format.
             home_key.str = home_copy;
-            home_key.len = (size_t)snprintf(home_copy, sizeof(home_copy), "#%016llx", (unsigned long long)uid);
+            home_key.len = (size_t)snprintf(home_copy, sizeof(home_copy), "%016llx", (unsigned long long)uid);
         }
         const wkv_str_t ns_key = cy_name_is_valid(namespace_) ? namespace_ : wkv_key(getenv("CYPHAL_NAMESPACE"));
         // Here we assume that any transport that Cyphal/UDP may work with in a redundant set will have
