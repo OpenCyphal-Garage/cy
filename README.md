@@ -1,3 +1,4 @@
+<img src="https://opencyphal.org/favicon-192.png" width="50px" align="right" style="text-align:right">
 <div align="center">
 
 # Cyphal v1.1 in C
@@ -127,9 +128,9 @@ spirit.
 
 Similar to GAAP.
 
-### Well-known pub/sub systems
+### Well-known decentralized pub/sub systems
 
-The list is long: DDS, MQTT, Zenoh, ROS1, etc. The distinguishing feature of Cyphal is that it is extremely simple and lightweight (only a couple thousand SLoC) while providing the key building blocks for decentralized pub/sub.
+These include DDS, Zenoh, etc. Cyphal does not attempt to directly compete with these, but instead offers an alternative for applications where the complexity of the competitors is undesirable.
 
 ## Compatibility with Cyphal/CAN v1.0
 
