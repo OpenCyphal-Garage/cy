@@ -53,7 +53,7 @@ int8 topic_log_age
 
 void8
 
-uint8 TOPIC_NAME_MAX = 88
+uint8 TOPIC_NAME_MAX = 200
 utf8[<=TOPIC_NAME_MAX] topic_name
 # On CAN FD, topic names should not be longer than 31 bytes to avoid multi-frame heartbeats.
 # A valid name:

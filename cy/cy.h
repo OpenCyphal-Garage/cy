@@ -362,11 +362,13 @@ uint64_t  cy_topic_hash(const cy_topic_t* const topic);
 //                                                      NAMES
 // =====================================================================================================================
 
-/// A sensible middle ground between worst-case gossip traffic and memory utilization vs. longest name support.
-/// In CAN FD networks, topic names should be short to avoid multi-frame heartbeats.
-#define CY_TOPIC_NAME_MAX 88
+/// Shorter topic names reduce the gossip traffic overhead.
+/// In CAN FD networks, topic names should not exceed 39 characters to avoid multi-frame heartbeats.
+/// This limit is chosen rather arbitrarily, keeping in mind RTPS where the maximum is 255,
+/// and ROS2 where the maximum is 248. In practice, topics very rarely exceed ~100 characters.
+#define CY_TOPIC_NAME_MAX 200
 
-/// The max namespace length should also provide space for at least one separator and the one-character topic name.
+/// The max namespace length should also provide space for at least one separator and a one-character topic name.
 #define CY_NAMESPACE_NAME_MAX (CY_TOPIC_NAME_MAX - 2)
 
 /// A valid name does not contain non-printable ASCII characters.
