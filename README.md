@@ -26,8 +26,8 @@ int main(void)
     // Set up the local Cyphal node. This is done using the platform- and transport-specific glue layer.
     // The rest of the application uses the generic Cyphal API only, except for the event loop spinning part.
     cy_udp_posix_t cy_udp;
-    cy_err_t       res = cy_udp_posix_new_simple(&cy_udp);
-    if (res != CY_OK) { ... }
+    cy_err_t       err = cy_udp_posix_new_simple(&cy_udp);
+    if (err != CY_OK) { ... }
     cy_t* const cy = &cy_udp.base;  // Get a pointer to the Cy instance for convenience.
 
     // ... to be continued ...
@@ -48,22 +48,22 @@ if (my_pub == NULL) { ... }  // handle error
 Publish a message asynchronously (non-blocking) using best-effort delivery:
 
 ```c++
-res = cy_publish(my_pub,
+err = cy_publish(my_pub,
                  cy_now(cy) + 100_000, // the message must be sent within 0.1 seconds from now
                  (cy_bytes_t){.size = 13, .data = "Hello Cyphal!"});
-if (res != CY_OK) { ... }
+if (err != CY_OK) { ... }
 ```
 
 Publish a message asynchronously (non-blocking) using reliable delivery (with delivery confirmation);
 the result can be provided per message via a callback:
 
 ```c++
-res = cy_publish_reliable(my_pub,
+err = cy_publish_reliable(my_pub,
                           cy_now(cy) + 2_000_000,   // keep trying to deliver the message for up to 2 seconds
                           (cy_bytes_t){.size = 34, .data = "Would you like to hear a TCP joke?"},
                           CY_USER_CONTEXT_EMPTY,    // here you can pass arbitrary context data to the callback
                           NULL);                    // pass a callback here to get notified of the delivery outcome
-if (res != CY_OK) { ... }
+if (err != CY_OK) { ... }
 ```
 
 There may be an arbitrary number of pending reliable messages per publisher, each with a dedicated callback.
@@ -90,7 +90,7 @@ static void on_message(cy_user_context_t user_context, cy_arrival_t* const arriv
     char* const dump = hexdump(size, data, 32);
     printf("Received message on topic %s:\n%s\n", cy_topic_name(arrival->topic).str, dump);
     // If relevant, you can optionally send a response back to the publisher here using cy_respond():
-    // res = cy_respond(arrival->responder, deadline, response_data, ...);
+    // err = cy_respond(arrival->responder, deadline, response_data, ...);
     // It is also possible to store the responder instance to send the response at any time later.
 }
 ```
@@ -100,8 +100,8 @@ Depending on the platform- and transport-specific glue layer used, the event loo
 ```c++
 while (true)
 {
-    res = cy_udp_posix_spin_until(cy, cy_now(cy) + 10000);  // spin for 0.01 seconds
-    if (res != CY_OK) { ... }
+    err = cy_udp_posix_spin_until(cy, cy_now(cy) + 10000);  // spin for 0.01 seconds
+    if (err != CY_OK) { ... }
     // here you can do other stuff periodically
 }
 ```
