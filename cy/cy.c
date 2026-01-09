@@ -1253,10 +1253,8 @@ static void pending_response_finalize(pending_response_t* const self, const cy_u
     cy_message_ts_t mt = { .timestamp = ts, .content = msg };
     cb(ctx, (ts >= 0) ? &mt : NULL);
 
-    // If the handler didn't take ownership of the message, destroy it here.
-    if (cy_message_size(mt.content) > 0) {
-        cy_message_destroy(&mt.content);
-    }
+    // This will be a no-op if the handler took ownership of the message by moving it out.
+    cy_message_destroy(&mt.content);
 }
 
 /// Deadlines are not unique, so this comparator never returns 0.
