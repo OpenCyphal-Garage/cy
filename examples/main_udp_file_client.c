@@ -9,20 +9,21 @@
 #define MEGA 1000000LL
 
 #define RESPONSE_TIMEOUT (30 * MEGA)
-#define PATH_CAPACITY    256
+#define PATH_MAX         2048
+#define DATA_MAX         4096
 
 typedef struct file_read_request_t
 {
     uint64_t read_offset;
     uint16_t path_len;
-    char     path[PATH_CAPACITY];
+    char     path[PATH_MAX];
 } file_read_request_t;
 
 typedef struct file_read_response_t
 {
     uint32_t error;
     uint16_t data_len;
-    uint8_t  data[PATH_CAPACITY];
+    uint8_t  data[DATA_MAX];
 } file_read_response_t;
 
 typedef struct future_t
@@ -62,7 +63,7 @@ int main(const int argc, char* argv[])
     file_read_request_t req;
     req.read_offset = 0;
     req.path_len    = (uint16_t)strlen(argv[1]);
-    if (req.path_len > PATH_CAPACITY) {
+    if (req.path_len > PATH_MAX) {
         (void)fprintf(stderr, "File path length %u is too long\n", req.path_len);
         return 1;
     }

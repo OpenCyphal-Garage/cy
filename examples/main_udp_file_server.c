@@ -7,12 +7,15 @@
 
 #define MEGA 1000000LL
 
+#define PATH_MAX 2048
+#define DATA_MAX 4096
+
 /// Request schema:
-///     uint64      read_offset
-///     utf8[<=256] file_path
+///     uint64           read_offset
+///     utf8[<=PATH_MAX] file_path
 /// Response schema:
-///     uint32      errno
-///     byte[<=256] data
+///     uint32           errno
+///     byte[<=DATA_MAX] data
 static void on_file_read_msg(const cy_user_context_t user, cy_arrival_t* const arv)
 {
     (void)user;
@@ -21,9 +24,9 @@ static void on_file_read_msg(const cy_user_context_t user, cy_arrival_t* const a
     // Deserialize the payload, assuming the local machine is little-endian, for simplicity.
     uint64_t read_offset = 0;
     uint16_t path_len    = 0;
-    char     file_name[257];
+    char     file_name[PATH_MAX + 1];
     if ((8 != cy_message_read(&arv->message.content, 0, 8, &read_offset)) ||
-        (2 != cy_message_read(&arv->message.content, 8, 2, &path_len)) || (path_len == 0) || (path_len > 256) ||
+        (2 != cy_message_read(&arv->message.content, 8, 2, &path_len)) || (path_len == 0) || (path_len > PATH_MAX) ||
         (path_len != cy_message_read(&arv->message.content, 10, path_len, file_name))) {
         CY_TRACE(cy, "Malformed request of size %zu", cy_message_size(arv->message.content));
         return;
@@ -35,15 +38,15 @@ static void on_file_read_msg(const cy_user_context_t user, cy_arrival_t* const a
     {
         uint32_t error;
         uint16_t data_len;
-        uint8_t  data[256];
+        uint8_t  data[DATA_MAX];
     } response;
     response.data_len = 0;
 
-    // Read the file, 256 bytes max, at the specified offset.
+    // Read the file at the specified offset.
     errno            = 0;
     FILE* const file = fopen(file_name, "rb");
     if ((file != NULL) && (fseek(file, (long)read_offset, SEEK_SET) == 0)) {
-        response.data_len = (uint16_t)fread(response.data, 1, 256, file);
+        response.data_len = (uint16_t)fread(response.data, 1, DATA_MAX, file);
     }
     response.error = (uint32_t)errno;
     if (file != NULL) {
