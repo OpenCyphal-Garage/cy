@@ -36,6 +36,7 @@
 /// where the values below or equal to CY_PINNED_SUBJECT_ID_MAX are used for pinned topics only.
 /// The modulus shall be a prime number; see https://github.com/OpenCyphal-Garage/cy/issues/12#issuecomment-3577831960
 #define CY_SUBJECT_ID_MODULUS_16bit 57349
+#define CY_SUBJECT_ID_MODULUS_17bit 122869
 #define CY_SUBJECT_ID_MODULUS_23bit 8380417
 #define CY_SUBJECT_ID_MODULUS_32bit 4294959083U
 
