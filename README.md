@@ -9,15 +9,20 @@ _pub/sub without steroids_
 
 -----
 
-A C implementation of Cyphal v1.1: robust decentralized zero-configuration pub/sub with tunable reliability and service discovery in only a couple thousand lines of straightforward C. Runs anywhere, including small baremetal MCUs. The key design goals are simplicity and robustness.
+A C implementation of Cyphal v1.1: robust decentralized zero-configuration pub/sub with tunable reliability
+and service discovery in only a couple thousand lines of straightforward C.
+Runs anywhere, including small baremetal MCUs.
+The key design goals are simplicity and robustness.
 
 🚧 **WORK IN PROGRESS** 🏗️ The library is under active development; the API and functionality may change. Bugs afoot.
 
-Build-time dependencies, all single-header-only:
+To use the library in your project, simply copy `cy.c`, `cy.h`, and `cy_platform.h` into your source tree,
+or add this repository as a submodule.
+The following external dependencies are required, all single-header-only:
 
-- [`cavl2.h`](https://github.com/pavel-kirienko/cavl) -- AVL tree.
-- [`wkv.h`](https://github.com/pavel-kirienko/wild_key_value) -- key-value container with fast pattern matching & key routing.
-- [`rapidhash.h`](https://github.com/Nicoshev/rapidhash) -- a good 64-bit hash by Nicolas De Carli (BSD 2-clause license).
+- [`cavl2.h`](https://github.com/pavel-kirienko/cavl) --- An AVL tree (Pavel Kirienko, MIT license).
+- [`wkv.h`](https://github.com/pavel-kirienko/wild_key_value) --- A key-value container with fast pattern matching & key routing (Pavel Kirienko, MIT license).
+- [`rapidhash.h`](https://github.com/Nicoshev/rapidhash) --- A good 64-bit hash (Nicolas De Carli, BSD 2-clause license).
 
 ## 📚 API crash course
 
@@ -39,7 +44,7 @@ int main(void)
     cy_udp_posix_t cy_udp;
     cy_err_t       err = cy_udp_posix_new_simple(&cy_udp);
     if (err != CY_OK) { ... }
-    cy_t* const cy = &cy_udp.base;  // Get a pointer to the Cy instance for convenience.
+    cy_t* cy = &cy_udp.base;  // Get a pointer to the Cy instance for convenience.
 
     // ... to be continued ...
 }
@@ -52,7 +57,7 @@ Use `wkv_key(const char*)` to create such strings from ordinary C strings.
 Create a publisher:
 
 ```c++
-cy_publisher_t* const my_pub = cy_advertise(cy, wkv_key("my/topic"));
+cy_publisher_t* my_pub = cy_advertise(cy, wkv_key("my/topic"));
 if (my_pub == NULL) { ... }  // handle error
 ```
 
@@ -72,7 +77,7 @@ the result can be provided per message via a callback:
 err = cy_publish_reliable(my_pub,
                           cy_now(cy) + 2_000_000,   // keep trying to deliver the message for up to 2 seconds
                           (cy_bytes_t){.size = 34, .data = "Would you like to hear a TCP joke?"},
-                          CY_USER_CONTEXT_EMPTY,    // here you can pass arbitrary context data to the callback
+                          CY_USER_CONTEXT_EMPTY,    // optionally, pass arbitrary context data to the callback
                           NULL);                    // pass a callback here to get notified of the delivery outcome
 if (err != CY_OK) { ... }
 ```
@@ -82,30 +87,65 @@ There may be an arbitrary number of pending reliable messages per publisher, eac
 Subscribe to a topic:
 
 ```c++
-cy_subscriber_t* const my_sub = cy_subscribe(cy,
-                                             wkv_key("my/topic"),
-                                             1024 * 100,            // max message size in bytes; excess truncated
-                                             CY_USER_CONTEXT_EMPTY, // context data passed to the callback
-                                             on_message);           // callback invoked upon message arrival
+cy_subscriber_t* my_sub = cy_subscribe(cy,
+                                       wkv_key("my/topic"),
+                                       1024 * 100,            // max message size in bytes; excess truncated
+                                       CY_USER_CONTEXT_EMPTY, // context data passed to the callback
+                                       on_message);           // callback invoked upon message arrival
 if (my_sub == NULL) { ... }
 ```
 
 The message arrival callback looks like this:
 
 ```c++
-static void on_message(cy_user_context_t user_context, cy_arrival_t* const arrival) 
+void on_message(cy_user_context_t user_context, cy_arrival_t* arrival) 
 {
-    const size_t  size = cy_message_size(arrival->message.content);
+    size_t  size = cy_message_size(arrival->message.content);
     unsigned char data[size];
     cy_message_read(&arrival->message.content, 0, size, data);  // feel free to read only the parts of interest
-    char* const dump = hexdump(size, data, 32);
+    char* dump = hexdump(size, data, 32);
     printf("Received message on topic %s:\n%s\n", cy_topic_name(arrival->topic).str, dump);
-    // If relevant, you can optionally send a response back to the publisher here using cy_respond():
+    // If relevant, one can optionally send a response back to the publisher here using cy_respond():
     // err = cy_respond(arrival->responder, deadline, response_data, ...);
     // It is also possible to store the responder instance to send the response at any time later.
 }
 ```
 
+Observe that the message callback provides an option to send a response back to the publisher directly using
+a direct P2P channel.
+This is how one can implement request/response (RPC-like) interactions.
+If the application expects a response, then the correct publishing function to use is `cy_request()`,
+which takes a callback that is invoked when the response arrives or times out:
+
+```c++
+err = cy_request(my_pub,
+                 cy_now(cy) + 500_000,      // outgoing request deadline
+                 cy_now(cy) + 2_000_000,    // give up waiting for the response after 2 seconds
+                 (cy_bytes_t){.size = 10, .data = "Hello RPC!"},
+                 CY_USER_CONTEXT_EMPTY,     // context for the request delivery callback
+                 NULL,                      // request delivery callback
+                 CY_USER_CONTEXT_EMPTY,     // context for the response callback
+                 on_response);
+if (err != CY_OK) { ... }
+```
+
+The response callback looks like this:
+
+```c++
+void on_response(cy_user_context_t user_context, cy_message_ts_t* response)
+{
+    if (response != NULL) {
+        const size_t  size = cy_message_size(response->content);
+        unsigned char data[size];
+        cy_message_read(&response->content, 0, size, data);
+        // Process the response data...
+    } else {
+        // Timed out while waiting for the response.
+    }
+}
+```
+
+Finally, spin the event loop to keep the stack making progress and processing incoming/outgoing messages.
 Depending on the platform- and transport-specific glue layer used, the event loop spinning part may look like this:
 
 ```c++
@@ -113,7 +153,7 @@ while (true)
 {
     err = cy_udp_posix_spin_until(cy, cy_now(cy) + 10000);  // spin for 0.01 seconds
     if (err != CY_OK) { ... }
-    // here you can do other stuff periodically
+    // do some other stuff here periodically
 }
 ```
 
@@ -123,8 +163,9 @@ That's it! See the `examples/` folder for more complete examples.
 
 ### [Group Address Allocation Protocol (GAAP)](https://datatracker.ietf.org/doc/html/draft-ietf-pim-gaap-03)
 
-Instead of CRDT, the GAAP relies on the conventional claim/deny approach. Otherwise, the protocol is very similar in 
-spirit.
+This is a form of a distributed consensus protocol that assigns unique numeric identifiers (multicast group addresses)
+to string keys. Cyphal v1.1 solves essentially the same problem where it finds a unique subject-ID per topic name.
+The difference of GAAP is that instead of CRDT, it relies on the conventional claim/deny approach.
 
 ### [Zeroconf Multicast Address Allocation Protocol (ZMAAP)](https://datatracker.ietf.org/doc/html/draft-ietf-zeroconf-zmaap-02)
 
