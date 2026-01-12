@@ -12,7 +12,7 @@ import string
 from rapidhash import rapidhash
 
 ALPHABET = string.ascii_letters + string.digits
-PINNED_SUBJECT_ID_MAX = 8189
+PINNED_SUBJECT_ID_MAX = 2**13 - 1
 
 
 def topic_hash(topic_name: str) -> int:

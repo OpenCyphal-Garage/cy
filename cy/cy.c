@@ -1594,7 +1594,7 @@ cy_err_t cy_new(cy_t* const              cy,
                 const wkv_str_t          namespace_,
                 const uint32_t           subject_id_modulus)
 {
-    if ((cy == NULL) || (vtable == NULL) || (subject_id_modulus < CY_SUBJECT_ID_MODULUS_16bit) ||
+    if ((cy == NULL) || (vtable == NULL) || (subject_id_modulus < CY_SUBJECT_ID_MODULUS_17bit) ||
         !is_prime_u32(subject_id_modulus)) {
         return CY_ERR_ARGUMENT;
     }

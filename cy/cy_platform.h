@@ -32,13 +32,16 @@
 /// The subject-ID modulus depends on the width of the subject-ID field in the transport protocol.
 /// All nodes in the network shall share the same value.
 /// If heterogeneously redundant transports are used, then the smallest modulus shall be used.
-/// The range of used subject-ID values is [0, CY_PINNED_SUBJECT_ID_MAX+modulus),
+///
+/// The full range of used subject-ID values is [0, CY_PINNED_SUBJECT_ID_MAX+modulus),
 /// where the values below or equal to CY_PINNED_SUBJECT_ID_MAX are used for pinned topics only.
-/// The modulus shall be a prime number; see https://github.com/OpenCyphal-Garage/cy/issues/12#issuecomment-3577831960
-#define CY_SUBJECT_ID_MODULUS_16bit 57349
-#define CY_SUBJECT_ID_MODULUS_17bit 122869
-#define CY_SUBJECT_ID_MODULUS_23bit 8380417
-#define CY_SUBJECT_ID_MODULUS_32bit 4294959083U
+///
+/// The modulus shall be a prime number because the subject-ID function uses a quadratic probing strategy:
+///     subject_id = CY_PINNED_SUBJECT_ID_MAX + (hash + evictions^2) mod modulus
+/// See https://en.wikipedia.org/wiki/Quadratic_probing
+#define CY_SUBJECT_ID_MODULUS_17bit 122869      // -1+8191=0x0001FFF3; (2**17-1)-0x0001FFF3=12 identifiers unused
+#define CY_SUBJECT_ID_MODULUS_23bit 8380417     // -1+8191=0x007FFFFF; (2**23-1)-0x007FFFFF=0  identifiers unused
+#define CY_SUBJECT_ID_MODULUS_32bit 4294959083U // -1+8191=0xFFFFFFE9; (2**32-1)-0xFFFFFFE9=22 identifiers unused
 
 /// If CY_CONFIG_TRACE is defined and is non-zero, cy_trace() shall be defined externally.
 #ifndef CY_CONFIG_TRACE
