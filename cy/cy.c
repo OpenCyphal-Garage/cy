@@ -45,6 +45,7 @@ static const wkv_str_t str_invalid = { .len = SIZE_MAX, .str = NULL };
 typedef unsigned char byte_t;
 
 static size_t  larger(const size_t a, const size_t b) { return (a > b) ? a : b; }
+static size_t  smaller(const size_t a, const size_t b) { return (a < b) ? a : b; }
 static int64_t max_i64(const int64_t a, const int64_t b) { return (a > b) ? a : b; }
 static int64_t min_i64(const int64_t a, const int64_t b) { return (a < b) ? a : b; }
 
@@ -440,34 +441,33 @@ static void schedule_gossip(cy_topic_t* const topic)
     }
 }
 
-/// Returns UINT32_MAX if the string is not a valid canonical pinned subject-ID form. A valid form is: "#01af".
-static uint32_t parse_pinned(const wkv_str_t s)
+/// Parses the hexadecimal hash override suffix if present and valid. Example: "sensors/temperature#1a2b".
+static bool parse_hash_override(const wkv_str_t s, uint64_t* const out)
 {
-    if ((s.len != 5) || (s.str[0] != '#')) {
-        return UINT32_MAX;
-    }
-    uint32_t out = 0U;
-    for (size_t i = 1; i < s.len; i++) {
-        out <<= 4U;
-        const unsigned char ch = (unsigned char)s.str[i];
-        if ((ch >= '0') && (ch <= '9')) {
-            out |= (uint32_t)(ch - '0');
-        } else if ((ch >= 'a') && (ch <= 'f')) {
-            out |= (uint32_t)(ch - 'a' + 10U);
-        } else {
-            return UINT32_MAX;
+    *out            = 0;
+    char* const end = (char*)s.str + s.len;
+    for (size_t i = 0; i < smaller(s.len, 17); i++) {
+        const unsigned char ch = (unsigned char)*(end - (i + 1));
+        if (ch == '#') {
+            return i > 0;
         }
+        uint64_t digit = 0;
+        if ((ch >= '0') && (ch <= '9')) {
+            digit = ch - '0';
+        } else if ((ch >= 'a') && (ch <= 'f')) {
+            digit = ch - 'a' + 10U;
+        } else {
+            break;
+        }
+        *out |= digit << (i * 4U);
     }
-    return (out <= CY_PINNED_SUBJECT_ID_MAX) ? out : UINT32_MAX;
+    return false;
 }
 
-/// The topic hash is the key component of the protocol.
-/// For pinned topics, hash<CY_TOTAL_SUBJECT_COUNT.
-/// The probability of a random hash falling into the pinned range is ~4.44e-16, or about one in two quadrillion.
 static uint64_t topic_hash(const wkv_str_t name)
 {
-    uint64_t hash = parse_pinned(name);
-    if (hash > CY_PINNED_SUBJECT_ID_MAX) {
+    uint64_t hash = 0;
+    if (!parse_hash_override(name, &hash)) {
         hash = rapidhash(name.str, name.len);
     }
     return hash;

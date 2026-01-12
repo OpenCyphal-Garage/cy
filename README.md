@@ -179,7 +179,10 @@ These include DDS, Zenoh, etc. Cyphal does not attempt to directly compete with 
 
 Cyphal v1.1 is wire-compatible with Cyphal/CAN v1.0.
 
-To publish or subscribe to v1.0 subjects, use pinned topics of the form `/#abcd`, where `abcd` is the subject-ID of the topic as a 4-digit hexadecimal number. For example, to subscribe to subject-ID 1234, use the topic name `/#04d2`.
+To publish or subscribe to v1.0 subjects, use pinned topics of the form `whatever/#abcd`,
+where `abcd` is the subject-ID of the topic as a hexadecimal number,
+and the part before `#` is arbitrary and ignored.
+For example, to subscribe to subject-ID 1234, use the topic name `#04d2`.
 
 Cyphal v1.1 has no RPC in the same way as Cyphal/CAN v1.0 does; instead, it uses pub/sub for everything, including request/response interactions. Thus, to use RPC in a legacy CAN network, a low-level CAN transport access is required.
 
