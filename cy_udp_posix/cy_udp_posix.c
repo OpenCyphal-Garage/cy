@@ -59,6 +59,20 @@ static size_t ceil_pow2(const size_t x)
     return ((size_t)1U) << ((sizeof(x) * CHAR_BIT) - ((uint_fast8_t)clz_size(x - 1U)));
 }
 
+/// A simple hash for two u64 arguments based on the SplitMix64 finalizer.
+/// Much better than a simple xor while not being too heavy.
+static uint64_t hash2_u64(const uint64_t a, const uint64_t b)
+{
+    uint64_t x = a ^ (b + 0x9e3779b97f4a7c15ULL);
+    x ^= (a >> 32U) ^ (b << 32U);
+    x ^= x >> 30U;
+    x *= 0xbf58476d1ce4e5b9ULL;
+    x ^= x >> 27U;
+    x *= 0x94d049bb133111ebULL;
+    x ^= x >> 31U;
+    return x;
+}
+
 static bool is_valid_ip(const uint32_t ip) { return (ip > 0) && (ip < UINT32_MAX); }
 
 static void* mem_alloc(void* const user, const size_t size)
@@ -253,12 +267,6 @@ static cy_responder_t make_responder(cy_t* const           cy,
 
 // ----------------------------------------  TOPIC VTABLE  ----------------------------------------
 
-typedef struct
-{
-    uint64_t source_uid;
-    uint64_t transfer_id;
-} transfer_uid_t;
-
 struct cy_udp_posix_topic_t
 {
     cy_topic_t       base;
@@ -272,7 +280,7 @@ struct cy_udp_posix_topic_t
     /// The history is only used with stateless subscriptions to reject the most obvious duplicates.
     /// It is essentially optional, but it is expected to save quite a bit of processing on busy topics,
     /// in particular in the heartbeat topic when used in a large network with redundant interfaces.
-    transfer_uid_t history[2];
+    uint64_t history[2];
 };
 
 static void on_topic_feedback(udpard_tx_t* const tx, const udpard_tx_feedback_t fb)
@@ -365,20 +373,19 @@ static void v_on_msg_stateless(udpard_rx_t* const rx, udpard_rx_port_t* const po
     // CPU cycles because each message requires some log-time index lookups.
     // We can mitigate this by applying a very simple filter that is cheap and computationally negligible.
     // It doesn't have to remove all duplicates -- removing the most obvious ones is sufficient to be useful.
-    const bool dup =
-      ((topic->history[0].transfer_id == tr.transfer_id) && (topic->history[0].source_uid == tr.remote.uid)) ||
-      ((topic->history[1].transfer_id == tr.transfer_id) && (topic->history[1].source_uid == tr.remote.uid));
+    const uint64_t msg_fingerprint = hash2_u64(tr.transfer_id, tr.remote.uid);
+    const bool     dup             = (topic->history[0] == msg_fingerprint) || (topic->history[1] == msg_fingerprint);
     if (!dup) {
-        topic->history[1]             = topic->history[0];
-        topic->history[0].transfer_id = tr.transfer_id;
-        topic->history[0].source_uid  = tr.remote.uid;
+        topic->history[1] = topic->history[0];
+        topic->history[0] = msg_fingerprint;
         v_on_msg(rx, port, tr);
     } else {
         CY_TRACE(topic->base.cy,
-                 "🍒️ T%016llx #%llu N%016llx duplicate transfer dropped",
+                 "🍒️ T%016llx #%llu N%016llx 👆%016llx duplicate transfer dropped",
                  (unsigned long long)port->topic_hash,
                  (unsigned long long)tr.transfer_id,
-                 (unsigned long long)tr.remote.uid);
+                 (unsigned long long)tr.remote.uid,
+                 (unsigned long long)msg_fingerprint);
     }
 }
 
