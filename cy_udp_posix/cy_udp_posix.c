@@ -464,11 +464,13 @@ static void v_topic_relocate(cy_topic_t* const self) { (void)self; }
 static void v_topic_destroy(cy_topic_t* const topic)
 {
     CY_TRACE(topic->cy, "🗑️ '%s'", topic->name);
+    assert(!topic->subscribed);
     cy_udp_posix_t* const       cy        = (cy_udp_posix_t*)topic->cy;
     cy_udp_posix_topic_t* const udp_topic = (cy_udp_posix_topic_t*)topic;
     for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
         udp_wrapper_close(&udp_topic->rx_sock[i]);
     }
+    udpard_tx_cancel_all(&cy->udpard_tx, topic->hash); // should already be canceled
     mem_free(cy, sizeof(cy_udp_posix_topic_t), topic);
     cy->n_topics--;
 }
