@@ -71,7 +71,7 @@ typedef struct cy_bytes_t
 
 /// The size is chosen to match most small closures, which is helpful when interfacing with Rust/C++ lambdas.
 /// The size can be increased as long as it doesn't break the compile-time size checks/limits in the platform layer.
-#define CY_USER_CONTEXT_PTR_COUNT 4
+#define CY_USER_CONTEXT_PTR_COUNT 2
 
 /// An opaque user context enabling the application to share data with callbacks. It is intended to be passed by value.
 typedef union cy_user_context_t

@@ -124,19 +124,24 @@ static uint64_t prng64(uint64_t* const state, const uint64_t local_uid)
     return rapidhash_withSeed(state, sizeof(uint64_t), local_uid);
 }
 
-static cy_feedback_context_t feedback_context_unbox(const udpard_user_context_t ctx)
+static cy_feedback_context_t tx_context_unbox_feedback(const udpard_user_context_t ctx)
 {
-    static_assert(sizeof(cy_feedback_context_t) <= sizeof(udpard_user_context_t), "");
+    static_assert(sizeof(cy_feedback_context_t) <= (sizeof(udpard_user_context_t) - sizeof(void*)), "");
     cy_feedback_context_t out;
     memcpy(&out, &ctx, sizeof(out));
     return out;
 }
 
-static udpard_user_context_t feedback_context_box(const cy_feedback_context_t ctx)
+/// The topic pointer is stored in the last pointer slot.
+static udpard_user_context_t tx_context_box(const cy_feedback_context_t* const ctx, cy_topic_t* const topic)
 {
-    static_assert(sizeof(cy_feedback_context_t) <= sizeof(udpard_user_context_t), "");
+    static_assert(sizeof(cy_feedback_context_t) <= (sizeof(udpard_user_context_t) - sizeof(void*)), "");
     udpard_user_context_t out = { .ptr = { NULL } };
-    memcpy(&out, &ctx, sizeof(ctx));
+    if (ctx != NULL) {
+        memcpy(&out, ctx, sizeof(*ctx));
+        assert(out.ptr[UDPARD_USER_CONTEXT_PTR_COUNT - 1] == NULL);
+    }
+    out.ptr[UDPARD_USER_CONTEXT_PTR_COUNT - 1] = (void*)topic;
     return out;
 }
 
@@ -203,7 +208,7 @@ static void on_response_feedback(udpard_tx_t* const tx, const udpard_tx_feedback
 {
     assert(tx->user != NULL);
     assert(fb.acknowledgements <= 1);
-    cy_on_response_feedback(tx->user, feedback_context_unbox(fb.user), fb.acknowledgements != 0);
+    cy_on_response_feedback(tx->user, tx_context_unbox_feedback(fb.user), fb.acknowledgements != 0);
 }
 
 /// Invoked by Cy when the application desires to respond to a message received earlier.
@@ -228,7 +233,7 @@ static cy_err_t v_respond(const cy_responder_t* const self,
                                        ctx.remote,
                                        cy_bytes_to_udpard_bytes(message),
                                        on_response_feedback,
-                                       feedback_context_box(context));
+                                       tx_context_box(&context, NULL));
     CY_TRACE(&cy->base,
              "💬 T%016llx #%llu N%016llx res=%u",
              (unsigned long long)ctx.topic_hash,
@@ -286,7 +291,7 @@ struct cy_udp_posix_topic_t
 static void on_topic_feedback(udpard_tx_t* const tx, const udpard_tx_feedback_t fb)
 {
     assert(tx->user != NULL);
-    cy_on_message_feedback(tx->user, feedback_context_unbox(fb.user), fb.acknowledgements);
+    cy_on_message_feedback(tx->user, tx_context_unbox_feedback(fb.user), fb.acknowledgements);
 }
 
 static cy_err_t v_topic_publish(cy_topic_t* const                  self,
@@ -297,15 +302,8 @@ static cy_err_t v_topic_publish(cy_topic_t* const                  self,
                                 uint64_t* const                    out_transfer_id,
                                 const size_t                       response_extent)
 {
-    cy_udp_posix_t* const   cy                                = (cy_udp_posix_t*)self->cy;
-    const udpard_udpip_ep_t ep                                = udpard_make_subject_endpoint(cy_topic_subject_id(self));
-    udpard_udpip_ep_t       endpoints[UDPARD_IFACE_COUNT_MAX] = { { 0 } };
-    for (size_t i = 0; i < UDPARD_IFACE_COUNT_MAX; i++) {
-        if ((cy->iface_bitmap & (1U << i)) != 0U) {
-            endpoints[i] = ep;
-        }
-    }
-    const uint64_t transfer_id = ((cy_udp_posix_topic_t*)self)->pub_transfer_id++;
+    cy_udp_posix_t* const cy          = (cy_udp_posix_t*)self->cy;
+    const uint64_t        transfer_id = ((cy_udp_posix_topic_t*)self)->pub_transfer_id++;
     if (out_transfer_id != NULL) {
         *out_transfer_id = transfer_id;
     }
@@ -320,17 +318,17 @@ static cy_err_t v_topic_publish(cy_topic_t* const                  self,
     }
     const uint64_t e_oom      = cy->udpard_tx.errors_oom;
     const uint64_t e_capacity = cy->udpard_tx.errors_capacity;
-    const bool     ok =
-      udpard_tx_push(&cy->udpard_tx,
-                     cy_udp_posix_now(),
-                     tx_deadline,
-                     (udpard_prio_t)priority,
-                     self->hash,
-                     endpoints,
-                     transfer_id,
-                     cy_bytes_to_udpard_bytes(message),
-                     (reliable_context != NULL) ? on_topic_feedback : NULL,
-                     (reliable_context != NULL) ? feedback_context_box(*reliable_context) : UDPARD_USER_CONTEXT_NULL);
+    //
+    const bool ok = udpard_tx_push(&cy->udpard_tx,
+                                   cy_udp_posix_now(),
+                                   tx_deadline,
+                                   cy->iface_bitmap,
+                                   (udpard_prio_t)priority,
+                                   self->hash,
+                                   transfer_id,
+                                   cy_bytes_to_udpard_bytes(message),
+                                   (reliable_context != NULL) ? on_topic_feedback : NULL,
+                                   tx_context_box(reliable_context, self));
     if (ok) {
         return CY_OK;
     }
@@ -461,6 +459,8 @@ static void v_topic_unsubscribe(cy_topic_t* const self)
     CY_TRACE(self->cy, "🔕 '%s'", self->name);
 }
 
+static void v_topic_relocate(cy_topic_t* const self) { (void)self; }
+
 static void v_topic_destroy(cy_topic_t* const topic)
 {
     CY_TRACE(topic->cy, "🗑️ '%s'", topic->name);
@@ -476,6 +476,7 @@ static void v_topic_destroy(cy_topic_t* const topic)
 static const cy_topic_vtable_t topic_vtable = { .publish     = v_topic_publish,
                                                 .subscribe   = v_topic_subscribe,
                                                 .unsubscribe = v_topic_unsubscribe,
+                                                .relocate    = v_topic_relocate,
                                                 .destroy     = v_topic_destroy };
 
 static cy_topic_t* v_topic_new(cy_t* const self)
@@ -566,7 +567,7 @@ static void v_on_p2p_msg(udpard_rx_t* const rx, udpard_rx_port_p2p_t* const port
     cy_on_response(&cy->base, tr.base.timestamp, tr.topic_hash, tr.base.transfer_id, msg);
 }
 
-static bool v_tx_eject(udpard_tx_t* const tx, udpard_tx_ejection_t* const ej)
+static bool v_tx_eject_p2p(udpard_tx_t* const tx, udpard_tx_ejection_t* const ej, const udpard_udpip_ep_t destination)
 {
     cy_udp_posix_t* const cy = (cy_udp_posix_t*)tx->user;
     assert(cy != NULL);
@@ -577,8 +578,8 @@ static bool v_tx_eject(udpard_tx_t* const tx, udpard_tx_ejection_t* const ej)
     // but the Berkeley socket API does not allow us to take advantage of that -- the data will be copied into the
     // kernel space anyway. Therefore, we simply send it with copying and do not bother with reference counting.
     const int16_t res = udp_wrapper_send(&cy->sock[ej->iface_index], //
-                                         ej->destination.ip,
-                                         ej->destination.port,
+                                         destination.ip,
+                                         destination.port,
                                          ej->dscp,
                                          ej->datagram.size,
                                          ej->datagram.data);
@@ -588,6 +589,14 @@ static bool v_tx_eject(udpard_tx_t* const tx, udpard_tx_ejection_t* const ej)
     }
     return res != 0; // either transmitted successfully or dropped due to error
 }
+
+static bool v_tx_eject_subject(udpard_tx_t* const tx, udpard_tx_ejection_t* const ej)
+{
+    cy_topic_t* const topic = ej->user.ptr[UDPARD_USER_CONTEXT_PTR_COUNT - 1];
+    return v_tx_eject_p2p(tx, ej, udpard_make_subject_endpoint(cy_topic_subject_id(topic)));
+}
+
+static const udpard_tx_vtable_t tx_vtable = { .eject_subject = v_tx_eject_subject, .eject_p2p = v_tx_eject_p2p };
 
 cy_err_t cy_udp_posix_new(cy_udp_posix_t* const cy,
                           const uint64_t        uid,
@@ -619,9 +628,8 @@ cy_err_t cy_udp_posix_new(cy_udp_posix_t* const cy,
     cy->prng_state = (uint64_t)time(NULL);
 
     // Set up the TX and RX pipelines.
-    static const udpard_tx_vtable_t tx_vtable = { .eject = v_tx_eject };
-    const udpard_rx_mem_resources_t rx_mem    = { .fragment = cy->mem, .session = cy->mem };
-    udpard_tx_mem_resources_t       tx_mem    = { .transfer = cy->mem };
+    const udpard_rx_mem_resources_t rx_mem = { .fragment = cy->mem, .session = cy->mem };
+    udpard_tx_mem_resources_t       tx_mem = { .transfer = cy->mem };
     for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
         cy->sock[i] = udp_wrapper_new();
         if (is_valid_ip(local_iface_address[i])) {

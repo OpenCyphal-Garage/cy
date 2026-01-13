@@ -200,6 +200,25 @@ typedef struct cy_topic_vtable_t
     /// Instructs the underlying transport to destroy an existing subscription. Infallible by design.
     void (*unsubscribe)(cy_topic_t* self);
 
+    /// Invoked to notify the platform layer that the topic has been moved to a different subject-ID.
+    /// Whether any action is necessary depends on the design of the underlying transport layer.
+    ///
+    /// If there are any pending outgoing transfers, they must be updated to use the new subject-ID;
+    /// otherwise, remote nodes may not be able to receive them. This is critical because the local node
+    /// does not wait to confirm the correct subject-ID (i.e., eviction counter) before allowing the application
+    /// to publish new messages. Hence, it is always a possibility that messages published over a newly created
+    /// topic are sent on a wrong subject. The protocol is designed to correct this quickly: if at least one node
+    /// notices the collision, it will gossip the correct eviction counter (which informs the subject-ID),
+    /// allowing the local node to correct the subject-ID and resend any pending transfers.
+    ///
+    /// Looking for enqueued transfers and changing them may not be the best design, however; ideally, the transport
+    /// should query which subject-ID to use at the time of transmission. In this case, no action is necessary here.
+    ///
+    /// It is guaranteed that at the time of invocation:
+    /// - The topic is not subscribed to (if it was, unsubscribe() has already been called).
+    /// - Invocation of cy_topic_subject_id() will return the new subject-ID.
+    void (*relocate)(cy_topic_t* self);
+
     void (*destroy)(cy_topic_t* self);
 } cy_topic_vtable_t;
 

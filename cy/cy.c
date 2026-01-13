@@ -635,6 +635,7 @@ static void topic_allocate(cy_topic_t* const topic, const uint64_t new_evictions
         // Allocation done (end of the recursion chain), schedule gossip and resubscribe if needed.
         // If a resubscription failed in the past, we will retry here as long as there is at least one live subscriber.
         schedule_gossip_urgent(topic);
+        topic->vtable->relocate(topic); // Notify the underlying transport of the subject-ID change.
         topic_ensure_subscribed(topic);
         // Re-allocate the defeated topic with incremented eviction counter.
         if (that != NULL) {

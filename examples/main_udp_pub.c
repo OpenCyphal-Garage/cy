@@ -150,7 +150,7 @@ int main(const int argc, char* argv[])
                               (unsigned long long)cfg.local_uid,
                               (long long)now);
                 const cy_user_context_t ctx = {
-                    .ptr = { NULL, (void*)cy_publisher_topic(publishers[i]), NULL, NULL },
+                    .ptr = { NULL, (void*)cy_publisher_topic(publishers[i]) },
                 };
                 const cy_err_t pub_res = cy_request(publishers[i],
                                                     now + (MEGA * 2),

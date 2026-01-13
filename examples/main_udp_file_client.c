@@ -96,7 +96,7 @@ int main(const int argc, char* argv[])
                          (cy_bytes_t){ .size = 8 + 2 + req.path_len, .data = &req },
                          CY_USER_CONTEXT_EMPTY,
                          on_request_delivery_result,
-                         (cy_user_context_t){ .ptr = { &future, NULL, NULL, NULL } },
+                         (cy_user_context_t){ .ptr = { &future, NULL } },
                          on_response);
         if (res != CY_OK) {
             errx(res, "cy_request");
