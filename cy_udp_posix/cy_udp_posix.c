@@ -341,6 +341,12 @@ static cy_err_t v_topic_publish(cy_topic_t* const                  self,
     return CY_ERR_ARGUMENT;
 }
 
+static bool v_topic_cancel(cy_topic_t* self, uint64_t transfer_id)
+{
+    cy_udp_posix_t* const cy = (cy_udp_posix_t*)self->cy;
+    return udpard_tx_cancel(&cy->udpard_tx, self->hash, transfer_id);
+}
+
 static bool topic_is_subscribed(const cy_udp_posix_topic_t* const self)
 {
     for (size_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
@@ -476,6 +482,7 @@ static void v_topic_destroy(cy_topic_t* const topic)
 }
 
 static const cy_topic_vtable_t topic_vtable = { .publish     = v_topic_publish,
+                                                .cancel      = v_topic_cancel,
                                                 .subscribe   = v_topic_subscribe,
                                                 .unsubscribe = v_topic_unsubscribe,
                                                 .relocate    = v_topic_relocate,

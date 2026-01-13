@@ -190,6 +190,11 @@ typedef struct cy_topic_vtable_t
                         uint64_t*                    out_transfer_id,
                         size_t                       response_extent);
 
+    /// Cancel publication of a previously published message that is still pending transmission.
+    /// Returns true iff the message was found and cancelled; false if no such pending message exists.
+    /// For reliable messages, the delivery callback must be invoked.
+    bool (*cancel)(cy_topic_t* self, uint64_t transfer_id);
+
     /// Instructs the underlying transport layer to create a new subscription on the topic.
     /// Messages received on this topic will be reported via cy_on_message().
     /// The topic is guaranteed to not be subscribed to when this function is invoked.

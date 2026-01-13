@@ -206,6 +206,7 @@ void      cy_priority_set(cy_publisher_t* const pub, const cy_prio_t priority);
 /// It can be used to obtain the topic name, hash, etc. of this publisher.
 cy_topic_t* cy_publisher_topic(const cy_publisher_t* const pub);
 
+/// Pending delivery callbacks, if any, will not be invoked after unadvertisement.
 void cy_unadvertise(cy_publisher_t* const pub);
 
 // =====================================================================================================================
@@ -313,8 +314,12 @@ cy_subscriber_t* cy_subscribe_ordered(cy_t* const                    cy,
 /// The response will be sent directly to the publisher using peer-to-peer transport, not affecting other nodes.
 /// This can be invoked from a subscription callback or at any later point as long as the responder object is available,
 /// but there may be at most one such invocation per responder instance.
+///
 /// The feedback may be NULL if no delivery status notification is needed; the absence of the callback does not imply
 /// that the transfer will not be sent in the reliable mode.
+/// If a feedback callback is provided, it will be invoked EXACTLY ONCE to report the outcome of the delivery attempt,
+/// unless this function returns anything other than CY_OK. In particular, it will be invoked also when the topic is
+/// destroyed with pending responses.
 cy_err_t cy_respond(const cy_responder_t         responder,
                     const cy_us_t                tx_deadline,
                     const cy_bytes_t             response_message,
