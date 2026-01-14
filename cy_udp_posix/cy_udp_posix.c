@@ -140,7 +140,7 @@ static udpard_bytes_scattered_t cy_bytes_to_udpard_bytes(const cy_bytes_t messag
 
 static void v_message_destroy(cy_message_t* const self)
 {
-    cy_udp_posix_t* const owner = (cy_udp_posix_t*)self->state[1];
+    const cy_udp_posix_t* const owner = (cy_udp_posix_t*)self->state[1];
     udpard_fragment_free_all((udpard_fragment_t*)self->state[0], udpard_make_deleter(owner->mem));
 }
 
@@ -196,7 +196,7 @@ static void on_response_feedback(udpard_tx_t* const tx, const udpard_tx_feedback
 }
 
 /// Invoked by Cy when the application desires to respond to a message received earlier.
-static cy_err_t v_respond(const cy_responder_t* self, cy_us_t tx_deadline, cy_bytes_t message)
+static cy_err_t v_respond(const cy_responder_t* const self, const cy_us_t tx_deadline, const cy_bytes_t message)
 {
     responder_context_t ctx;
     static_assert(sizeof(ctx) <= sizeof(self->state), "");
@@ -286,14 +286,14 @@ static void on_topic_feedback(udpard_tx_t* const tx, const udpard_tx_feedback_t 
     boxed.feedback(boxed.context, fb.acknowledgements);
 }
 
-static cy_err_t v_topic_publish(cy_topic_t* self,
-                                cy_us_t     tx_deadline,
-                                cy_prio_t   priority,
-                                cy_bytes_t  message,
-                                uint64_t*   out_transfer_id,
-                                size_t      response_extent,
-                                void*       reliable_context,
-                                void (*reliable_feedback)(void* reliable_context, uint16_t acknowledgements))
+static cy_err_t v_topic_publish(cy_topic_t* const self,
+                                const cy_us_t     tx_deadline,
+                                const cy_prio_t   priority,
+                                const cy_bytes_t  message,
+                                uint64_t* const   out_transfer_id,
+                                const size_t      response_extent,
+                                void* const       reliable_context,
+                                void (*const reliable_feedback)(void* reliable_context, uint16_t acknowledgements))
 {
     cy_udp_posix_t* const cy          = (cy_udp_posix_t*)self->cy;
     const uint64_t        transfer_id = ((cy_udp_posix_topic_t*)self)->pub_transfer_id++;
@@ -342,7 +342,7 @@ static cy_err_t v_topic_publish(cy_topic_t* self,
     return CY_ERR_ARGUMENT;
 }
 
-static bool v_topic_cancel(cy_topic_t* self, uint64_t transfer_id)
+static bool v_topic_cancel(cy_topic_t* const self, const uint64_t transfer_id)
 {
     cy_udp_posix_t* const cy  = (cy_udp_posix_t*)self->cy;
     const bool            out = udpard_tx_cancel(&cy->udpard_tx, self->hash, transfer_id);
@@ -605,7 +605,7 @@ static bool v_tx_eject_p2p(udpard_tx_t* const tx, udpard_tx_ejection_t* const ej
 
 static bool v_tx_eject_subject(udpard_tx_t* const tx, udpard_tx_ejection_t* const ej)
 {
-    cy_topic_t* const topic = ej->user.ptr[0];
+    const cy_topic_t* const topic = ej->user.ptr[0];
     assert(topic->cy == tx->user);
     return v_tx_eject_p2p(tx, ej, udpard_make_subject_endpoint(cy_topic_subject_id(topic)));
 }
