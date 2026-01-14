@@ -74,16 +74,16 @@ static struct config_t load_config(const int argc, char* argv[])
 
 static void on_result(cy_future_t* const future)
 {
-    cy_topic_t* const topic           = cy_future_context(future).ptr[0];
-    const wkv_str_t   topic_name      = cy_topic_name(topic); // The returned topic name is NUL-terminated in this case
-    const cy_future_status_t   status = cy_future_status(future);
-    cy_request_result_t* const result = cy_future_result(future);
+    cy_topic_t* const topic         = cy_future_context(future).ptr[0];
+    const wkv_str_t   topic_name    = cy_topic_name(topic); // The returned topic name is NUL-terminated in this case
+    const cy_future_status_t status = cy_future_status(future);
     // cy_t* const cy = cy_topic_owner(topic);  // Sometimes it's needed.
     if (status == cy_future_pending) {
         (void)fprintf(stderr, "➡️ '%s' request delivered; waiting for response...\n", topic_name.str);
     } else if (status == cy_future_success) {
-        const size_t  size = cy_message_size(result->response.content);
-        unsigned char data[size];
+        cy_request_result_t* const result = cy_future_result(future);
+        const size_t               size   = cy_message_size(result->response.content);
+        unsigned char              data[size];
         cy_message_read(&result->response.content, 0, size, data);
         char* const dump = hexdump(size, data, 32); // just a simple visualization aid unrelated to the API
         (void)fprintf(stderr,
