@@ -1357,6 +1357,7 @@ static void request_future_finalize(cy_future_t* const self)
         cavl2_remove(&self->cy->request_futures_by_deadline, &f->index_deadline);
         cavl2_remove(&f->pub->topic->request_futures_by_transfer_id, &f->index_transfer_id);
     }
+    assert(f->request_done && request_future_is_done(f));
     // This will be a no-op if the user already took ownership of the message, or if there was no message to begin with.
     cy_message_destroy(&f->result.response.content);
 }
@@ -1370,7 +1371,7 @@ static void request_future_complete(request_future_t* const self)
     if (!self->request_done) { // this may trigger the request feedback but we already marked it as done
         self->request_done = self->pub->topic->vtable->cancel(self->pub->topic, self->transfer_id);
     }
-    assert(self->request_done);
+    assert(self->request_done && request_future_is_done(self));
     future_notify(&self->base);
 }
 

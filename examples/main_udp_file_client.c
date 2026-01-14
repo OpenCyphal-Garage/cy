@@ -1,7 +1,6 @@
 #include "cy_udp_posix.h"
 #include <stdio.h>
 #include <string.h>
-#include <assert.h>
 #include <stdint.h>
 #include <unistd.h>
 #include <err.h>
@@ -26,30 +25,6 @@ typedef struct file_read_response_t
     uint8_t  data[DATA_MAX];
 } file_read_response_t;
 
-typedef struct future_t
-{
-    bool         done;
-    bool         success;
-    cy_message_t message;
-} future_t;
-
-static void on_request_delivery_result(const cy_user_context_t ctx, const uint16_t acknowledgements)
-{
-    (void)ctx;
-    (void)acknowledgements;
-}
-
-static void on_response(const cy_user_context_t ctx, cy_message_ts_t* const msg)
-{
-    future_t* const fut = (future_t* const)ctx.ptr[0];
-    assert(!fut->done);
-    fut->done    = true;
-    fut->success = msg != NULL;
-    if (fut->success) {
-        fut->message = cy_message_move(&msg->content);
-    }
-}
-
 /// Command line arguments: namespace, file name.
 /// The read file will be written into stdout as-is.
 int main(const int argc, char* argv[])
@@ -71,16 +46,18 @@ int main(const int argc, char* argv[])
 
     // SET UP THE NODE.
     cy_udp_posix_t cy_udp;
-    cy_err_t       res = cy_udp_posix_new_simple(&cy_udp);
-    if (res != CY_OK) {
-        errx(res, "cy_udp_posix_new_simple");
+    {
+        const cy_err_t res = cy_udp_posix_new_simple(&cy_udp);
+        if (res != CY_OK) {
+            errx(res, "cy_udp_posix_new_simple");
+        }
     }
     cy_t* const cy = &cy_udp.base;
 
     // SET UP THE FILE READ PUBLISHER.
     cy_publisher_t* const pub_file_read = cy_advertise_client(cy, wkv_key("file/read"), sizeof(file_read_response_t));
     if (pub_file_read == NULL) {
-        errx(res, "cy_advertise_client");
+        errx(0, "cy_advertise_client");
     }
 
     // READ THE FILE SEQUENTIALLY.
@@ -89,37 +66,39 @@ int main(const int argc, char* argv[])
 
         // Send the request.
         (void)fprintf(stderr, "\nRequesting offset %llu...\n", (unsigned long long)req.read_offset);
-        future_t future = { .done = false };
-        res             = cy_request(pub_file_read,
-                         now + (RESPONSE_TIMEOUT / 2),
-                         now + RESPONSE_TIMEOUT,
-                         (cy_bytes_t){ .size = 8 + 2 + req.path_len, .data = &req },
-                         CY_USER_CONTEXT_EMPTY,
-                         on_request_delivery_result,
-                         (cy_user_context_t){ .ptr = { &future, NULL } },
-                         on_response);
-        if (res != CY_OK) {
-            errx(res, "cy_request");
+        cy_future_t* const future = cy_request(pub_file_read,
+                                               now + (RESPONSE_TIMEOUT / 2),
+                                               now + RESPONSE_TIMEOUT,
+                                               (cy_bytes_t){ .size = 8 + 2 + req.path_len, .data = &req });
+        if (future == NULL) {
+            errx(0, "cy_request");
         }
 
         // Wait for the response while spinning the event loop.
-        // We could do it asynchronously as well, but in this simple application it is easier to do it synchronously.
         // We could also spin the loop in a background thread and use a condition variable to wake up the main thread.
-        while (!future.done) {
-            res = cy_udp_posix_spin_once(&cy_udp);
+        while (cy_future_status(future) == cy_future_pending) {
+            const cy_err_t res = cy_udp_posix_spin_once(&cy_udp);
             if (res != CY_OK) {
                 errx(res, "cy_udp_posix_spin_once");
             }
         }
-        if (!future.success) {
+
+        // Process the response outcome.
+        if (cy_future_status(future) == cy_future_failure) {
             errx(0, "Request timed out");
         }
+        assert(cy_future_status(future) == cy_future_success);
+        cy_request_result_t* const result = cy_future_result(future);
+        // We could use the response message directly from the future, but moving it out allows us to release
+        // the future memory earlier. Sometimes it may be useful; this is an example of how it can be done.
+        cy_message_t message = cy_message_move(&result->response.content);
+        cy_future_destroy(future); // This must be eventually done for every future.
 
         // Process the next chunk.
-        CY_TRACE(cy, "Received response: offset %llu", (unsigned long long)req.read_offset);
+        (void)fprintf(stderr, "Received response: offset %llu\n", (unsigned long long)req.read_offset);
         file_read_response_t resp;
-        const size_t         resp_size = cy_message_read(&future.message, 0, sizeof(resp), &resp);
-        cy_message_destroy(&future.message); // release the memory asap
+        const size_t         resp_size = cy_message_read(&message, 0, sizeof(resp), &resp);
+        cy_message_destroy(&message); // release the memory asap
         if (resp_size < 6) {
             errx(0, "Invalid response size %zu", resp_size);
         }
