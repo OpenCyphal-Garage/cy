@@ -263,7 +263,7 @@ void cy_message_destroy(cy_message_t* const msg)
 typedef struct cy_future_vtable_t
 {
     cy_future_status_t (*status)(const cy_future_t*);
-    const void* (*result)(const cy_future_t*);
+    void* (*result)(cy_future_t*);
     void (*finalize)(cy_future_t*); ///< Invoked immediately before destruction; must clean up.
 } cy_future_vtable_t;
 
@@ -296,7 +296,7 @@ void future_notify(cy_future_t* const future)
 }
 
 cy_future_status_t cy_future_status(const cy_future_t* const future) { return future->vtable->status(future); }
-const void*        cy_future_result(const cy_future_t* const future) { return future->vtable->result(future); }
+void*              cy_future_result(cy_future_t* const future) { return future->vtable->result(future); }
 
 cy_user_context_t cy_future_context(const cy_future_t* const future) { return future->context; }
 void cy_future_context_set(cy_future_t* const future, const cy_user_context_t context) { future->context = context; }
@@ -1244,10 +1244,7 @@ typedef struct
     uint64_t            transfer_id; ///< Needed for cancellation.
 } publish_future_t;
 
-static const void* publish_future_result(const cy_future_t* const self)
-{
-    return &((const publish_future_t*)self)->result;
-}
+static void* publish_future_result(cy_future_t* const self) { return &((publish_future_t*)self)->result; }
 
 static cy_future_status_t publish_future_status(const cy_future_t* const self)
 {
@@ -1335,10 +1332,7 @@ static bool request_future_is_done(const request_future_t* const self)
     return !ins;
 }
 
-static const void* request_future_result(const cy_future_t* const self)
-{
-    return &((const request_future_t*)self)->result;
-}
+static void* request_future_result(cy_future_t* const self) { return &((request_future_t*)self)->result; }
 
 static cy_future_status_t request_future_status(const cy_future_t* const self)
 {
@@ -1387,7 +1381,7 @@ static void on_request_feedback(void* const context, const uint16_t acknowledgem
     assert(!f->request_done);
     f->request_done = true;
     if (!request_future_is_done(f)) {
-        future_notify(&f->base); // Intermediate progress update notification.
+        future_notify(&f->base); // Intermediate progress update notification; skip if already done.
     }
 }
 
@@ -1709,8 +1703,8 @@ wkv_str_t cy_topic_name(const cy_topic_t* const topic)
     }
     return (wkv_str_t){ .len = 0, .str = "" };
 }
-
 uint64_t cy_topic_hash(const cy_topic_t* const topic) { return (topic != NULL) ? topic->hash : UINT64_MAX; }
+cy_t*    cy_topic_owner(const cy_topic_t* const topic) { return (topic != NULL) ? topic->cy : NULL; }
 
 cy_user_context_t* cy_topic_user_context(cy_topic_t* const topic)
 {

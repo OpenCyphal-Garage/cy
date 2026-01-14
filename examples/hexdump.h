@@ -3,7 +3,6 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include <assert.h>
-#include <stdint.h>
 
 static inline char hexdump_hex_digit(const unsigned v) { return (v < 10U) ? (char)('0' + v) : (char)('a' + (v - 10U)); }
 

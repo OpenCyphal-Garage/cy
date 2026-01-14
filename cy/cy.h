@@ -71,7 +71,10 @@ typedef struct cy_bytes_t
 
 /// The size is chosen to match most small closures, which is helpful when interfacing with Rust/C++ lambdas.
 /// The size can be changed arbitrarily, it's a trivial trade-off between flexibility and memory usage.
+/// This size must be the same for all translation units to avoid ABI incompatibilities.
+#ifndef CY_USER_CONTEXT_PTR_COUNT
 #define CY_USER_CONTEXT_PTR_COUNT 3
+#endif
 
 /// An opaque user context enabling the application to share data with callbacks. It is intended to be passed by value.
 typedef union cy_user_context_t
@@ -158,7 +161,7 @@ cy_future_status_t cy_future_status(const cy_future_t* const future);
 
 /// The result depends on the type of the future; some intermediate results may be available while still pending.
 /// The lifetime of the returned pointer is bound to the lifetime of the future instance (valid until destroyed).
-const void* cy_future_result(const cy_future_t* const future);
+void* cy_future_result(cy_future_t* const future);
 
 /// The application can store arbitrary data in the context to share information with the future callback, if used.
 cy_user_context_t cy_future_context(const cy_future_t* const future);
@@ -386,6 +389,7 @@ cy_topic_t* cy_topic_iter_next(cy_topic_t* const topic);
 /// The name pointer lifetime is bound to the topic. The name is NUL-terminated.
 wkv_str_t cy_topic_name(const cy_topic_t* const topic);
 uint64_t  cy_topic_hash(const cy_topic_t* const topic);
+cy_t*     cy_topic_owner(const cy_topic_t* const topic);
 
 /// Provides access to the application-specific context associated per topic.
 /// By default it is set to CY_USER_CONTEXT_EMPTY when the topic is created.
