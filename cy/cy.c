@@ -1467,7 +1467,7 @@ cy_future_t* cy_request(cy_publisher_t* const pub,
                                &fut->index_deadline,
                                cavl2_trivial_factory);
     CY_TRACE(cy, "📩 %s #%016llx new request future", topic_repr(pub->topic).str, (unsigned long long)fut->transfer_id);
-    return CY_OK;
+    return (cy_future_t*)fut;
 }
 
 static void retire_expired_request_futures(const cy_t* cy, const cy_us_t now)

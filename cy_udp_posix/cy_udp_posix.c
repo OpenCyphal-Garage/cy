@@ -304,9 +304,9 @@ static cy_err_t v_topic_publish(cy_topic_t* const self,
     // complex reconfiguration. We are aware that changing the extent may sometimes, under very specific circumstances
     // involving out-of-order frame arrival, cause some in-progress transfers to be lost, but it's exceedingly unlikely
     // and we use reliable delivery for P2P anyway. To minimize the impact, we round it to some arbitrary threshold.
-    const size_t response_extent_final = ceil_pow2(response_extent + UDPARD_P2P_HEADER_BYTES);
+    const size_t response_extent_final = ceil_pow2((response_extent * 2U) + UDPARD_P2P_HEADER_BYTES);
     if (response_extent_final > cy->p2p_port.base.extent) {
-        cy->p2p_port.base.extent = response_extent_final * 2U; // Keep changes minimal.
+        cy->p2p_port.base.extent = response_extent_final;
         CY_TRACE(&cy->base, "📏 P2P response (extent+overhead) increased to %zu bytes", cy->p2p_port.base.extent);
     }
     udpard_user_context_t udpard_context = UDPARD_USER_CONTEXT_NULL;
@@ -667,9 +667,11 @@ cy_err_t cy_udp_posix_new(cy_udp_posix_t* const cy,
     cy->udpard_tx.user = cy;
     cy->udpard_rx.user = cy;
 
-    // Initialize the udpard P2P RX port. We start with a zero initial extent, which will be increased ad-hoc.
-    static const udpard_rx_port_p2p_vtable_t rx_p2p_vtable = { .on_message = v_on_p2p_msg };
-    if (!udpard_rx_port_new_p2p(&cy->p2p_port, uid, 0, rx_mem, &rx_p2p_vtable)) {
+    // Initialize the udpard P2P RX port.
+    // We start with an arbitrarily chosen sensible initial extent, which will be increased later as needed.
+    const size_t                             initial_extent = UDPARD_MTU_DEFAULT;
+    static const udpard_rx_port_p2p_vtable_t rx_p2p_vtable  = { .on_message = v_on_p2p_msg };
+    if (!udpard_rx_port_new_p2p(&cy->p2p_port, uid, initial_extent, rx_mem, &rx_p2p_vtable)) {
         return CY_ERR_ARGUMENT; // Cleanup not required -- no resources allocated yet.
     }
 
