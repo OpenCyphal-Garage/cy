@@ -1263,9 +1263,10 @@ static void publish_future_finalize(cy_future_t* const self)
     assert(self->callback == NULL); // callback cleared when finalizing to avoid reentrance
     publish_future_t* const f = (publish_future_t*)self;
     if (f->owner != NULL) {
-        f->owner = NULL; // Suppress the callback if the feedback notification is invoked from cancel().
+        cy_topic_t* const topic = f->owner->topic;
+        f->owner                = NULL; // Suppress the callback if the feedback notification is invoked from cancel().
         // Message is still pending feedback; cancel transfer to avoid dangling callback into freed memory.
-        const bool canceled = f->owner->topic->vtable->cancel(f->owner->topic, f->transfer_id);
+        const bool canceled = topic->vtable->cancel(topic, f->transfer_id);
         assert(canceled);
         (void)canceled;
     }

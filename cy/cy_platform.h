@@ -228,7 +228,7 @@ typedef struct cy_responder_vtable_t
     /// Currently, there is no delivery information exposed; this may be changed in the future.
     /// The most likely solution would be to add a cancel() function to the responder vtable,
     /// and make implementations keep track of the transfer-ID used to send the response such that internally
-    /// they can cancel it if requested.
+    /// they can cancel it if requested. The responder instance would be stored in the future.
     cy_err_t (*respond)(const cy_responder_t*, cy_us_t tx_deadline, cy_bytes_t message);
 } cy_responder_vtable_t;
 
