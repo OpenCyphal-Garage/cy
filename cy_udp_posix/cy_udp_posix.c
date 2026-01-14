@@ -124,27 +124,6 @@ static uint64_t prng64(uint64_t* const state, const uint64_t local_uid)
     return rapidhash_withSeed(state, sizeof(uint64_t), local_uid);
 }
 
-static cy_feedback_context_t tx_context_unbox_feedback(const udpard_user_context_t ctx)
-{
-    static_assert(sizeof(cy_feedback_context_t) <= (sizeof(udpard_user_context_t) - sizeof(void*)), "");
-    cy_feedback_context_t out;
-    memcpy(&out, &ctx, sizeof(out));
-    return out;
-}
-
-/// The topic pointer is stored in the last pointer slot.
-static udpard_user_context_t tx_context_box(const cy_feedback_context_t* const ctx, cy_topic_t* const topic)
-{
-    static_assert(sizeof(cy_feedback_context_t) <= (sizeof(udpard_user_context_t) - sizeof(void*)), "");
-    udpard_user_context_t out = { .ptr = { NULL } };
-    if (ctx != NULL) {
-        memcpy(&out, ctx, sizeof(*ctx));
-        assert(out.ptr[UDPARD_USER_CONTEXT_PTR_COUNT - 1] == NULL);
-    }
-    out.ptr[UDPARD_USER_CONTEXT_PTR_COUNT - 1] = (void*)topic;
-    return out;
-}
-
 static udpard_bytes_scattered_t cy_bytes_to_udpard_bytes(const cy_bytes_t message)
 {
     // Instead of converting the entire payload chain, we can just statically validate that the memory layouts
@@ -208,14 +187,16 @@ static void on_response_feedback(udpard_tx_t* const tx, const udpard_tx_feedback
 {
     assert(tx->user != NULL);
     assert(fb.acknowledgements <= 1);
-    cy_on_response_feedback(tx->user, tx_context_unbox_feedback(fb.user), fb.acknowledgements != 0);
+    CY_TRACE((cy_t*)tx->user,
+             "💬 T%016llx #%llu ack=%u",
+             (unsigned long long)fb.topic_hash,
+             (unsigned long long)fb.transfer_id,
+             (unsigned)fb.acknowledgements);
+    // Currently, we don't emit any response delivery feedback. This may be changed in the future if needed.
 }
 
 /// Invoked by Cy when the application desires to respond to a message received earlier.
-static cy_err_t v_respond(const cy_responder_t* const self,
-                          const cy_us_t               tx_deadline,
-                          const cy_bytes_t            message,
-                          const cy_feedback_context_t context)
+static cy_err_t v_respond(const cy_responder_t* self, cy_us_t tx_deadline, cy_bytes_t message)
 {
     responder_context_t ctx;
     static_assert(sizeof(ctx) <= sizeof(self->state), "");
@@ -233,7 +214,7 @@ static cy_err_t v_respond(const cy_responder_t* const self,
                                        ctx.remote,
                                        cy_bytes_to_udpard_bytes(message),
                                        on_response_feedback,
-                                       tx_context_box(&context, NULL));
+                                       UDPARD_USER_CONTEXT_NULL);
     CY_TRACE(&cy->base,
              "💬 T%016llx #%llu N%016llx res=%u",
              (unsigned long long)ctx.topic_hash,
@@ -288,19 +269,31 @@ struct cy_udp_posix_topic_t
     uint64_t history[2];
 };
 
+typedef struct
+{
+    cy_topic_t* topic; ///< It is important that the topic pointer is stored in the first slot for quick access.
+    void*       context;
+    void (*feedback)(void*, uint16_t); // caution: may exceed sizeof(void*)
+} publish_feedback_context_t;
+
 static void on_topic_feedback(udpard_tx_t* const tx, const udpard_tx_feedback_t fb)
 {
     assert(tx->user != NULL);
-    cy_on_message_feedback(tx->user, tx_context_unbox_feedback(fb.user), fb.acknowledgements);
+    publish_feedback_context_t boxed;
+    static_assert(sizeof(boxed) <= sizeof(fb.user), "");
+    memcpy(&boxed, &fb.user, sizeof(boxed)); // respect strict aliasing
+    assert(boxed.feedback != NULL);
+    boxed.feedback(boxed.context, fb.acknowledgements);
 }
 
-static cy_err_t v_topic_publish(cy_topic_t* const                  self,
-                                const cy_us_t                      tx_deadline,
-                                const cy_prio_t                    priority,
-                                const cy_bytes_t                   message,
-                                const cy_feedback_context_t* const reliable_context,
-                                uint64_t* const                    out_transfer_id,
-                                const size_t                       response_extent)
+static cy_err_t v_topic_publish(cy_topic_t* self,
+                                cy_us_t     tx_deadline,
+                                cy_prio_t   priority,
+                                cy_bytes_t  message,
+                                uint64_t*   out_transfer_id,
+                                size_t      response_extent,
+                                void*       reliable_context,
+                                void (*reliable_feedback)(void* reliable_context, uint16_t acknowledgements))
 {
     cy_udp_posix_t* const cy          = (cy_udp_posix_t*)self->cy;
     const uint64_t        transfer_id = ((cy_udp_posix_topic_t*)self)->pub_transfer_id++;
@@ -316,6 +309,14 @@ static cy_err_t v_topic_publish(cy_topic_t* const                  self,
         cy->p2p_port.base.extent = response_extent_final * 2U; // Keep changes minimal.
         CY_TRACE(&cy->base, "📏 P2P response (extent+overhead) increased to %zu bytes", cy->p2p_port.base.extent);
     }
+    udpard_user_context_t udpard_context = UDPARD_USER_CONTEXT_NULL;
+    {
+        const publish_feedback_context_t boxed = { .topic    = self,
+                                                   .context  = reliable_context,
+                                                   .feedback = reliable_feedback };
+        static_assert(sizeof(boxed) <= sizeof(udpard_context), "");
+        memcpy(&udpard_context, &boxed, sizeof(boxed)); // respect strict aliasing
+    }
     const uint64_t e_oom      = cy->udpard_tx.errors_oom;
     const uint64_t e_capacity = cy->udpard_tx.errors_capacity;
     //
@@ -327,8 +328,8 @@ static cy_err_t v_topic_publish(cy_topic_t* const                  self,
                                    self->hash,
                                    transfer_id,
                                    cy_bytes_to_udpard_bytes(message),
-                                   (reliable_context != NULL) ? on_topic_feedback : NULL,
-                                   tx_context_box(reliable_context, self));
+                                   (reliable_feedback != NULL) ? on_topic_feedback : NULL,
+                                   udpard_context);
     if (ok) {
         return CY_OK;
     }
@@ -343,8 +344,11 @@ static cy_err_t v_topic_publish(cy_topic_t* const                  self,
 
 static bool v_topic_cancel(cy_topic_t* self, uint64_t transfer_id)
 {
-    cy_udp_posix_t* const cy = (cy_udp_posix_t*)self->cy;
-    return udpard_tx_cancel(&cy->udpard_tx, self->hash, transfer_id);
+    cy_udp_posix_t* const cy  = (cy_udp_posix_t*)self->cy;
+    const bool            out = udpard_tx_cancel(&cy->udpard_tx, self->hash, transfer_id);
+    CY_TRACE(
+      &cy->base, "🚫 T%016llx #%llu canceled=%u", (unsigned long long)self->hash, (unsigned long long)transfer_id, out);
+    return out;
 }
 
 static bool topic_is_subscribed(const cy_udp_posix_topic_t* const self)
@@ -476,7 +480,7 @@ static void v_topic_destroy(cy_topic_t* const topic)
     for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
         udp_wrapper_close(&udp_topic->rx_sock[i]);
     }
-    udpard_tx_cancel_all(&cy->udpard_tx, topic->hash); // should already be canceled
+    (void)udpard_tx_cancel_all(&cy->udpard_tx, topic->hash);
     mem_free(cy, sizeof(cy_udp_posix_topic_t), topic);
     cy->n_topics--;
 }
@@ -601,7 +605,8 @@ static bool v_tx_eject_p2p(udpard_tx_t* const tx, udpard_tx_ejection_t* const ej
 
 static bool v_tx_eject_subject(udpard_tx_t* const tx, udpard_tx_ejection_t* const ej)
 {
-    cy_topic_t* const topic = ej->user.ptr[UDPARD_USER_CONTEXT_PTR_COUNT - 1];
+    cy_topic_t* const topic = ej->user.ptr[0];
+    assert(topic->cy == tx->user);
     return v_tx_eject_p2p(tx, ej, udpard_make_subject_endpoint(cy_topic_subject_id(topic)));
 }
 
