@@ -1458,7 +1458,7 @@ cy_future_t* cy_request(cy_publisher_t* const pub,
             break; // Successfully inserted.
         }
         CY_TRACE(
-          cy, "⚠️ %s #%llu transfer-ID exhaustion", topic_repr(pub->topic).str, (unsigned long long)fut->transfer_id);
+          cy, "⚠️ %s #%016llx transfer-ID exhaustion", topic_repr(pub->topic).str, (unsigned long long)fut->transfer_id);
         request_future_complete(fut2);
     }
     (void)cavl2_find_or_insert(&cy->request_futures_by_deadline,
@@ -1466,7 +1466,7 @@ cy_future_t* cy_request(cy_publisher_t* const pub,
                                cavl_comp_future_response_deadline,
                                &fut->index_deadline,
                                cavl2_trivial_factory);
-    CY_TRACE(cy, "📩 %s #%llu new request future", topic_repr(pub->topic).str, (unsigned long long)fut->transfer_id);
+    CY_TRACE(cy, "📩 %s #%016llx new request future", topic_repr(pub->topic).str, (unsigned long long)fut->transfer_id);
     return CY_OK;
 }
 
@@ -1923,14 +1923,14 @@ void cy_on_response(cy_t* const    cy,
 #if CY_CONFIG_TRACE
             if (!fut->request_done) {
                 CY_TRACE(cy,
-                         "🔀 %s #%llu response before request ack",
+                         "🔀 %s #%016llx response before request ack",
                          topic_repr(fut->pub->topic).str,
                          (unsigned long long)fut->transfer_id);
             }
 #endif
             request_future_complete(fut);
         } else {
-            CY_TRACE(cy, "❓ %s orphan #%llu", topic_repr(topic).str, (unsigned long long)transfer_id);
+            CY_TRACE(cy, "❓ %s orphan #%016llx", topic_repr(topic).str, (unsigned long long)transfer_id);
             cy_message_destroy(&message); // Unexpected or duplicate response.
         }
     } else {

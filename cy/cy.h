@@ -366,7 +366,8 @@ void cy_unsubscribe(cy_subscriber_t* const sub);
 /// Returns the current time in microseconds. Always non-negative.
 cy_us_t cy_now(const cy_t* const cy);
 
-// TODO: cy_err_t cy_remap(cy_t*, wkv_str_t from, wkv_str_t to);
+/// TODO implement remapping
+cy_err_t cy_map(cy_t* const cy, const wkv_str_t from, const wkv_str_t to);
 
 // TODO: add a way to dump/restore topic configuration for instant initialization. This may be platform-specific.
 

@@ -188,7 +188,7 @@ static void on_response_feedback(udpard_tx_t* const tx, const udpard_tx_feedback
     assert(tx->user != NULL);
     assert(fb.acknowledgements <= 1);
     CY_TRACE((cy_t*)tx->user,
-             "💬 T%016llx #%llu ack=%u",
+             "💬 T%016llx #%016llx ack=%u",
              (unsigned long long)fb.topic_hash,
              (unsigned long long)fb.transfer_id,
              (unsigned)fb.acknowledgements);
@@ -216,7 +216,7 @@ static cy_err_t v_respond(const cy_responder_t* const self, const cy_us_t tx_dea
                                        on_response_feedback,
                                        UDPARD_USER_CONTEXT_NULL);
     CY_TRACE(&cy->base,
-             "💬 T%016llx #%llu N%016llx res=%u",
+             "💬 T%016llx #%016llx N%016llx res=%u",
              (unsigned long long)ctx.topic_hash,
              (unsigned long long)ctx.transfer_id,
              (unsigned long long)ctx.remote.uid,
@@ -346,8 +346,11 @@ static bool v_topic_cancel(cy_topic_t* const self, const uint64_t transfer_id)
 {
     cy_udp_posix_t* const cy  = (cy_udp_posix_t*)self->cy;
     const bool            out = udpard_tx_cancel(&cy->udpard_tx, self->hash, transfer_id);
-    CY_TRACE(
-      &cy->base, "🚫 T%016llx #%llu canceled=%u", (unsigned long long)self->hash, (unsigned long long)transfer_id, out);
+    CY_TRACE(&cy->base,
+             "🚫 T%016llx #%016llx canceled=%u",
+             (unsigned long long)self->hash,
+             (unsigned long long)transfer_id,
+             out);
     return out;
 }
 
@@ -389,7 +392,7 @@ static void v_on_msg_stateless(udpard_rx_t* const rx, udpard_rx_port_t* const po
         v_on_msg(rx, port, tr);
     } else {
         CY_TRACE(topic->base.cy,
-                 "🍒️ T%016llx #%llu N%016llx 👆%016llx duplicate transfer dropped",
+                 "🍒️ T%016llx #%016llx N%016llx 👆%016llx duplicate transfer dropped",
                  (unsigned long long)port->topic_hash,
                  (unsigned long long)tr.transfer_id,
                  (unsigned long long)tr.remote.uid,
@@ -719,11 +722,11 @@ cy_err_t cy_udp_posix_new_simple(cy_udp_posix_t* const cy)
     assert(n_if > 0);
     const cy_err_t out = cy_udp_posix_new(cy, uid, wkv_key(""), wkv_key(""), ifaces, 50000);
 #if CY_CONFIG_TRACE
-    CY_TRACE(&cy->base, "Semirandom EUI-64 %016llx", (unsigned long long)uid);
+    CY_TRACE(&cy->base, "🏷 Semirandom EUI-64 %016llx", (unsigned long long)uid);
     for (int16_t i = 0; i < n_if; i++) {
         const uint32_t f = ifaces[i];
         CY_TRACE(&cy->base,
-                 "Autodetected default iface #%d of %d: %u.%u.%u.%u",
+                 "🔌 Autodetected default iface #%d of %d: %u.%u.%u.%u",
                  i,
                  n_if,
                  (f >> 24U) & 0xFFU,
