@@ -275,7 +275,7 @@ struct cy_future_t
     const cy_future_vtable_t* vtable;
 };
 
-void* future_new(cy_t* const cy, const cy_future_vtable_t* const vtable, const size_t derived_size)
+static void* future_new(cy_t* const cy, const cy_future_vtable_t* const vtable, const size_t derived_size)
 {
     assert(derived_size >= sizeof(cy_future_t));
     cy_future_t* const future = (cy_future_t*)mem_alloc_zero(cy, derived_size);
@@ -288,7 +288,7 @@ void* future_new(cy_t* const cy, const cy_future_vtable_t* const vtable, const s
     return future;
 }
 
-void future_notify(cy_future_t* const future)
+static void future_notify(cy_future_t* const future)
 {
     if (future->callback != NULL) {
         future->callback(future);

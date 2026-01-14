@@ -19,7 +19,6 @@
 static void on_file_read_msg(const cy_user_context_t user, cy_arrival_t* const arv)
 {
     (void)user;
-    cy_t* const cy = arv->topic->cy;
 
     // Deserialize the payload, assuming the local machine is little-endian, for simplicity.
     uint64_t read_offset = 0;
