@@ -327,7 +327,7 @@ void           cy_future_callback_set(cy_future_t* const self, const cy_on_futur
 void cy_future_destroy(cy_future_t* const self)
 {
     if (self != NULL) {
-        self->callback = NULL;
+        self->callback = NULL; // Remember that a future may be destroyed from within its own callback.
         future_cancel_and_notify(self);
         self->vtable->finalize(self);
         mem_free(self->cy, self);

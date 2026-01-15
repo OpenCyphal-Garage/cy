@@ -28,6 +28,7 @@ The following external dependencies are required, all single-header-only:
 
 The library is extremely simple and easy to use on any platform.
 The entire API header is just a few hundred lines of code, mostly comments.
+The API is fully asynchronous/non-blocking; if necessary, synchronous wrappers can be implemented on top of it.
 
 The specifics of setting up a local node depend on the platform and transport used,
 unlike the rest of the API, which is entirely platform- and transport-agnostic.
@@ -54,7 +55,7 @@ The library uses Pascal strings represented as `wkv_str_t` throughout;
 these strings are normally not nul-terminated, unless specifically noted otherwise.
 Use `wkv_key(const char*)` to create such strings from ordinary C strings.
 
-Create a publisher:
+### 📢 Publish messages
 
 ```c++
 cy_publisher_t* my_pub = cy_advertise(cy, wkv_key("my/topic"));
@@ -64,27 +65,58 @@ if (my_pub == NULL) { ... }  // handle error
 Publish a message asynchronously (non-blocking) using best-effort delivery:
 
 ```c++
-err = cy_publish(my_pub,
-                 cy_now(cy) + 100_000, // the message must be sent within 0.1 seconds from now
-                 (cy_bytes_t){.size = 13, .data = "Hello Cyphal!"});
+cy_us_t deadline = cy_now(cy) + 100_000; // the message must be sent within 0.1 seconds from now
+err = cy_publish(my_pub, deadline, (cy_bytes_t){.size = 13, .data = "Hello Cyphal!"});
 if (err != CY_OK) { ... }
 ```
 
-Publish a message asynchronously (non-blocking) using reliable delivery (with delivery confirmation);
-the result can be provided per message via a callback:
+Publish a message asynchronously using reliable delivery; the outcome can be checked via the returned future:
 
 ```c++
-err = cy_publish_reliable(my_pub,
-                          cy_now(cy) + 2_000_000,   // keep trying to deliver the message for up to 2 seconds
-                          (cy_bytes_t){.size = 34, .data = "Would you like to hear a TCP joke?"},
-                          CY_USER_CONTEXT_EMPTY,    // optionally, pass arbitrary context data to the callback
-                          NULL);                    // pass a callback here to get notified of the delivery outcome
-if (err != CY_OK) { ... }
+cy_us_t    deadline = cy_now(cy) + 2_000_000; // keep trying to deliver the message for up to 2 seconds
+cy_bytes_t message = {.size = 34, .data = "Would you like to hear a TCP joke?"}
+cy_future_t* future = cy_publish_reliable(my_pub, deadline, message);
+if (future == NULL) { ... }  // handle error
 ```
 
-There may be an arbitrary number of pending reliable messages per publisher, each with a dedicated callback.
+There may be an arbitrary number of pending reliable messages per publisher, each with a dedicated future.
+The future can be polled to check the delivery outcome:
 
-Subscribe to a topic:
+```c++
+cy_future_status_t status = cy_future_status(future);
+if (status == cy_future_pending) {
+    // wait some more
+} else if (status == cy_future_success) {
+    // message was delivered successfully
+} else {
+    // message could not be delivered within the specified deadline
+    assert(status == cy_future_failure);
+}
+```
+
+Instead of polling, one can also attach a callback to be invoked once the future has materialized;
+to pass arbitrary context data to the callback, use `cy_user_context_t`:
+
+```c++
+cy_future_context_set(future, (cy_user_context_t){ { "🐈", NULL, (void*)123456 } });
+cy_future_callback_set(future, on_future_done);
+```
+```c++
+void on_future_done(cy_future_t* future)
+{
+    cy_user_context_t ctx = cy_future_context(future);
+    // Query the future as you normally would.
+}
+```
+
+When done with the future, be sure to destroy it. Destroying a pending future cancels the associated action.
+A future may be destroyed from within its own callback.
+
+```c++
+cy_future_destroy(future);
+```
+
+### 📩 Subscribe to messages
 
 ```c++
 cy_subscriber_t* my_sub = cy_subscribe(cy,
@@ -106,44 +138,55 @@ void on_message(cy_user_context_t user_context, cy_arrival_t* arrival)
     char* dump = hexdump(size, data, 32);
     printf("Received message on topic %s:\n%s\n", cy_topic_name(arrival->topic).str, dump);
     // If relevant, one can optionally send a response back to the publisher here using cy_respond():
-    // err = cy_respond(arrival->responder, deadline, response_data, ...);
-    // It is also possible to store the responder instance to send the response at any time later.
+    err = cy_respond(arrival->responder, deadline, response_data);
+    // It is also possible to store the responder instance to send the response at any time later after the callback.
 }
 ```
+
+### ↩️ Respond to messages (RPC)
 
 Observe that the message callback provides an option to send a response back to the publisher directly using
 a direct P2P channel.
 This is how one can implement request/response (RPC-like) interactions.
-If the application expects a response, then the correct publishing function to use is `cy_request()`,
-which takes a callback that is invoked when the response arrives or times out:
+If the application expects a response, then the correct publishing function to use is `cy_request()`:
 
 ```c++
-err = cy_request(my_pub,
-                 cy_now(cy) + 500_000,      // outgoing request deadline
-                 cy_now(cy) + 2_000_000,    // give up waiting for the response after 2 seconds
-                 (cy_bytes_t){.size = 10, .data = "Hello RPC!"},
-                 CY_USER_CONTEXT_EMPTY,     // context for the request delivery callback
-                 NULL,                      // request delivery callback
-                 CY_USER_CONTEXT_EMPTY,     // context for the response callback
-                 on_response);
-if (err != CY_OK) { ... }
+cy_us_t request_deadline  = cy_now(cy) + 3_000_000; // request must be acknowledged by the remote within 3 seconds
+cy_us_t response_deadline = cy_now(cy) + 6_000_000; // give up waiting for the response after 6 seconds
+cy_future_t* future = cy_request(my_pub, request_deadline, response_deadline, message);
+if (future == NULL) { ... }  // handle error
 ```
 
-The response callback looks like this:
+As usual, the future can be polled, or we can set up a callback to be invoked when the response arrives:
 
 ```c++
-void on_response(cy_user_context_t user_context, cy_message_ts_t* response)
+void on_response(cy_future_t* future)
 {
-    if (response != NULL) {
-        const size_t  size = cy_message_size(response->content);
+    cy_future_status_t status = cy_future_status(future);
+    if (status == cy_future_pending) {
+        // Intermediate progress update: request delivery has been confirmed, waiting for the response now.
+    } else if (status == cy_future_success) {
+        cy_request_result_t* const result = cy_future_result(future);
+        cy_us_t response_arrival_timestamp = result->response.timestamp;
+        const size_t  size = cy_message_size(result->response.content);
         unsigned char data[size];
-        cy_message_read(&response->content, 0, size, data);
-        // Process the response data...
+        cy_message_read(&result->response.content, 0, size, data);
+        // Process the response data!
+        cy_future_destroy(future);
     } else {
-        // Timed out while waiting for the response.
+        assert(status == cy_future_failure);
+        cy_request_result_t* const result = cy_future_result(future);
+        if (result->request.acknowledgements == 0) {
+            // The request could not be delivered.
+        } else {
+            // The request was delivered, but no response was received.
+        }
+        cy_future_destroy(future);
     }
 }
 ```
+
+### ⚙ Event loop
 
 Finally, spin the event loop to keep the stack making progress and processing incoming/outgoing messages.
 Depending on the platform- and transport-specific glue layer used, the event loop spinning part may look like this:
@@ -181,7 +224,7 @@ Cyphal v1.1 is wire-compatible with Cyphal/CAN v1.0.
 
 To publish or subscribe to v1.0 subjects, use pinned topics of the form `whatever/#abcd`,
 where `abcd` is the subject-ID of the topic as a hexadecimal number,
-and the part before `#` is arbitrary and ignored.
+and the part before `#` is arbitrary and does not influence the topic hash (it is only meaningful for pattern matching).
 For example, to subscribe to subject-ID 1234, use the topic name `#04d2`.
 
 Cyphal v1.1 has no RPC in the same way as Cyphal/CAN v1.0 does; instead, it uses pub/sub for everything, including request/response interactions. Thus, to use RPC in a legacy CAN network, a low-level CAN transport access is required.

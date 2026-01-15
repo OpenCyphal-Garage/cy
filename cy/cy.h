@@ -260,7 +260,7 @@ typedef struct cy_subscriber_t cy_subscriber_t;
 /// Instead of referencing the topic, the relevant parameters of the topic are stored here by value.
 typedef struct cy_responder_t
 {
-    cy_t*                               cy; ///< Must be valid; the platform layer is responsible for ensuring this.
+    cy_t*                               cy;
     const struct cy_responder_vtable_t* vtable;
     CY_ALIGN unsigned char              state[CY_RESPONDER_STATE_BYTES];
 } cy_responder_t;
