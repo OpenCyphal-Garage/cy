@@ -239,7 +239,7 @@ void      cy_priority_set(cy_publisher_t* const pub, const cy_prio_t priority);
 /// It can be used to obtain the topic name, hash, etc. of this publisher.
 cy_topic_t* cy_publisher_topic(const cy_publisher_t* const pub);
 
-/// Pending delivery callbacks, if any, will not be invoked after unadvertisement.
+/// All pending futures created by this publisher, if any, will be cancelled.
 void cy_unadvertise(cy_publisher_t* const pub);
 
 // =====================================================================================================================

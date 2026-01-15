@@ -145,6 +145,8 @@ typedef struct cy_topic_t
     cy_us_t ts_animated; ///< Last time the topic saw activity that prevents it from being retired.
 
     /// Used for matching pending response states against received responses by transfer-ID.
+    /// TODO: When destroying the topic, ensure this index is empty -- each publisher must clean up its own
+    ///       pending request futures.
     cy_tree_t* request_futures_by_transfer_id;
 
     /// States related to tracking publishers and subscribers on this topic. The topic is removed when none left.
