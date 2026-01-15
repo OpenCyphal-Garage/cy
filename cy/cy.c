@@ -1997,8 +1997,7 @@ void cy_on_response(cy_t* const    cy,
                          (unsigned long long)fut->transfer_id);
             }
 #endif
-            request_future_cancel(&fut->base);
-            future_notify(&fut->base); // future invalidated
+            future_cancel_and_notify(&fut->base); // future invalidated
         } else {
             CY_TRACE(cy, "❓ %s orphan #%016llx", topic_repr(topic).str, (unsigned long long)transfer_id);
             cy_message_destroy(&message); // Unexpected or duplicate response.
