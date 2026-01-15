@@ -70,8 +70,11 @@ typedef struct cy_bytes_t
 } cy_bytes_t;
 
 /// The size is chosen to match most small closures, which is helpful when interfacing with Rust/C++ lambdas.
-/// The size can be increased as long as it doesn't break the compile-time size checks/limits in the platform layer.
-#define CY_USER_CONTEXT_PTR_COUNT 2
+/// The size can be changed arbitrarily, it's a trivial trade-off between flexibility and memory usage.
+/// This size must be the same for all translation units to avoid ABI incompatibilities.
+#ifndef CY_USER_CONTEXT_PTR_COUNT
+#define CY_USER_CONTEXT_PTR_COUNT 3
+#endif
 
 /// An opaque user context enabling the application to share data with callbacks. It is intended to be passed by value.
 typedef union cy_user_context_t
@@ -135,6 +138,50 @@ typedef struct cy_message_ts_t
 } cy_message_ts_t;
 
 // =====================================================================================================================
+//                                                      FUTURE
+// =====================================================================================================================
+
+/// Futures are constructed by the library when an async operation is initiated that will complete later.
+/// The future object is passed to the user-provided callback when the operation completes (successfully or not).
+/// Future instances are owned by the application; the application is responsible for destroying them
+/// using cy_future_destroy(). Destroying a pending future will cancel the associated operation.
+typedef struct cy_future_t cy_future_t;
+
+/// If set, invoked on future completion always; also may be invoked multiple times for progress updates while pending.
+typedef void (*cy_future_callback_t)(cy_future_t*);
+
+/// A future can transition from pending to either success or failure exactly once.
+typedef enum cy_future_status_t
+{
+    cy_future_pending = 0,
+    cy_future_success = 1,
+    cy_future_failure = 2,
+} cy_future_status_t;
+cy_future_status_t cy_future_status(const cy_future_t* const future);
+
+/// The result depends on the type of the future; some intermediate results may be available while still pending.
+/// The lifetime of the returned pointer is bound to the lifetime of the future instance (valid until destroyed).
+void* cy_future_result(cy_future_t* const future);
+
+/// The application can store arbitrary data in the context to share information with the future callback, if used.
+cy_user_context_t cy_future_context(const cy_future_t* const future);
+void              cy_future_context_set(cy_future_t* const future, const cy_user_context_t context);
+
+/// The callback is guaranteed to be invoked when the future completes (successfully or not);
+/// also, it may be invoked when the future is still pending to provide intermediate progress updates.
+/// Therefore, it is necessary to always check the future status inside the callback.
+///
+/// If the future is already completed, the callback will be invoked immediately before this function returns.
+/// It is safe to destroy the future from within its own callback (but it is not safe to destroy another future).
+cy_future_callback_t cy_future_callback(const cy_future_t* const future);
+void                 cy_future_callback_set(cy_future_t* const future, const cy_future_callback_t callback);
+
+/// Every future must be destroyed. If the future is still pending, the associated action will be cancelled.
+/// A future may be destroyed from within its own callback.
+/// If a future is not of interest, use this function as the future callback to ensure automatic destruction.
+void cy_future_destroy(cy_future_t* const future);
+
+// =====================================================================================================================
 //                                                      PUBLISHER
 // =====================================================================================================================
 
@@ -150,53 +197,39 @@ cy_publisher_t* cy_advertise_client(cy_t* const cy, const wkv_str_t name, const 
 /// TODO not implemented; this is a simple idea -- store the last transfer-ID in the topic and cancel it on new publish.
 cy_publisher_t* cy_advertise_sample(cy_t* const cy, const wkv_str_t name);
 
-/// Notifies the application about the outcome of a reliable delivery attempt.
-/// It is ALWAYS invoked EXACTLY ONCE per published message or a sent response if reliable delivery was requested.
-/// For published messages, the value indicates the number of remote subscribers that acknowledged the message.
-/// For responses, the value is either zero (failure) or one (success).
-typedef void (*cy_delivery_callback_t)(cy_user_context_t, uint16_t acknowledgements);
-
-/// Optionally, the user callback can take ownership of the message using cy_message_move().
-/// If the message is not moved out, it will be destroyed automatically after return from the callback.
-/// If no response was received before the deadline, the message pointer will be NULL.
-typedef void (*cy_response_callback_t)(cy_user_context_t, cy_message_ts_t*);
-
 /// Publish a best-effort (non-reliable) one-way message without expecting a response.
-cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t tx_deadline, const cy_bytes_t message);
+cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t deadline, const cy_bytes_t message);
 
-/// Publish a reliable one-way message without expecting a response.
-/// The delivery callback, unless NULL, is GUARANTEED to be invoked EXACTLY ONCE per published message
-/// to report the outcome (success/failure), unless this function returns anything other than CY_OK.
-cy_err_t cy_publish_reliable(cy_publisher_t* const        pub,
-                             const cy_us_t                tx_deadline,
-                             const cy_bytes_t             message,
-                             const cy_user_context_t      ctx_delivery,
-                             const cy_delivery_callback_t cb_delivery);
+/// Future result of publishing a reliable message.
+typedef struct cy_publish_result_t
+{
+    uint16_t acknowledgements; /// The number of remote subscribers that acknowledged reception of the message.
+} cy_publish_result_t;
 
-/// If the delivery callback is provided, reliable delivery will be used, attempting to deliver the message
-/// until the specified deadline is reached. The outcome will be reported via the delivery callback,
-/// which is GUARANTEED to be invoked EXACTLY ONCE per published message unless the function did not return CY_OK.
-/// If the delivery callback is NULL, best-effort delivery will be used.
-///
-/// The response callback is mandatory (otherwise use the simple publish functions instead of this one).
-/// A P2P response transfer will be awaited from any remote node that received the published message.
-/// The response or lack thereof will be reported via the response callback.
-/// The response callback is GUARANTEED to be invoked EXACTLY ONCE per published message unless the function
-/// did not return CY_OK. If no response is received before the deadline, the response callback will be invoked
-/// with a negative timestamp and empty data.
-///
-/// The reliability of the response transfer is up to the remote node.
-///
-/// If reliable delivery fails, the response callback will still be invoked. The guaranteed callback invocation
-/// regardless of the outcome is taken very seriously because it simplifies resource management for the application.
-cy_err_t cy_request(cy_publisher_t* const        pub,
-                    const cy_us_t                tx_deadline,
-                    const cy_us_t                response_deadline,
-                    const cy_bytes_t             message,
-                    const cy_user_context_t      ctx_delivery,
-                    const cy_delivery_callback_t cb_delivery,
-                    const cy_user_context_t      ctx_response,
-                    const cy_response_callback_t cb_response);
+/// Publish a reliable one-way message. The future result is of type cy_publish_result_t.
+cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadline, const cy_bytes_t message);
+
+/// Future result of a request message that expects a response.
+typedef struct cy_request_result_t
+{
+    /// Delivery result of the request message itself.
+    /// It is updated while the future is still pending, as a means to provide intermediate progress feedback.
+    cy_publish_result_t request;
+
+    /// The response is valid only if the future status is cy_future_success.
+    /// The response contents can be moved out using cy_message_move(); if not moved out, it will be destroyed
+    /// when the future is destroyed.
+    cy_message_ts_t response;
+} cy_request_result_t;
+
+/// The first received P2P response transfer will be awaited from any remote node that received the published message.
+/// The future result is of type cy_request_result_t.
+/// The future will be updated when the request delivery feedback is available (intermediate update) and when
+/// the response is received.
+cy_future_t* cy_request(cy_publisher_t* const pub,
+                        const cy_us_t         delivery_deadline,
+                        const cy_us_t         response_deadline,
+                        const cy_bytes_t      message);
 
 cy_prio_t cy_priority(const cy_publisher_t* const pub);
 void      cy_priority_set(cy_publisher_t* const pub, const cy_prio_t priority);
@@ -206,7 +239,7 @@ void      cy_priority_set(cy_publisher_t* const pub, const cy_prio_t priority);
 /// It can be used to obtain the topic name, hash, etc. of this publisher.
 cy_topic_t* cy_publisher_topic(const cy_publisher_t* const pub);
 
-/// Pending delivery callbacks, if any, will not be invoked after unadvertisement.
+/// All pending futures created by this publisher, if any, will be cancelled.
 void cy_unadvertise(cy_publisher_t* const pub);
 
 // =====================================================================================================================
@@ -227,7 +260,7 @@ typedef struct cy_subscriber_t cy_subscriber_t;
 /// Instead of referencing the topic, the relevant parameters of the topic are stored here by value.
 typedef struct cy_responder_t
 {
-    cy_t*                               cy; ///< Must be valid; the platform layer is responsible for ensuring this.
+    cy_t*                               cy;
     const struct cy_responder_vtable_t* vtable;
     CY_ALIGN unsigned char              state[CY_RESPONDER_STATE_BYTES];
 } cy_responder_t;
@@ -286,7 +319,10 @@ typedef struct cy_arrival_t
 
 /// The arrival pointer is mutable to allow moving the message out of it if needed.
 /// The lifetime of the arrival struct ends upon return from the current callback.
-typedef void (*cy_subscriber_callback_t)(cy_user_context_t, cy_arrival_t*);
+typedef void (*cy_subscriber_callback_t)(cy_subscriber_t*, cy_arrival_t*);
+
+// Future note: eventually, we may want to support sampling subscription pattern:
+// keep the last arrival inside the subscriber instance, and add a function to query it outside of the callback.
 
 /// We intentionally use the exact same API for both verbatim and pattern subscriptions; this is a key design feature.
 ///
@@ -296,42 +332,37 @@ typedef void (*cy_subscriber_callback_t)(cy_user_context_t, cy_arrival_t*);
 /// reference-counted topic; upon message arrival, all matching subscribers will be invoked in an unspecified order.
 /// If there is more than one subscriber utilizing different parameters (extent, ordering, etc.) on the same topic,
 /// the library will disambiguate the parameters using simple heuristics.
-cy_subscriber_t* cy_subscribe(cy_t* const                    cy,
-                              const wkv_str_t                name,
-                              const size_t                   extent,
-                              const cy_user_context_t        context,
-                              const cy_subscriber_callback_t callback);
+cy_subscriber_t* cy_subscribe(cy_t* const cy, const wkv_str_t name, const size_t extent);
 
 /// The reordering window must be non-negative.
-cy_subscriber_t* cy_subscribe_ordered(cy_t* const                    cy,
-                                      const wkv_str_t                name,
-                                      const size_t                   extent,
-                                      const cy_us_t                  reordering_window,
-                                      const cy_user_context_t        context,
-                                      const cy_subscriber_callback_t callback);
+cy_subscriber_t* cy_subscribe_ordered(cy_t* const     cy,
+                                      const wkv_str_t name,
+                                      const size_t    extent,
+                                      const cy_us_t   reordering_window);
 
 /// Send a response to a message previously received from a topic subscription.
 /// The response will be sent directly to the publisher using peer-to-peer transport, not affecting other nodes.
 /// This can be invoked from a subscription callback or at any later point as long as the responder object is available,
 /// but there may be at most one such invocation per responder instance.
 ///
-/// The feedback may be NULL if no delivery status notification is needed; the absence of the callback does not imply
-/// that the transfer will not be sent in the reliable mode.
-/// If a feedback callback is provided, it will be invoked EXACTLY ONCE to report the outcome of the delivery attempt,
-/// unless this function returns anything other than CY_OK. In particular, it will be invoked also when the topic is
-/// destroyed with pending responses.
-cy_err_t cy_respond(const cy_responder_t         responder,
-                    const cy_us_t                tx_deadline,
-                    const cy_bytes_t             response_message,
-                    const cy_user_context_t      ctx_delivery,
-                    const cy_delivery_callback_t cb_delivery);
+/// Reliable delivery will be used, but this API does not provide any delivery feedback; this may be changed in a
+/// future version if there is a use case for it (the delivery information is available internally).
+/// If the delivery information is to be exposed, it will be a new future-based API similar to cy_publish_reliable().
+/// The lifetime of the future will probably be tied to the lifetime of the subscriber instance.
+cy_err_t cy_respond(const cy_responder_t responder, const cy_us_t deadline, const cy_bytes_t message);
+
+cy_user_context_t cy_subscriber_context(const cy_subscriber_t* const self);
+void              cy_subscriber_context_set(cy_subscriber_t* const self, const cy_user_context_t context);
+
+cy_subscriber_callback_t cy_subscriber_callback(const cy_subscriber_t* const self);
+void cy_subscriber_callback_set(cy_subscriber_t* const self, const cy_subscriber_callback_t callback);
 
 /// Copies the subscriber name into the user-supplied buffer. Max size is CY_TOPIC_NAME_MAX plus NUL-terminator.
 /// The output string is NUL-terminated.
-void cy_subscriber_name(const cy_subscriber_t* const sub, char* const out_name);
+void cy_subscriber_name(const cy_subscriber_t* const self, char* const out_name);
 
 /// No effect if the subscriber pointer is NULL.
-void cy_unsubscribe(cy_subscriber_t* const sub);
+void cy_unsubscribe(cy_subscriber_t* const self);
 
 // =====================================================================================================================
 //                                                  NODE & TOPIC
@@ -340,7 +371,8 @@ void cy_unsubscribe(cy_subscriber_t* const sub);
 /// Returns the current time in microseconds. Always non-negative.
 cy_us_t cy_now(const cy_t* const cy);
 
-// TODO: cy_err_t cy_remap(cy_t*, wkv_str_t from, wkv_str_t to);
+/// TODO implement remapping
+cy_err_t cy_map(cy_t* const cy, const wkv_str_t from, const wkv_str_t to);
 
 // TODO: add a way to dump/restore topic configuration for instant initialization. This may be platform-specific.
 
@@ -363,6 +395,7 @@ cy_topic_t* cy_topic_iter_next(cy_topic_t* const topic);
 /// The name pointer lifetime is bound to the topic. The name is NUL-terminated.
 wkv_str_t cy_topic_name(const cy_topic_t* const topic);
 uint64_t  cy_topic_hash(const cy_topic_t* const topic);
+cy_t*     cy_topic_owner(const cy_topic_t* const topic);
 
 /// Provides access to the application-specific context associated per topic.
 /// By default it is set to CY_USER_CONTEXT_EMPTY when the topic is created.

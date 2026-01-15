@@ -157,12 +157,6 @@ static topic_repr_t topic_repr(const cy_topic_t* const topic)
 
 #endif
 
-static void delivery_callback_stub(const cy_user_context_t ctx, const uint16_t acknowledgements)
-{
-    (void)ctx;
-    (void)acknowledgements;
-}
-
 // =====================================================================================================================
 //                                                    LIST UTILITIES
 // =====================================================================================================================
@@ -216,6 +210,7 @@ static void* ptr_unbias(const void* const ptr, const size_t offset)
 }
 
 #define LIST_TAIL(list, owner_type, owner_field) LIST_MEMBER((list).tail, owner_type, owner_field)
+#define LIST_EMPTY                               ((cy_list_t){ .head = NULL, .tail = NULL })
 
 // =====================================================================================================================
 //                                                  MESSAGE BUFFER
@@ -263,6 +258,89 @@ void cy_message_destroy(cy_message_t* const msg)
 // ReSharper restore CppParameterMayBeConstPtrOrRef
 
 // =====================================================================================================================
+//                                                      FUTURE
+// =====================================================================================================================
+
+typedef struct cy_future_vtable_t
+{
+    cy_future_status_t (*status)(const cy_future_t*);
+    void* (*result)(cy_future_t*);
+    void (*cancel)(cy_future_t*);   ///< Pre: status() == pending; post: status() != pending.
+    void (*finalize)(cy_future_t*); ///< Invoked immediately before destruction; pre: status() != pending.
+} cy_future_vtable_t;
+
+struct cy_future_t
+{
+    cy_t*                     cy;
+    cy_user_context_t         context;
+    cy_future_callback_t      callback;
+    const cy_future_vtable_t* vtable;
+};
+
+static void* future_new(cy_t* const cy, const cy_future_vtable_t* const vtbl, const size_t derived_size)
+{
+    assert(derived_size >= sizeof(cy_future_t));
+    assert(vtbl != NULL);
+    assert((vtbl->status != NULL) && (vtbl->result != NULL) && (vtbl->cancel != NULL) && (vtbl->finalize != NULL));
+    cy_future_t* const future = (cy_future_t*)mem_alloc_zero(cy, derived_size);
+    if (future != NULL) {
+        future->cy       = cy;
+        future->context  = CY_USER_CONTEXT_EMPTY;
+        future->callback = NULL;
+        future->vtable   = vtbl;
+    }
+    return future;
+}
+
+/// Remember that the user callback may destroy the future!
+/// The future pointer is thus invalidated after this function; any access counts as use-after-free.
+static void future_notify(cy_future_t* const self)
+{
+    if (self->callback != NULL) {
+        self->callback(self);
+    }
+}
+
+static void future_cancel_and_notify(cy_future_t* const self)
+{
+    if (cy_future_status(self) == cy_future_pending) {
+        self->vtable->cancel(self);
+        assert(cy_future_status(self) != cy_future_pending);
+        future_notify(self);
+    }
+}
+
+cy_future_status_t cy_future_status(const cy_future_t* const self) { return self->vtable->status(self); }
+void*              cy_future_result(cy_future_t* const self) { return self->vtable->result(self); }
+
+cy_user_context_t cy_future_context(const cy_future_t* const self) { return self->context; }
+void cy_future_context_set(cy_future_t* const self, const cy_user_context_t context) { self->context = context; }
+
+cy_future_callback_t cy_future_callback(const cy_future_t* const self) { return self->callback; }
+void                 cy_future_callback_set(cy_future_t* const self, const cy_future_callback_t callback)
+{
+    const bool was_set = (self->callback != NULL);
+    self->callback     = callback;
+    if (!was_set && (cy_future_status(self) != cy_future_pending)) {
+        future_notify(self);
+    }
+}
+
+void cy_future_destroy(cy_future_t* const self)
+{
+    if (self != NULL) {
+        self->callback = NULL; // Remember that a future may be destroyed from within its own callback.
+        future_cancel_and_notify(self);
+        self->vtable->finalize(self);
+        mem_free(self->cy, self);
+    }
+}
+
+/// Stub for futures that do not require finalization.
+// ReSharper disable once CppParameterMayBeConstPtrOrRef
+static void future_noop(cy_future_t* const self) { (void)self; }
+
+// =====================================================================================================================
 //                                                      TOPICS
 // =====================================================================================================================
 
@@ -303,6 +381,11 @@ struct cy_publisher_t
     cy_topic_t* topic; ///< Many-to-one relationship, never NULL; the topic is reference counted.
     cy_prio_t   priority;
     size_t      response_extent;
+
+    // Pending futures to clean up on destruction.
+    // Each is tied to its own publisher for better API experience.
+    cy_list_t publish_futures;
+    cy_list_t request_futures;
 };
 
 typedef struct
@@ -922,8 +1005,9 @@ static cy_err_t publish_heartbeat(const cy_t* const cy,
                                                      cy->heartbeat_pub->priority,
                                                      (cy_bytes_t){ .size = message_size, .data = buf },
                                                      NULL,
+                                                     0,
                                                      NULL,
-                                                     0);
+                                                     NULL);
 }
 
 static cy_err_t publish_heartbeat_gossip(cy_t* const cy, cy_topic_t* const topic, const cy_us_t now)
@@ -1013,9 +1097,9 @@ static hb_t heartbeat_deserialize(cy_message_t msg, byte_t* const name_buf)
 }
 
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
-static void on_heartbeat(const cy_user_context_t ctx, cy_arrival_t* const arrival)
+static void on_heartbeat(cy_subscriber_t* const sub, cy_arrival_t* const arrival)
 {
-    (void)ctx;
+    (void)sub;
     assert(arrival->substitutions.count == 0); // This is a verbatim subscriber.
     const cy_us_t ts = arrival->message.timestamp;
     cy_t* const   cy = arrival->topic->cy;
@@ -1151,6 +1235,8 @@ cy_publisher_t* cy_advertise_client(cy_t* const cy, const wkv_str_t name, const 
     const cy_err_t res   = topic_ensure(cy, &pub->topic, resolved);
     pub->priority        = cy_prio_nominal;
     pub->response_extent = response_extent;
+    pub->publish_futures = LIST_EMPTY;
+    pub->request_futures = LIST_EMPTY;
     if (res == CY_OK) {
         assert(pub->topic != NULL);
         pub->topic->pub_count++;
@@ -1167,88 +1253,173 @@ cy_publisher_t* cy_advertise_client(cy_t* const cy, const wkv_str_t name, const 
 }
 
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
-cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t tx_deadline, const cy_bytes_t message)
+cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t deadline, const cy_bytes_t message)
 {
-    if ((pub == NULL) || (tx_deadline < 0)) {
+    if ((pub == NULL) || (deadline < 0)) {
         return CY_ERR_ARGUMENT;
     }
     assert(pub->topic->pub_count > 0);
     heartbeat_begin(pub->topic->cy);
-    return pub->topic->vtable->publish(pub->topic, tx_deadline, pub->priority, message, NULL, NULL, 0);
-}
-
-// ReSharper disable once CppParameterMayBeConstPtrOrRef
-cy_err_t cy_publish_reliable(cy_publisher_t* const        pub,
-                             const cy_us_t                tx_deadline,
-                             const cy_bytes_t             message,
-                             const cy_user_context_t      ctx_delivery,
-                             const cy_delivery_callback_t cb_delivery)
-{
-    if ((pub == NULL) || (tx_deadline < 0)) {
-        return CY_ERR_ARGUMENT;
-    }
-    assert(pub->topic->pub_count > 0);
-    heartbeat_begin(pub->topic->cy);
-    const cy_feedback_context_t ctx = { .user = ctx_delivery,
-                                        .fun  = (cb_delivery == NULL) ? delivery_callback_stub : cb_delivery };
-    return pub->topic->vtable->publish(pub->topic, tx_deadline, pub->priority, message, &ctx, NULL, 0);
+    return pub->topic->vtable->publish(pub->topic, deadline, pub->priority, message, NULL, 0, NULL, NULL);
 }
 
 typedef struct
 {
-    cy_tree_t index_deadline;    ///< Global across all topics.
-    cy_tree_t index_transfer_id; ///< Per-topic transfer-ID index.
+    cy_future_t         base;
+    cy_publisher_t*     owner;
+    cy_publish_result_t result;
+    uint64_t            transfer_id; ///< Needed for cancellation.
+    cy_list_member_t    member_pending;
+} publish_future_t;
 
-    uint64_t transfer_id; ///< As returned by the platform publish() method.
+static void* publish_future_result(cy_future_t* const self) { return &((publish_future_t*)self)->result; }
+
+static cy_future_status_t publish_future_status(const cy_future_t* const self)
+{
+    const publish_future_t* const f = (const publish_future_t*)self;
+    if (f->owner == NULL) {
+        return (f->result.acknowledgements > 0) ? cy_future_success : cy_future_failure;
+    }
+    return cy_future_pending;
+}
+
+static void publish_future_cancel(cy_future_t* const self)
+{
+    publish_future_t* const f = (publish_future_t*)self;
+    if (f->owner != NULL) {
+        delist(&f->owner->publish_futures, &f->member_pending);
+        cy_topic_t* const topic = f->owner->topic;
+        f->owner                = NULL; // Suppress the callback if the feedback notification is invoked from cancel().
+        // Message is still pending feedback; cancel transfer to avoid dangling callback into freed memory.
+        (void)topic->vtable->cancel(topic, f->transfer_id);
+    }
+    assert((f->member_pending.next == NULL) && (f->member_pending.prev == NULL));
+}
+
+static void on_publish_feedback(void* const context, const uint16_t acknowledgements)
+{
+    publish_future_t* const f  = (publish_future_t*)context;
+    f->result.acknowledgements = acknowledgements;
+    if (f->owner != NULL) {
+        delist(&f->owner->publish_futures, &f->member_pending);
+        f->owner = NULL;         // Prevent cancellation in finalize(); it may be deadly if the transfer-ID is reused.
+        future_notify(&f->base); // future invalidated
+    }
+}
+
+// ReSharper disable once CppParameterMayBeConstPtrOrRef
+cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadline, const cy_bytes_t message)
+{
+    if ((pub == NULL) || (deadline < 0)) {
+        return NULL;
+    }
+    assert(pub->topic->pub_count > 0);
+    static const cy_future_vtable_t future_vtable = { .result   = publish_future_result,
+                                                      .status   = publish_future_status,
+                                                      .cancel   = publish_future_cancel,
+                                                      .finalize = future_noop };
+    publish_future_t* fut = future_new(pub->topic->cy, &future_vtable, sizeof(publish_future_t)); // ------
+    if (fut != NULL) {
+        fut->owner                   = pub;
+        fut->result.acknowledgements = 0;
+        heartbeat_begin(pub->topic->cy);
+        const cy_err_t err = pub->topic->vtable->publish(pub->topic, //
+                                                         deadline,
+                                                         pub->priority,
+                                                         message,
+                                                         &fut->transfer_id,
+                                                         0,
+                                                         fut,
+                                                         &on_publish_feedback);
+        if (err != CY_OK) {
+            mem_free(pub->topic->cy, fut);
+            fut = NULL;
+        } else {
+            enlist_head(&pub->publish_futures, &fut->member_pending);
+        }
+    }
+    return (cy_future_t*)fut;
+}
+
+typedef struct
+{
+    cy_future_t     base;
+    cy_publisher_t* pub;
+
+    bool                request_done;
+    cy_request_result_t result;
+
+    uint64_t transfer_id; ///< Needed for response correlation and early cancellation.
     cy_us_t  deadline;
 
-    cy_topic_t* topic;
+    cy_tree_t        index_transfer_id; ///< Per-topic transfer-ID index.
+    cy_tree_t        index_deadline;    ///< Global across all topics.
+    cy_list_member_t member_pending;    ///< List of pending requests for cancellation when publisher is destroyed.
+} request_future_t;
 
-    cy_user_context_t      user_context;
-    cy_response_callback_t callback;
-} pending_response_t;
+static void* request_future_result(cy_future_t* const self) { return &((request_future_t*)self)->result; }
 
-/// Unlink from everywhere and deallocate the instance. The callback takes the ownership of the message.
-static void pending_response_finalize(pending_response_t* const self, const cy_us_t ts, const cy_message_t msg)
+static cy_future_status_t request_future_status(const cy_future_t* const self)
 {
-    cy_t* const cy = self->topic->cy;
-    CY_TRACE(cy,
-             "📩 %s #%llu msize=%zu %s",
-             topic_repr(self->topic).str,
-             (unsigned long long)self->transfer_id,
-             msg.size,
-             (ts >= 0) ? "✅ SUCCESS" : "❌ NO RESPONSE");
-    cavl2_remove(&cy->pending_responses_by_deadline, &self->index_deadline);
-    cavl2_remove(&self->topic->pending_responses_by_transfer_id, &self->index_transfer_id);
+    const request_future_t* const f = (const request_future_t*)self;
+    const bool ins = cavl2_is_inserted(self->cy->request_futures_by_deadline, &f->index_deadline); // instant check
+    assert(ins == cavl2_is_inserted(f->pub->topic->request_futures_by_transfer_id, &f->index_transfer_id));
+    if (ins) {
+        return cy_future_pending;
+    }
+    return (f->result.response.timestamp > 0) ? cy_future_success : cy_future_failure;
+}
 
-    // Store the context needed to invoke the callback, then free the memory BEFORE invoking the callback.
-    assert(self->callback != NULL);
-    const cy_response_callback_t cb  = self->callback;
-    const cy_user_context_t      ctx = self->user_context;
-    mem_free(cy, self);
+static void request_future_cancel(cy_future_t* const self)
+{
+    request_future_t* const f = (request_future_t*)self;
+    if (!f->request_done) {
+        // It is essential that we cancel not only to stop the no longer useful message from being sent,
+        // but also to prevent the future feedback callback from operating on a dead future pointer.
+        (void)f->pub->topic->vtable->cancel(f->pub->topic, f->transfer_id);
+        f->request_done = true;
+    }
+    if (request_future_status(self) == cy_future_pending) {
+        cavl2_remove(&self->cy->request_futures_by_deadline, &f->index_deadline);
+        cavl2_remove(&f->pub->topic->request_futures_by_transfer_id, &f->index_transfer_id);
+    }
+    delist(&f->pub->request_futures, &f->member_pending);
+    assert(f->request_done && (request_future_status(self) != cy_future_pending));
+}
 
-    // Invoke the callback to deliver the response. It may take ownership of the message.
-    cy_message_ts_t mt = { .timestamp = ts, .content = msg };
-    cb(ctx, (ts >= 0) ? &mt : NULL);
+static void request_future_finalize(cy_future_t* const self)
+{
+    request_future_t* const f = (request_future_t*)self;
+    assert(f->request_done && (request_future_status(self) != cy_future_pending));
+    // This will be a no-op if the user already took ownership of the message, or if there was no message to begin with.
+    cy_message_destroy(&f->result.response.content);
+}
 
-    // This will be a no-op if the handler took ownership of the message by moving it out.
-    cy_message_destroy(&mt.content);
+static void on_request_feedback(void* const context, const uint16_t acknowledgements)
+{
+    request_future_t* const f          = (request_future_t*)context;
+    f->result.request.acknowledgements = acknowledgements;
+    assert(!f->request_done);
+    f->request_done = true;
+    if ((request_future_status(&f->base) == cy_future_pending)) {
+        future_notify(&f->base); // future invalidated
+    }
 }
 
 /// Deadlines are not unique, so this comparator never returns 0.
-static int32_t cavl_comp_pending_response_deadline(const void* const user, const cy_tree_t* const node)
+static int32_t cavl_comp_future_response_deadline(const void* const user, const cy_tree_t* const node)
 {
     assert((user != NULL) && (node != NULL));
-    const pending_response_t* const inner = CAVL2_TO_OWNER(node, pending_response_t, index_deadline);
+    const request_future_t* const inner = CAVL2_TO_OWNER(node, request_future_t, index_deadline);
     return ((*(cy_us_t*)user) >= inner->deadline) ? +1 : -1;
 }
 
 /// To find a pending response, one needs to locate the topic by hash first, if it exists when the response arrives.
-static int32_t cavl_comp_pending_response_transfer_id(const void* const user, const cy_tree_t* const node)
+static int32_t cavl_comp_future_response_transfer_id(const void* const user, const cy_tree_t* const node)
 {
     assert((user != NULL) && (node != NULL));
-    const uint64_t                  outer = *(uint64_t*)user;
-    const pending_response_t* const inner = CAVL2_TO_OWNER(node, pending_response_t, index_transfer_id);
+    const uint64_t                outer = *(uint64_t*)user;
+    const request_future_t* const inner = CAVL2_TO_OWNER(node, request_future_t, index_transfer_id);
     if (outer == inner->transfer_id) {
         return 0;
     }
@@ -1256,84 +1427,83 @@ static int32_t cavl_comp_pending_response_transfer_id(const void* const user, co
 }
 
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
-cy_err_t cy_request(cy_publisher_t* const        pub,
-                    const cy_us_t                tx_deadline,
-                    const cy_us_t                response_deadline,
-                    const cy_bytes_t             message,
-                    const cy_user_context_t      ctx_delivery,
-                    const cy_delivery_callback_t cb_delivery,
-                    const cy_user_context_t      ctx_response,
-                    const cy_response_callback_t cb_response)
+cy_future_t* cy_request(cy_publisher_t* const pub,
+                        const cy_us_t         delivery_deadline,
+                        const cy_us_t         response_deadline,
+                        const cy_bytes_t      message)
 {
-    if ((pub == NULL) || (tx_deadline < 0) || (response_deadline < tx_deadline) || (cb_response == NULL)) {
-        return CY_ERR_ARGUMENT;
+    if ((pub == NULL) || (delivery_deadline < 0) || (response_deadline < delivery_deadline)) {
+        return NULL;
     }
     cy_t* const cy = pub->topic->cy;
     assert(pub->topic->pub_count > 0);
-    pending_response_t* const pr = mem_alloc_zero(cy, sizeof(pending_response_t));
-    if (pr == NULL) {
-        return CY_ERR_MEMORY;
+    static const cy_future_vtable_t future_vtable = { .result   = request_future_result,
+                                                      .status   = request_future_status,
+                                                      .cancel   = request_future_cancel,
+                                                      .finalize = request_future_finalize };
+    request_future_t* const         fut           = future_new(cy, &future_vtable, sizeof(request_future_t));
+    if (fut == NULL) {
+        return NULL;
     }
-    const bool                  reliable = (cb_delivery != NULL);
-    const cy_feedback_context_t fb_ctx   = { .user = ctx_delivery, .fun = cb_delivery };
+    fut->pub             = pub;
+    fut->request_done    = false;
+    fut->result.response = (cy_message_ts_t){ .timestamp = BIG_BANG, .content = message_empty };
+    fut->deadline        = response_deadline;
     heartbeat_begin(cy);
     const cy_err_t res = pub->topic->vtable->publish(pub->topic,
-                                                     tx_deadline,
+                                                     delivery_deadline,
                                                      pub->priority,
                                                      message,
-                                                     reliable ? &fb_ctx : NULL,
-                                                     &pr->transfer_id,
-                                                     pub->response_extent);
+                                                     &fut->transfer_id,
+                                                     pub->response_extent,
+                                                     fut,
+                                                     &on_request_feedback);
     if (res != CY_OK) {
-        mem_free(cy, pr);
-        return res;
+        mem_free(cy, fut);
+        return NULL;
     }
-    pr->deadline     = response_deadline;
-    pr->topic        = pub->topic;
-    pr->user_context = ctx_response;
-    pr->callback     = cb_response;
     // The transfer-ID values returned by the transport layer are meant to be unique. This is trivially ensured in most
     // transports because they use 64-bit monotonically increasing sequence numbers. However, Cyphal/CAN is special in
     // that its transfer-ID space is only 5 bits wide, which will cause the insertion operation to fail if there already
     // are 31 pending requests. While this is highly unlikely to actually happen in practice, we must still handle this
     // case gracefully; the solution is very simple -- finalize the old competed response early and replace it.
     while (true) {
-        pending_response_t* const pr2 =
-          CAVL2_TO_OWNER(cavl2_find_or_insert(&pub->topic->pending_responses_by_transfer_id,
-                                              &pr->transfer_id,
-                                              cavl_comp_pending_response_transfer_id,
-                                              &pr->index_transfer_id,
-                                              cavl2_trivial_factory),
-                         pending_response_t,
-                         index_transfer_id);
-        if (pr2 == pr) {
+        request_future_t* const fut2 = CAVL2_TO_OWNER(cavl2_find_or_insert(&pub->topic->request_futures_by_transfer_id,
+                                                                           &fut->transfer_id,
+                                                                           cavl_comp_future_response_transfer_id,
+                                                                           &fut->index_transfer_id,
+                                                                           cavl2_trivial_factory),
+                                                      request_future_t,
+                                                      index_transfer_id);
+        if (fut2 == fut) {
             break; // Successfully inserted.
         }
-        CY_TRACE(cy,
-                 "⚠️ %s response transfer-ID exhaustion on #%llu",
-                 topic_repr(pub->topic).str,
-                 (unsigned long long)pr->transfer_id);
-        pending_response_finalize(pr2, BIG_BANG, message_empty);
+        CY_TRACE(
+          cy, "⚠️ %s #%016llx transfer-ID exhaustion", topic_repr(pub->topic).str, (unsigned long long)fut->transfer_id);
+        future_cancel_and_notify(&fut2->base);
+        // We cannot destroy the conflicting future because we don't own it. The user will do that eventually -- we
+        // just marked it as completed (actually failed, sorry about that haha -_o).
     }
-    (void)cavl2_find_or_insert(&cy->pending_responses_by_deadline,
-                               &pr->deadline,
-                               cavl_comp_pending_response_deadline,
-                               &pr->index_deadline,
+    (void)cavl2_find_or_insert(&cy->request_futures_by_deadline,
+                               &fut->deadline,
+                               cavl_comp_future_response_deadline,
+                               &fut->index_deadline,
                                cavl2_trivial_factory);
-    CY_TRACE(cy, "📩 %s new pending response #%llu", topic_repr(pr->topic).str, (unsigned long long)pr->transfer_id);
-    return CY_OK;
+    enlist_head(&pub->request_futures, &fut->member_pending);
+    CY_TRACE(cy, "📩 %s #%016llx new request future", topic_repr(pub->topic).str, (unsigned long long)fut->transfer_id);
+    return (cy_future_t*)fut;
 }
 
-static void retire_expired_pending_responses(const cy_t* cy, const cy_us_t now)
+static void retire_expired_request_futures(const cy_t* cy, const cy_us_t now)
 {
-    pending_response_t* pr =
-      CAVL2_TO_OWNER(cavl2_min(cy->pending_responses_by_deadline), pending_response_t, index_deadline);
-    while ((pr != NULL) && (pr->deadline < now)) {
-        pending_response_finalize(pr, BIG_BANG, message_empty);
+    request_future_t* fut =
+      CAVL2_TO_OWNER(cavl2_min(cy->request_futures_by_deadline), request_future_t, index_deadline);
+    while ((fut != NULL) && (fut->deadline < now)) {
+        future_cancel_and_notify(&fut->base);
         // We could have avoided the second min lookup by replacing this with a cavl2_next_greater(), but the problem
         // is that the user callback may modify the tree, and we don't want to put constraints on the callback behavior.
         // A more sophisticated solution is to mark the tree as modified, but it's not worth the effort.
-        pr = CAVL2_TO_OWNER(cavl2_min(cy->pending_responses_by_deadline), pending_response_t, index_deadline);
+        fut = CAVL2_TO_OWNER(cavl2_min(cy->request_futures_by_deadline), request_future_t, index_deadline);
     }
 }
 
@@ -1347,7 +1517,44 @@ void      cy_priority_set(cy_publisher_t* const pub, const cy_prio_t priority)
 
 cy_topic_t* cy_publisher_topic(const cy_publisher_t* const pub) { return (pub != NULL) ? pub->topic : NULL; }
 
-void cy_unadvertise(cy_publisher_t* const pub) { (void)pub; }
+void cy_unadvertise(cy_publisher_t* const pub)
+{
+    if (pub == NULL) {
+        return;
+    }
+    // Finalize pending publish futures.
+    while (true) {
+        publish_future_t* const fut = LIST_TAIL(pub->publish_futures, publish_future_t, member_pending);
+        if (fut == NULL) {
+            break;
+        }
+        future_cancel_and_notify(&fut->base);
+        assert(fut != LIST_TAIL(pub->publish_futures, publish_future_t, member_pending)); // Must delist.
+    }
+
+    // Finalize pending request futures.
+    while (true) {
+        request_future_t* const fut = LIST_TAIL(pub->request_futures, request_future_t, member_pending);
+        if (fut == NULL) {
+            break;
+        }
+        future_cancel_and_notify(&fut->base);
+        assert(fut != LIST_TAIL(pub->request_futures, request_future_t, member_pending)); // Must delist.
+    }
+
+    // Dereference the topic.
+    cy_topic_t* const topic = pub->topic;
+    assert(!is_implicit(topic));
+    assert(topic->pub_count > 0);
+    topic->pub_count--;
+    if (topic->pub_count == 0) {
+        assert(topic->request_futures_by_transfer_id == NULL); // All pending requests must have been cancelled.
+        if (cy_topic_has_subscribers(topic)) { // Demote to implicit; will be eventually garbage collected.
+            enlist_head(&topic->cy->list_implicit, &topic->list_implicit);
+            assert(!is_implicit(topic));
+        }
+    }
+}
 
 // =====================================================================================================================
 //                                                      SUBSCRIBER
@@ -1440,13 +1647,9 @@ static cy_err_t ensure_subscriber_root(cy_t* const               cy,
     return CY_OK;
 }
 
-static cy_subscriber_t* subscribe(cy_t* const                    cy,
-                                  const wkv_str_t                name,
-                                  const subscriber_params_t      params,
-                                  const cy_user_context_t        context,
-                                  const cy_subscriber_callback_t callback)
+static cy_subscriber_t* subscribe(cy_t* const cy, const wkv_str_t name, const subscriber_params_t params)
 {
-    assert((cy != NULL) && (callback != NULL) && (params.reordering_window >= -1));
+    assert((cy != NULL) && (params.reordering_window >= -1));
     char            name_buf[CY_TOPIC_NAME_MAX];
     const wkv_str_t resolved = cy_name_resolve(name, cy->ns, cy->home, sizeof(name_buf), name_buf);
     if (resolved.len > sizeof(name_buf)) {
@@ -1458,8 +1661,8 @@ static cy_subscriber_t* subscribe(cy_t* const                    cy,
         return NULL;
     }
     sub->params        = params;
-    sub->user_context  = context;
-    sub->callback      = callback;
+    sub->user_context  = CY_USER_CONTEXT_EMPTY;
+    sub->callback      = NULL;
     const cy_err_t res = ensure_subscriber_root(cy, resolved, &sub->root);
     if (res != CY_OK) {
         mem_free(cy, sub);
@@ -1476,54 +1679,54 @@ static cy_subscriber_t* subscribe(cy_t* const                    cy,
     return sub;
 }
 
-cy_subscriber_t* cy_subscribe(cy_t* const                    cy,
-                              const wkv_str_t                name,
-                              const size_t                   extent,
-                              const cy_user_context_t        context,
-                              const cy_subscriber_callback_t callback)
+cy_subscriber_t* cy_subscribe(cy_t* const cy, const wkv_str_t name, const size_t extent)
 {
-    if ((cy != NULL) && (callback != NULL)) {
+    if (cy != NULL) {
         const subscriber_params_t params = { .extent = extent, .reordering_window = -1 };
-        return subscribe(cy, name, params, context, callback);
+        return subscribe(cy, name, params);
     }
     return NULL;
 }
 
-cy_subscriber_t* cy_subscribe_ordered(cy_t* const                    cy,
-                                      const wkv_str_t                name,
-                                      const size_t                   extent,
-                                      const cy_us_t                  reordering_window,
-                                      const cy_user_context_t        context,
-                                      const cy_subscriber_callback_t callback)
+cy_subscriber_t* cy_subscribe_ordered(cy_t* const     cy,
+                                      const wkv_str_t name,
+                                      const size_t    extent,
+                                      const cy_us_t   reordering_window)
 {
-    if ((cy != NULL) && (callback != NULL) && (reordering_window >= 0)) {
+    if ((cy != NULL) && (reordering_window >= 0)) {
         const subscriber_params_t params = { .extent = extent, .reordering_window = reordering_window };
-        return subscribe(cy, name, params, context, callback);
+        return subscribe(cy, name, params);
     }
     return NULL;
 }
 
-cy_err_t cy_respond(const cy_responder_t         responder,
-                    const cy_us_t                tx_deadline,
-                    const cy_bytes_t             response_message,
-                    const cy_user_context_t      ctx_delivery,
-                    const cy_delivery_callback_t cb_delivery)
+cy_err_t cy_respond(const cy_responder_t responder, const cy_us_t deadline, const cy_bytes_t message)
 {
-    if (tx_deadline < 0) {
+    if (deadline < 0) {
         return CY_ERR_ARGUMENT;
     }
     heartbeat_begin(responder.cy);
-    const cy_feedback_context_t fb_ctx = { .user = ctx_delivery,
-                                           .fun  = (cb_delivery == NULL) ? delivery_callback_stub : cb_delivery };
-    return responder.vtable->respond(&responder, tx_deadline, response_message, fb_ctx);
+    return responder.vtable->respond(&responder, deadline, message);
 }
 
-void cy_subscriber_name(const cy_subscriber_t* const sub, char* const out_name)
+cy_user_context_t cy_subscriber_context(const cy_subscriber_t* const self) { return self->user_context; }
+void              cy_subscriber_context_set(cy_subscriber_t* const self, const cy_user_context_t context)
 {
-    wkv_get_key(&sub->root->cy->subscribers_by_name, sub->root->index_name, out_name);
+    self->user_context = context;
 }
 
-void cy_unsubscribe(cy_subscriber_t* const sub) { (void)sub; }
+cy_subscriber_callback_t cy_subscriber_callback(const cy_subscriber_t* const self) { return self->callback; }
+void cy_subscriber_callback_set(cy_subscriber_t* const self, const cy_subscriber_callback_t callback)
+{
+    self->callback = callback;
+}
+
+void cy_subscriber_name(const cy_subscriber_t* const self, char* const out_name)
+{
+    wkv_get_key(&self->root->cy->subscribers_by_name, self->root->index_name, out_name);
+}
+
+void cy_unsubscribe(cy_subscriber_t* const self) { (void)self; }
 
 // =====================================================================================================================
 //                                                  NODE & TOPIC
@@ -1564,8 +1767,8 @@ wkv_str_t cy_topic_name(const cy_topic_t* const topic)
     }
     return (wkv_str_t){ .len = 0, .str = "" };
 }
-
 uint64_t cy_topic_hash(const cy_topic_t* const topic) { return (topic != NULL) ? topic->hash : UINT64_MAX; }
+cy_t*    cy_topic_owner(const cy_topic_t* const topic) { return (topic != NULL) ? topic->cy : NULL; }
 
 cy_user_context_t* cy_topic_user_context(cy_topic_t* const topic)
 {
@@ -1633,6 +1836,11 @@ cy_err_t cy_new(cy_t* const              cy,
     wkv_init(&cy->subscribers_by_pattern, &wkv_realloc);
     cy->subscribers_by_pattern.context = cy;
 
+    cy->list_implicit      = LIST_EMPTY;
+    cy->list_gossip_urgent = LIST_EMPTY;
+    cy->list_gossip        = LIST_EMPTY;
+    cy->list_scout_pending = LIST_EMPTY;
+
     // Postpone calling the functions until after the object is set up.
     cy->ts_started = cy_now(cy);
 
@@ -1651,11 +1859,12 @@ cy_err_t cy_new(cy_t* const              cy,
         return CY_ERR_MEMORY;
     }
     assert(cy->heartbeat_pub->topic->hash == CY_HEARTBEAT_TOPIC_HASH);
-    cy->heartbeat_sub = cy_subscribe(cy, hb_name, HEARTBEAT_SIZE_MAX, CY_USER_CONTEXT_EMPTY, &on_heartbeat);
+    cy->heartbeat_sub = cy_subscribe(cy, hb_name, HEARTBEAT_SIZE_MAX);
     if (cy->heartbeat_sub == NULL) {
         cy_unadvertise(cy->heartbeat_pub);
         return CY_ERR_MEMORY;
     }
+    cy_subscriber_callback_set(cy->heartbeat_sub, &on_heartbeat);
     CY_TRACE(cy,
              "🚀 home='%s' ns='%s' ts_started=%llu subject_id_modulus=%lu",
              cy->home.str,
@@ -1702,7 +1911,7 @@ cy_err_t cy_update(cy_t* const cy)
         return CY_ERR_ARGUMENT;
     }
     const cy_us_t now = cy_now(cy);
-    retire_expired_pending_responses(cy, now);
+    retire_expired_request_futures(cy, now);
     retire_expired_implicit_topics(cy, now);
     return heartbeat_poll(cy, now);
 }
@@ -1746,7 +1955,7 @@ void cy_on_message(cy_topic_t* const    topic,
                 .topic         = topic,
                 .substitutions = { .count = cpl->substitution_count, .substitutions = cpl->substitutions },
             };
-            sub->callback(sub->user_context, &arrival);
+            sub->callback(sub, &arrival);
             if (cy_message_size(arrival.message.content) < cy_message_size(message)) {
                 assert(!moved); // At most one handler can take ownership of the payload.
                 moved = true;
@@ -1770,34 +1979,34 @@ void cy_on_response(cy_t* const    cy,
     assert((cy != NULL) && (timestamp >= 0));
     const cy_topic_t* const topic = cy_topic_find_by_hash(cy, topic_hash);
     if (topic != NULL) {
-        pending_response_t* const pr = CAVL2_TO_OWNER(
-          cavl2_find(topic->pending_responses_by_transfer_id, &transfer_id, cavl_comp_pending_response_transfer_id),
-          pending_response_t,
+        request_future_t* const fut = CAVL2_TO_OWNER(
+          cavl2_find(topic->request_futures_by_transfer_id, &transfer_id, cavl_comp_future_response_transfer_id),
+          request_future_t,
           index_transfer_id);
-        if (pr != NULL) {
-            pending_response_finalize(pr, timestamp, message); // Takes ownership of the message.
+        if (fut != NULL) {
+            assert(fut->pub->topic->cy == cy);
+            assert(fut->result.response.timestamp < 0);
+            assert(cy_message_size(fut->result.response.content) == 0);
+            fut->result.response.timestamp = timestamp;
+            fut->result.response.content   = cy_message_move(&message);
+#if CY_CONFIG_TRACE
+            if (!fut->request_done) {
+                CY_TRACE(cy,
+                         "🔀 %s #%016llx response before request ack",
+                         topic_repr(fut->pub->topic).str,
+                         (unsigned long long)fut->transfer_id);
+            }
+#endif
+            request_future_cancel(&fut->base);
+            future_notify(&fut->base); // future invalidated
         } else {
-            CY_TRACE(cy, "❓ %s orphan #%llu", topic_repr(topic).str, (unsigned long long)transfer_id);
+            CY_TRACE(cy, "❓ %s orphan #%016llx", topic_repr(topic).str, (unsigned long long)transfer_id);
             cy_message_destroy(&message); // Unexpected or duplicate response.
         }
     } else {
         CY_TRACE(cy, "❓ T%016llx no such topic", (unsigned long long)topic_hash);
         cy_message_destroy(&message); // The topic was destroyed while waiting for the response.
     }
-}
-
-void cy_on_message_feedback(cy_t* const cy, const cy_feedback_context_t context, const uint16_t acknowledgements)
-{
-    assert(cy != NULL);
-    (void)cy; // Later we may want to add statistics.
-    context.fun(context.user, acknowledgements);
-}
-
-void cy_on_response_feedback(cy_t* const cy, const cy_feedback_context_t context, const bool success)
-{
-    assert(cy != NULL);
-    (void)cy; // Later we may want to add statistics.
-    context.fun(context.user, success ? 1 : 0);
 }
 
 // =====================================================================================================================

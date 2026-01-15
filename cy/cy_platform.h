@@ -85,14 +85,6 @@ typedef struct cy_message_vtable_t
     size_t (*read)(cy_message_t*, size_t, size_t, void*);
 } cy_message_vtable_t;
 
-/// The data that is forwarded back to Cy per message delivery callback by value.
-typedef struct cy_feedback_context_t cy_feedback_context_t;
-struct cy_feedback_context_t
-{
-    cy_user_context_t      user;
-    cy_delivery_callback_t fun; ///< May exceed sizeof(void*) depending on the platform; treat as opaque.
-};
-
 /// This is the base type that is extended by the platform layer with transport- and platform-specific entities,
 /// such as socket handles, etc. Instantiation is therefore done inside the platform layer in the heap or some
 /// other dynamic storage. The user code is not expected to interact with the topic type, and the only reason it is
@@ -153,7 +145,9 @@ typedef struct cy_topic_t
     cy_us_t ts_animated; ///< Last time the topic saw activity that prevents it from being retired.
 
     /// Used for matching pending response states against received responses by transfer-ID.
-    cy_tree_t* pending_responses_by_transfer_id;
+    /// TODO: When destroying the topic, ensure this index is empty -- each publisher must clean up its own
+    ///       pending request futures.
+    cy_tree_t* request_futures_by_transfer_id;
 
     /// States related to tracking publishers and subscribers on this topic. The topic is removed when none left.
     struct cy_topic_coupling_t* couplings;
@@ -174,25 +168,23 @@ typedef struct cy_topic_vtable_t
     /// The transport will choose a new transfer-ID value for the message and return it, which may be used later to
     /// match responses if any are needed/expected.
     ///
-    /// The feedback context is NULL iff best-effort mode is chosen, otherwise the reliable mode is used.
-    /// If reliable mode is chosen, the outcome will ALWAYS be reported EXACTLY ONCE per successful publish() call
-    /// via cy_on_message_feedback() with the provided context.
-    ///
     /// The response extent hints the maximum size of response messages arriving in response to the published message
     /// that is of interest for the application, allowing the transport to truncate the rest. The transport may
     /// disregard the hint and receive an arbitrarily larger response message. If no responses are expected, use zero.
     /// All received responses are reported via cy_on_response().
-    cy_err_t (*publish)(cy_topic_t*                  self,
-                        cy_us_t                      tx_deadline,
-                        cy_prio_t                    priority,
-                        cy_bytes_t                   message,
-                        const cy_feedback_context_t* reliable_context,
-                        uint64_t*                    out_transfer_id,
-                        size_t                       response_extent);
+    cy_err_t (*publish)(cy_topic_t* self,
+                        cy_us_t     deadline,
+                        cy_prio_t   priority,
+                        cy_bytes_t  message,
+                        uint64_t*   out_transfer_id,
+                        size_t      response_extent,
+                        void*       reliable_context,
+                        void (*reliable_feedback)(void* reliable_context, uint16_t acknowledgements));
 
     /// Cancel publication of a previously published message that is still pending transmission.
     /// Returns true iff the message was found and cancelled; false if no such pending message exists.
-    /// For reliable messages, the delivery callback must be invoked.
+    /// For reliable messages, the delivery callback must either not be invoked, or invoked immediately from within
+    /// this function. Delayed invocation would result in dangling pointers / use-after-free.
     bool (*cancel)(cy_topic_t* self, uint64_t transfer_id);
 
     /// Instructs the underlying transport layer to create a new subscription on the topic.
@@ -233,11 +225,13 @@ typedef struct cy_responder_vtable_t
     /// Instructs the underlying transport layer to send a peer-to-peer response transfer. The identity of the remote
     /// endpoint is encoded and the transfer metadata are stored inside the cy_responder_t object in a
     /// platform-specific manner.
-    /// Implementations may optionally invalidate the responder object after use -- only a single use is guaranteed.
-    /// Currently, all P2P response transfers are sent using the reliable delivery mode, and the result of the transfer
-    /// is reported via cy_on_message_feedback(). If needed, in the future we may consider adding support for
-    /// best-effort P2P responses by allowing NULL feedback context here.
-    cy_err_t (*respond)(const cy_responder_t*, cy_us_t tx_deadline, cy_bytes_t message, cy_feedback_context_t context);
+    /// Implementations may optionally invalidate the responder object after use -- at most single use is guaranteed.
+    ///
+    /// Currently, there is no delivery information exposed; this may be changed in the future.
+    /// The most likely solution would be to add a cancel() function to the responder vtable,
+    /// and make implementations keep track of the transfer-ID used to send the response such that internally
+    /// they can cancel it if requested. The responder instance would be stored in the future.
+    cy_err_t (*respond)(const cy_responder_t*, cy_us_t deadline, cy_bytes_t message);
 } cy_responder_vtable_t;
 
 /// Instances of cy are not copyable; they are always accessed via pointer provided during initialization.
@@ -290,7 +284,7 @@ struct cy_t
     wkv_t subscribers_by_pattern; ///< Only patterns for implicit subscriptions on heartbeat.
 
     /// For detecting timed out responses. This index spans all topics.
-    cy_tree_t* pending_responses_by_deadline;
+    cy_tree_t* request_futures_by_deadline;
 };
 
 /// Platform-specific implementation of cy_t.
@@ -311,9 +305,9 @@ typedef struct cy_vtable_t
     ///
     /// A simple compliant solution that can be implemented in an embedded system without TRNG is:
     ///
-    ///     static uint64_t g_prng_state __attribute__ ((section (".noinit")));
+    ///     static uint64_t g_prng_state __attribute__ ((section (".noinit")));  // adapt .noinit to your toolchain
     ///     g_prng_state += 0xA0761D6478BD642FULL;     // add Wyhash seed (64-bit prime)
-    ///     const uint64_t seed[] = { g_prng_state }; // if possible, add more entropy here, like ADC noise
+    ///     const uint64_t seed[] = { g_prng_state };  // if possible, add more entropy here, like ADC noise
     ///     return rapidhash_withSeed(seed, sizeof(seed), local_uid);
     ///
     /// It is desirable to save the PRNG state in a battery-backed memory, if available; otherwise, in small MCUs one
@@ -394,15 +388,6 @@ void cy_on_response(cy_t* const    cy,
                     const uint64_t topic_hash,
                     const uint64_t transfer_id,
                     cy_message_t   message);
-
-/// Communicates the delivery status of a reliable message published on a topic, and a P2P response sent to a
-/// previously received message. For the platform layer it is easy to also provide the topic hash and the transfer-ID,
-/// but at the moment Cy does not make use of that information, so it is omitted. This API may be revised later.
-///
-/// These are GUARANTEED to be invoked EXACTLY ONCE per reliable message, unless the publish/response function did
-/// not return CY_OK. This also involves the case when the associated resource is destroyed (e.g., unsubscribed etc).
-void cy_on_message_feedback(cy_t* const cy, const cy_feedback_context_t context, const uint16_t acknowledgements);
-void cy_on_response_feedback(cy_t* const cy, const cy_feedback_context_t context, const bool success);
 
 /// For diagnostics and logging only. Do not use in embedded and real-time applications.
 /// This function is only required if CY_CONFIG_TRACE is defined and is nonzero; otherwise it should be left undefined.

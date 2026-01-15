@@ -16,10 +16,9 @@
 /// Response schema:
 ///     uint32           errno
 ///     byte[<=DATA_MAX] data
-static void on_file_read_msg(const cy_user_context_t user, cy_arrival_t* const arv)
+static void on_file_read_msg(cy_subscriber_t* const subscriber, cy_arrival_t* const arv)
 {
-    (void)user;
-    cy_t* const cy = arv->topic->cy;
+    (void)subscriber;
 
     // Deserialize the payload, assuming the local machine is little-endian, for simplicity.
     uint64_t read_offset = 0;
@@ -28,7 +27,7 @@ static void on_file_read_msg(const cy_user_context_t user, cy_arrival_t* const a
     if ((8 != cy_message_read(&arv->message.content, 0, 8, &read_offset)) ||
         (2 != cy_message_read(&arv->message.content, 8, 2, &path_len)) || (path_len == 0) || (path_len > PATH_MAX) ||
         (path_len != cy_message_read(&arv->message.content, 10, path_len, file_name))) {
-        CY_TRACE(cy, "Malformed request of size %zu", cy_message_size(arv->message.content));
+        (void)fprintf(stderr, "Malformed request of size %zu\n", cy_message_size(arv->message.content));
         return;
     }
     file_name[path_len] = '\0';
@@ -54,17 +53,15 @@ static void on_file_read_msg(const cy_user_context_t user, cy_arrival_t* const a
     }
 
     // Send the response back to the client.
-    CY_TRACE(cy,
-             "Responding: file='%s' offset=%llu size=%u error=%u",
-             file_name,
-             (unsigned long long)read_offset,
-             response.data_len,
-             response.error);
+    (void)fprintf(stderr,
+                  "Responding: file='%s' offset=%llu size=%u error=%u\n",
+                  file_name,
+                  (unsigned long long)read_offset,
+                  response.data_len,
+                  response.error);
     (void)cy_respond(arv->responder,
                      arv->message.timestamp + (10 * MEGA),
-                     (cy_bytes_t){ .size = 4 + 2 + response.data_len, .data = &response },
-                     CY_USER_CONTEXT_EMPTY,
-                     NULL);
+                     (cy_bytes_t){ .size = 4 + 2 + response.data_len, .data = &response });
 }
 
 int main(void)
@@ -76,11 +73,11 @@ int main(void)
     }
     cy_t* const cy = &cy_udp.base;
 
-    cy_subscriber_t* const sub_file_read =
-      cy_subscribe(cy, wkv_key("file/read"), 1024, CY_USER_CONTEXT_EMPTY, on_file_read_msg);
+    cy_subscriber_t* const sub_file_read = cy_subscribe(cy, wkv_key("file/read"), 1024);
     if (sub_file_read == NULL) {
         errx(res, "cy_subscribe");
     }
+    cy_subscriber_callback_set(sub_file_read, &on_file_read_msg);
 
     while (true) {
         res = cy_udp_posix_spin_once(&cy_udp);

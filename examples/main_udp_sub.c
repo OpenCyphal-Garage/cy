@@ -76,41 +76,28 @@ static struct config_t load_config(const int argc, char* argv[])
     return cfg;
 }
 
-static void on_response_delivery_result(const cy_user_context_t user, const uint16_t acknowledgements)
-{
-    bool* const done_flag = (bool*)user.ptr[0];
-    assert((done_flag != NULL) && !*done_flag);
-    *done_flag = true;
-    assert(acknowledgements <= 1);
-    const cy_topic_t* const topic = user.ptr[1];
-    CY_TRACE(topic->cy, "'%s' %s", topic->name, (acknowledgements == 1) ? "✅" : "❌");
-}
-
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
-static void on_message(cy_user_context_t user, cy_arrival_t* const arrival)
+static void on_message(cy_subscriber_t* const subscriber, cy_arrival_t* const arrival)
 {
+    (void)subscriber;
     const size_t  payload_size = cy_message_size(arrival->message.content);
     unsigned char payload_copy[payload_size];
     cy_message_read(&arrival->message.content, 0, payload_size, payload_copy);
     char* const dump = hexdump(payload_size, payload_copy, 32);
-    CY_TRACE(arrival->topic->cy,
-             "💬 ts=%09llu sid=%04x sz=%06zu sbt=%zu topic='%s'\n%s",
-             (unsigned long long)arrival->message.timestamp,
-             cy_topic_subject_id(arrival->topic),
-             payload_size,
-             arrival->substitutions.count,
-             cy_topic_name(arrival->topic).str,
-             dump);
+    (void)fprintf(stderr,
+                  "💬 ts=%09llu sid=%04x sz=%06zu sbt=%zu topic='%s'\n%s\n",
+                  (unsigned long long)arrival->message.timestamp,
+                  cy_topic_subject_id(arrival->topic),
+                  payload_size,
+                  arrival->substitutions.count,
+                  cy_topic_name(arrival->topic).str,
+                  dump);
     // Optionally, send a response to the publisher of this message.
     // The stack knows the identity of the publisher and can deliver a response directly to it.
     if ((rand() % 2) == 0) {
-        *(bool*)user.ptr[0] = false; // reset the flag for the response delivery
-        user.ptr[1]         = (void*)arrival->topic;
-        const cy_err_t err  = cy_respond(arrival->responder,
+        const cy_err_t err = cy_respond(arrival->responder, //
                                         arrival->message.timestamp + MEGA,
-                                        (cy_bytes_t){ .size = 2, .data = ":3" },
-                                        user,
-                                        on_response_delivery_result);
+                                        (cy_bytes_t){ .size = 2, .data = ":3" });
         if (err != CY_OK) {
             (void)fprintf(stderr, "cy_respond: %d\n", err);
         }
@@ -141,15 +128,13 @@ int main(const int argc, char* argv[])
     cy_subscriber_t* subscribers[cfg.sub_count];
     bool             response_delivery_flags[cfg.sub_count];
     for (size_t i = 0; i < cfg.sub_count; i++) {
-        subscribers[i] = cy_subscribe(cy,
-                                      wkv_key(cfg.subs[i].name),
-                                      MEGA,
-                                      (cy_user_context_t){ .ptr = { &response_delivery_flags[i] } },
-                                      on_message);
+        subscribers[i] = cy_subscribe(cy, wkv_key(cfg.subs[i].name), MEGA);
         if (subscribers[i] == NULL) {
             (void)fprintf(stderr, "cy_subscribe: NULL\n");
             return 1;
         }
+        cy_subscriber_context_set(subscribers[i], (cy_user_context_t){ .ptr = { &response_delivery_flags[i] } });
+        cy_subscriber_callback_set(subscribers[i], on_message);
         response_delivery_flags[i] = false;
     }
 

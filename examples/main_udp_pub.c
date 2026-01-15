@@ -72,33 +72,33 @@ static struct config_t load_config(const int argc, char* argv[])
     return cfg;
 }
 
-static void on_message_delivery_result(const cy_user_context_t user, const uint16_t acks)
+static void on_result(cy_future_t* const future)
 {
-    cy_topic_t* const topic = user.ptr[1];
-    CY_TRACE(topic->cy, "'%s' %s %u acks", topic->name, (acks > 0) ? "✅" : "❌", (unsigned)acks);
-}
-
-// ReSharper disable once CppParameterMayBeConstPtrOrRef
-static void on_response(const cy_user_context_t user, cy_message_ts_t* const msg)
-{
-    cy_topic_t* const topic = user.ptr[1];
-    assert(topic != NULL);
-    if (msg == NULL) {
-        CY_TRACE(topic->cy, "↩️⌛ sid=%04x topic='%s' response timed out", cy_topic_subject_id(topic), topic->name);
-        return;
+    cy_topic_t* const topic         = cy_future_context(future).ptr[0];
+    const wkv_str_t   topic_name    = cy_topic_name(topic); // The returned topic name is NUL-terminated in this case
+    const cy_future_status_t status = cy_future_status(future);
+    // cy_t* const cy = cy_topic_owner(topic);  // Sometimes it's needed.
+    if (status == cy_future_pending) { // Future not complete yet, this is an intermediate progress update.
+        (void)fprintf(stderr, "➡️ '%s' request delivered; waiting for response...\n", topic_name.str);
+    } else if (status == cy_future_success) {
+        cy_request_result_t* const result = cy_future_result(future);
+        const size_t               size   = cy_message_size(result->response.content);
+        unsigned char              data[size];
+        cy_message_read(&result->response.content, 0, size, data);
+        char* const dump = hexdump(size, data, 32); // just a simple visualization aid unrelated to the API
+        (void)fprintf(stderr,
+                      "↩️ ts=%09llu sz=%06zu topic='%s' response ✅\n%s\n",
+                      (unsigned long long)result->response.timestamp,
+                      size,
+                      topic_name.str,
+                      dump);
+        free(dump);
+        cy_future_destroy(future); // This will also destroy the message because we haven't done cy_message_move().
+    } else {
+        assert(status == cy_future_failure);
+        (void)fprintf(stderr, "⌛ topic='%s' response timed out ❌\n", topic_name.str);
+        cy_future_destroy(future);
     }
-    const size_t  payload_size = cy_message_size(msg->content);
-    unsigned char payload_copy[payload_size];
-    cy_message_read(&msg->content, 0, payload_size, payload_copy);
-    char* const dump = hexdump(payload_size, payload_copy, 32);
-    CY_TRACE(topic->cy,
-             "↩️ ts=%09llu sid=%04x sz=%06zu topic='%s'\n%s",
-             (unsigned long long)msg->timestamp,
-             cy_topic_subject_id(topic),
-             payload_size,
-             topic->name,
-             dump);
-    free(dump);
 }
 
 int main(const int argc, char* argv[])
@@ -149,21 +149,16 @@ int main(const int argc, char* argv[])
                               "Hello from %016llx! The current time is %lld us.",
                               (unsigned long long)cfg.local_uid,
                               (long long)now);
-                const cy_user_context_t ctx = {
-                    .ptr = { NULL, (void*)cy_publisher_topic(publishers[i]) },
-                };
-                const cy_err_t pub_res = cy_request(publishers[i],
-                                                    now + (MEGA * 2),
-                                                    now + (MEGA * 10),
-                                                    (cy_bytes_t){ .size = strlen(msg), .data = msg },
-                                                    ctx,
-                                                    on_message_delivery_result,
-                                                    ctx,
-                                                    on_response);
-                if (pub_res != CY_OK) {
-                    (void)fprintf(stderr, "cy_request: %d\n", pub_res);
+                cy_future_t* const future = cy_request(publishers[i], //
+                                                       now + (MEGA * 2),
+                                                       now + (MEGA * 10),
+                                                       (cy_bytes_t){ .size = strlen(msg), .data = msg });
+                if (future == NULL) {
+                    (void)fprintf(stderr, "cy_request\n");
                     break;
                 }
+                cy_future_context_set(future, (cy_user_context_t){ { (void*)cy_publisher_topic(publishers[i]) } });
+                cy_future_callback_set(future, on_result);
             }
             next_publish_at += 5 * MEGA;
         }
