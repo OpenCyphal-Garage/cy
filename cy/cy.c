@@ -292,6 +292,8 @@ static void* future_new(cy_t* const cy, const cy_future_vtable_t* const vtbl, co
     return future;
 }
 
+/// Remember that the user callback may destroy the future!
+/// The future pointer is thus invalidated after this function; any access counts as use-after-free.
 static void future_notify(cy_future_t* const self)
 {
     if (self->callback != NULL) {
@@ -1289,9 +1291,7 @@ static void publish_future_cancel(cy_future_t* const self)
         cy_topic_t* const topic = f->owner->topic;
         f->owner                = NULL; // Suppress the callback if the feedback notification is invoked from cancel().
         // Message is still pending feedback; cancel transfer to avoid dangling callback into freed memory.
-        const bool canceled = topic->vtable->cancel(topic, f->transfer_id);
-        assert(canceled);
-        (void)canceled;
+        (void)topic->vtable->cancel(topic, f->transfer_id);
     }
     assert((f->member_pending.next == NULL) && (f->member_pending.prev == NULL));
 }
@@ -1302,10 +1302,9 @@ static void on_publish_feedback(void* const context, const uint16_t acknowledgem
     f->result.acknowledgements = acknowledgements;
     if (f->owner != NULL) {
         delist(&f->owner->publish_futures, &f->member_pending);
-        f->owner = NULL; // Prevent cancellation in finalize(); it may be deadly if the transfer-ID is reused.
-        future_notify(&f->base);
+        f->owner = NULL;         // Prevent cancellation in finalize(); it may be deadly if the transfer-ID is reused.
+        future_notify(&f->base); // future invalidated
     }
-    assert((f->member_pending.next == NULL) && (f->member_pending.prev == NULL));
 }
 
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
@@ -1377,9 +1376,7 @@ static void request_future_cancel(cy_future_t* const self)
     if (!f->request_done) {
         // It is essential that we cancel not only to stop the no longer useful message from being sent,
         // but also to prevent the future feedback callback from operating on a dead future pointer.
-        const bool canceled = f->pub->topic->vtable->cancel(f->pub->topic, f->transfer_id);
-        assert(canceled);
-        (void)canceled;
+        (void)f->pub->topic->vtable->cancel(f->pub->topic, f->transfer_id);
         f->request_done = true;
     }
     if (request_future_status(self) == cy_future_pending) {
@@ -1405,7 +1402,7 @@ static void on_request_feedback(void* const context, const uint16_t acknowledgem
     assert(!f->request_done);
     f->request_done = true;
     if ((request_future_status(&f->base) == cy_future_pending)) {
-        future_notify(&f->base); // Intermediate progress update notification; skip if already done.
+        future_notify(&f->base); // future invalidated
     }
 }
 
@@ -1484,6 +1481,8 @@ cy_future_t* cy_request(cy_publisher_t* const pub,
         CY_TRACE(
           cy, "⚠️ %s #%016llx transfer-ID exhaustion", topic_repr(pub->topic).str, (unsigned long long)fut->transfer_id);
         future_cancel_and_notify(&fut2->base);
+        // We cannot destroy the conflicting future because we don't own it. The user will do that eventually -- we
+        // just marked it as completed (actually failed, sorry about that haha -_o).
     }
     (void)cavl2_find_or_insert(&cy->request_futures_by_deadline,
                                &fut->deadline,
@@ -1520,6 +1519,9 @@ cy_topic_t* cy_publisher_topic(const cy_publisher_t* const pub) { return (pub !=
 
 void cy_unadvertise(cy_publisher_t* const pub)
 {
+    if (pub == NULL) {
+        return;
+    }
     // Finalize pending publish futures.
     while (true) {
         publish_future_t* const fut = LIST_TAIL(pub->publish_futures, publish_future_t, member_pending);
@@ -1996,7 +1998,7 @@ void cy_on_response(cy_t* const    cy,
             }
 #endif
             request_future_cancel(&fut->base);
-            future_notify(&fut->base);
+            future_notify(&fut->base); // future invalidated
         } else {
             CY_TRACE(cy, "❓ %s orphan #%016llx", topic_repr(topic).str, (unsigned long long)transfer_id);
             cy_message_destroy(&message); // Unexpected or duplicate response.
