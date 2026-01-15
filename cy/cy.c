@@ -1377,9 +1377,11 @@ static void request_future_cancel(cy_future_t* const self)
     if (!f->request_done) {
         // It is essential that we cancel not only to stop the no longer useful message from being sent,
         // but also to prevent the future feedback callback from operating on a dead future pointer.
-        f->request_done = f->pub->topic->vtable->cancel(f->pub->topic, f->transfer_id);
+        const bool canceled = f->pub->topic->vtable->cancel(f->pub->topic, f->transfer_id);
+        assert(canceled);
+        (void)canceled;
+        f->request_done = true;
     }
-    assert(f->request_done);
     if (request_future_status(self) == cy_future_pending) {
         cavl2_remove(&self->cy->request_futures_by_deadline, &f->index_deadline);
         cavl2_remove(&f->pub->topic->request_futures_by_transfer_id, &f->index_transfer_id);

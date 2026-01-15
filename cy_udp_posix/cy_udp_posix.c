@@ -196,7 +196,7 @@ static void on_response_feedback(udpard_tx_t* const tx, const udpard_tx_feedback
 }
 
 /// Invoked by Cy when the application desires to respond to a message received earlier.
-static cy_err_t v_respond(const cy_responder_t* const self, const cy_us_t tx_deadline, const cy_bytes_t message)
+static cy_err_t v_respond(const cy_responder_t* const self, const cy_us_t deadline, const cy_bytes_t message)
 {
     responder_context_t ctx;
     static_assert(sizeof(ctx) <= sizeof(self->state), "");
@@ -207,7 +207,7 @@ static cy_err_t v_respond(const cy_responder_t* const self, const cy_us_t tx_dea
     //
     const bool ok = udpard_tx_push_p2p(&cy->udpard_tx,
                                        cy_udp_posix_now(),
-                                       tx_deadline,
+                                       deadline,
                                        ctx.priority,
                                        ctx.topic_hash,
                                        ctx.transfer_id,
@@ -287,7 +287,7 @@ static void on_topic_feedback(udpard_tx_t* const tx, const udpard_tx_feedback_t 
 }
 
 static cy_err_t v_topic_publish(cy_topic_t* const self,
-                                const cy_us_t     tx_deadline,
+                                const cy_us_t     deadline,
                                 const cy_prio_t   priority,
                                 const cy_bytes_t  message,
                                 uint64_t* const   out_transfer_id,
@@ -322,7 +322,7 @@ static cy_err_t v_topic_publish(cy_topic_t* const self,
     //
     const bool ok = udpard_tx_push(&cy->udpard_tx,
                                    cy_udp_posix_now(),
-                                   tx_deadline,
+                                   deadline,
                                    cy->iface_bitmap,
                                    (udpard_prio_t)priority,
                                    self->hash,
@@ -452,7 +452,7 @@ static cy_err_t v_topic_subscribe(cy_topic_t* const self, const size_t extent, c
         }
     }
     CY_TRACE(self->cy,
-             "🔔 '%s' (extent=%zu reordering_window=%lld) res=%d",
+             "🔔 '%s' extent=%zu reordering_window=%lld res=%d",
              self->name,
              extent,
              (long long)reordering_window,

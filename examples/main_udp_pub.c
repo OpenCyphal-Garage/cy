@@ -78,7 +78,7 @@ static void on_result(cy_future_t* const future)
     const wkv_str_t   topic_name    = cy_topic_name(topic); // The returned topic name is NUL-terminated in this case
     const cy_future_status_t status = cy_future_status(future);
     // cy_t* const cy = cy_topic_owner(topic);  // Sometimes it's needed.
-    if (status == cy_future_pending) {
+    if (status == cy_future_pending) { // Future not complete yet, this is an intermediate progress update.
         (void)fprintf(stderr, "➡️ '%s' request delivered; waiting for response...\n", topic_name.str);
     } else if (status == cy_future_success) {
         cy_request_result_t* const result = cy_future_result(future);

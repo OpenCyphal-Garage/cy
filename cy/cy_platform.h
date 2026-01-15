@@ -173,7 +173,7 @@ typedef struct cy_topic_vtable_t
     /// disregard the hint and receive an arbitrarily larger response message. If no responses are expected, use zero.
     /// All received responses are reported via cy_on_response().
     cy_err_t (*publish)(cy_topic_t* self,
-                        cy_us_t     tx_deadline,
+                        cy_us_t     deadline,
                         cy_prio_t   priority,
                         cy_bytes_t  message,
                         uint64_t*   out_transfer_id,
@@ -231,7 +231,7 @@ typedef struct cy_responder_vtable_t
     /// The most likely solution would be to add a cancel() function to the responder vtable,
     /// and make implementations keep track of the transfer-ID used to send the response such that internally
     /// they can cancel it if requested. The responder instance would be stored in the future.
-    cy_err_t (*respond)(const cy_responder_t*, cy_us_t tx_deadline, cy_bytes_t message);
+    cy_err_t (*respond)(const cy_responder_t*, cy_us_t deadline, cy_bytes_t message);
 } cy_responder_vtable_t;
 
 /// Instances of cy are not copyable; they are always accessed via pointer provided during initialization.

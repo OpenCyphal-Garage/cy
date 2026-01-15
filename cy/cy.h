@@ -350,6 +350,8 @@ cy_subscriber_t* cy_subscribe_ordered(cy_t* const             cy,
 ///
 /// Reliable delivery will be used, but this API does not provide any delivery feedback; this may be changed in a
 /// future version if there is a use case for it (the delivery information is available internally).
+/// If the delivery information is to be exposed, it will be a new future-based API similar to cy_publish_reliable().
+/// The lifetime of the future will probably be tied to the lifetime of the subscriber instance.
 cy_err_t cy_respond(const cy_responder_t responder, const cy_us_t deadline, const cy_bytes_t message);
 
 /// Copies the subscriber name into the user-supplied buffer. Max size is CY_TOPIC_NAME_MAX plus NUL-terminator.
