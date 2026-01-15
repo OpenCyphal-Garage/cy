@@ -119,26 +119,26 @@ cy_future_destroy(future);
 ### 📩 Subscribe to messages
 
 ```c++
-cy_subscriber_t* my_sub = cy_subscribe(cy,
-                                       wkv_key("my/topic"),
-                                       1024 * 100,            // max message size in bytes; excess truncated
-                                       CY_USER_CONTEXT_EMPTY, // context data passed to the callback
-                                       on_message);           // callback invoked upon message arrival
-if (my_sub == NULL) { ... }
+size_t extent = 1024 * 100;  // max message size in bytes; excess truncated
+cy_subscriber_t* my_sub = cy_subscribe(cy, wkv_key("my/topic"), extent);
+if (my_sub == NULL) { ... }  // handle error
+cy_subscriber_context_set(my_sub, (cy_user_context_t){ { "🐱", (void*)654321, NULL } }); // optional context
+cy_subscriber_callback_set(my_sub, on_message); // callback invoked upon message arrival
 ```
 
 The message arrival callback looks like this:
 
 ```c++
-void on_message(cy_user_context_t user_context, cy_arrival_t* arrival) 
+void on_message(cy_subscriber_t* subscriber, cy_arrival_t* arrival) 
 {
+    cy_user_context_t ctx = cy_subscriber_context(subscriber);  // retrieve the context if needed
     size_t  size = cy_message_size(arrival->message.content);
     unsigned char data[size];
     cy_message_read(&arrival->message.content, 0, size, data);  // feel free to read only the parts of interest
     char* dump = hexdump(size, data, 32);
     printf("Received message on topic %s:\n%s\n", cy_topic_name(arrival->topic).str, dump);
     // If relevant, one can optionally send a response back to the publisher here using cy_respond():
-    err = cy_respond(arrival->responder, deadline, response_data);
+    cy_err_t err = cy_respond(arrival->responder, deadline, response_data);
     // It is also possible to store the responder instance to send the response at any time later after the callback.
 }
 ```
@@ -194,7 +194,7 @@ Depending on the platform- and transport-specific glue layer used, the event loo
 ```c++
 while (true)
 {
-    err = cy_udp_posix_spin_until(cy, cy_now(cy) + 10000);  // spin for 0.01 seconds
+    err = cy_udp_posix_spin_until(&cy_udp, cy_now(cy) + 10000);  // spin for 0.01 seconds
     if (err != CY_OK) { ... }
     // do some other stuff here periodically
 }

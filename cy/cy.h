@@ -148,7 +148,7 @@ typedef struct cy_message_ts_t
 typedef struct cy_future_t cy_future_t;
 
 /// If set, invoked on future completion always; also may be invoked multiple times for progress updates while pending.
-typedef void (*cy_on_future_t)(cy_future_t*);
+typedef void (*cy_future_callback_t)(cy_future_t*);
 
 /// A future can transition from pending to either success or failure exactly once.
 typedef enum cy_future_status_t
@@ -173,8 +173,8 @@ void              cy_future_context_set(cy_future_t* const future, const cy_user
 ///
 /// If the future is already completed, the callback will be invoked immediately before this function returns.
 /// It is safe to destroy the future from within its own callback (but it is not safe to destroy another future).
-cy_on_future_t cy_future_callback(const cy_future_t* const future);
-void           cy_future_callback_set(cy_future_t* const future, const cy_on_future_t callback);
+cy_future_callback_t cy_future_callback(const cy_future_t* const future);
+void                 cy_future_callback_set(cy_future_t* const future, const cy_future_callback_t callback);
 
 /// Every future must be destroyed. If the future is still pending, the associated action will be cancelled.
 /// A future may be destroyed from within its own callback.
@@ -319,7 +319,10 @@ typedef struct cy_arrival_t
 
 /// The arrival pointer is mutable to allow moving the message out of it if needed.
 /// The lifetime of the arrival struct ends upon return from the current callback.
-typedef void (*cy_on_arrival_t)(cy_user_context_t, cy_arrival_t*);
+typedef void (*cy_subscriber_callback_t)(cy_subscriber_t*, cy_arrival_t*);
+
+// Future note: eventually, we may want to support sampling subscription pattern:
+// keep the last arrival inside the subscriber instance, and add a function to query it outside of the callback.
 
 /// We intentionally use the exact same API for both verbatim and pattern subscriptions; this is a key design feature.
 ///
@@ -329,19 +332,13 @@ typedef void (*cy_on_arrival_t)(cy_user_context_t, cy_arrival_t*);
 /// reference-counted topic; upon message arrival, all matching subscribers will be invoked in an unspecified order.
 /// If there is more than one subscriber utilizing different parameters (extent, ordering, etc.) on the same topic,
 /// the library will disambiguate the parameters using simple heuristics.
-cy_subscriber_t* cy_subscribe(cy_t* const             cy,
-                              const wkv_str_t         name,
-                              const size_t            extent,
-                              const cy_user_context_t context,
-                              const cy_on_arrival_t   callback);
+cy_subscriber_t* cy_subscribe(cy_t* const cy, const wkv_str_t name, const size_t extent);
 
 /// The reordering window must be non-negative.
-cy_subscriber_t* cy_subscribe_ordered(cy_t* const             cy,
-                                      const wkv_str_t         name,
-                                      const size_t            extent,
-                                      const cy_us_t           reordering_window,
-                                      const cy_user_context_t context,
-                                      const cy_on_arrival_t   callback);
+cy_subscriber_t* cy_subscribe_ordered(cy_t* const     cy,
+                                      const wkv_str_t name,
+                                      const size_t    extent,
+                                      const cy_us_t   reordering_window);
 
 /// Send a response to a message previously received from a topic subscription.
 /// The response will be sent directly to the publisher using peer-to-peer transport, not affecting other nodes.
@@ -354,12 +351,18 @@ cy_subscriber_t* cy_subscribe_ordered(cy_t* const             cy,
 /// The lifetime of the future will probably be tied to the lifetime of the subscriber instance.
 cy_err_t cy_respond(const cy_responder_t responder, const cy_us_t deadline, const cy_bytes_t message);
 
+cy_user_context_t cy_subscriber_context(const cy_subscriber_t* const self);
+void              cy_subscriber_context_set(cy_subscriber_t* const self, const cy_user_context_t context);
+
+cy_subscriber_callback_t cy_subscriber_callback(const cy_subscriber_t* const self);
+void cy_subscriber_callback_set(cy_subscriber_t* const self, const cy_subscriber_callback_t callback);
+
 /// Copies the subscriber name into the user-supplied buffer. Max size is CY_TOPIC_NAME_MAX plus NUL-terminator.
 /// The output string is NUL-terminated.
-void cy_subscriber_name(const cy_subscriber_t* const sub, char* const out_name);
+void cy_subscriber_name(const cy_subscriber_t* const self, char* const out_name);
 
 /// No effect if the subscriber pointer is NULL.
-void cy_unsubscribe(cy_subscriber_t* const sub);
+void cy_unsubscribe(cy_subscriber_t* const self);
 
 // =====================================================================================================================
 //                                                  NODE & TOPIC

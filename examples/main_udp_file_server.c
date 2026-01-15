@@ -16,9 +16,9 @@
 /// Response schema:
 ///     uint32           errno
 ///     byte[<=DATA_MAX] data
-static void on_file_read_msg(const cy_user_context_t user, cy_arrival_t* const arv)
+static void on_file_read_msg(cy_subscriber_t* const subscriber, cy_arrival_t* const arv)
 {
-    (void)user;
+    (void)subscriber;
 
     // Deserialize the payload, assuming the local machine is little-endian, for simplicity.
     uint64_t read_offset = 0;
@@ -73,11 +73,11 @@ int main(void)
     }
     cy_t* const cy = &cy_udp.base;
 
-    cy_subscriber_t* const sub_file_read =
-      cy_subscribe(cy, wkv_key("file/read"), 1024, CY_USER_CONTEXT_EMPTY, on_file_read_msg);
+    cy_subscriber_t* const sub_file_read = cy_subscribe(cy, wkv_key("file/read"), 1024);
     if (sub_file_read == NULL) {
         errx(res, "cy_subscribe");
     }
+    cy_subscriber_callback_set(sub_file_read, &on_file_read_msg);
 
     while (true) {
         res = cy_udp_posix_spin_once(&cy_udp);

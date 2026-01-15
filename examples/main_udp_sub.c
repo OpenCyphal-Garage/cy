@@ -77,9 +77,9 @@ static struct config_t load_config(const int argc, char* argv[])
 }
 
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
-static void on_message(cy_user_context_t user, cy_arrival_t* const arrival)
+static void on_message(cy_subscriber_t* const subscriber, cy_arrival_t* const arrival)
 {
-    (void)user;
+    (void)subscriber;
     const size_t  payload_size = cy_message_size(arrival->message.content);
     unsigned char payload_copy[payload_size];
     cy_message_read(&arrival->message.content, 0, payload_size, payload_copy);
@@ -128,15 +128,13 @@ int main(const int argc, char* argv[])
     cy_subscriber_t* subscribers[cfg.sub_count];
     bool             response_delivery_flags[cfg.sub_count];
     for (size_t i = 0; i < cfg.sub_count; i++) {
-        subscribers[i] = cy_subscribe(cy,
-                                      wkv_key(cfg.subs[i].name),
-                                      MEGA,
-                                      (cy_user_context_t){ .ptr = { &response_delivery_flags[i] } },
-                                      on_message);
+        subscribers[i] = cy_subscribe(cy, wkv_key(cfg.subs[i].name), MEGA);
         if (subscribers[i] == NULL) {
             (void)fprintf(stderr, "cy_subscribe: NULL\n");
             return 1;
         }
+        cy_subscriber_context_set(subscribers[i], (cy_user_context_t){ .ptr = { &response_delivery_flags[i] } });
+        cy_subscriber_callback_set(subscribers[i], on_message);
         response_delivery_flags[i] = false;
     }
 

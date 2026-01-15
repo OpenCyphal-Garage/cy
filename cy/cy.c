@@ -273,7 +273,7 @@ struct cy_future_t
 {
     cy_t*                     cy;
     cy_user_context_t         context;
-    cy_on_future_t            callback;
+    cy_future_callback_t      callback;
     const cy_future_vtable_t* vtable;
 };
 
@@ -314,8 +314,8 @@ void*              cy_future_result(cy_future_t* const self) { return self->vtab
 cy_user_context_t cy_future_context(const cy_future_t* const self) { return self->context; }
 void cy_future_context_set(cy_future_t* const self, const cy_user_context_t context) { self->context = context; }
 
-cy_on_future_t cy_future_callback(const cy_future_t* const self) { return self->callback; }
-void           cy_future_callback_set(cy_future_t* const self, const cy_on_future_t callback)
+cy_future_callback_t cy_future_callback(const cy_future_t* const self) { return self->callback; }
+void                 cy_future_callback_set(cy_future_t* const self, const cy_future_callback_t callback)
 {
     const bool was_set = (self->callback != NULL);
     self->callback     = callback;
@@ -397,9 +397,9 @@ struct cy_subscriber_t
     subscriber_root_t* root; ///< Many-to-one relationship, never NULL.
     cy_subscriber_t*   next; ///< Lists all subscribers under the same root.
 
-    subscriber_params_t params;
-    cy_user_context_t   user_context;
-    cy_on_arrival_t     callback;
+    subscriber_params_t      params;
+    cy_user_context_t        user_context;
+    cy_subscriber_callback_t callback;
 };
 
 static int32_t cavl_comp_topic_hash(const void* const user, const cy_tree_t* const node)
@@ -1095,9 +1095,9 @@ static hb_t heartbeat_deserialize(cy_message_t msg, byte_t* const name_buf)
 }
 
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
-static void on_heartbeat(const cy_user_context_t ctx, cy_arrival_t* const arrival)
+static void on_heartbeat(cy_subscriber_t* const sub, cy_arrival_t* const arrival)
 {
-    (void)ctx;
+    (void)sub;
     assert(arrival->substitutions.count == 0); // This is a verbatim subscriber.
     const cy_us_t ts = arrival->message.timestamp;
     cy_t* const   cy = arrival->topic->cy;
@@ -1645,13 +1645,9 @@ static cy_err_t ensure_subscriber_root(cy_t* const               cy,
     return CY_OK;
 }
 
-static cy_subscriber_t* subscribe(cy_t* const               cy,
-                                  const wkv_str_t           name,
-                                  const subscriber_params_t params,
-                                  const cy_user_context_t   context,
-                                  const cy_on_arrival_t     callback)
+static cy_subscriber_t* subscribe(cy_t* const cy, const wkv_str_t name, const subscriber_params_t params)
 {
-    assert((cy != NULL) && (callback != NULL) && (params.reordering_window >= -1));
+    assert((cy != NULL) && (params.reordering_window >= -1));
     char            name_buf[CY_TOPIC_NAME_MAX];
     const wkv_str_t resolved = cy_name_resolve(name, cy->ns, cy->home, sizeof(name_buf), name_buf);
     if (resolved.len > sizeof(name_buf)) {
@@ -1663,8 +1659,8 @@ static cy_subscriber_t* subscribe(cy_t* const               cy,
         return NULL;
     }
     sub->params        = params;
-    sub->user_context  = context;
-    sub->callback      = callback;
+    sub->user_context  = CY_USER_CONTEXT_EMPTY;
+    sub->callback      = NULL;
     const cy_err_t res = ensure_subscriber_root(cy, resolved, &sub->root);
     if (res != CY_OK) {
         mem_free(cy, sub);
@@ -1681,29 +1677,23 @@ static cy_subscriber_t* subscribe(cy_t* const               cy,
     return sub;
 }
 
-cy_subscriber_t* cy_subscribe(cy_t* const             cy,
-                              const wkv_str_t         name,
-                              const size_t            extent,
-                              const cy_user_context_t context,
-                              const cy_on_arrival_t   callback)
+cy_subscriber_t* cy_subscribe(cy_t* const cy, const wkv_str_t name, const size_t extent)
 {
-    if ((cy != NULL) && (callback != NULL)) {
+    if (cy != NULL) {
         const subscriber_params_t params = { .extent = extent, .reordering_window = -1 };
-        return subscribe(cy, name, params, context, callback);
+        return subscribe(cy, name, params);
     }
     return NULL;
 }
 
-cy_subscriber_t* cy_subscribe_ordered(cy_t* const             cy,
-                                      const wkv_str_t         name,
-                                      const size_t            extent,
-                                      const cy_us_t           reordering_window,
-                                      const cy_user_context_t context,
-                                      const cy_on_arrival_t   callback)
+cy_subscriber_t* cy_subscribe_ordered(cy_t* const     cy,
+                                      const wkv_str_t name,
+                                      const size_t    extent,
+                                      const cy_us_t   reordering_window)
 {
-    if ((cy != NULL) && (callback != NULL) && (reordering_window >= 0)) {
+    if ((cy != NULL) && (reordering_window >= 0)) {
         const subscriber_params_t params = { .extent = extent, .reordering_window = reordering_window };
-        return subscribe(cy, name, params, context, callback);
+        return subscribe(cy, name, params);
     }
     return NULL;
 }
@@ -1717,12 +1707,24 @@ cy_err_t cy_respond(const cy_responder_t responder, const cy_us_t deadline, cons
     return responder.vtable->respond(&responder, deadline, message);
 }
 
-void cy_subscriber_name(const cy_subscriber_t* const sub, char* const out_name)
+cy_user_context_t cy_subscriber_context(const cy_subscriber_t* const self) { return self->user_context; }
+void              cy_subscriber_context_set(cy_subscriber_t* const self, const cy_user_context_t context)
 {
-    wkv_get_key(&sub->root->cy->subscribers_by_name, sub->root->index_name, out_name);
+    self->user_context = context;
 }
 
-void cy_unsubscribe(cy_subscriber_t* const sub) { (void)sub; }
+cy_subscriber_callback_t cy_subscriber_callback(const cy_subscriber_t* const self) { return self->callback; }
+void cy_subscriber_callback_set(cy_subscriber_t* const self, const cy_subscriber_callback_t callback)
+{
+    self->callback = callback;
+}
+
+void cy_subscriber_name(const cy_subscriber_t* const self, char* const out_name)
+{
+    wkv_get_key(&self->root->cy->subscribers_by_name, self->root->index_name, out_name);
+}
+
+void cy_unsubscribe(cy_subscriber_t* const self) { (void)self; }
 
 // =====================================================================================================================
 //                                                  NODE & TOPIC
@@ -1855,11 +1857,12 @@ cy_err_t cy_new(cy_t* const              cy,
         return CY_ERR_MEMORY;
     }
     assert(cy->heartbeat_pub->topic->hash == CY_HEARTBEAT_TOPIC_HASH);
-    cy->heartbeat_sub = cy_subscribe(cy, hb_name, HEARTBEAT_SIZE_MAX, CY_USER_CONTEXT_EMPTY, &on_heartbeat);
+    cy->heartbeat_sub = cy_subscribe(cy, hb_name, HEARTBEAT_SIZE_MAX);
     if (cy->heartbeat_sub == NULL) {
         cy_unadvertise(cy->heartbeat_pub);
         return CY_ERR_MEMORY;
     }
+    cy_subscriber_callback_set(cy->heartbeat_sub, &on_heartbeat);
     CY_TRACE(cy,
              "🚀 home='%s' ns='%s' ts_started=%llu subject_id_modulus=%lu",
              cy->home.str,
@@ -1950,7 +1953,7 @@ void cy_on_message(cy_topic_t* const    topic,
                 .topic         = topic,
                 .substitutions = { .count = cpl->substitution_count, .substitutions = cpl->substitutions },
             };
-            sub->callback(sub->user_context, &arrival);
+            sub->callback(sub, &arrival);
             if (cy_message_size(arrival.message.content) < cy_message_size(message)) {
                 assert(!moved); // At most one handler can take ownership of the payload.
                 moved = true;
