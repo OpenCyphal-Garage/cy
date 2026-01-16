@@ -4,6 +4,9 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <stdint.h>
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
+#include <sys/sysctl.h>
+#endif
 
 /// Generates a new random locally administered unicast EUI-64 identifier suitable for use as a 64-bit Cyphal node-ID.
 /// Returns zero on failure, which is not a valid EUI-64.
@@ -29,6 +32,28 @@ static inline uint64_t eui64_semirandom(void)
             return 0;
         }
         host_20 = (uint32_t)(rapidhash(buf, (size_t)n) & 0xFFFFFU);
+    }
+    {
+        const int fd = open("/dev/urandom", O_RDONLY);
+        if (fd < 0) {
+            return 0;
+        }
+        if (read(fd, &rand_44, sizeof(rand_44)) != sizeof(rand_44)) {
+            close(fd);
+            return 0;
+        }
+        close(fd);
+    }
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
+    {
+        // Use sysctl kern.hostid for host identifier
+        int      mib[2] = {CTL_KERN, KERN_HOSTID};
+        uint32_t hostid = 0;
+        size_t   len    = sizeof(hostid);
+        if (sysctl(mib, 2, &hostid, &len, NULL, 0) != 0) {
+            return 0;
+        }
+        host_20 = hostid & 0xFFFFFU;
     }
     {
         const int fd = open("/dev/urandom", O_RDONLY);
