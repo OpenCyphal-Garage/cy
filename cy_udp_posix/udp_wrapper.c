@@ -29,12 +29,14 @@
 /// RFC 2474.
 #define DSCP_MAX 63
 
+#ifndef __APPLE__
 struct in_pktinfo
 {
     unsigned ipi_ifindex;  // incoming ifindex
     uint32_t ipi_spec_dst; // local destination address
     uint32_t ipi_addr;     // header source address
 };
+#endif
 
 static bool is_multicast(const uint32_t address)
 {
