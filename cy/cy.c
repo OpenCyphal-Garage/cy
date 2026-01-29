@@ -1928,13 +1928,10 @@ void cy_on_topic_collision(cy_topic_t* const topic)
     }
 }
 
-void cy_on_message(cy_topic_t* const    topic,
-                   const cy_us_t        timestamp,
-                   cy_message_t         message,
-                   const cy_responder_t responder)
+void cy_on_message(cy_topic_t* const topic, cy_message_ts_t message, const cy_responder_t responder)
 {
-    assert((topic != NULL) && (timestamp >= 0) && (responder.cy != NULL) && (responder.cy == topic->cy));
-    implicit_animate(topic, timestamp);
+    assert((topic != NULL) && (message.timestamp >= 0) && (responder.cy != NULL) && (responder.cy == topic->cy));
+    implicit_animate(topic, message.timestamp);
     const cy_topic_coupling_t* cpl   = topic->couplings;
     bool                       moved = false;
     // A callback may unsubscribe, so we have to store the next pointer early.
@@ -1950,13 +1947,13 @@ void cy_on_message(cy_topic_t* const    topic,
             // Rebuild the struct before every callback because the callbacks are allowed to mutate it.
             // Most topics only have a single subscription so this is not too expensive in practice.
             cy_arrival_t arrival = {
-                .message       = { .timestamp = timestamp, .content = message },
+                .message       = message,
                 .responder     = responder,
                 .topic         = topic,
                 .substitutions = { .count = cpl->substitution_count, .substitutions = cpl->substitutions },
             };
             sub->callback(sub, &arrival);
-            if (cy_message_size(arrival.message.content) < cy_message_size(message)) {
+            if (cy_message_size(arrival.message.content) < cy_message_size(message.content)) {
                 assert(!moved); // At most one handler can take ownership of the payload.
                 moved = true;
             }
@@ -1965,18 +1962,14 @@ void cy_on_message(cy_topic_t* const    topic,
         cpl = next_cpl;
     }
     if (!moved) {
-        cy_message_destroy(&message);
+        cy_message_destroy(&message.content);
     }
 }
 
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
-void cy_on_response(cy_t* const    cy,
-                    const cy_us_t  timestamp,
-                    const uint64_t topic_hash,
-                    const uint64_t transfer_id,
-                    cy_message_t   message)
+void cy_on_response(cy_t* const cy, const uint64_t topic_hash, const uint64_t transfer_id, cy_message_ts_t message)
 {
-    assert((cy != NULL) && (timestamp >= 0));
+    assert((cy != NULL) && (message.timestamp >= 0));
     const cy_topic_t* const topic = cy_topic_find_by_hash(cy, topic_hash);
     if (topic != NULL) {
         request_future_t* const fut = CAVL2_TO_OWNER(
@@ -1987,8 +1980,8 @@ void cy_on_response(cy_t* const    cy,
             assert(fut->pub->topic->cy == cy);
             assert(fut->result.response.timestamp < 0);
             assert(cy_message_size(fut->result.response.content) == 0);
-            fut->result.response.timestamp = timestamp;
-            fut->result.response.content   = cy_message_move(&message);
+            fut->result.response.timestamp = message.timestamp;
+            fut->result.response.content   = cy_message_move(&message.content);
 #if CY_CONFIG_TRACE
             if (!fut->request_done) {
                 CY_TRACE(cy,
@@ -2000,11 +1993,11 @@ void cy_on_response(cy_t* const    cy,
             future_cancel_and_notify(&fut->base); // future invalidated
         } else {
             CY_TRACE(cy, "❓ %s orphan #%016llx", topic_repr(topic).str, (unsigned long long)transfer_id);
-            cy_message_destroy(&message); // Unexpected or duplicate response.
+            cy_message_destroy(&message.content); // Unexpected or duplicate response.
         }
     } else {
         CY_TRACE(cy, "❓ T%016llx no such topic", (unsigned long long)topic_hash);
-        cy_message_destroy(&message); // The topic was destroyed while waiting for the response.
+        cy_message_destroy(&message.content); // The topic was destroyed while waiting for the response.
     }
 }
 

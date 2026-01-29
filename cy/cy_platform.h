@@ -369,10 +369,7 @@ void cy_on_topic_collision(cy_topic_t* const topic);
 
 /// New message received on a topic. The message ownership is taken by this function.
 /// No effect if the topic is NULL.
-void cy_on_message(cy_topic_t* const    topic,
-                   const cy_us_t        timestamp,
-                   cy_message_t         message,
-                   const cy_responder_t responder);
+void cy_on_message(cy_topic_t* const topic, cy_message_ts_t message, const cy_responder_t responder);
 
 /// New P2P response to a message published earlier is received. The topic hash and the transfer-ID of the original
 /// message are provided.
@@ -383,11 +380,7 @@ void cy_on_message(cy_topic_t* const    topic,
 /// Observe that we do not pass a responder instance here because we assume that if any follow-up communication is
 /// needed, it will take place using the normal topic publication with P2P responses.
 /// At this time I am not certain if this assumption will hold. We may revise this based on empirical evidence.
-void cy_on_response(cy_t* const    cy,
-                    const cy_us_t  timestamp,
-                    const uint64_t topic_hash,
-                    const uint64_t transfer_id,
-                    cy_message_t   message);
+void cy_on_response(cy_t* const cy, const uint64_t topic_hash, const uint64_t transfer_id, cy_message_ts_t message);
 
 /// For diagnostics and logging only. Do not use in embedded and real-time applications.
 /// This function is only required if CY_CONFIG_TRACE is defined and is nonzero; otherwise it should be left undefined.

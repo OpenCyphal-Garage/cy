@@ -370,9 +370,10 @@ static void v_on_msg(udpard_rx_t* const rx, udpard_rx_port_t* const port, const 
     cy_udp_posix_t* const cy    = rx->user;
     cy_topic_t* const     topic = port->user;
     assert((cy != NULL) && (topic != NULL));
-    const cy_message_t   msg  = make_message(cy, tr.payload_size_stored, tr.payload);
-    const cy_responder_t resp = make_responder(&cy->base, port->topic_hash, tr.transfer_id, tr.priority, tr.remote);
-    cy_on_message(topic, tr.timestamp, msg, resp);
+    const cy_message_ts_t msg  = { .timestamp = tr.timestamp,
+                                   .content   = make_message(cy, tr.payload_size_stored, tr.payload) };
+    const cy_responder_t  resp = make_responder(&cy->base, port->topic_hash, tr.transfer_id, tr.priority, tr.remote);
+    cy_on_message(topic, msg, resp);
 }
 
 static void v_on_msg_stateless(udpard_rx_t* const rx, udpard_rx_port_t* const port, const udpard_rx_transfer_t tr)
@@ -580,8 +581,9 @@ static void v_on_p2p_msg(udpard_rx_t* const rx, udpard_rx_port_p2p_t* const port
     cy_udp_posix_t* const cy = rx->user;
     assert((cy != NULL) && (port == &cy->p2p_port));
     (void)port;
-    const cy_message_t msg = make_message(cy, tr.base.payload_size_stored, tr.base.payload);
-    cy_on_response(&cy->base, tr.base.timestamp, tr.topic_hash, tr.base.transfer_id, msg);
+    const cy_message_ts_t msg = { .timestamp = tr.base.timestamp,
+                                  .content   = make_message(cy, tr.base.payload_size_stored, tr.base.payload) };
+    cy_on_response(&cy->base, tr.topic_hash, tr.base.transfer_id, msg);
 }
 
 static bool v_tx_eject_p2p(udpard_tx_t* const tx, udpard_tx_ejection_t* const ej, const udpard_udpip_ep_t destination)
