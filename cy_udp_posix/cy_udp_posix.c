@@ -214,7 +214,8 @@ static cy_err_t v_respond(const cy_responder_t* const self, const cy_us_t deadli
                                        ctx.remote,
                                        cy_bytes_to_udpard_bytes(message),
                                        on_response_feedback,
-                                       UDPARD_USER_CONTEXT_NULL);
+                                       UDPARD_USER_CONTEXT_NULL,
+                                       NULL);
     CY_TRACE(&cy->base,
              "💬 T%016llx #%016llx N%016llx res=%u",
              (unsigned long long)ctx.topic_hash,
@@ -418,18 +419,18 @@ static cy_err_t v_topic_subscribe(cy_topic_t* const self, const size_t extent, c
     // will be useful for the application. It is useful for the network stack because the heartbeat topic
     // is a bottleneck to be aware of -- every node publishes on it and every node is subscribed, so there is
     // a lot of traffic, while the protocol stack itself is invariant to heartbeat message reordering/duplicates.
+    udpard_rx_mode_t mode = udpard_rx_ordered;
     if (reordering_window < 0) {
-        reordering_window = (self->hash == CY_HEARTBEAT_TOPIC_HASH) ? UDPARD_RX_REORDERING_WINDOW_STATELESS
-                                                                    : UDPARD_RX_REORDERING_WINDOW_UNORDERED;
+        mode              = (self->hash == CY_HEARTBEAT_TOPIC_HASH) ? udpard_rx_stateless : udpard_rx_unordered;
+        reordering_window = 0;
     }
-    const bool stateless = (reordering_window == UDPARD_RX_REORDERING_WINDOW_STATELESS);
 
     // Set up the udpard port. This does not yet allocate any resources.
     static const udpard_rx_port_vtable_t vtbl   = { .on_message = v_on_msg, .on_collision = v_on_collision };
     static const udpard_rx_port_vtable_t vtbl_s = { .on_message = v_on_msg_stateless, .on_collision = v_on_collision };
-    const udpard_rx_port_vtable_t*       vt     = stateless ? &vtbl_s : &vtbl;
+    const udpard_rx_port_vtable_t*       vt     = (mode == udpard_rx_stateless) ? &vtbl_s : &vtbl;
     const udpard_rx_mem_resources_t      rx_mem = { .fragment = cy->mem, .session = cy->mem };
-    if (!udpard_rx_port_new(&self_low->rx_port, self->hash, extent, reordering_window, rx_mem, vt)) {
+    if (!udpard_rx_port_new(&self_low->rx_port, self->hash, extent, mode, reordering_window, rx_mem, vt)) {
         return CY_ERR_ARGUMENT;
     }
     self_low->rx_port.user           = self;
