@@ -82,7 +82,10 @@ typedef struct cy_list_t
 typedef struct cy_message_vtable_t
 {
     void (*destroy)(cy_message_t*);
-    size_t (*read)(cy_message_t*, size_t, size_t, void*);
+
+    /// The offset is supplied with the skip already applied.
+    /// It is guaranteed by the caller that the offset+size does not exceed the message size.
+    size_t (*read)(cy_message_t*, size_t offset, size_t size, void*);
 } cy_message_vtable_t;
 
 /// This is the base type that is extended by the platform layer with transport- and platform-specific entities,
@@ -175,7 +178,7 @@ typedef struct cy_topic_vtable_t
     cy_err_t (*publish)(cy_topic_t* self,
                         cy_us_t     deadline,
                         cy_prio_t   priority,
-                        cy_bytes_t  message,
+                        cy_bytes_t  message, // Message lifetime ends upon return from this function.
                         uint64_t*   out_transfer_id,
                         size_t      response_extent,
                         void*       reliable_context,
@@ -218,21 +221,6 @@ typedef struct cy_topic_vtable_t
 
     void (*destroy)(cy_topic_t* self);
 } cy_topic_vtable_t;
-
-/// Platform-specific implementation of cy_responder_t.
-typedef struct cy_responder_vtable_t
-{
-    /// Instructs the underlying transport layer to send a peer-to-peer response transfer. The identity of the remote
-    /// endpoint is encoded and the transfer metadata are stored inside the cy_responder_t object in a
-    /// platform-specific manner.
-    /// Implementations may optionally invalidate the responder object after use -- at most single use is guaranteed.
-    ///
-    /// Currently, there is no delivery information exposed; this may be changed in the future.
-    /// The most likely solution would be to add a cancel() function to the responder vtable,
-    /// and make implementations keep track of the transfer-ID used to send the response such that internally
-    /// they can cancel it if requested. The responder instance would be stored in the future.
-    cy_err_t (*respond)(const cy_responder_t*, cy_us_t deadline, cy_bytes_t message);
-} cy_responder_vtable_t;
 
 /// Instances of cy are not copyable; they are always accessed via pointer provided during initialization.
 /// Creation of a new topic may cause resubscription of any existing topics (all topics in the unlikely worst case).
@@ -322,6 +310,13 @@ typedef struct cy_vtable_t
     /// Allocates a new topic that is initially neither subscribed nor advertised. NULL if out of memory.
     cy_topic_t* (*new_topic)(cy_t*);
 
+    /// Instructs the underlying transport layer to send a peer-to-peer transfer.
+    /// The message lifetime ends upon return from this function.
+    /// If the transport layer needs any additional metadata to send a P2P message (e.g., destination address/port),
+    /// it must be stored inside the responder context prior to cy_on_message() invocation.
+    /// Currently, there is no delivery information exposed; this may be changed in the future.
+    cy_err_t (*p2p)(cy_t*, const cy_p2p_context_t*, cy_us_t deadline, uint64_t remote_id, cy_bytes_t message);
+
     /// If an allocation collision or divergence are discovered, Cy may reassign the topic to a different subject-ID.
     /// To do that, it will first unsubscribe the topic using the corresponding function,
     /// and then invoke the subscription function to recreate the subscription with the new subject-ID.
@@ -369,18 +364,15 @@ void cy_on_topic_collision(cy_topic_t* const topic);
 
 /// New message received on a topic. The message ownership is taken by this function.
 /// No effect if the topic is NULL.
-void cy_on_message(cy_topic_t* const topic, cy_message_ts_t message, const cy_responder_t responder);
+void cy_on_message(cy_topic_t* const      topic,
+                   const uint64_t         remote_id,
+                   const uint64_t         transfer_id,
+                   cy_message_ts_t        message,
+                   const cy_p2p_context_t p2p_context);
 
-/// New P2P response to a message published earlier is received. The topic hash and the transfer-ID of the original
-/// message are provided.
-/// This function accepts a topic hash instead of a topic pointer, which is to decouple it from the topic lifetime
-/// -- by the time the response is received, the topic may have been destroyed already.
-/// The message ownership is taken by this function.
-///
-/// Observe that we do not pass a responder instance here because we assume that if any follow-up communication is
-/// needed, it will take place using the normal topic publication with P2P responses.
-/// At this time I am not certain if this assumption will hold. We may revise this based on empirical evidence.
-void cy_on_response(cy_t* const cy, const uint64_t topic_hash, const uint64_t transfer_id, cy_message_ts_t message);
+/// New P2P message is received from the specified remote. The message ownership is taken by this function.
+/// The transport treats P2P messages as opaque blobs; any transport-specific metadata is (de)serialized by Cy.
+void cy_on_p2p(cy_t* const cy, const uint64_t remote_id, cy_message_ts_t message);
 
 /// For diagnostics and logging only. Do not use in embedded and real-time applications.
 /// This function is only required if CY_CONFIG_TRACE is defined and is nonzero; otherwise it should be left undefined.
