@@ -1422,12 +1422,15 @@ static void on_request_feedback(void* const context, const uint16_t acknowledgem
     }
 }
 
-/// Deadlines are not unique, so this comparator never returns 0.
 static int32_t cavl_comp_future_response_deadline(const void* const user, const cy_tree_t* const node)
 {
     assert((user != NULL) && (node != NULL));
+    const request_future_t* const outer = (const request_future_t*)user;
     const request_future_t* const inner = CAVL2_TO_OWNER(node, request_future_t, index_deadline);
-    return ((*(cy_us_t*)user) >= inner->first_response_deadline) ? +1 : -1;
+    if (outer->first_response_deadline != inner->first_response_deadline) {
+        return (outer->first_response_deadline > inner->first_response_deadline) ? +1 : -1;
+    }
+    return (outer > inner) ? +1 : -1; // Tiebreak to support non-unique deadlines.
 }
 
 /// To find a pending response, one needs to locate the topic by hash first, if it exists when the response arrives.
@@ -1503,7 +1506,7 @@ cy_future_t* cy_request(cy_publisher_t* const pub,
         // just marked it as completed (actually failed, sorry about that haha -_o).
     }
     (void)cavl2_find_or_insert(&cy->request_futures_by_deadline,
-                               &fut->first_response_deadline,
+                               &fut,
                                cavl_comp_future_response_deadline,
                                &fut->index_deadline,
                                cavl2_trivial_factory);

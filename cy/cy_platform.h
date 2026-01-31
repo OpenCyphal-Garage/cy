@@ -310,7 +310,7 @@ typedef struct cy_vtable_t
     /// Allocates a new topic that is initially neither subscribed nor advertised. NULL if out of memory.
     cy_topic_t* (*new_topic)(cy_t*);
 
-    /// Instructs the underlying transport layer to send a peer-to-peer transfer.
+    /// Instructs the underlying transport layer to send a peer-to-peer transfer to the specified remote node.
     /// The message lifetime ends upon return from this function.
     /// If the transport layer needs any additional metadata to send a P2P message (e.g., destination address/port),
     /// it must be stored inside the responder context prior to cy_on_message() invocation.
