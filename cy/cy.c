@@ -937,8 +937,9 @@ static cy_topic_t* topic_subscribe_if_matching(cy_t* const       cy,
             return NULL;
         }
     }
-    // Attach subscriptions.
-    if (NULL != wkv_route(&cy->subscribers_by_pattern, resolved_name, topic, wkv_cb_couple_new_topic)) {
+    // Attach subscriptions using topic-owned name to keep substitutions stable.
+    // Using the resolved_name here would be deadly since it is stack-allocated.
+    if (NULL != wkv_route(&cy->subscribers_by_pattern, cy_topic_name(topic), topic, wkv_cb_couple_new_topic)) {
         // TODO discard the topic!
         cy->vtable->on_subscription_error(cy, NULL, CY_ERR_MEMORY);
         return NULL;
