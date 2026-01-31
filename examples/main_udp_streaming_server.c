@@ -9,8 +9,6 @@
 #include <stdio.h>
 
 #define TOPIC_NAME           "demo/stream"
-#define DEFAULT_COUNT        20U
-#define DEFAULT_PERIOD_ms    200U
 #define RESPONSE_DEADLINE_us (2 * 1000000LL)
 #define RESPONSE_MAX         128U
 #define STREAM_MAX           8U
@@ -116,7 +114,7 @@ static void on_stream_request(cy_subscriber_t* const sub, cy_arrival_t* const ar
     assert((arv != NULL) && (arv->breadcrumb != NULL));
 
     // Parse the request payload and apply limits.
-    stream_request_t req = { .count = DEFAULT_COUNT, .period_ms = DEFAULT_PERIOD_ms };
+    stream_request_t req = { 0 };
     if (cy_message_read(&arv->message.content, 0, sizeof(req), &req) != sizeof(req)) {
         return; // malformed request -- payload too short, ignore
     }
