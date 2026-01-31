@@ -1406,8 +1406,8 @@ static void request_future_cancel(cy_future_t* const self)
     if (!f->request_done) {
         // It is essential that we cancel not only to stop the no longer useful message from being sent,
         // but also to prevent the future feedback callback from operating on a dead future pointer.
+        f->request_done = true; // Prevent on_request_feedback() from invoking the future_notify() if it is invoked.
         f->base.cy->vtable->cancel(f->base.cy, f->cancellation_token);
-        f->request_done = true;
     }
     (void)cavl2_remove_if(&f->pub->topic->request_futures_by_transfer_id, &f->index_transfer_id);
     (void)cavl2_remove_if(&self->cy->request_futures_by_deadline, &f->index_deadline);
@@ -1425,12 +1425,13 @@ static void request_future_finalize(cy_future_t* const self)
 
 static void on_request_feedback(void* const context, const uint16_t acknowledgements)
 {
-    request_future_t* const f          = (request_future_t*)context;
-    f->result.request.acknowledgements = acknowledgements;
-    assert(!f->request_done);
-    f->request_done = true;
-    if ((request_future_status(&f->base) == cy_future_pending)) {
-        future_notify(&f->base); // future invalidated
+    request_future_t* const f = (request_future_t*)context;
+    if (!f->request_done) {
+        f->result.request.acknowledgements = acknowledgements;
+        f->request_done                    = true;
+        if ((request_future_status(&f->base) == cy_future_pending)) {
+            future_notify(&f->base); // future invalidated
+        }
     }
 }
 
@@ -1823,6 +1824,9 @@ cy_err_t cy_respond(cy_breadcrumb_t* const breadcrumb, const cy_us_t deadline, c
 
 cy_future_t* cy_respond_reliable(cy_breadcrumb_t* const breadcrumb, const cy_us_t deadline, const cy_bytes_t message)
 {
+    if ((breadcrumb == NULL) || (breadcrumb->cy == NULL) || (deadline < 0)) {
+        return NULL;
+    }
     static const cy_future_vtable_t future_vtable = { .result   = response_future_result,
                                                       .status   = response_future_status,
                                                       .cancel   = response_future_cancel,

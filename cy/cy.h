@@ -273,6 +273,10 @@ typedef struct cy_p2p_context_t
 
 /// Stores the origin information of a received message to allow sending a P2P response back to the sender.
 /// None of the fields may be altered by the application.
+///
+/// One might ask why are we using the transfer-ID, a very low-level transport concept, for correlating responses to
+/// requests instead of using a higher-level counter managed at this layer. The reason is that using the transfer-ID
+/// allows removing an additional field from each message, thus reducing the message size.
 typedef struct cy_breadcrumb_t
 {
     cy_t*            cy;          ///< The owning Cy instance.
