@@ -74,7 +74,7 @@ Publish a message asynchronously using reliable delivery; the outcome can be che
 
 ```c++
 cy_us_t    deadline = cy_now(cy) + 2_000_000; // keep trying to deliver the message for up to 2 seconds
-cy_bytes_t message = {.size = 34, .data = "Would you like to hear a TCP joke?"}
+cy_bytes_t message = {.size = 34, .data = "Would you like to hear a TCP joke?"};
 cy_future_t* future = cy_publish_reliable(my_pub, deadline, message);
 if (future == NULL) { ... }  // handle error
 ```
@@ -139,11 +139,13 @@ void on_message(cy_subscriber_t* subscriber, cy_arrival_t* arrival)
     printf("Received message on topic %s:\n%s\n", cy_topic_name(arrival->topic).str, dump);
     // If relevant, one can optionally send a response back to the publisher here using cy_respond():
     cy_err_t err = cy_respond(arrival->breadcrumb, deadline, response_data);
-    // It is also possible to store the breadcrumb to respond at any time later after the callback.
 }
 ```
 
-### ↩️ Respond to messages (RPC)
+It is also possible to store the breadcrumb (copy by value) to respond at any time later after the callback.
+The breadcrumb contains full information about the publisher and the message and the identity of the message.
+
+### ↩️ Respond to messages: RPC & streaming
 
 Observe that the message callback provides an option to send a response back to the publisher directly using
 a direct P2P channel using the `breadcrumb`.
@@ -189,6 +191,14 @@ void on_response(cy_future_t* future)
     }
 }
 ```
+
+If streaming is used, then normally it will be done using reliable delivery via `cy_respond_reliable()`,
+as reliable messages inform the server whether the remote side is still present and is accepting the data.
+As soon as the remote fails to confirm a message (once all delivery attempts have failed),
+the future will materialize with failure, hinting the server to cease streaming.
+
+As always with Cyphal, the process is largely stateless, in the sense of the avoidance of hard state sharing between
+the involved nodes.
 
 ### ⚙ Event loop
 
