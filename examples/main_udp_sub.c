@@ -94,8 +94,9 @@ static void on_message(cy_subscriber_t* const subscriber, cy_arrival_t* const ar
                   dump);
     // Optionally, send a response to the publisher of this message.
     // The stack knows the identity of the publisher and can deliver a response directly to it.
+    // It is possible to stream multiple responses for a single message (the breadcrumb can be copied).
     if ((rand() % 2) == 0) {
-        const cy_err_t err = cy_respond(arrival->responder, //
+        const cy_err_t err = cy_respond(arrival->breadcrumb, // Using best-effort delivery in this example.
                                         arrival->message.timestamp + MEGA,
                                         (cy_bytes_t){ .size = 2, .data = ":3" });
         if (err != CY_OK) {

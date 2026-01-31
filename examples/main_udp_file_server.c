@@ -52,16 +52,24 @@ static void on_file_read_msg(cy_subscriber_t* const subscriber, cy_arrival_t* co
         (void)fclose(file);
     }
 
-    // Send the response back to the client.
+    // Send the response back to the client using reliable delivery.
     (void)fprintf(stderr,
                   "Responding: file='%s' offset=%llu size=%u error=%u\n",
                   file_name,
                   (unsigned long long)read_offset,
                   response.data_len,
                   response.error);
-    (void)cy_respond(arv->responder,
-                     arv->message.timestamp + (10 * MEGA),
-                     (cy_bytes_t){ .size = 4 + 2 + response.data_len, .data = &response });
+    cy_future_t* const future =
+      cy_respond_reliable(arv->breadcrumb,
+                          arv->message.timestamp + (10 * MEGA),
+                          (cy_bytes_t){ .size = 4 + 2 + response.data_len, .data = &response });
+    // We want the stack to retransmit until the client acknowledges reception, but we don't care about the result.
+    // If we simply destroy the future, the transmission will be cancelled, so instead we set up auto-destruction.
+    if (future != NULL) {
+        cy_future_callback_set(future, &cy_future_destroy);
+    } else {
+        (void)fprintf(stderr, "FAILED TO RESPOND\n");
+    }
 }
 
 int main(void)

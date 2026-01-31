@@ -138,21 +138,21 @@ void on_message(cy_subscriber_t* subscriber, cy_arrival_t* arrival)
     char* dump = hexdump(size, data, 32);
     printf("Received message on topic %s:\n%s\n", cy_topic_name(arrival->topic).str, dump);
     // If relevant, one can optionally send a response back to the publisher here using cy_respond():
-    cy_err_t err = cy_respond(arrival->responder, deadline, response_data);
-    // It is also possible to store the responder instance to send the response at any time later after the callback.
+    cy_err_t err = cy_respond(arrival->breadcrumb, deadline, response_data);
+    // It is also possible to store the breadcrumb to respond at any time later after the callback.
 }
 ```
 
 ### ↩️ Respond to messages (RPC)
 
 Observe that the message callback provides an option to send a response back to the publisher directly using
-a direct P2P channel.
-This is how one can implement request/response (RPC-like) interactions.
+a direct P2P channel using the `breadcrumb`.
+This is how one can implement request/response (RPC-like) interactions and/or P2P streaming.
 If the application expects a response, then the correct publishing function to use is `cy_request()`:
 
 ```c++
 cy_us_t request_deadline  = cy_now(cy) + 3_000_000; // request must be acknowledged by the remote within 3 seconds
-cy_us_t response_deadline = cy_now(cy) + 6_000_000; // give up waiting for the response after 6 seconds
+cy_us_t response_deadline = cy_now(cy) + 6_000_000; // give up waiting for the first response after 6 seconds
 cy_future_t* future = cy_request(my_pub, request_deadline, response_deadline, message);
 if (future == NULL) { ... }  // handle error
 ```
@@ -167,12 +167,16 @@ void on_response(cy_future_t* future)
         // Intermediate progress update: request delivery has been confirmed, waiting for the response now.
     } else if (status == cy_future_success) {
         cy_request_result_t* const result = cy_future_result(future);
-        cy_us_t response_arrival_timestamp = result->response.timestamp;
-        const size_t  size = cy_message_size(result->response.content);
+        cy_us_t response_arrival_timestamp = result->response.message.timestamp;
+        const size_t  size = cy_message_size(result->response.message.content);
         unsigned char data[size];
-        cy_message_read(&result->response.content, 0, size, data);
+        cy_message_read(&result->response.message.content, 0, size, data);
         // Process the response data!
-        cy_future_destroy(future);
+        
+        // We can destroy the future if we don't expect any further responses;
+        // alternatively, it can be kept alive to continue listening for more responses,
+        // in which case it will remain in the 'success' state until destroyed.
+        //cy_future_destroy(future);
     } else {
         assert(status == cy_future_failure);
         cy_request_result_t* const result = cy_future_result(future);

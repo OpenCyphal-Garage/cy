@@ -91,7 +91,7 @@ int main(const int argc, char* argv[])
         cy_request_result_t* const result = cy_future_result(future);
         // We could use the response message directly from the future, but moving it out allows us to release
         // the future memory earlier. Sometimes it may be useful; this is an example of how it can be done.
-        cy_message_t message = cy_message_move(&result->response.content);
+        cy_message_t message = cy_message_move(&result->response.message.content);
         cy_future_destroy(future); // This must be eventually done for every future.
 
         // Process the next chunk.
