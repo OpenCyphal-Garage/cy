@@ -116,9 +116,9 @@ A future may be destroyed from within its own callback.
 cy_future_destroy(future);
 ```
 
-If you don't care about the future outcome, you can set it up for auto-destruction upon materialization,
-as shown below. Usually, destroying the future immediately upon creation is not what you want because the
-associated action would be cancelled right away.
+If you don't care about the future outcome, you can set it up for auto-destruction upon materialization as shown below.
+Usually, destroying the future immediately upon creation is not what you want because the associated action would be
+cancelled right away.
 
 ```c++
 cy_future_callback_set(future, cy_future_destroy);  // Will destroy itself when done, no need to keep the reference.
@@ -225,6 +225,8 @@ If streaming is used, then normally it will be done using reliable delivery via 
 as reliable messages inform the server whether the remote side is still present and is accepting the data.
 As soon as the remote fails to confirm a message (once all delivery attempts have failed),
 the future will materialize with failure, hinting the server to cease streaming.
+This reachability-based flow control is crude and is only intended as a guardrail against unexpected connectivity
+failure; normally, one should explicitly request the server to stop sending data using a dedicated message.
 
 As always with Cyphal, the process is largely stateless, in the sense of the avoidance of hard state sharing between
 the involved nodes.

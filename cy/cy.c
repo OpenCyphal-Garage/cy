@@ -1743,6 +1743,7 @@ typedef struct
 {
     cy_future_t             base;
     bool                    done;
+    bool                    acknowledged;
     cy_response_result_t    result;
     cy_cancellation_token_t token;
 } response_future_t;
@@ -1753,7 +1754,7 @@ static cy_future_status_t response_future_status(const cy_future_t* const self)
 {
     const response_future_t* const f = (const response_future_t*)self;
     if (f->done) {
-        return f->result.acknowledged ? cy_future_success : cy_future_failure;
+        return f->acknowledged ? cy_future_success : cy_future_failure;
     }
     return cy_future_pending;
 }
@@ -1772,7 +1773,7 @@ static void on_response_delivery_feedback(void* const reliable_context, const bo
 {
     response_future_t* const f = (response_future_t*)reliable_context;
     assert(f->result.seqno != UINT64_MAX); // Must have been initialized.
-    f->result.acknowledged = acknowledged;
+    f->acknowledged = acknowledged;
     if (!f->done) {
         f->done = true; // Prevent cancellation -- not needed anymore.
         future_notify(&f->base);
@@ -1799,9 +1800,9 @@ static cy_err_t do_respond(cy_breadcrumb_t* const   breadcrumb,
 
     // Send the response as a P2P message.
     if (future != NULL) {
-        future->done                = false;
-        future->result.seqno        = seqno;
-        future->result.acknowledged = false;
+        future->done         = false;
+        future->acknowledged = false;
+        future->result.seqno = seqno;
     }
     const cy_bytes_t headed_message = { .size = P2P_HEADER_BYTES, .data = header_serialized, .next = &message };
     return breadcrumb->cy->vtable->p2p(breadcrumb->cy, //

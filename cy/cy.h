@@ -280,13 +280,24 @@ typedef struct cy_p2p_context_t
 /// One might ask why are we using the transfer-ID, a very low-level transport concept, for correlating responses to
 /// requests instead of using a higher-level counter managed at this layer. The reason is that using the transfer-ID
 /// allows removing an additional field from each message, thus reducing the message size.
+///
+/// The triplet of (remote-ID, topic hash, transfer-ID) uniquely identifies the original message within the network.
+/// Consequently, if response streaming is used, it uniquely identifies the response stream.
+/// One can obtain a convenient 64-bit stream identifier by hashing these three values together; given a good hash,
+/// the collision probability is astronomically low and is negligible for all practical purposes:
+///
+///     const uint64_t key[3] = { b->remote_id, b->topic_hash, b->transfer_id };
+///     return rapidhash(key, sizeof(key));
+///
 typedef struct cy_breadcrumb_t
 {
-    cy_t*            cy;          ///< The owning Cy instance.
-    uint64_t         remote_id;   ///< Uniquely identifies the source node within the network.
-    uint64_t         topic_hash;  ///< Identifies the topic the message was received from.
-    uint64_t         transfer_id; ///< The transfer-ID of the received message this breadcrumb can respond to.
-    uint64_t         seqno;       ///< Incremented with each response sent (incl. failed); starts at zero.
+    cy_t* cy; ///< The owning Cy instance.
+
+    uint64_t remote_id;   ///< Uniquely identifies the source node within the network.
+    uint64_t topic_hash;  ///< Identifies the topic the message was received from.
+    uint64_t transfer_id; ///< The transfer-ID of the received message this breadcrumb can respond to.
+
+    uint64_t         seqno; ///< Incremented with each response sent (incl. failed); starts at zero.
     cy_p2p_context_t p2p_context;
 } cy_breadcrumb_t;
 
@@ -381,10 +392,12 @@ void cy_subscriber_name(const cy_subscriber_t* const self, char* const out_name)
 void cy_unsubscribe(cy_subscriber_t* const self);
 
 /// Future result of sending a reliable response message.
+/// The future will succeed if the response is acknowledged by the remote node before the deadline.
+/// There appears to be no need to provide the `acknowledged` field separately, as the future status already
+/// conveys that information.
 typedef struct cy_response_result_t
 {
-    uint64_t seqno;        ///< The unique sequence number used for this response message. Constant, always available.
-    bool     acknowledged; ///< True iff the response message reception has been acknowledged by the remote node.
+    uint64_t seqno; ///< The unique sequence number used for this response message. Constant, always available.
 } cy_response_result_t;
 
 /// Send a best-effort response to a message previously received from a topic subscription.

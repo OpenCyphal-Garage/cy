@@ -19,3 +19,9 @@ add_executable(udp_file_server main_udp_file_server.c)
 add_executable(udp_file_client main_udp_file_client.c)
 target_link_libraries(udp_file_server cy_udp_posix cy_trace_stderr)
 target_link_libraries(udp_file_client cy_udp_posix cy_trace_stderr)
+
+# UDP streaming examples.
+add_executable(udp_streaming_server main_udp_streaming_server.c)
+add_executable(udp_streaming_client main_udp_streaming_client.c)
+target_link_libraries(udp_streaming_server cy_udp_posix cy_trace_stderr)
+target_link_libraries(udp_streaming_client cy_udp_posix cy_trace_stderr)
