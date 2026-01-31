@@ -325,8 +325,8 @@ typedef struct cy_vtable_t
     /// If the transport layer needs any additional metadata to send a P2P message (e.g., destination address/port),
     /// it must be stored inside the responder context prior to cy_on_message() invocation.
     ///
-    /// If the feedback and the cancellation token are non-NULL, the message is sent reliably, and the callback is
-    /// invoked to report whether the remote node has acknowledged reception of the message.
+    /// If reliable_feedback is non-NULL, the message is sent reliably, and the callback is invoked to report whether
+    /// the remote node has acknowledged reception of the message.
     /// If given, the callback is always invoked exactly once, unless publication fails or the message is cancelled.
     ///
     /// Cancellation can be done later using the returned cancellation token; NULL if not needed.

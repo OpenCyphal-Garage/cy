@@ -253,11 +253,12 @@ void cy_unadvertise(cy_publisher_t* const pub);
 typedef struct cy_subscriber_t cy_subscriber_t;
 
 /// This ought to be enough for any reasonable transport-specific state.
-/// For example, IPv4 with 3 redundant transfers would need (4 bytes IP + 2 bytes port) * 3 = 18 bytes, plus padding.
+/// For example, IPv4 with 3 redundant transfers would need (4 bytes IP + 2 bytes port) * 3 + 1 byte priority = 19 bytes
+/// plus padding.
 /// IPv6 would likely need north of 64 bytes, but at the moment we don't have any transport that would require that.
 /// It can be changed easily as the library makes no assumptions about the size of this state.
 #ifndef CY_RESPONSE_CONTEXT_BYTES
-#define CY_RESPONSE_CONTEXT_BYTES 24U
+#define CY_RESPONSE_CONTEXT_BYTES 32U
 #endif
 
 /// Received transfers are given this copyable instance to allow sending P2P response transfers back to the sender.

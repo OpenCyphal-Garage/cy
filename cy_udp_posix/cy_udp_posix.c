@@ -167,89 +167,10 @@ static cy_message_t make_message(cy_udp_posix_t* const owner, const size_t size,
 {
     static const cy_message_vtable_t vtable        = { .destroy = v_message_destroy, .read = v_message_read };
     static const cy_message_vtable_t vtable_1frame = { .destroy = v_message_destroy, .read = v_message_read_1 };
-    return (cy_message_t){ .state  = { frag, owner },
-                           .size   = size,
-                           .vtable = (frag->view.size == size) ? &vtable_1frame : &vtable };
-}
-
-// ----------------------------------------  RESPONDER  ----------------------------------------
-
-typedef struct responder_context_t
-{
-    uint64_t        topic_hash;
-    uint64_t        transfer_id;
-    udpard_remote_t remote;
-    udpard_prio_t   priority;
-} responder_context_t;
-
-/// Invoked by libudpard when a response transmission attempt completes, whether successfully or not.
-static void on_response_feedback(udpard_tx_t* const tx, const udpard_tx_feedback_t fb)
-{
-    assert(tx->user != NULL);
-    assert(fb.acknowledgements <= 1);
-    CY_TRACE((cy_t*)tx->user,
-             "💬 T%016llx #%016llx ack=%u",
-             (unsigned long long)fb.topic_hash,
-             (unsigned long long)fb.transfer_id,
-             (unsigned)fb.acknowledgements);
-    // Currently, we don't emit any response delivery feedback. This may be changed in the future if needed.
-}
-
-/// Invoked by Cy when the application desires to respond to a message received earlier.
-static cy_err_t v_respond(const cy_responder_t* const self, const cy_us_t deadline, const cy_bytes_t message)
-{
-    responder_context_t ctx;
-    static_assert(sizeof(ctx) <= sizeof(self->state), "");
-    memcpy(&ctx, self->state, sizeof(ctx));
-    cy_udp_posix_t* const cy         = (cy_udp_posix_t*)self->cy;
-    const uint64_t        e_oom      = cy->udpard_tx.errors_oom;
-    const uint64_t        e_capacity = cy->udpard_tx.errors_capacity;
-    //
-    const bool ok = udpard_tx_push_p2p(&cy->udpard_tx,
-                                       cy_udp_posix_now(),
-                                       deadline,
-                                       ctx.priority,
-                                       ctx.topic_hash,
-                                       ctx.transfer_id,
-                                       ctx.remote,
-                                       cy_bytes_to_udpard_bytes(message),
-                                       on_response_feedback,
-                                       UDPARD_USER_CONTEXT_NULL,
-                                       NULL);
-    CY_TRACE(&cy->base,
-             "💬 T%016llx #%016llx N%016llx res=%u",
-             (unsigned long long)ctx.topic_hash,
-             (unsigned long long)ctx.transfer_id,
-             (unsigned long long)ctx.remote.uid,
-             ok);
-    if (ok) {
-        return CY_OK;
-    }
-    if (cy->udpard_tx.errors_oom > e_oom) {
-        return CY_ERR_MEMORY;
-    }
-    if (cy->udpard_tx.errors_capacity > e_capacity) {
-        return CY_ERR_CAPACITY;
-    }
-    return CY_ERR_ARGUMENT;
-}
-
-/// When a message is received, a responder is created to allow responding to it later, if needed.
-static cy_responder_t make_responder(cy_t* const           cy,
-                                     const uint64_t        topic_hash,
-                                     const uint64_t        transfer_id,
-                                     const udpard_prio_t   priority,
-                                     const udpard_remote_t remote)
-{
-    static const cy_responder_vtable_t vtable  = { .respond = v_respond };
-    cy_responder_t                     out     = { .cy = cy, .vtable = &vtable };
-    const responder_context_t          context = {
-                 .topic_hash = topic_hash, .transfer_id = transfer_id, .remote = remote, .priority = priority
-    };
-    out.cy = cy;
-    static_assert(sizeof(context) <= sizeof(out.state), "");
-    memcpy(out.state, &context, sizeof(context));
-    return out;
+    return (cy_message_t){ .state      = { frag, owner },
+                           .size_total = size,
+                           .skip       = 0,
+                           .vtable     = (frag->view.size == size) ? &vtable_1frame : &vtable };
 }
 
 // ----------------------------------------  TOPIC VTABLE  ----------------------------------------
@@ -286,37 +207,46 @@ static void on_topic_feedback(udpard_tx_t* const tx, const udpard_tx_feedback_t 
     boxed.feedback(boxed.context, fb.acknowledgements);
 }
 
-static cy_err_t v_topic_publish(cy_topic_t* const self,
-                                const cy_us_t     deadline,
-                                const cy_prio_t   priority,
-                                const cy_bytes_t  message,
-                                uint64_t* const   out_transfer_id,
-                                const size_t      response_extent,
-                                void* const       reliable_context,
-                                void (*const reliable_feedback)(void* reliable_context, uint16_t acknowledgements))
+static cy_err_t v_topic_publish(cy_topic_t*              self,
+                                cy_us_t                  deadline,
+                                cy_prio_t                priority,
+                                uint64_t                 transfer_id,
+                                cy_bytes_t               message,
+                                size_t                   response_extent,
+                                cy_cancellation_token_t* out_cancellation_token,
+                                void*                    reliable_context,
+                                void (*reliable_feedback)(void* reliable_context, uint16_t acknowledgements))
 {
-    cy_udp_posix_t* const cy          = (cy_udp_posix_t*)self->cy;
-    const uint64_t        transfer_id = ((cy_udp_posix_topic_t*)self)->pub_transfer_id++;
-    if (out_transfer_id != NULL) {
-        *out_transfer_id = transfer_id;
-    }
+    cy_udp_posix_t* const cy       = (cy_udp_posix_t*)self->cy;
+    const bool            reliable = reliable_feedback != NULL;
+
     // In this transport, the P2P response extent is trivial to change -- just update a variable; no need for any
     // complex reconfiguration. We are aware that changing the extent may sometimes, under very specific circumstances
     // involving out-of-order frame arrival, cause some in-progress transfers to be lost, but it's exceedingly unlikely
-    // and we use reliable delivery for P2P anyway. To minimize the impact, we round it to some arbitrary threshold.
-    const size_t response_extent_final = ceil_pow2((response_extent * 2U) + UDPARD_P2P_HEADER_BYTES);
-    if (response_extent_final > cy->p2p_port.base.extent) {
-        cy->p2p_port.base.extent = response_extent_final;
-        CY_TRACE(&cy->base, "📏 P2P response (extent+overhead) increased to %zu bytes", cy->p2p_port.base.extent);
+    // and we normally use reliable delivery for P2P. To minimize the impact, we round it to some arbitrary threshold.
+    if (response_extent > cy->p2p_port.extent) {
+        cy->p2p_port.extent = ceil_pow2(response_extent);
+        CY_TRACE(&cy->base, "📏 P2P response extent increased to %zu bytes", cy->p2p_port.extent);
     }
+
+    // Prepare the user context for reliable publication feedback, if needed.
     udpard_user_context_t udpard_context = UDPARD_USER_CONTEXT_NULL;
-    {
+    if (reliable) {
         const publish_feedback_context_t boxed = { .topic    = self,
                                                    .context  = reliable_context,
                                                    .feedback = reliable_feedback };
         static_assert(sizeof(boxed) <= sizeof(udpard_context), "");
         memcpy(&udpard_context, &boxed, sizeof(boxed)); // respect strict aliasing
     }
+
+    // Prepare the cancellation token, if needed.
+    if (out_cancellation_token != NULL) {
+        out_cancellation_token->id[0] = self->hash;
+        out_cancellation_token->id[1] = transfer_id;
+    }
+
+    // Push the message into the transmission queue.
+    // We need better error reporting in libudpard, this is really unwieldy.
     const uint64_t e_oom      = cy->udpard_tx.errors_oom;
     const uint64_t e_capacity = cy->udpard_tx.errors_capacity;
     //
@@ -328,7 +258,7 @@ static cy_err_t v_topic_publish(cy_topic_t* const self,
                                    self->hash,
                                    transfer_id,
                                    cy_bytes_to_udpard_bytes(message),
-                                   (reliable_feedback != NULL) ? on_topic_feedback : NULL,
+                                   reliable ? on_topic_feedback : NULL,
                                    udpard_context);
     if (ok) {
         return CY_OK;
@@ -342,18 +272,6 @@ static cy_err_t v_topic_publish(cy_topic_t* const self,
     return CY_ERR_ARGUMENT;
 }
 
-static bool v_topic_cancel(cy_topic_t* const self, const uint64_t transfer_id)
-{
-    cy_udp_posix_t* const cy  = (cy_udp_posix_t*)self->cy;
-    const bool            out = udpard_tx_cancel(&cy->udpard_tx, self->hash, transfer_id);
-    CY_TRACE(&cy->base,
-             "🚫 T%016llx #%016llx canceled=%u",
-             (unsigned long long)self->hash,
-             (unsigned long long)transfer_id,
-             out);
-    return out;
-}
-
 static bool topic_is_subscribed(const cy_udp_posix_topic_t* const self)
 {
     for (size_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
@@ -364,15 +282,31 @@ static bool topic_is_subscribed(const cy_udp_posix_topic_t* const self)
     return false;
 }
 
+typedef struct
+{
+    udpard_udpip_ep_t endpoints[UDPARD_IFACE_COUNT_MAX];
+    udpard_prio_t     priority;
+} p2p_ctx_t;
+
 static void v_on_msg(udpard_rx_t* const rx, udpard_rx_port_t* const port, const udpard_rx_transfer_t tr)
 {
     cy_udp_posix_t* const cy    = rx->user;
     cy_topic_t* const     topic = port->user;
     assert((cy != NULL) && (topic != NULL));
-    const cy_message_ts_t msg  = { .timestamp = tr.timestamp,
-                                   .content   = make_message(cy, tr.payload_size_stored, tr.payload) };
-    const cy_responder_t  resp = make_responder(&cy->base, port->topic_hash, tr.transfer_id, tr.priority, tr.remote);
-    cy_on_message(topic, msg, resp);
+
+    cy_p2p_context_t p2p_context = { { 0 } };
+    {
+        p2p_ctx_t inner = { .priority = tr.priority };
+        for (size_t i = 0; i < UDPARD_IFACE_COUNT_MAX; i++) {
+            inner.endpoints[i] = tr.remote.endpoints[i];
+        }
+        static_assert(sizeof(inner) <= sizeof(p2p_context), "");
+        memcpy(&p2p_context, &inner, sizeof(inner));
+    }
+
+    const cy_message_ts_t msg = { .timestamp = tr.timestamp,
+                                  .content   = make_message(cy, tr.payload_size_stored, tr.payload) };
+    cy_on_message(topic, tr.remote.uid, tr.transfer_id, msg, p2p_context);
 }
 
 static void v_on_msg_stateless(udpard_rx_t* const rx, udpard_rx_port_t* const port, const udpard_rx_transfer_t tr)
@@ -490,7 +424,6 @@ static void v_topic_destroy(cy_topic_t* const topic)
 }
 
 static const cy_topic_vtable_t topic_vtable = { .publish     = v_topic_publish,
-                                                .cancel      = v_topic_cancel,
                                                 .subscribe   = v_topic_subscribe,
                                                 .unsubscribe = v_topic_unsubscribe,
                                                 .relocate    = v_topic_relocate,
@@ -537,6 +470,98 @@ static uint64_t v_random(cy_t* const cy)
     return prng64(&((cy_udp_posix_t*)cy)->prng_state, ((cy_udp_posix_t*)cy)->udpard_tx.local_uid);
 }
 
+typedef struct
+{
+    void* context;
+    void (*feedback)(void*, bool); // caution: may exceed sizeof(void*)
+} p2p_feedback_context_t;
+
+/// Invoked by libudpard when a P2P transmission attempt completes, whether successfully or not.
+static void on_p2p_feedback(udpard_tx_t* const tx, const udpard_tx_feedback_t fb)
+{
+    assert(tx->user != NULL);
+    p2p_feedback_context_t boxed;
+    static_assert(sizeof(boxed) <= sizeof(fb.user), "");
+    memcpy(&boxed, &fb.user, sizeof(boxed)); // respect strict aliasing
+    assert(boxed.feedback != NULL);
+    boxed.feedback(boxed.context, fb.acknowledgements > 0);
+}
+
+/// Invoked by Cy when the application desires to respond to a message received earlier.
+static cy_err_t v_p2p(cy_t* const                    cy,
+                      const cy_p2p_context_t* const  p2p_context,
+                      const cy_us_t                  deadline,
+                      const uint64_t                 remote_id,
+                      const cy_bytes_t               message,
+                      cy_cancellation_token_t* const out_cancellation_token,
+                      void* const                    reliable_context,
+                      void (*const reliable_feedback)(void* reliable_context, bool acknowledged))
+{
+    cy_udp_posix_t* const cy_udp   = (cy_udp_posix_t*)cy;
+    const bool            reliable = reliable_feedback != NULL;
+
+    // Unbox the P2P context.
+    p2p_ctx_t inner;
+    static_assert(sizeof(inner) <= sizeof(cy_p2p_context_t), "");
+    memcpy(&inner, p2p_context, sizeof(inner));
+    udpard_remote_t remote = { .uid = remote_id };
+    for (size_t i = 0; i < UDPARD_IFACE_COUNT_MAX; i++) {
+        remote.endpoints[i] = inner.endpoints[i];
+    }
+
+    // Set up libudpard context for the callback.
+    udpard_user_context_t udpard_context = UDPARD_USER_CONTEXT_NULL;
+    if (reliable) {
+        const p2p_feedback_context_t boxed = { .context = reliable_context, .feedback = reliable_feedback };
+        static_assert(sizeof(boxed) <= sizeof(udpard_context), "");
+        memcpy(&udpard_context, &boxed, sizeof(boxed)); // respect strict aliasing
+    }
+
+    // The other part of the cancellation token is set later.
+    if (out_cancellation_token != NULL) {
+        out_cancellation_token->id[0] = remote_id; // Takes the place of the topic hash in normal publications.
+    }
+
+    // Push the message.
+    // We need better error reporting in libudpard, this is really unwieldy.
+    const uint64_t e_oom      = cy_udp->udpard_tx.errors_oom;
+    const uint64_t e_capacity = cy_udp->udpard_tx.errors_capacity;
+    //
+    const bool ok = udpard_tx_push_p2p(&cy_udp->udpard_tx,
+                                       cy_udp_posix_now(),
+                                       deadline,
+                                       inner.priority,
+                                       remote,
+                                       cy_bytes_to_udpard_bytes(message),
+                                       reliable ? on_p2p_feedback : NULL,
+                                       udpard_context,
+                                       (out_cancellation_token == NULL) ? NULL : &out_cancellation_token->id[1]);
+
+    // Report the result.
+    CY_TRACE(cy, "💬 N%016llx res=%u", (unsigned long long)remote.uid, ok);
+    if (ok) {
+        return CY_OK;
+    }
+    if (cy_udp->udpard_tx.errors_oom > e_oom) {
+        return CY_ERR_MEMORY;
+    }
+    if (cy_udp->udpard_tx.errors_capacity > e_capacity) {
+        return CY_ERR_CAPACITY;
+    }
+    return CY_ERR_ARGUMENT;
+}
+
+static void v_cancel(cy_t* const cy, const cy_cancellation_token_t token)
+{
+    cy_udp_posix_t* const cy_udp       = (cy_udp_posix_t*)cy;
+    const uint64_t        topic_or_uid = token.id[0];
+    const uint64_t        transfer_id  = token.id[1];
+    const bool            out          = udpard_tx_cancel(&cy_udp->udpard_tx, topic_or_uid, transfer_id);
+    CY_TRACE(
+      cy, "🚫 %016llx #%016llx canceled=%u", (unsigned long long)topic_or_uid, (unsigned long long)transfer_id, out);
+    (void)out;
+}
+
 static void v_on_subscription_error(cy_t* const cy, cy_topic_t* const cy_topic, const cy_err_t error)
 {
     // No action is needed -- Cy will keep attempting to repair the media until it succeeds.
@@ -547,6 +572,8 @@ static const cy_vtable_t cy_vtable = { .now                   = v_now,
                                        .realloc               = v_realloc,
                                        .random                = v_random,
                                        .new_topic             = v_topic_new,
+                                       .p2p                   = v_p2p,
+                                       .cancel                = v_cancel,
                                        .on_subscription_error = v_on_subscription_error };
 
 // ----------------------------------------  END OF PLATFORM INTERFACE  ----------------------------------------
@@ -574,14 +601,14 @@ static void default_rx_sock_err_handler(cy_udp_posix_t* const       cy,
     CY_TRACE(&cy->base, "⚠️ RX socket error on iface #%u topic '%s': %u", iface_index, topic_name, (unsigned)err_no);
 }
 
-static void v_on_p2p_msg(udpard_rx_t* const rx, udpard_rx_port_p2p_t* const port, const udpard_rx_transfer_p2p_t tr)
+static void v_on_p2p_msg(udpard_rx_t* const rx, udpard_rx_port_t* const port, const udpard_rx_transfer_t tr)
 {
     cy_udp_posix_t* const cy = rx->user;
     assert((cy != NULL) && (port == &cy->p2p_port));
     (void)port;
-    const cy_message_ts_t msg = { .timestamp = tr.base.timestamp,
-                                  .content   = make_message(cy, tr.base.payload_size_stored, tr.base.payload) };
-    cy_on_response(&cy->base, tr.topic_hash, tr.base.transfer_id, msg);
+    const cy_message_ts_t msg = { .timestamp = tr.timestamp,
+                                  .content   = make_message(cy, tr.payload_size_stored, tr.payload) };
+    cy_on_p2p(&cy->base, tr.remote.uid, msg);
 }
 
 static bool v_tx_eject_p2p(udpard_tx_t* const tx, udpard_tx_ejection_t* const ej, const udpard_udpip_ep_t destination)
@@ -611,6 +638,7 @@ static bool v_tx_eject_subject(udpard_tx_t* const tx, udpard_tx_ejection_t* cons
 {
     const cy_topic_t* const topic = ej->user.ptr[0];
     assert(topic->cy == tx->user);
+    // Subject-ID resolution postponed to the very last moment in case the consensus changes meanwhile.
     return v_tx_eject_p2p(tx, ej, udpard_make_subject_endpoint(cy_topic_subject_id(topic)));
 }
 
@@ -670,9 +698,9 @@ cy_err_t cy_udp_posix_new(cy_udp_posix_t* const cy,
 
     // Initialize the udpard P2P RX port.
     // We start with an arbitrarily chosen sensible initial extent, which will be increased later as needed.
-    const size_t                             initial_extent = UDPARD_MTU_DEFAULT;
-    static const udpard_rx_port_p2p_vtable_t rx_p2p_vtable  = { .on_message = v_on_p2p_msg };
-    if (!udpard_rx_port_new_p2p(&cy->p2p_port, uid, initial_extent, rx_mem, &rx_p2p_vtable)) {
+    const size_t                         initial_extent = UDPARD_MTU_DEFAULT;
+    static const udpard_rx_port_vtable_t rx_p2p_vtable  = { .on_message = v_on_p2p_msg, .on_collision = NULL };
+    if (!udpard_rx_port_new(&cy->p2p_port, uid, initial_extent, udpard_rx_unordered, 0, rx_mem, &rx_p2p_vtable)) {
         return CY_ERR_ARGUMENT; // Cleanup not required -- no resources allocated yet.
     }
 
@@ -702,7 +730,7 @@ cy_err_t cy_udp_posix_new(cy_udp_posix_t* const cy,
 
     // Cleanup on error.
     if (res != CY_OK) {
-        udpard_rx_port_free(&cy->udpard_rx, &cy->p2p_port.base);
+        udpard_rx_port_free(&cy->udpard_rx, &cy->p2p_port);
         udpard_tx_free(&cy->udpard_tx);
         for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
             udp_wrapper_close(&cy->sock[i]); // The handle may be invalid, but we don't care.
@@ -791,7 +819,7 @@ static void read_socket(cy_udp_posix_t* const       cy,
 
     // Pass the data buffer into LibUDPard then into Cy for further processing. It takes ownership of the buffer.
     const bool pushok = udpard_rx_port_push(&cy->udpard_rx,
-                                            (topic != NULL) ? &topic->rx_port : &cy->p2p_port.base,
+                                            (topic != NULL) ? &topic->rx_port : &cy->p2p_port,
                                             ts,
                                             remote_ep,
                                             dgram,
@@ -904,7 +932,7 @@ void cy_udp_posix_destroy(cy_udp_posix_t* const cy)
     if (cy != NULL) {
         cy_destroy(&cy->base);
         assert(cy->n_topics == 0); // cy_destroy() must clean up.
-        udpard_rx_port_free(&cy->udpard_rx, &cy->p2p_port.base);
+        udpard_rx_port_free(&cy->udpard_rx, &cy->p2p_port);
         udpard_tx_free(&cy->udpard_tx);
         for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
             udp_wrapper_close(&cy->sock[i]); // The handle may be invalid, but we don't care.
