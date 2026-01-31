@@ -346,7 +346,7 @@ static void v_on_collision(udpard_rx_t* const rx, udpard_rx_port_t* const port, 
 static cy_err_t v_topic_subscribe(cy_topic_t* const self, const size_t extent, cy_us_t reordering_window)
 {
     cy_udp_posix_topic_t* const self_low = (cy_udp_posix_topic_t*)self;
-    const cy_udp_posix_t* const cy       = (cy_udp_posix_t*)self->cy;
+    cy_udp_posix_t* const       cy       = (cy_udp_posix_t*)self->cy;
     assert(!topic_is_subscribed(self_low));
     // We special-case the heartbeat topic to have STATELESS reassembly strategy to conserve CPU and RAM.
     // Currently, the user API doesn't have the ability to select STATELESS mode, as it is uncertain if it
@@ -382,6 +382,7 @@ static cy_err_t v_topic_subscribe(cy_topic_t* const self, const size_t extent, c
 
     // Cleanup on error.
     if (res != CY_OK) {
+        udpard_rx_port_free(&cy->udpard_rx, &self_low->rx_port);
         for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
             udp_wrapper_close(&self_low->rx_sock[i]);
         }

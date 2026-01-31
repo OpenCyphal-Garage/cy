@@ -1530,7 +1530,7 @@ static void retire_expired_request_futures(const cy_t* cy, const cy_us_t now)
 cy_prio_t cy_priority(const cy_publisher_t* const pub) { return (pub != NULL) ? pub->priority : cy_prio_nominal; }
 void      cy_priority_set(cy_publisher_t* const pub, const cy_prio_t priority)
 {
-    if ((pub != NULL) && (((int)priority) < CY_PRIO_COUNT)) {
+    if ((pub != NULL) && (((int)priority) >= 0) && (((int)priority) < CY_PRIO_COUNT)) {
         pub->priority = priority;
     }
 }
@@ -1571,7 +1571,7 @@ void cy_unadvertise(cy_publisher_t* const pub)
         assert(topic->request_futures_by_transfer_id == NULL); // All pending requests must have been cancelled.
         if (cy_topic_has_subscribers(topic)) { // Demote to implicit; will be eventually garbage collected.
             enlist_head(&topic->cy->list_implicit, &topic->list_implicit);
-            assert(!is_implicit(topic));
+            assert(is_implicit(topic));
         }
     }
 }
@@ -1670,7 +1670,7 @@ static cy_err_t ensure_subscriber_root(cy_t* const               cy,
 static cy_subscriber_t* subscribe(cy_t* const cy, const wkv_str_t name, const subscriber_params_t params)
 {
     assert((cy != NULL) && (params.reordering_window >= -1));
-    char            name_buf[CY_TOPIC_NAME_MAX];
+    char            name_buf[CY_TOPIC_NAME_MAX + 1U];
     const wkv_str_t resolved = cy_name_resolve(name, cy->ns, cy->home, sizeof(name_buf), name_buf);
     if (resolved.len > sizeof(name_buf)) {
         return NULL;
