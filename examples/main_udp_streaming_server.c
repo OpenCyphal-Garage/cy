@@ -3,6 +3,7 @@
 #include "cy_udp_posix.h"
 #include <rapidhash.h>
 
+#include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -77,11 +78,14 @@ static void reset_stream(stream_state_t* const s)
 
 static void on_response_future_update(cy_future_t* const future)
 {
+    assert(cy_future_status(future) != cy_future_pending); // the response future does not emit intermediate updates
+
     stream_state_t* const s = (stream_state_t*)cy_future_context(future).ptr[0];
     assert((s != NULL) && (s->pending_response == future));
-    const cy_response_result_t* const res = (const cy_response_result_t*)cy_future_result(future);
     assert(s->remaining > 0);
     s->pending_response = NULL;
+
+    const cy_response_result_t* const res = (const cy_response_result_t*)cy_future_result(future);
     if (cy_future_status(future) == cy_future_success) {
         s->remaining--;
         s->next_send_at = cy_now(s->breadcrumb.cy) + s->period_us;
@@ -118,6 +122,9 @@ static void on_stream_request(cy_subscriber_t* const sub, cy_arrival_t* const ar
     }
     if (req.period_ms < 100) {
         req.period_ms = 100;
+    }
+    if (req.count == 0) {
+        return; // nothing to do; the stream scheduler requires at least one message
     }
 
     // Find or allocate a stream slot for this stream ID.

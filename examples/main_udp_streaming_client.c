@@ -2,6 +2,7 @@
 
 #include "cy_udp_posix.h"
 
+#include <assert.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdbool.h>
