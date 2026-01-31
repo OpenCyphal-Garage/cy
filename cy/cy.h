@@ -232,6 +232,8 @@ typedef struct cy_request_result_t
 /// The future will be updated when the request delivery feedback is available (intermediate update) and when
 /// the response is received. The future will enter the completed state after the first response, and it will
 /// continue to receive further responses if the remote chooses to send more; the future will remain completed.
+/// The application can monitor the seqno field in the response to detect new responses.
+/// To stop receiving further responses, the application must destroy the future.
 cy_future_t* cy_request(cy_publisher_t* const pub,
                         const cy_us_t         delivery_deadline,
                         const cy_us_t         first_response_deadline,

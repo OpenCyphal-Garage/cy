@@ -49,9 +49,7 @@ static void on_stream_response(cy_future_t* const future)
             st->received++;
             if (st->received >= st->expected) {
                 st->done = true;
-                // Once the future is destroyed, no further responses will be accepted; the server will observe failure
-                // to deliver responses and terminate the stream.
-                // We could also publish an explicit cancellation message, depending on the application requirements.
+                // Once the future is destroyed, no further responses will be accepted.
                 cy_future_destroy(future);
             }
             break;

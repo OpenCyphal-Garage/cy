@@ -2093,7 +2093,6 @@ void cy_on_message(cy_topic_t* const      topic,
     }
 }
 
-// ReSharper disable once CppParameterMayBeConstPtrOrRef
 void cy_on_p2p(cy_t* const cy, const uint64_t remote_id, cy_message_ts_t message)
 {
     assert((cy != NULL) && (message.timestamp >= 0));
@@ -2165,6 +2164,13 @@ void cy_on_p2p(cy_t* const cy, const uint64_t remote_id, cy_message_ts_t message
         CY_TRACE(cy, "❓ T%016llx no such topic", (unsigned long long)topic_hash);
         cy_message_destroy(&message.content); // The topic was destroyed while waiting for the response.
     }
+    // TODO: Currently, we silently drop orphaned responses without informing the remote because reliable transfers
+    //       provide only transport-layer reliability without regard to the higher layer protocol state. This is
+    //       suboptimal. In the future, we may consider implementing e2e ACK gating by extending the transport layer
+    //       API, such that the transport would postpone sending ACK until after delivering the transfer to Cy.
+    //       This way we would get an opportunity to return a flag back to the transport indicating whether the
+    //       transfer should be acknowledged or not. This feature naturally calls for the introduction of NACKs as well
+    //       to let the remote distinguish between network unreachability and higher-layer rejections.
 }
 
 // =====================================================================================================================
