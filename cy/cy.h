@@ -5,6 +5,8 @@
 ///                         `____/ .___/`___/_/ /_/`____/`__, / .___/_/ /_/`__,_/_/
 ///                             /_/                     /____/_/
 ///
+/// A lightweight real-time decentralized pub/sub for embedded systems and robotics. See the README.md for details.
+///
 /// Copyright (c) Pavel Kirienko <pavel@opencyphal.org>
 
 #pragma once
@@ -190,7 +192,7 @@ cy_publisher_t* cy_advertise_client(cy_t* const cy, const wkv_str_t name, const 
 
 /// Create a new publisher that ensures that there is at most one, the most recent, message pending for transmission.
 /// If a new message is published while another one is still pending, the previous one is cancelled.
-/// TODO not implemented; this is a simple idea -- store the last transfer-ID in the topic and cancel it on new publish.
+/// TODO not implemented; very simple idea -- store last cancellation token in the topic and cancel it on new publish.
 cy_publisher_t* cy_advertise_sample(cy_t* const cy, const wkv_str_t name);
 
 /// Publish a best-effort (non-reliable) one-way message without expecting a response.

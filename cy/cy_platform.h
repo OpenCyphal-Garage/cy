@@ -7,6 +7,7 @@
 ///
 /// Platform-side API of the Cy library.
 /// The application is not intended to have access to this header; this is only for the platform layer implementation.
+/// Applications should only include cy.h.
 ///
 /// Copyright (c) Pavel Kirienko <pavel@opencyphal.org>
 
@@ -189,7 +190,8 @@ typedef struct cy_topic_vtable_t
     /// invoked to report the number of remote subscribers that acknowledged reception of the message.
     /// If given, the callback is always invoked exactly once, unless publication fails or the message is cancelled.
     ///
-    /// Cancellation can be done later using the returned cancellation token; NULL if not needed.
+    /// Cancellation can be done later using the returned cancellation token; NULL if not needed. Ideally, the
+    /// transport should support cancellation of both reliable and non-reliable messages.
     cy_err_t (*publish)(cy_topic_t*              self,
                         cy_us_t                  deadline,
                         cy_prio_t                priority,
@@ -329,7 +331,8 @@ typedef struct cy_vtable_t
     /// the remote node has acknowledged reception of the message.
     /// If given, the callback is always invoked exactly once, unless publication fails or the message is cancelled.
     ///
-    /// Cancellation can be done later using the returned cancellation token; NULL if not needed.
+    /// Cancellation can be done later using the returned cancellation token; NULL if not needed. Cancellation is only
+    /// required for reliable messages.
     cy_err_t (*p2p)(cy_t*,
                     const cy_p2p_context_t*,
                     cy_us_t                  deadline,

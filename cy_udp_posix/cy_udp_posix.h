@@ -6,7 +6,7 @@
 ///                             /_/                     /____/_/
 ///
 /// A Cy platform layer for POSIX-like OSes using standard BSD sockets and libUDPard for Cyphal over UDP.
-/// It can be adapted for other socket-based APIs with minimal changes.
+/// It can be adapted to other socket-based APIs with minimal changes (mostly confined to udp_wrapper.c).
 ///
 /// Copyright (c) Pavel Kirienko <pavel@opencyphal.org>
 
