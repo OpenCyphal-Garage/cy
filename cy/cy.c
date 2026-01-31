@@ -1027,6 +1027,7 @@ static cy_err_t publish_heartbeat(const cy_t* const cy,
                                                      (cy_bytes_t){ .size = message_size, .data = buf },
                                                      0,
                                                      NULL,
+                                                     NULL,
                                                      NULL);
 }
 
@@ -1287,16 +1288,17 @@ cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t deadline, const cy_
                                        message,
                                        0,
                                        NULL,
+                                       NULL,
                                        NULL);
 }
 
 typedef struct
 {
-    cy_future_t         base;
-    cy_publisher_t*     owner;
-    cy_publish_result_t result;
-    uint64_t            transfer_id; ///< Needed for cancellation.
-    cy_list_member_t    member_pending;
+    cy_future_t             base;
+    cy_publisher_t*         owner;
+    cy_publish_result_t     result;
+    cy_cancellation_token_t token;
+    cy_list_member_t        member_pending;
 } publish_future_t;
 
 static void* publish_future_result(cy_future_t* const self) { return &((publish_future_t*)self)->result; }
@@ -1315,10 +1317,9 @@ static void publish_future_cancel(cy_future_t* const self)
     publish_future_t* const f = (publish_future_t*)self;
     if (f->owner != NULL) {
         delist(&f->owner->publish_futures, &f->member_pending);
-        cy_topic_t* const topic = f->owner->topic;
-        f->owner                = NULL; // Suppress the callback if the feedback notification is invoked from cancel().
+        f->owner = NULL; // Suppress the callback if the feedback notification is invoked from cancel().
         // Message is still pending feedback; cancel transfer to avoid dangling callback into freed memory.
-        (void)topic->vtable->cancel(topic, f->transfer_id);
+        f->base.cy->vtable->cancel(f->base.cy, f->token);
     }
     assert((f->member_pending.next == NULL) && (f->member_pending.prev == NULL));
 }
@@ -1349,14 +1350,14 @@ cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadli
     if (fut != NULL) {
         fut->owner                   = pub;
         fut->result.acknowledgements = 0;
-        fut->transfer_id             = pub->topic->pub_next_transfer_id++;
         heartbeat_begin(pub->topic->cy);
         const cy_err_t err = pub->topic->vtable->publish(pub->topic, //
                                                          deadline,
                                                          pub->priority,
-                                                         fut->transfer_id,
+                                                         pub->topic->pub_next_transfer_id++,
                                                          message,
                                                          0,
+                                                         &fut->token,
                                                          fut,
                                                          &on_publish_feedback);
         if (err != CY_OK) {
@@ -1377,8 +1378,9 @@ typedef struct
     bool                request_done;
     cy_request_result_t result;
 
-    uint64_t transfer_id;             ///< Needed for response correlation and early cancellation.
-    cy_us_t  first_response_deadline; ///< No deadline tracking after the first response.
+    uint64_t                transfer_id;             ///< Needed for response correlation.
+    cy_cancellation_token_t cancellation_token;      ///< Needed for request cancellation.
+    cy_us_t                 first_response_deadline; ///< No deadline tracking after the first response.
 
     cy_tree_t        index_transfer_id; ///< Per-topic transfer-ID index.
     cy_tree_t        index_deadline;    ///< Global across all topics; inserted until the first response only.
@@ -1404,7 +1406,7 @@ static void request_future_cancel(cy_future_t* const self)
     if (!f->request_done) {
         // It is essential that we cancel not only to stop the no longer useful message from being sent,
         // but also to prevent the future feedback callback from operating on a dead future pointer.
-        (void)f->pub->topic->vtable->cancel(f->pub->topic, f->transfer_id);
+        f->base.cy->vtable->cancel(f->base.cy, f->cancellation_token);
         f->request_done = true;
     }
     (void)cavl2_remove_if(&f->pub->topic->request_futures_by_transfer_id, &f->index_transfer_id);
@@ -1488,6 +1490,7 @@ cy_future_t* cy_request(cy_publisher_t* const pub,
                                                      fut->transfer_id,
                                                      message,
                                                      pub->response_extent,
+                                                     &fut->cancellation_token,
                                                      fut,
                                                      &on_request_feedback);
     if (res != CY_OK) {
@@ -1716,31 +1719,6 @@ cy_subscriber_t* cy_subscribe_ordered(cy_t* const     cy,
     return NULL;
 }
 
-cy_err_t cy_respond(cy_breadcrumb_t* const breadcrumb, const cy_us_t deadline, const cy_bytes_t message)
-{
-    if ((breadcrumb == NULL) || (breadcrumb->cy == NULL) || (deadline < 0)) {
-        return CY_ERR_ARGUMENT;
-    }
-    heartbeat_begin(breadcrumb->cy);
-
-    // Compose the P2P header. The remote will parse it to understand how to correlate the response.
-    const uint64_t header_lead = (breadcrumb->seqno++) << 24U;
-    byte_t         header_serialized[P2P_HEADER_BYTES];
-    byte_t*        ptr = serialize_u64(header_serialized, header_lead);
-    ptr                = serialize_u64(ptr, breadcrumb->topic_hash);
-    ptr                = serialize_u64(ptr, breadcrumb->transfer_id);
-    assert(ptr == (header_serialized + P2P_HEADER_BYTES));
-    (void)ptr;
-
-    // Send the response as a P2P message.
-    const cy_bytes_t headed_message = { .size = P2P_HEADER_BYTES, .data = header_serialized, .next = &message };
-    return breadcrumb->cy->vtable->p2p(breadcrumb->cy, //
-                                       &breadcrumb->p2p_context,
-                                       deadline,
-                                       breadcrumb->remote_id,
-                                       headed_message);
-}
-
 cy_user_context_t cy_subscriber_context(const cy_subscriber_t* const self) { return self->user_context; }
 void              cy_subscriber_context_set(cy_subscriber_t* const self, const cy_user_context_t context)
 {
@@ -1759,6 +1737,106 @@ void cy_subscriber_name(const cy_subscriber_t* const self, char* const out_name)
 }
 
 void cy_unsubscribe(cy_subscriber_t* const self) { (void)self; }
+
+typedef struct
+{
+    cy_future_t             base;
+    bool                    done;
+    cy_response_result_t    result;
+    cy_cancellation_token_t token;
+} response_future_t;
+
+static void* response_future_result(cy_future_t* const self) { return &((response_future_t*)self)->result; }
+
+static cy_future_status_t response_future_status(const cy_future_t* const self)
+{
+    const response_future_t* const f = (const response_future_t*)self;
+    if (f->done) {
+        return f->result.acknowledged ? cy_future_success : cy_future_failure;
+    }
+    return cy_future_pending;
+}
+
+static void response_future_cancel(cy_future_t* const self)
+{
+    response_future_t* const f = (response_future_t*)self;
+    if (!f->done) {
+        f->done = true; // Suppress the callback if the feedback notification is invoked from cancel().
+        // Message is still pending feedback; cancel transfer to avoid dangling callback into freed memory.
+        f->base.cy->vtable->cancel(f->base.cy, f->token);
+    }
+}
+
+static void on_response_delivery_feedback(void* const reliable_context, const bool acknowledged)
+{
+    response_future_t* const f = (response_future_t*)reliable_context;
+    assert(f->result.seqno != UINT64_MAX); // Must have been initialized.
+    f->result.acknowledged = acknowledged;
+    if (!f->done) {
+        f->done = true; // Prevent cancellation -- not needed anymore.
+        future_notify(&f->base);
+    }
+}
+
+static cy_err_t do_respond(cy_breadcrumb_t* const   breadcrumb,
+                           const cy_us_t            deadline,
+                           const cy_bytes_t         message,
+                           response_future_t* const future)
+{
+    assert((breadcrumb != NULL) && (breadcrumb->cy != NULL) && (deadline >= 0));
+    heartbeat_begin(breadcrumb->cy);
+
+    // Compose the P2P header. The remote will parse it to understand how to correlate the response.
+    const uint64_t seqno = breadcrumb->seqno++;
+    assert(seqno < (1ULL << 40U)); // Sanity check -- this is unreachable.
+    byte_t  header_serialized[P2P_HEADER_BYTES];
+    byte_t* ptr = serialize_u64(header_serialized, seqno << 24U);
+    ptr         = serialize_u64(ptr, breadcrumb->topic_hash);
+    ptr         = serialize_u64(ptr, breadcrumb->transfer_id);
+    assert(ptr == (header_serialized + P2P_HEADER_BYTES));
+    (void)ptr;
+
+    // Send the response as a P2P message.
+    if (future != NULL) {
+        future->done                = false;
+        future->result.seqno        = seqno;
+        future->result.acknowledged = false;
+    }
+    const cy_bytes_t headed_message = { .size = P2P_HEADER_BYTES, .data = header_serialized, .next = &message };
+    return breadcrumb->cy->vtable->p2p(breadcrumb->cy, //
+                                       &breadcrumb->p2p_context,
+                                       deadline,
+                                       breadcrumb->remote_id,
+                                       headed_message,
+                                       (future == NULL) ? NULL : &future->token,
+                                       future,
+                                       (future == NULL) ? NULL : &on_response_delivery_feedback);
+}
+
+cy_err_t cy_respond(cy_breadcrumb_t* const breadcrumb, const cy_us_t deadline, const cy_bytes_t message)
+{
+    if ((breadcrumb != NULL) && (breadcrumb->cy != NULL) && (deadline >= 0)) {
+        return do_respond(breadcrumb, deadline, message, NULL);
+    }
+    return CY_ERR_ARGUMENT;
+}
+
+cy_future_t* cy_respond_reliable(cy_breadcrumb_t* const breadcrumb, const cy_us_t deadline, const cy_bytes_t message)
+{
+    static const cy_future_vtable_t future_vtable = { .result   = response_future_result,
+                                                      .status   = response_future_status,
+                                                      .cancel   = response_future_cancel,
+                                                      .finalize = future_noop };
+    response_future_t* fut = future_new(breadcrumb->cy, &future_vtable, sizeof(response_future_t)); // ------
+    if (fut != NULL) {
+        const cy_err_t err = do_respond(breadcrumb, deadline, message, fut);
+        if (err != CY_OK) {
+            mem_free(breadcrumb->cy, fut);
+            fut = NULL;
+        }
+    }
+    return (cy_future_t*)fut;
+}
 
 // =====================================================================================================================
 //                                                  NODE & TOPIC

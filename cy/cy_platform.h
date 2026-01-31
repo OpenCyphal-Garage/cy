@@ -78,6 +78,14 @@ typedef struct cy_list_t
     cy_list_member_t* tail; ///< NULL if list empty
 } cy_list_t;
 
+/// Opaque platform-specific item used for cancellation of asynchronous operations.
+/// It is trivially destructible and copyable so it cannot own any resources.
+typedef union cy_cancellation_token_t
+{
+    void*    ptr[2];
+    uint64_t id[2];
+} cy_cancellation_token_t;
+
 /// Platform-specific implementation of cy_message_t.
 typedef struct cy_message_vtable_t
 {
@@ -176,20 +184,21 @@ typedef struct cy_topic_vtable_t
     /// that is of interest for the application, allowing the transport to truncate the rest. The transport may
     /// disregard the hint and receive an arbitrarily larger response message. If no responses are expected, use zero.
     /// All received responses are reported via cy_on_response().
-    cy_err_t (*publish)(cy_topic_t* self,
-                        cy_us_t     deadline,
-                        cy_prio_t   priority,
-                        uint64_t    transfer_id,
-                        cy_bytes_t  message, // Message lifetime ends upon return from this function.
-                        size_t      response_extent,
-                        void*       reliable_context,
+    ///
+    /// If the feedback and the cancellation token are non-NULL, the message is sent reliably, and the callback is
+    /// invoked to report the number of remote subscribers that acknowledged reception of the message.
+    /// If given, the callback is always invoked exactly once, unless publication fails or the message is cancelled.
+    ///
+    /// Cancellation can be done later using the returned cancellation token; NULL if not needed.
+    cy_err_t (*publish)(cy_topic_t*              self,
+                        cy_us_t                  deadline,
+                        cy_prio_t                priority,
+                        uint64_t                 transfer_id,
+                        cy_bytes_t               message, // Message lifetime ends upon return from this function.
+                        size_t                   response_extent,
+                        cy_cancellation_token_t* out_cancellation_token,
+                        void*                    reliable_context,
                         void (*reliable_feedback)(void* reliable_context, uint16_t acknowledgements));
-
-    /// Cancel publication of a previously published message that is still pending transmission.
-    /// Returns true iff the message was found and cancelled; false if no such pending message exists.
-    /// For reliable messages, the delivery callback must either not be invoked, or invoked immediately from within
-    /// this function. Delayed invocation would result in dangling pointers / use-after-free.
-    bool (*cancel)(cy_topic_t* self, uint64_t transfer_id);
 
     /// Instructs the underlying transport layer to create a new subscription on the topic.
     /// Messages received on this topic will be reported via cy_on_message().
@@ -315,8 +324,25 @@ typedef struct cy_vtable_t
     /// The message lifetime ends upon return from this function.
     /// If the transport layer needs any additional metadata to send a P2P message (e.g., destination address/port),
     /// it must be stored inside the responder context prior to cy_on_message() invocation.
-    /// Currently, there is no delivery information exposed; this may be changed in the future.
-    cy_err_t (*p2p)(cy_t*, const cy_p2p_context_t*, cy_us_t deadline, uint64_t remote_id, cy_bytes_t message);
+    ///
+    /// If the feedback and the cancellation token are non-NULL, the message is sent reliably, and the callback is
+    /// invoked to report whether the remote node has acknowledged reception of the message.
+    /// If given, the callback is always invoked exactly once, unless publication fails or the message is cancelled.
+    ///
+    /// Cancellation can be done later using the returned cancellation token; NULL if not needed.
+    cy_err_t (*p2p)(cy_t*,
+                    const cy_p2p_context_t*,
+                    cy_us_t                  deadline,
+                    uint64_t                 remote_id,
+                    cy_bytes_t               message,
+                    cy_cancellation_token_t* out_cancellation_token,
+                    void*                    reliable_context,
+                    void (*reliable_feedback)(void* reliable_context, bool acknowledged));
+
+    /// Cancel publication of a previously sent message (incl. P2P) that is still pending transmission.
+    /// For reliable messages, the feedback callback must either not be invoked, or invoked immediately from within
+    /// this function. Delayed invocation would result in dangling pointers / use-after-free.
+    void (*cancel)(cy_t*, cy_cancellation_token_t);
 
     /// If an allocation collision or divergence are discovered, Cy may reassign the topic to a different subject-ID.
     /// To do that, it will first unsubscribe the topic using the corresponding function,

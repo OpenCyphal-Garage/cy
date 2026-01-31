@@ -360,18 +360,6 @@ cy_subscriber_t* cy_subscribe_ordered(cy_t* const     cy,
                                       const size_t    extent,
                                       const cy_us_t   reordering_window);
 
-/// Send a response to a message previously received from a topic subscription.
-/// The response will be sent directly to the publisher using peer-to-peer transport, not affecting other nodes.
-/// This can be invoked from a subscription callback or at any later point as long as the breadcrumb is available.
-/// There may be an arbitrary number of responses sent for the same received message, which we call streamed
-/// RPC responses. Each response will carry a unique sequence number starting from zero, generated automatically by Cy.
-///
-/// Reliable delivery will be used, but this API does not provide any delivery feedback; this may be changed in a
-/// future version if there is a use case for it (the delivery information is available internally).
-/// If the delivery information is to be exposed, it will be a new future-based API similar to cy_publish_reliable().
-/// The lifetime of the future will probably be tied to the lifetime of the subscriber instance.
-cy_err_t cy_respond(cy_breadcrumb_t* const breadcrumb, const cy_us_t deadline, const cy_bytes_t message);
-
 cy_user_context_t cy_subscriber_context(const cy_subscriber_t* const self);
 void              cy_subscriber_context_set(cy_subscriber_t* const self, const cy_user_context_t context);
 
@@ -384,6 +372,30 @@ void cy_subscriber_name(const cy_subscriber_t* const self, char* const out_name)
 
 /// No effect if the subscriber pointer is NULL.
 void cy_unsubscribe(cy_subscriber_t* const self);
+
+/// Future result of sending a reliable response message.
+typedef struct cy_response_result_t
+{
+    uint64_t seqno;        ///< The unique sequence number used for this response message. Constant, always available.
+    bool     acknowledged; ///< True iff the response message reception has been acknowledged by the remote node.
+} cy_response_result_t;
+
+/// Send a best-effort response to a message previously received from a topic subscription.
+/// The response will be sent directly to the publisher using peer-to-peer transport, not affecting other nodes.
+/// This can be invoked from a subscription callback or at any later point as long as the breadcrumb is available.
+/// There may be an arbitrary number of responses sent per received message; we call these streamed RPC responses.
+/// Each response will carry a unique sequence number starting from zero, generated automatically by Cy.
+/// For reliable responses use cy_respond_reliable().
+cy_err_t cy_respond(cy_breadcrumb_t* const breadcrumb, const cy_us_t deadline, const cy_bytes_t message);
+
+/// Reliable counterpart of cy_respond() that provides the delivery success feedback via a future.
+/// This is useful for streamed RPC responses where the server (the sender) needs to know whether the client
+/// is still listening or has gone away (in which case streaming should be ceased).
+///
+/// The future result is of type cy_response_result_t. The seqno field is always available immediately upon future
+/// creation; the acknowledged field becomes true when/if the remote node acknowledges reception of the response.
+/// Destruction of the future will cancel the response if it is still pending transmission.
+cy_future_t* cy_respond_reliable(cy_breadcrumb_t* const breadcrumb, const cy_us_t deadline, const cy_bytes_t message);
 
 // =====================================================================================================================
 //                                                  NODE & TOPIC
