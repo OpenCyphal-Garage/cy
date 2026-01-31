@@ -231,7 +231,7 @@ static cy_err_t v_topic_publish(cy_topic_t*              self,
 
     // Prepare the user context for reliable publication feedback, if needed.
     udpard_user_context_t udpard_context = UDPARD_USER_CONTEXT_NULL;
-    if (reliable) {
+    {
         const publish_feedback_context_t boxed = { .topic    = self,
                                                    .context  = reliable_context,
                                                    .feedback = reliable_feedback };
