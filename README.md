@@ -116,7 +116,9 @@ A future may be destroyed from within its own callback.
 cy_future_destroy(future);
 ```
 
-If you don't care about the future outcome, you can set it up for auto-destruction upon materialization:
+If you don't care about the future outcome, you can set it up for auto-destruction upon materialization,
+as shown below. Usually, destroying the future immediately upon creation is not what you want because the
+associated action would be cancelled right away.
 
 ```c++
 cy_future_callback_set(future, cy_future_destroy);  // Will destroy itself when done, no need to keep the reference.
@@ -124,20 +126,41 @@ cy_future_callback_set(future, cy_future_destroy);  // Will destroy itself when 
 
 ### 📩 Subscribe to messages
 
+`cy_subscribe()` covers most use cases:
+
 ```c++
 size_t extent = 1024 * 100;  // max message size in bytes; excess truncated
-cy_subscriber_t* my_sub = cy_subscribe(cy, wkv_key("my/topic"), extent);
+cy_subscriber_t* my_sub = cy_subscribe(cy, wkv_key("my/topic"), extent); // See also cy_subscribe_ordered()
 if (my_sub == NULL) { ... }  // handle error
 cy_subscriber_context_set(my_sub, (cy_user_context_t){ { "🐱", (void*)654321, NULL } }); // optional context
 cy_subscriber_callback_set(my_sub, on_message); // callback invoked upon message arrival
 ```
 
-The message arrival callback looks like this:
+There is also `cy_subscribe_ordered()` if the application requires the messages to arrive strictly in the publication
+order -- some transports may deliver messages out of order and Cy will reconstruct the original order.
+
+One powerful feature of Cyphal is pattern subscriptions -- a kind of automatic service discovery.
+When a pattern subscription is created, the local node will scout the network for topics matching the specified
+pattern and will automatically subscribe to them as they appear, and unsubscribe when they disappear.
+Cy *intentionally uses the exact same API* for both concrete and pattern subscriptions,
+as this enables flexible system configuration at the time of integration/runtime as opposed to compile time only.
+As such, to create a pattern subscription, simply use a topic name that contains substitution wildcards:
+
+* `?` -- matches a single path segment; e.g., `sensors/?/temperature` matches `sensors/engine/temperature` and `sensors/cabin/temperature`.
+* `*` -- matches zero or more path segments; e.g., `*/status` matches `status`, `subsystem/foo/status`, etc.
+
+Cyphal is designed to be lightweight and efficient, which is why we don't support substitution characters *within*
+path segments; e.g., `sensor*/eng?ne/` will be treated as a literal topic name.
+
+The message arrival callback looks like this for all subscribers (ordered, unordered, verbatim, pattern):
 
 ```c++
 void on_message(cy_subscriber_t* subscriber, cy_arrival_t* arrival) 
 {
     cy_user_context_t ctx = cy_subscriber_context(subscriber);  // retrieve the context if needed
+    // You can see the name substitutions that had to be made to match the topic name pattern, if one used,
+    // by inspecting arrival->substitutions; in verbatim subscriptions the substitutions list is empty.
+    // The exact name of the matched topic is available as cy_topic_name(arrival->topic).
     size_t  size = cy_message_size(arrival->message.content);
     unsigned char data[size];
     cy_message_read(&arrival->message.content, 0, size, data);  // feel free to read only the parts of interest
