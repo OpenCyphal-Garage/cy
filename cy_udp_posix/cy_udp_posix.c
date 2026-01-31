@@ -257,7 +257,6 @@ static cy_responder_t make_responder(cy_t* const           cy,
 struct cy_udp_posix_topic_t
 {
     cy_topic_t       base;
-    uint64_t         pub_transfer_id;
     udpard_rx_port_t rx_port;
     udp_wrapper_t    rx_sock[CY_UDP_POSIX_IFACE_COUNT_MAX];
     void (*rx_sock_err_handler)(cy_udp_posix_t*       cy_udp,
@@ -503,8 +502,7 @@ static cy_topic_t* v_topic_new(cy_t* const self)
     cy_udp_posix_topic_t* const topic = (cy_udp_posix_topic_t*)mem_alloc(cy, sizeof(cy_udp_posix_topic_t));
     if (topic != NULL) {
         memset(topic, 0, sizeof(cy_udp_posix_topic_t));
-        topic->base.vtable     = &topic_vtable;
-        topic->pub_transfer_id = prng64(&cy->prng_state, cy->udpard_tx.local_uid);
+        topic->base.vtable = &topic_vtable;
         for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
             topic->rx_sock[i] = udp_wrapper_new();
         }

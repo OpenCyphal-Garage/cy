@@ -147,6 +147,9 @@ typedef struct cy_topic_t
     cy_us_t ts_origin;   ///< An approximation of when the topic was first seen on the network.
     cy_us_t ts_animated; ///< Last time the topic saw activity that prevents it from being retired.
 
+    /// Randomly-initialized monotonic transfer-ID counter for publications on this topic.
+    uint64_t pub_next_transfer_id;
+
     /// Used for matching pending response states against received responses by transfer-ID.
     /// TODO: When destroying the topic, ensure this index is empty -- each publisher must clean up its own
     ///       pending request futures.
@@ -168,8 +171,6 @@ typedef struct cy_topic_t
 typedef struct cy_topic_vtable_t
 {
     /// Instructs the underlying transport layer to non-blockingly publish a new message on the topic.
-    /// The transport will choose a new transfer-ID value for the message and return it, which may be used later to
-    /// match responses if any are needed/expected.
     ///
     /// The response extent hints the maximum size of response messages arriving in response to the published message
     /// that is of interest for the application, allowing the transport to truncate the rest. The transport may
@@ -178,8 +179,8 @@ typedef struct cy_topic_vtable_t
     cy_err_t (*publish)(cy_topic_t* self,
                         cy_us_t     deadline,
                         cy_prio_t   priority,
+                        uint64_t    transfer_id,
                         cy_bytes_t  message, // Message lifetime ends upon return from this function.
-                        uint64_t*   out_transfer_id,
                         size_t      response_extent,
                         void*       reliable_context,
                         void (*reliable_feedback)(void* reliable_context, uint16_t acknowledgements));

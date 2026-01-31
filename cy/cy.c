@@ -795,6 +795,8 @@ static cy_err_t topic_new(cy_t* const        cy,
     topic->ts_origin   = now - (pow2us(lage) * MEGA);
     topic->ts_animated = now;
 
+    topic->pub_next_transfer_id = cy->vtable->random(cy);
+
     topic->pub_count = 0;
 
     topic->couplings  = NULL;
@@ -1021,8 +1023,8 @@ static cy_err_t publish_heartbeat(const cy_t* const cy,
     return cy->heartbeat_pub->topic->vtable->publish(cy->heartbeat_pub->topic,
                                                      now + cy->heartbeat_period,
                                                      cy->heartbeat_pub->priority,
+                                                     cy->heartbeat_pub->topic->pub_next_transfer_id++,
                                                      (cy_bytes_t){ .size = message_size, .data = buf },
-                                                     NULL,
                                                      0,
                                                      NULL,
                                                      NULL);
@@ -1278,7 +1280,14 @@ cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t deadline, const cy_
     }
     assert(pub->topic->pub_count > 0);
     heartbeat_begin(pub->topic->cy);
-    return pub->topic->vtable->publish(pub->topic, deadline, pub->priority, message, NULL, 0, NULL, NULL);
+    return pub->topic->vtable->publish(pub->topic, //
+                                       deadline,
+                                       pub->priority,
+                                       pub->topic->pub_next_transfer_id++,
+                                       message,
+                                       0,
+                                       NULL,
+                                       NULL);
 }
 
 typedef struct
@@ -1340,12 +1349,13 @@ cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadli
     if (fut != NULL) {
         fut->owner                   = pub;
         fut->result.acknowledgements = 0;
+        fut->transfer_id             = pub->topic->pub_next_transfer_id++;
         heartbeat_begin(pub->topic->cy);
         const cy_err_t err = pub->topic->vtable->publish(pub->topic, //
                                                          deadline,
                                                          pub->priority,
+                                                         fut->transfer_id,
                                                          message,
-                                                         &fut->transfer_id,
                                                          0,
                                                          fut,
                                                          &on_publish_feedback);
@@ -1470,12 +1480,13 @@ cy_future_t* cy_request(cy_publisher_t* const pub,
     fut->result.response.seqno     = UINT64_MAX; // Ditto, this seqno is unreachable in practice.
     fut->result.response.message   = (cy_message_ts_t){ .timestamp = BIG_BANG, .content = message_empty };
     fut->first_response_deadline   = first_response_deadline;
+    fut->transfer_id               = pub->topic->pub_next_transfer_id++;
     heartbeat_begin(cy);
     const cy_err_t res = pub->topic->vtable->publish(pub->topic,
                                                      delivery_deadline,
                                                      pub->priority,
+                                                     fut->transfer_id,
                                                      message,
-                                                     &fut->transfer_id,
                                                      pub->response_extent,
                                                      fut,
                                                      &on_request_feedback);
@@ -1483,30 +1494,14 @@ cy_future_t* cy_request(cy_publisher_t* const pub,
         mem_free(cy, fut);
         return NULL;
     }
-    // The transfer-ID values returned by the transport layer are meant to be unique. This is trivially ensured in most
-    // transports because they use 64-bit monotonically increasing sequence numbers. However, Cyphal/CAN is special in
-    // that its transfer-ID space is only 5 bits wide, which will cause the insertion operation to fail if there already
-    // are 31 pending requests. While this is highly unlikely to actually happen in practice, we must still handle this
-    // case gracefully; the solution is very simple -- finalize the old competed response early and replace it.
-    while (true) {
-        request_future_t* const fut2 = CAVL2_TO_OWNER(cavl2_find_or_insert(&pub->topic->request_futures_by_transfer_id,
-                                                                           &fut->transfer_id,
-                                                                           cavl_comp_future_response_transfer_id,
-                                                                           &fut->index_transfer_id,
-                                                                           cavl2_trivial_factory),
-                                                      request_future_t,
-                                                      index_transfer_id);
-        if (fut2 == fut) {
-            break; // Successfully inserted.
-        }
-        CY_TRACE(
-          cy, "⚠️ %s #%016llx transfer-ID exhaustion", topic_repr(pub->topic).str, (unsigned long long)fut->transfer_id);
-        future_cancel_and_notify(&fut2->base);
-        // We cannot destroy the conflicting future because we don't own it. The user will do that eventually -- we
-        // just marked it as completed (actually failed, sorry about that haha -_o).
-    }
+    const cy_tree_t* const fut_tid_tree = cavl2_find_or_insert(&pub->topic->request_futures_by_transfer_id,
+                                                               &fut->transfer_id,
+                                                               cavl_comp_future_response_transfer_id,
+                                                               &fut->index_transfer_id,
+                                                               cavl2_trivial_factory);
+    assert(fut_tid_tree == &fut->index_transfer_id);
     (void)cavl2_find_or_insert(&cy->request_futures_by_deadline,
-                               &fut,
+                               fut,
                                cavl_comp_future_response_deadline,
                                &fut->index_deadline,
                                cavl2_trivial_factory);
