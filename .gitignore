@@ -27,8 +27,7 @@
 *.profraw
 *.luarc*
 .scannerwork
-build/
-build_*/
+build*/
 cmake*build*/
 .ipynb_checkpoints
 **/.idea/*

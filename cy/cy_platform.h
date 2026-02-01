@@ -7,6 +7,7 @@
 ///
 /// Platform-side API of the Cy library.
 /// The application is not intended to have access to this header; this is only for the platform layer implementation.
+/// Applications should only include cy.h.
 ///
 /// Copyright (c) Pavel Kirienko <pavel@opencyphal.org>
 
@@ -78,11 +79,22 @@ typedef struct cy_list_t
     cy_list_member_t* tail; ///< NULL if list empty
 } cy_list_t;
 
+/// Opaque platform-specific item used for cancellation of asynchronous operations.
+/// It is trivially destructible and copyable so it cannot own any resources.
+typedef union cy_cancellation_token_t
+{
+    void*    ptr[2];
+    uint64_t id[2];
+} cy_cancellation_token_t;
+
 /// Platform-specific implementation of cy_message_t.
 typedef struct cy_message_vtable_t
 {
     void (*destroy)(cy_message_t*);
-    size_t (*read)(cy_message_t*, size_t, size_t, void*);
+
+    /// The offset is supplied with the skip already applied.
+    /// It is guaranteed by the caller that the offset+size does not exceed the message size.
+    size_t (*read)(cy_message_t*, size_t offset, size_t size, void*);
 } cy_message_vtable_t;
 
 /// This is the base type that is extended by the platform layer with transport- and platform-specific entities,
@@ -144,6 +156,9 @@ typedef struct cy_topic_t
     cy_us_t ts_origin;   ///< An approximation of when the topic was first seen on the network.
     cy_us_t ts_animated; ///< Last time the topic saw activity that prevents it from being retired.
 
+    /// Randomly-initialized monotonic transfer-ID counter for publications on this topic.
+    uint64_t pub_next_transfer_id;
+
     /// Used for matching pending response states against received responses by transfer-ID.
     /// TODO: When destroying the topic, ensure this index is empty -- each publisher must clean up its own
     ///       pending request futures.
@@ -165,27 +180,27 @@ typedef struct cy_topic_t
 typedef struct cy_topic_vtable_t
 {
     /// Instructs the underlying transport layer to non-blockingly publish a new message on the topic.
-    /// The transport will choose a new transfer-ID value for the message and return it, which may be used later to
-    /// match responses if any are needed/expected.
     ///
     /// The response extent hints the maximum size of response messages arriving in response to the published message
     /// that is of interest for the application, allowing the transport to truncate the rest. The transport may
     /// disregard the hint and receive an arbitrarily larger response message. If no responses are expected, use zero.
     /// All received responses are reported via cy_on_response().
-    cy_err_t (*publish)(cy_topic_t* self,
-                        cy_us_t     deadline,
-                        cy_prio_t   priority,
-                        cy_bytes_t  message,
-                        uint64_t*   out_transfer_id,
-                        size_t      response_extent,
-                        void*       reliable_context,
+    ///
+    /// If the feedback and the cancellation token are non-NULL, the message is sent reliably, and the callback is
+    /// invoked to report the number of remote subscribers that acknowledged reception of the message.
+    /// If given, the callback is always invoked exactly once, unless publication fails or the message is cancelled.
+    ///
+    /// Cancellation can be done later using the returned cancellation token; NULL if not needed. Ideally, the
+    /// transport should support cancellation of both reliable and non-reliable messages.
+    cy_err_t (*publish)(cy_topic_t*              self,
+                        cy_us_t                  deadline,
+                        cy_prio_t                priority,
+                        uint64_t                 transfer_id,
+                        cy_bytes_t               message, // Message lifetime ends upon return from this function.
+                        size_t                   response_extent,
+                        cy_cancellation_token_t* out_cancellation_token,
+                        void*                    reliable_context,
                         void (*reliable_feedback)(void* reliable_context, uint16_t acknowledgements));
-
-    /// Cancel publication of a previously published message that is still pending transmission.
-    /// Returns true iff the message was found and cancelled; false if no such pending message exists.
-    /// For reliable messages, the delivery callback must either not be invoked, or invoked immediately from within
-    /// this function. Delayed invocation would result in dangling pointers / use-after-free.
-    bool (*cancel)(cy_topic_t* self, uint64_t transfer_id);
 
     /// Instructs the underlying transport layer to create a new subscription on the topic.
     /// Messages received on this topic will be reported via cy_on_message().
@@ -218,21 +233,6 @@ typedef struct cy_topic_vtable_t
 
     void (*destroy)(cy_topic_t* self);
 } cy_topic_vtable_t;
-
-/// Platform-specific implementation of cy_responder_t.
-typedef struct cy_responder_vtable_t
-{
-    /// Instructs the underlying transport layer to send a peer-to-peer response transfer. The identity of the remote
-    /// endpoint is encoded and the transfer metadata are stored inside the cy_responder_t object in a
-    /// platform-specific manner.
-    /// Implementations may optionally invalidate the responder object after use -- at most single use is guaranteed.
-    ///
-    /// Currently, there is no delivery information exposed; this may be changed in the future.
-    /// The most likely solution would be to add a cancel() function to the responder vtable,
-    /// and make implementations keep track of the transfer-ID used to send the response such that internally
-    /// they can cancel it if requested. The responder instance would be stored in the future.
-    cy_err_t (*respond)(const cy_responder_t*, cy_us_t deadline, cy_bytes_t message);
-} cy_responder_vtable_t;
 
 /// Instances of cy are not copyable; they are always accessed via pointer provided during initialization.
 /// Creation of a new topic may cause resubscription of any existing topics (all topics in the unlikely worst case).
@@ -322,6 +322,31 @@ typedef struct cy_vtable_t
     /// Allocates a new topic that is initially neither subscribed nor advertised. NULL if out of memory.
     cy_topic_t* (*new_topic)(cy_t*);
 
+    /// Instructs the underlying transport layer to send a peer-to-peer transfer to the specified remote node.
+    /// The message lifetime ends upon return from this function.
+    /// If the transport layer needs any additional metadata to send a P2P message (e.g., destination address/port),
+    /// it must be stored inside the responder context prior to cy_on_message() invocation.
+    ///
+    /// If reliable_feedback is non-NULL, the message is sent reliably, and the callback is invoked to report whether
+    /// the remote node has acknowledged reception of the message.
+    /// If given, the callback is always invoked exactly once, unless publication fails or the message is cancelled.
+    ///
+    /// Cancellation can be done later using the returned cancellation token; NULL if not needed. Cancellation is only
+    /// required for reliable messages.
+    cy_err_t (*p2p)(cy_t*,
+                    const cy_p2p_context_t*,
+                    cy_us_t                  deadline,
+                    uint64_t                 remote_id,
+                    cy_bytes_t               message,
+                    cy_cancellation_token_t* out_cancellation_token,
+                    void*                    reliable_context,
+                    void (*reliable_feedback)(void* reliable_context, bool acknowledged));
+
+    /// Cancel publication of a previously sent message (incl. P2P) that is still pending transmission.
+    /// For reliable messages, the feedback callback must either not be invoked, or invoked immediately from within
+    /// this function. Delayed invocation would result in dangling pointers / use-after-free.
+    void (*cancel)(cy_t*, cy_cancellation_token_t);
+
     /// If an allocation collision or divergence are discovered, Cy may reassign the topic to a different subject-ID.
     /// To do that, it will first unsubscribe the topic using the corresponding function,
     /// and then invoke the subscription function to recreate the subscription with the new subject-ID.
@@ -369,25 +394,15 @@ void cy_on_topic_collision(cy_topic_t* const topic);
 
 /// New message received on a topic. The message ownership is taken by this function.
 /// No effect if the topic is NULL.
-void cy_on_message(cy_topic_t* const    topic,
-                   const cy_us_t        timestamp,
-                   cy_message_t         message,
-                   const cy_responder_t responder);
+void cy_on_message(cy_topic_t* const      topic,
+                   const uint64_t         remote_id,
+                   const uint64_t         transfer_id,
+                   cy_message_ts_t        message,
+                   const cy_p2p_context_t p2p_context);
 
-/// New P2P response to a message published earlier is received. The topic hash and the transfer-ID of the original
-/// message are provided.
-/// This function accepts a topic hash instead of a topic pointer, which is to decouple it from the topic lifetime
-/// -- by the time the response is received, the topic may have been destroyed already.
-/// The message ownership is taken by this function.
-///
-/// Observe that we do not pass a responder instance here because we assume that if any follow-up communication is
-/// needed, it will take place using the normal topic publication with P2P responses.
-/// At this time I am not certain if this assumption will hold. We may revise this based on empirical evidence.
-void cy_on_response(cy_t* const    cy,
-                    const cy_us_t  timestamp,
-                    const uint64_t topic_hash,
-                    const uint64_t transfer_id,
-                    cy_message_t   message);
+/// New P2P message is received from the specified remote. The message ownership is taken by this function.
+/// The transport treats P2P messages as opaque blobs; any transport-specific metadata is (de)serialized by Cy.
+void cy_on_p2p(cy_t* const cy, const uint64_t remote_id, cy_message_ts_t message);
 
 /// For diagnostics and logging only. Do not use in embedded and real-time applications.
 /// This function is only required if CY_CONFIG_TRACE is defined and is nonzero; otherwise it should be left undefined.

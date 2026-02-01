@@ -82,13 +82,15 @@ static void on_result(cy_future_t* const future)
         (void)fprintf(stderr, "➡️ '%s' request delivered; waiting for response...\n", topic_name.str);
     } else if (status == cy_future_success) {
         cy_request_result_t* const result = cy_future_result(future);
-        const size_t               size   = cy_message_size(result->response.content);
+        const size_t               size   = cy_message_size(result->response.message.content);
         unsigned char              data[size];
-        cy_message_read(&result->response.content, 0, size, data);
+        cy_message_read(&result->response.message.content, 0, size, data);
         char* const dump = hexdump(size, data, 32); // just a simple visualization aid unrelated to the API
         (void)fprintf(stderr,
-                      "↩️ ts=%09llu sz=%06zu topic='%s' response ✅\n%s\n",
-                      (unsigned long long)result->response.timestamp,
+                      "↩️ ts=%09llu remote=%016x seqno=%llu sz=%06zu topic='%s' response ✅\n%s\n",
+                      (unsigned long long)result->response.message.timestamp,
+                      (unsigned)result->response.remote_id,
+                      (unsigned long long)result->response.seqno,
                       size,
                       topic_name.str,
                       dump);

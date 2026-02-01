@@ -74,7 +74,7 @@ Publish a message asynchronously using reliable delivery; the outcome can be che
 
 ```c++
 cy_us_t    deadline = cy_now(cy) + 2_000_000; // keep trying to deliver the message for up to 2 seconds
-cy_bytes_t message = {.size = 34, .data = "Would you like to hear a TCP joke?"}
+cy_bytes_t message = {.size = 34, .data = "Would you like to hear a TCP joke?"};
 cy_future_t* future = cy_publish_reliable(my_pub, deadline, message);
 if (future == NULL) { ... }  // handle error
 ```
@@ -116,43 +116,70 @@ A future may be destroyed from within its own callback.
 cy_future_destroy(future);
 ```
 
+If you don't care about the future outcome, you can set it up for auto-destruction upon materialization as shown below.
+Usually, destroying the future immediately upon creation is not what you want because the associated action would be
+cancelled right away.
+
+```c++
+cy_future_callback_set(future, cy_future_destroy);  // Will destroy itself when done, no need to keep the reference.
+```
+
 ### 📩 Subscribe to messages
+
+`cy_subscribe()` covers most use cases:
 
 ```c++
 size_t extent = 1024 * 100;  // max message size in bytes; excess truncated
-cy_subscriber_t* my_sub = cy_subscribe(cy, wkv_key("my/topic"), extent);
+cy_subscriber_t* my_sub = cy_subscribe(cy, wkv_key("my/topic"), extent); // See also cy_subscribe_ordered()
 if (my_sub == NULL) { ... }  // handle error
 cy_subscriber_context_set(my_sub, (cy_user_context_t){ { "🐱", (void*)654321, NULL } }); // optional context
 cy_subscriber_callback_set(my_sub, on_message); // callback invoked upon message arrival
 ```
 
-The message arrival callback looks like this:
+There is also `cy_subscribe_ordered()` if the application requires the messages to arrive strictly in the publication
+order -- some transports may deliver messages out of order and Cy will reconstruct the original order.
+
+One powerful feature is pattern subscriptions -- a kind of automatic service discovery.
+When a pattern subscription is created, the local node will scout the network for topics matching the specified
+pattern and will automatically subscribe to them as they appear, and unsubscribe when they disappear.
+Cy *intentionally uses the same API* for both concrete and pattern subscriptions,
+as this enables flexible configuration at the time of integration/runtime as opposed to compile time only.
+To create a pattern subscription, simply use a topic name that contains substitution wildcards:
+
+* `?` -- matches a single path segment; e.g., `sensors/?/temperature` matches `sensors/engine/temperature` and `sensors/cabin/temperature`.
+* `*` -- matches zero or more path segments; e.g., `*/status` matches `status`, `subsystem/foo/status`, etc.
+
+Cyphal is designed to be lightweight and efficient, which is why we don't support substitution characters *within*
+path segments; e.g., `sensor*/eng?ne` will be treated as a literal topic name.
+
+The message arrival callback looks like this for all subscribers (ordered, unordered, verbatim, pattern):
 
 ```c++
 void on_message(cy_subscriber_t* subscriber, cy_arrival_t* arrival) 
 {
     cy_user_context_t ctx = cy_subscriber_context(subscriber);  // retrieve the context if needed
+    // You can see the name substitutions that had to be made to match the topic name pattern, if one used,
+    // by inspecting arrival->substitutions; in verbatim subscriptions the substitutions list is empty.
+    // The exact name of the matched topic is available as cy_topic_name(arrival->topic).
     size_t  size = cy_message_size(arrival->message.content);
     unsigned char data[size];
     cy_message_read(&arrival->message.content, 0, size, data);  // feel free to read only the parts of interest
     char* dump = hexdump(size, data, 32);
     printf("Received message on topic %s:\n%s\n", cy_topic_name(arrival->topic).str, dump);
     // If relevant, one can optionally send a response back to the publisher here using cy_respond():
-    cy_err_t err = cy_respond(arrival->responder, deadline, response_data);
-    // It is also possible to store the responder instance to send the response at any time later after the callback.
+    cy_err_t err = cy_respond(arrival->breadcrumb, deadline, response_data);
 }
 ```
 
-### ↩️ Respond to messages (RPC)
+### ↩️ Respond to messages: RPC & streaming
 
 Observe that the message callback provides an option to send a response back to the publisher directly using
 a direct P2P channel.
-This is how one can implement request/response (RPC-like) interactions.
 If the application expects a response, then the correct publishing function to use is `cy_request()`:
 
 ```c++
 cy_us_t request_deadline  = cy_now(cy) + 3_000_000; // request must be acknowledged by the remote within 3 seconds
-cy_us_t response_deadline = cy_now(cy) + 6_000_000; // give up waiting for the response after 6 seconds
+cy_us_t response_deadline = cy_now(cy) + 6_000_000; // give up waiting for the first response after 6 seconds
 cy_future_t* future = cy_request(my_pub, request_deadline, response_deadline, message);
 if (future == NULL) { ... }  // handle error
 ```
@@ -167,12 +194,16 @@ void on_response(cy_future_t* future)
         // Intermediate progress update: request delivery has been confirmed, waiting for the response now.
     } else if (status == cy_future_success) {
         cy_request_result_t* const result = cy_future_result(future);
-        cy_us_t response_arrival_timestamp = result->response.timestamp;
-        const size_t  size = cy_message_size(result->response.content);
+        cy_us_t response_arrival_timestamp = result->response.message.timestamp;
+        const size_t  size = cy_message_size(result->response.message.content);
         unsigned char data[size];
-        cy_message_read(&result->response.content, 0, size, data);
+        cy_message_read(&result->response.message.content, 0, size, data);
         // Process the response data!
-        cy_future_destroy(future);
+        
+        // We can destroy the future if we don't expect any further responses;
+        // alternatively, it can be kept alive to continue listening for more responses,
+        // in which case it will remain in the 'success' state until destroyed.
+        //cy_future_destroy(future);
     } else {
         assert(status == cy_future_failure);
         cy_request_result_t* const result = cy_future_result(future);
@@ -185,6 +216,13 @@ void on_response(cy_future_t* future)
     }
 }
 ```
+
+If streaming is used, then normally it will be done using reliable delivery via `cy_respond_reliable()`,
+as reliable messages inform the server whether the remote side is still present and is accepting the data.
+As soon as the remote fails to confirm a message (once all delivery attempts have failed),
+the future will materialize with failure, hinting the server to cease streaming.
+This reachability-based flow control is crude and is only intended as a guardrail against unexpected connectivity
+failure; normally, one should explicitly request the server to stop sending data using a separate request.
 
 ### ⚙ Event loop
 

@@ -5,6 +5,8 @@
 ///                         `____/ .___/`___/_/ /_/`____/`__, / .___/_/ /_/`__,_/_/
 ///                             /_/                     /____/_/
 ///
+/// A lightweight real-time decentralized pub/sub for embedded systems and robotics. See the README.md for details.
+///
 /// Copyright (c) Pavel Kirienko <pavel@opencyphal.org>
 
 #pragma once
@@ -17,14 +19,6 @@
 #ifdef __cplusplus
 extern "C"
 {
-#endif
-
-#if defined(__STDC_VERSION__) && (__STDC_VERSION__ < 201112L)
-#define CY_ALIGN
-#elif defined(__STDC_VERSION__) && (__STDC_VERSION__ < 202311L)
-#define CY_ALIGN _Alignas(max_align_t)
-#else
-#define CY_ALIGN alignas(max_align_t)
 #endif
 
 /// The limit could be set arbitrarily, but chosen this way for compatibility with Cyphal v1.0,
@@ -79,8 +73,8 @@ typedef struct cy_bytes_t
 /// An opaque user context enabling the application to share data with callbacks. It is intended to be passed by value.
 typedef union cy_user_context_t
 {
-    CY_ALIGN void*         ptr[CY_USER_CONTEXT_PTR_COUNT];
-    CY_ALIGN unsigned char bytes[sizeof(void*) * CY_USER_CONTEXT_PTR_COUNT];
+    void*         ptr[CY_USER_CONTEXT_PTR_COUNT];
+    unsigned char bytes[sizeof(void*) * CY_USER_CONTEXT_PTR_COUNT];
 } cy_user_context_t;
 
 #ifdef __cplusplus
@@ -102,25 +96,27 @@ typedef union cy_user_context_t
 /// Do not access any of the fields directly; use the provided functions instead.
 typedef struct cy_message_t
 {
-    void*                             state[2]; ///< Opaque implementation-specific soft state.
-    size_t                            size;     ///< Must contain the total size of the scattered buffer data in bytes.
+    void*  state[2];   ///< Opaque implementation-specific soft state.
+    size_t size_total; ///< Must contain the total size of the scattered buffer data in bytes, incl. the skip.
+    size_t skip;       ///< Reads will start from this offset within the message; size will return size_total-skip.
     const struct cy_message_vtable_t* vtable;
 } cy_message_t;
 
-/// Returns the total size of the scattered buffer in bytes. The size of a moved-from instance is zero.
-static inline size_t cy_message_size(const cy_message_t msg) { return msg.size; }
+/// Returns the size of the scattered buffer in bytes. The size of a moved-from instance is zero.
+size_t cy_message_size(const cy_message_t msg);
 
 /// A convenience helper that returns a copy of the message object and invalidates the original.
 /// Use this to transfer the ownership of the message to another message object.
 cy_message_t cy_message_move(cy_message_t* const msg);
 
 /// This is the only way to access the received message data.
-/// It gathers `size` bytes of data located at `offset` bytes from the beginning of the transfer data
-/// into the provided contiguous buffer. The function returns the number of bytes copied.
+/// It gathers `size` bytes of data located at `offset` bytes from payload origin into the provided contiguous buffer.
+/// The function returns the number of bytes copied.
 /// If the requested range exceeds the available message size, only the available bytes are copied.
 /// The implementation may be optimized for highly efficient sequential access by caching soft states in the cursor
 /// instance. This is particularly useful for message deserialization by reading the fields out one by one.
-size_t cy_message_read(cy_message_t* const cursor, const size_t offset, const size_t size, void* const destination);
+/// Given (nearly-)sequential access, the complexity is linear in the size.
+size_t cy_message_read(cy_message_t* const cursor, size_t offset, const size_t size, void* const destination);
 
 /// Must be invoked at least once on a message object obtained from a received transfer.
 /// No effect if the instance is already moved-from or if the pointer is NULL.
@@ -171,7 +167,8 @@ void              cy_future_context_set(cy_future_t* const future, const cy_user
 /// also, it may be invoked when the future is still pending to provide intermediate progress updates.
 /// Therefore, it is necessary to always check the future status inside the callback.
 ///
-/// If the future is already completed, the callback will be invoked immediately before this function returns.
+/// If the future is already completed, the callback will be invoked immediately before this function returns,
+/// unless it was already set.
 /// It is safe to destroy the future from within its own callback (but it is not safe to destroy another future).
 cy_future_callback_t cy_future_callback(const cy_future_t* const future);
 void                 cy_future_callback_set(cy_future_t* const future, const cy_future_callback_t callback);
@@ -189,12 +186,14 @@ typedef struct cy_publisher_t cy_publisher_t;
 
 /// Create a new publisher on the topic. The default priority value is cy_prio_nominal, it can be changed later.
 /// The response_extent is the extent (maximum size) of the response data if the publisher expects responses.
+/// TODO: currently, responses may arrive out-of-order; this can be easily changed in the future if/when needed
+///       by adding a reordering window parameter here and implementing a simple reordering buffer in Cy.
 cy_publisher_t* cy_advertise(cy_t* const cy, const wkv_str_t name);
 cy_publisher_t* cy_advertise_client(cy_t* const cy, const wkv_str_t name, const size_t response_extent);
 
 /// Create a new publisher that ensures that there is at most one, the most recent, message pending for transmission.
 /// If a new message is published while another one is still pending, the previous one is cancelled.
-/// TODO not implemented; this is a simple idea -- store the last transfer-ID in the topic and cancel it on new publish.
+/// TODO not implemented; very simple idea -- store last cancellation token in the topic and cancel it on new publish.
 cy_publisher_t* cy_advertise_sample(cy_t* const cy, const wkv_str_t name);
 
 /// Publish a best-effort (non-reliable) one-way message without expecting a response.
@@ -217,18 +216,28 @@ typedef struct cy_request_result_t
     cy_publish_result_t request;
 
     /// The response is valid only if the future status is cy_future_success.
-    /// The response contents can be moved out using cy_message_move(); if not moved out, it will be destroyed
+    /// It is updated with every received response; the arrival of new responses can be monitored using either
+    /// a future callback or by checking the seqno counter.
+    /// The message contents can be moved out using cy_message_move(); if not moved out, it will be destroyed
     /// when the future is destroyed.
-    cy_message_ts_t response;
+    struct cy_request_result_response_t
+    {
+        cy_message_ts_t message;
+        uint64_t        remote_id; ///< Uniquely identifies the remote node that sent the response within the network.
+        uint64_t        seqno;     ///< Incremented by the remote (sic) with each response sent; starts at zero.
+    } response;
 } cy_request_result_t;
 
 /// The first received P2P response transfer will be awaited from any remote node that received the published message.
 /// The future result is of type cy_request_result_t.
 /// The future will be updated when the request delivery feedback is available (intermediate update) and when
-/// the response is received.
+/// the response is received. The future will enter the completed state after the first response, and it will
+/// continue to receive further responses if the remote chooses to send more; the future will remain completed.
+/// The application can monitor the seqno field in the response to detect new responses.
+/// To stop receiving further responses, the application must destroy the future.
 cy_future_t* cy_request(cy_publisher_t* const pub,
                         const cy_us_t         delivery_deadline,
-                        const cy_us_t         response_deadline,
+                        const cy_us_t         first_response_deadline,
                         const cy_bytes_t      message);
 
 cy_prio_t cy_priority(const cy_publisher_t* const pub);
@@ -249,21 +258,51 @@ void cy_unadvertise(cy_publisher_t* const pub);
 typedef struct cy_subscriber_t cy_subscriber_t;
 
 /// This ought to be enough for any reasonable transport-specific state.
-#define CY_RESPONDER_STATE_BYTES 64U
+/// For example, IPv4 with 3 redundant transfers would need (4 bytes IP + 2 bytes port) * 3 + 1 byte priority = 19 bytes
+/// plus padding.
+/// IPv6 would likely need north of 64 bytes, but at the moment we don't have any transport that would require that.
+/// It can be changed easily as the library makes no assumptions about the size of this state.
+#ifndef CY_RESPONSE_CONTEXT_BYTES
+#define CY_RESPONSE_CONTEXT_BYTES 32U
+#endif
 
-/// Received transfers are given this copyable instance to allow sending P2P response transfers if necessary.
-/// It is only valid for a single response. It can be copied / passed by value.
-/// It can be trivially discarded if no response is needed.
+/// Received transfers are given this copyable instance to allow sending P2P response transfers back to the sender.
+/// It can be copied / passed by value. It can be trivially discarded if no response is needed.
 ///
 /// This object avoids linking the topic instance that delivered the original message to avoid lifetime
 /// issues that would occur if the topic is destroyed between the message arrival and the response time.
 /// Instead of referencing the topic, the relevant parameters of the topic are stored here by value.
-typedef struct cy_responder_t
+typedef struct cy_p2p_context_t
 {
-    cy_t*                               cy;
-    const struct cy_responder_vtable_t* vtable;
-    CY_ALIGN unsigned char              state[CY_RESPONDER_STATE_BYTES];
-} cy_responder_t;
+    unsigned char state[CY_RESPONSE_CONTEXT_BYTES];
+} cy_p2p_context_t;
+
+/// Stores the origin information of a received message to allow sending a P2P response back to the sender.
+/// None of the fields may be altered by the application.
+///
+/// One might ask why are we using the transfer-ID, a very low-level transport concept, for correlating responses to
+/// requests instead of using a higher-level counter managed at this layer. The reason is that using the transfer-ID
+/// allows removing an additional field from each message, thus reducing the message size.
+///
+/// The triplet of (remote-ID, topic hash, transfer-ID) uniquely identifies the original message within the network.
+/// Consequently, if response streaming is used, it uniquely identifies the response stream.
+/// One can obtain a convenient 64-bit stream identifier by hashing these three values together; given a good hash,
+/// the collision probability is astronomically low and is negligible for all practical purposes:
+///
+///     const uint64_t key[3] = { b->remote_id, b->topic_hash, b->transfer_id };
+///     return rapidhash(key, sizeof(key));
+///
+typedef struct cy_breadcrumb_t
+{
+    cy_t* cy; ///< The owning Cy instance.
+
+    uint64_t remote_id;   ///< Uniquely identifies the source node within the network.
+    uint64_t topic_hash;  ///< Identifies the topic the message was received from.
+    uint64_t transfer_id; ///< The transfer-ID of the received message this breadcrumb can respond to.
+
+    uint64_t         seqno; ///< Incremented with each response sent (incl. failed); starts at zero.
+    cy_p2p_context_t p2p_context;
+} cy_breadcrumb_t;
 
 typedef struct cy_substitution_t
 {
@@ -285,8 +324,6 @@ typedef struct cy_substitution_set_t
 } cy_substitution_set_t;
 
 /// Event information for a received message from a topic subscription.
-///
-/// Note that we do not report the transfer-ID here because this value is considered too low-level to be useful.
 /// In the future we may consider adding an API for signaling lost messages to the application, which may be based
 /// on the transfer-ID discontinuities, but it will likely be a separate callback.
 typedef struct cy_arrival_t
@@ -301,7 +338,11 @@ typedef struct cy_arrival_t
     cy_message_ts_t message;
 
     /// Use cy_respond() to send a P2P response directly to the publisher of this message if needed.
-    cy_responder_t responder;
+    /// Multiple responses can be sent if necessary; each will carry a unique sequence number starting from zero.
+    /// If responses are needed, this instance should be copied by value only once, as it keeps internal state.
+    /// If multiple subscribers will be sending responses, they must coordinate to use a shared breadcrumb instance.
+    /// This pointer is invalidated after return from the subscription callback; copy if needed later.
+    cy_breadcrumb_t* breadcrumb;
 
     /// The topic that the message was received from; always non-NULL.
     ///
@@ -340,17 +381,6 @@ cy_subscriber_t* cy_subscribe_ordered(cy_t* const     cy,
                                       const size_t    extent,
                                       const cy_us_t   reordering_window);
 
-/// Send a response to a message previously received from a topic subscription.
-/// The response will be sent directly to the publisher using peer-to-peer transport, not affecting other nodes.
-/// This can be invoked from a subscription callback or at any later point as long as the responder object is available,
-/// but there may be at most one such invocation per responder instance.
-///
-/// Reliable delivery will be used, but this API does not provide any delivery feedback; this may be changed in a
-/// future version if there is a use case for it (the delivery information is available internally).
-/// If the delivery information is to be exposed, it will be a new future-based API similar to cy_publish_reliable().
-/// The lifetime of the future will probably be tied to the lifetime of the subscriber instance.
-cy_err_t cy_respond(const cy_responder_t responder, const cy_us_t deadline, const cy_bytes_t message);
-
 cy_user_context_t cy_subscriber_context(const cy_subscriber_t* const self);
 void              cy_subscriber_context_set(cy_subscriber_t* const self, const cy_user_context_t context);
 
@@ -363,6 +393,32 @@ void cy_subscriber_name(const cy_subscriber_t* const self, char* const out_name)
 
 /// No effect if the subscriber pointer is NULL.
 void cy_unsubscribe(cy_subscriber_t* const self);
+
+/// Future result of sending a reliable response message.
+/// The future will succeed if the response is acknowledged by the remote node before the deadline.
+/// There appears to be no need to provide the `acknowledged` field separately, as the future status already
+/// conveys that information.
+typedef struct cy_response_result_t
+{
+    uint64_t seqno; ///< The unique sequence number used for this response message. Constant, always available.
+} cy_response_result_t;
+
+/// Send a best-effort response to a message previously received from a topic subscription.
+/// The response will be sent directly to the publisher using peer-to-peer transport, not affecting other nodes.
+/// This can be invoked from a subscription callback or at any later point as long as the breadcrumb is available.
+/// There may be an arbitrary number of responses sent per received message; we call these streamed RPC responses.
+/// Each response will carry a unique sequence number starting from zero, generated automatically by Cy.
+/// For reliable responses use cy_respond_reliable().
+cy_err_t cy_respond(cy_breadcrumb_t* const breadcrumb, const cy_us_t deadline, const cy_bytes_t message);
+
+/// Reliable counterpart of cy_respond() that provides the delivery success feedback via a future.
+/// This is useful for streamed RPC responses where the server (the sender) needs to know whether the client
+/// is still listening or has gone away (in which case streaming should be ceased).
+///
+/// The future result is of type cy_response_result_t. The seqno field is always available immediately upon future
+/// creation; the acknowledged field becomes true when/if the remote node acknowledges reception of the response.
+/// Destruction of the future will cancel the response if it is still pending transmission.
+cy_future_t* cy_respond_reliable(cy_breadcrumb_t* const breadcrumb, const cy_us_t deadline, const cy_bytes_t message);
 
 // =====================================================================================================================
 //                                                  NODE & TOPIC
