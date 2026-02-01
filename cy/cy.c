@@ -52,6 +52,8 @@
 /// NB: Given 1000 responses per second, a 40-bit seqno will overflow in about 35 years.
 #define P2P_HEADER_BYTES 24U
 
+#define TREE_NULL ((cy_tree_t){ NULL, { NULL, NULL }, 0 })
+
 static const wkv_str_t str_invalid = { .len = SIZE_MAX, .str = NULL };
 
 typedef unsigned char byte_t;
@@ -222,7 +224,9 @@ static void* ptr_unbias(const void* const ptr, const size_t offset)
 }
 
 #define LIST_TAIL(list, owner_type, owner_field) LIST_MEMBER((list).tail, owner_type, owner_field)
-#define LIST_EMPTY                               ((cy_list_t){ .head = NULL, .tail = NULL })
+
+#define LIST_EMPTY       ((cy_list_t){ .head = NULL, .tail = NULL })
+#define LIST_MEMBER_NULL ((cy_list_member_t){ .next = NULL, .prev = NULL })
 
 // =====================================================================================================================
 //                                                  MESSAGE BUFFER
@@ -779,6 +783,14 @@ static cy_err_t topic_new(cy_t* const        cy,
     if (topic == NULL) {
         return CY_ERR_MEMORY;
     }
+    topic->index_hash         = TREE_NULL;
+    topic->index_subject_id   = TREE_NULL;
+    topic->index_name         = NULL;
+    topic->list_implicit      = LIST_MEMBER_NULL;
+    topic->list_gossip_urgent = LIST_MEMBER_NULL;
+    topic->list_gossip        = LIST_MEMBER_NULL;
+
+    topic->cy   = cy;
     topic->name = mem_alloc(cy, resolved_name.len + 1);
     if (topic->name == NULL) {
         goto oom;
@@ -786,23 +798,18 @@ static cy_err_t topic_new(cy_t* const        cy,
     memcpy(topic->name, resolved_name.str, resolved_name.len);
     topic->name[resolved_name.len] = '\0';
 
-    const cy_us_t now = cy_now(cy);
-
-    topic->cy        = cy;
-    topic->hash      = hash;
     topic->evictions = evictions;
+    topic->hash      = hash;
 
-    topic->ts_origin   = now - (pow2us(lage) * MEGA);
-    topic->ts_animated = now;
-
-    topic->pub_next_transfer_id = cy->vtable->random(cy);
-
-    topic->pub_count = 0;
-
-    topic->couplings  = NULL;
-    topic->subscribed = false;
-
-    topic->user_context = CY_USER_CONTEXT_EMPTY;
+    const cy_us_t now                     = cy_now(cy);
+    topic->ts_origin                      = now - (pow2us(lage) * MEGA);
+    topic->ts_animated                    = now;
+    topic->pub_next_transfer_id           = cy->vtable->random(cy);
+    topic->request_futures_by_transfer_id = NULL;
+    topic->couplings                      = NULL;
+    topic->subscribed                     = false;
+    topic->pub_count                      = 0;
+    topic->user_context                   = CY_USER_CONTEXT_EMPTY;
 
     if (cavl_count(cy->topics_by_hash) >= (cy->subject_id_modulus / 4)) {
         goto bad_name;
@@ -1242,9 +1249,12 @@ cy_publisher_t* cy_advertise(cy_t* const cy, const wkv_str_t name) { return cy_a
 
 cy_publisher_t* cy_advertise_client(cy_t* const cy, const wkv_str_t name, const size_t response_extent)
 {
+    if (cy == NULL) {
+        return NULL;
+    }
     char            name_buf[CY_TOPIC_NAME_MAX];
     const wkv_str_t resolved = cy_name_resolve(name, cy->ns, cy->home, sizeof(name_buf), name_buf);
-    if ((cy == NULL) || (resolved.len > sizeof(name_buf))) {
+    if (resolved.len > CY_TOPIC_NAME_MAX) {
         return NULL;
     }
     if (!cy_name_is_verbatim(resolved)) {
@@ -1266,7 +1276,7 @@ cy_publisher_t* cy_advertise_client(cy_t* const cy, const wkv_str_t name, const 
     }
     CY_TRACE(cy,
              "✨ %s topic_count=%zu pub_count=%zu response_extent_with_header=%zu res=%d",
-             topic_repr(pub->topic).str,
+             (res == CY_OK) ? topic_repr(pub->topic).str : "(failed)",
              cavl_count(cy->topics_by_hash),
              pub->topic->pub_count,
              pub->response_extent,
@@ -1673,7 +1683,7 @@ static cy_subscriber_t* subscribe(cy_t* const cy, const wkv_str_t name, const su
     assert((cy != NULL) && (params.reordering_window >= -1));
     char            name_buf[CY_TOPIC_NAME_MAX + 1U];
     const wkv_str_t resolved = cy_name_resolve(name, cy->ns, cy->home, sizeof(name_buf), name_buf);
-    if (resolved.len > sizeof(name_buf)) {
+    if (resolved.len > CY_TOPIC_NAME_MAX) {
         return NULL;
     }
     name_buf[resolved.len]     = 0; // this is not needed for the logic but helps with tracing (if enabled)
@@ -2081,7 +2091,8 @@ void cy_on_message(cy_topic_t* const      topic,
                 .substitutions = { .count = cpl->substitution_count, .substitutions = cpl->substitutions },
             };
             sub->callback(sub, &arrival);
-            if (cy_message_size(arrival.message.content) < cy_message_size(message.content)) {
+            if ((arrival.message.content.vtable == &message_empty_vtable) ||
+                (cy_message_size(arrival.message.content) < cy_message_size(message.content))) {
                 assert(!moved); // At most one handler can take ownership of the payload.
                 moved = true;
             }
@@ -2307,9 +2318,6 @@ wkv_str_t cy_name_resolve(const wkv_str_t name,
         if (namespace_.len >= dest_size) {
             return str_invalid;
         }
-        namespace_.str = dest;
-        dest_size -= namespace_.len;
-        dest += namespace_.len;
     }
     return cy_name_join(namespace_, name, dest_size, dest);
 }

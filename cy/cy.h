@@ -167,7 +167,8 @@ void              cy_future_context_set(cy_future_t* const future, const cy_user
 /// also, it may be invoked when the future is still pending to provide intermediate progress updates.
 /// Therefore, it is necessary to always check the future status inside the callback.
 ///
-/// If the future is already completed, the callback will be invoked immediately before this function returns.
+/// If the future is already completed, the callback will be invoked immediately before this function returns,
+/// unless it was already set.
 /// It is safe to destroy the future from within its own callback (but it is not safe to destroy another future).
 cy_future_callback_t cy_future_callback(const cy_future_t* const future);
 void                 cy_future_callback_set(cy_future_t* const future, const cy_future_callback_t callback);
