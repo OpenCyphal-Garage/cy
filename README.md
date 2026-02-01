@@ -139,18 +139,18 @@ cy_subscriber_callback_set(my_sub, on_message); // callback invoked upon message
 There is also `cy_subscribe_ordered()` if the application requires the messages to arrive strictly in the publication
 order -- some transports may deliver messages out of order and Cy will reconstruct the original order.
 
-One powerful feature of Cyphal is pattern subscriptions -- a kind of automatic service discovery.
+One powerful feature is pattern subscriptions -- a kind of automatic service discovery.
 When a pattern subscription is created, the local node will scout the network for topics matching the specified
 pattern and will automatically subscribe to them as they appear, and unsubscribe when they disappear.
-Cy *intentionally uses the exact same API* for both concrete and pattern subscriptions,
-as this enables flexible system configuration at the time of integration/runtime as opposed to compile time only.
-As such, to create a pattern subscription, simply use a topic name that contains substitution wildcards:
+Cy *intentionally uses the same API* for both concrete and pattern subscriptions,
+as this enables flexible configuration at the time of integration/runtime as opposed to compile time only.
+To create a pattern subscription, simply use a topic name that contains substitution wildcards:
 
 * `?` -- matches a single path segment; e.g., `sensors/?/temperature` matches `sensors/engine/temperature` and `sensors/cabin/temperature`.
 * `*` -- matches zero or more path segments; e.g., `*/status` matches `status`, `subsystem/foo/status`, etc.
 
 Cyphal is designed to be lightweight and efficient, which is why we don't support substitution characters *within*
-path segments; e.g., `sensor*/eng?ne/` will be treated as a literal topic name.
+path segments; e.g., `sensor*/eng?ne` will be treated as a literal topic name.
 
 The message arrival callback looks like this for all subscribers (ordered, unordered, verbatim, pattern):
 
@@ -171,14 +171,10 @@ void on_message(cy_subscriber_t* subscriber, cy_arrival_t* arrival)
 }
 ```
 
-It is also possible to store the breadcrumb (copy by value) to respond at any time later after the callback.
-The breadcrumb contains full information about the publisher and the message and the identity of the message.
-
 ### ↩️ Respond to messages: RPC & streaming
 
 Observe that the message callback provides an option to send a response back to the publisher directly using
-a direct P2P channel using the `breadcrumb`.
-This is how one can implement request/response (RPC-like) interactions and/or P2P streaming.
+a direct P2P channel.
 If the application expects a response, then the correct publishing function to use is `cy_request()`:
 
 ```c++
@@ -226,10 +222,7 @@ as reliable messages inform the server whether the remote side is still present 
 As soon as the remote fails to confirm a message (once all delivery attempts have failed),
 the future will materialize with failure, hinting the server to cease streaming.
 This reachability-based flow control is crude and is only intended as a guardrail against unexpected connectivity
-failure; normally, one should explicitly request the server to stop sending data using a dedicated message.
-
-As always with Cyphal, the process is largely stateless, in the sense of the avoidance of hard state sharing between
-the involved nodes.
+failure; normally, one should explicitly request the server to stop sending data using a separate request.
 
 ### ⚙ Event loop
 
