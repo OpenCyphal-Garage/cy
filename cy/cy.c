@@ -1454,7 +1454,7 @@ static int32_t cavl_comp_future_response_deadline(const void* const user, const 
     if (outer->first_response_deadline != inner->first_response_deadline) {
         return (outer->first_response_deadline > inner->first_response_deadline) ? +1 : -1;
     }
-    return (outer > inner) ? +1 : -1; // Tiebreak to support non-unique deadlines.
+    return (outer > inner) ? +1 : -1; // TODO FIXME: Pointer comparison here is ill-defined; use a different tiebreak
 }
 
 /// To find a pending response, one needs to locate the topic by hash first, if it exists when the response arrives.
