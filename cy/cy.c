@@ -6,6 +6,71 @@
 ///                             /_/                     /____/_/
 ///
 /// Copyright (c) Pavel Kirienko <pavel@opencyphal.org>
+///
+/// -------------------------------------------------------------------------------------------------------------------
+/// TRANSPORT LAYER REQUIREMENTS
+///
+/// The transport layer provides UNRELIABLE DEDUPLICATED (at most one) UNORDERED DELIVERY of messages either to;
+///     - A GROUP OF SUBSCRIBERS on a given SUBJECT identified with a numerical subject-ID (IGMP group, CAN ID, etc).
+///     - A specified REMOTE NODE direct PEER-TO-PEER.
+///
+/// The transport layer supports messages of arbitrary size, providing SEGMENTATION/REASSEMBLY transparently to the
+/// higher layers.
+///
+/// The transport layer DOES NOT provide message ordering recovery or reliable delivery (messages may arrive out of
+/// order or may not arrive at all).
+///
+/// The transport layer provides network participant discovery as a side effect of joining a specified subject.
+///
+/// --------------------------------------------------------------------------------------------------------------------
+/// SESSION LAYER MESSAGE HEADER
+///
+/// Message transfers over non-pinned topics carry a header.
+/// Pinned topics have no message headers and are limited to unordered best-effort messages only without responses.
+/// TODO: consider allowing message headers for a subset of pinned topics; e.g., in [0,4096), or those with names.
+///
+/// The message header is variable-size; any excess fields not understood by the receiver must be ignored.
+/// Voids and padding at the end must be transmitted as zeros and ignored on reception.
+/// The tags must be unique across reboots to avoid misattribution, also unique per message.
+/// The first part of the header is fixed:
+///
+///     uint5 kind              # The kind also doubles as version field.
+///     uint3 header_size       # payload offset = (header_size+1)*8 bytes
+///     uint4 flags_incompat    # Drop message if any flag is set that is not understood.
+///     void4                   # Transmit zeros, ignore on reception.
+///
+/// kind = 0: Message. Header size {16, 24} bytes depending on tag presence.
+///
+///     bool   reliable         # If set, the tag must be present, otherwise malformed; subscribers must ACK.
+///     uint47 seqno            # Monotonic sequence number starting from zero; maintained per node per topic.
+///     uint64 topic_hash       # For subject allocation collision detection.
+///     uint64 tag              # Optional; if present, the publisher can accept responses; also for ack if reliable.
+///     # Payload follows after the header.
+///
+/// kind = 1: Response to a tagged message received earlier. Header size {16, 24} bytes depending on tag presence.
+///
+///     void1                   # Transmit zero, ignore on reception.
+///     uint47 seqno            # Monotonic sequence number starting from zero; incremented with each response sent.
+///     uint64 correlation_tag  # Tag of the message being responded to.
+///     uint64 tag              # Optional; if present, the responder requires an acknowledgment from the receiver.
+///     # Payload follows after the header.
+///
+/// kind = 2: Notification concerning an earlier tagged message or response.
+///
+///     uint4  KIND_MSG_ACK  = 0    # Message received by the session layer; there is a live subscription.
+///     uint4  KIND_RSP_ACK  = 1    # Response received and there is a matching pending request.
+///     uint4  KIND_RSP_NACK = 2    # Response received but discarded -- there is NO matching pending request.
+///     uint4  kind
+///     uint4  flags_incompat    # Drop message if any flag is set that is not understood.
+///     void40                   # Transmit zeros, ignore on reception. May be used for ACK de-ambiguity counter.
+///     uint64 correlation_tag   # Tag of the message or response being acknowledged.
+///     # Payload should be empty on transmission, ignored on reception.
+///
+/// --------------------------------------------------------------------------------------------------------------------
+///
+/// The transport delivers deduplicated messages, but duplication due to retransmission in case of lost acks may still
+/// occur (for the transport such messages are seen as distinct). To mitigate, additional deduplication is performed
+/// at the session layer for reliable messages only based on their tags.
 
 // ReSharper disable CppDFATimeOver
 // ReSharper disable CppDFAConstantParameter
@@ -39,18 +104,6 @@
 /// Here, "idle" means no messages received from this topic and no gossips seen on the network.
 /// Topics created explicitly by the application (without substitution tokens) are not affected by this timeout.
 #define IMPLICIT_TOPIC_DEFAULT_TIMEOUT_us (3600 * MEGA)
-
-/// P2P transfers carry a header defined as follows, in DSDL notation:
-///
-///     uint4  version          # P2P header version; reject if unsupported; currently zero.
-///     uint4  flags_incompat   # Reserved for incompatibility flags; discard if any bit is set that is not understood.
-///     void16                  # Reserved; send zeroed; ignore on receive.
-///     uint40 seqno            # Increments from 0 with each response under same (topic hash, transfer-ID).
-///     uint64 topic_hash       # Topic hash of the original message being responded to.
-///     uint64 transfer_id      # Transfer-ID of the original message being responded to.
-///
-/// NB: Given 1000 responses per second, a 40-bit seqno will overflow in about 35 years.
-#define P2P_HEADER_BYTES 24U
 
 #define TREE_NULL ((cy_tree_t){ NULL, { NULL, NULL }, 0 })
 

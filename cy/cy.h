@@ -280,27 +280,23 @@ typedef struct cy_p2p_context_t
 /// Stores the origin information of a received message to allow sending a P2P response back to the sender.
 /// None of the fields may be altered by the application.
 ///
-/// One might ask why are we using the transfer-ID, a very low-level transport concept, for correlating responses to
-/// requests instead of using a higher-level counter managed at this layer. The reason is that using the transfer-ID
-/// allows removing an additional field from each message, thus reducing the message size.
-///
-/// The triplet of (remote-ID, topic hash, transfer-ID) uniquely identifies the original message within the network.
+/// The triplet of (remote-ID, topic hash, message seqno) uniquely identifies the original message within the network.
 /// Consequently, if response streaming is used, it uniquely identifies the response stream.
 /// One can obtain a convenient 64-bit stream identifier by hashing these three values together; given a good hash,
 /// the collision probability is astronomically low and is negligible for all practical purposes:
 ///
-///     const uint64_t key[3] = { b->remote_id, b->topic_hash, b->transfer_id };
+///     const uint64_t key[3] = { b->remote_id, b->topic_hash, b->message_seqno };
 ///     return rapidhash(key, sizeof(key));
 ///
 typedef struct cy_breadcrumb_t
 {
     cy_t* cy; ///< The owning Cy instance.
 
-    uint64_t remote_id;   ///< Uniquely identifies the source node within the network.
-    uint64_t topic_hash;  ///< Identifies the topic the message was received from.
-    uint64_t transfer_id; ///< The transfer-ID of the received message this breadcrumb can respond to.
+    uint64_t remote_id;     ///< Uniquely identifies the source node within the network.
+    uint64_t topic_hash;    ///< Identifies the topic the message was received from.
+    uint64_t message_seqno; ///< The sequence number of the received message this breadcrumb can respond to.
 
-    uint64_t         seqno; ///< Incremented with each response sent (incl. failed); starts at zero.
+    uint64_t         response_seqno; ///< Incremented with each response sent (incl. failed); starts at zero.
     cy_p2p_context_t p2p_context;
 } cy_breadcrumb_t;
 
@@ -324,8 +320,6 @@ typedef struct cy_substitution_set_t
 } cy_substitution_set_t;
 
 /// Event information for a received message from a topic subscription.
-/// In the future we may consider adding an API for signaling lost messages to the application, which may be based
-/// on the transfer-ID discontinuities, but it will likely be a separate callback.
 typedef struct cy_arrival_t
 {
     /// Optionally, the user callback can take ownership of the message using cy_message_move();
