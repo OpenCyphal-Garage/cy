@@ -26,45 +26,43 @@
 /// SESSION LAYER MESSAGE HEADER
 ///
 /// Message transfers over non-pinned topics carry a header.
-/// Pinned topics have no message headers and are limited to unordered best-effort messages only without responses.
-/// TODO: consider allowing message headers for a subset of pinned topics; e.g., in [0,4096), or those with names.
+/// TODO: Pinned topics on CAN must have no header to ensure backward compatibility, sort this out later.
 ///
-/// The message header is variable-size; any excess fields not understood by the receiver must be ignored.
-/// Voids and padding at the end must be transmitted as zeros and ignored on reception.
-/// The tags must be unique across reboots to avoid misattribution, also unique per message.
-/// The first part of the header is fixed:
+/// The message tags must be unique across reboots to avoid misattribution (use random init), also unique per message;
+/// subsequent tags of a message must be incremented by one to allow ordering recovery and loss detection.
 ///
-///     uint5 kind              # The kind also doubles as version field.
-///     uint3 header_size       # payload offset = (header_size+1)*8 bytes
-///     uint4 flags_incompat    # Drop message if any flag is set that is not understood.
-///     void4                   # Transmit zeros, ignore on reception.
+/// Response tags are not used for ordering recovery since there is a seqno available, and there is no risk of reboot
+/// misattribution -- they are only needed for acknowledgement correlation and as such they are much narrower
+/// and there is no monotonicity requirement, the sender can choose values arbitrarily. The correlation tag for
+/// response ack is formed as seqno|(tag<<48) to ensure uniqueness.
 ///
-/// kind = 0: Message. Header size {16, 24} bytes depending on tag presence.
+/// The payload follows immediately after the header. The header fields are not naturally aligned to conserve space.
+/// The first part of the header is fixed; the reset is appended according to the type.
 ///
-///     bool   reliable         # If set, the tag must be present, otherwise malformed; subscribers must ACK.
-///     uint47 seqno            # Monotonic sequence number starting from zero; maintained per node per topic.
+/// type = 0: Best-effort message.
+/// type = 1: Reliable message. Expects ack with the specified tag.
+///
+///     uint8  type             # in {0, 1}
+///     uint56 tag              # For ordering recovery and for acknowledgement and response correlation.
 ///     uint64 topic_hash       # For subject allocation collision detection.
-///     uint64 tag              # Optional; if present, the publisher can accept responses; also for ack if reliable.
-///     # Payload follows after the header.
+///     # Header size 16 bytes, payload follows.
 ///
-/// kind = 1: Response to a tagged message received earlier. Header size {16, 24} bytes depending on tag presence.
+/// type = 2: Best-effort response to a message received earlier.
+/// type = 3: Reliable response to a message received earlier.
 ///
-///     void1                   # Transmit zero, ignore on reception.
-///     uint47 seqno            # Monotonic sequence number starting from zero; incremented with each response sent.
-///     uint64 correlation_tag  # Tag of the message being responded to.
-///     uint64 tag              # Optional; if present, the responder requires an acknowledgment from the receiver.
-///     # Payload follows after the header.
+///     uint8  type             # = 2
+///     uint56 correlation_tag  # Tag of the message being responded to.
+///     uint48 seqno            # Monotonic sequence number starting from zero; incremented with each response sent.
+///     uint16 tag              # If reliable, sender expects an ack with correlation_tag=seqno|(tag<<48).
+///     # Header size 16 bytes, payload follows.
 ///
-/// kind = 2: Notification concerning an earlier tagged message or response.
+/// type =  8: Reliable message acknowledgement. Message received by the session layer; there is a live subscription.
+/// type =  9: Reliable response acknowledgement: Response received; there is a matching pending request.
+/// type = 10: Reliable response negative-acknowledgement: Response DISCARDED -- there is NO matching pending request.
 ///
-///     uint4  KIND_MSG_ACK  = 0    # Message received by the session layer; there is a live subscription.
-///     uint4  KIND_RSP_ACK  = 1    # Response received and there is a matching pending request.
-///     uint4  KIND_RSP_NACK = 2    # Response received but discarded -- there is NO matching pending request.
-///     uint4  kind
-///     uint4  flags_incompat    # Drop message if any flag is set that is not understood.
-///     void40                   # Transmit zeros, ignore on reception. May be used for ACK de-ambiguity counter.
-///     uint64 correlation_tag   # Tag of the message or response being acknowledged.
-///     # Payload should be empty on transmission, ignored on reception.
+///     uint8  type             # in {8, 9, 10}
+///     uint56 correlation_tag  # From the original message/response.
+///     # Ignore extra data if any.
 ///
 /// --------------------------------------------------------------------------------------------------------------------
 ///
