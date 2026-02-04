@@ -149,9 +149,11 @@ typedef struct cy_topic_t
     cy_us_t ts_animated; ///< Last time the topic saw activity that prevents it from being retired.
 
     /// Used for matching pending response states against received responses by transfer-ID.
-    /// TODO: When destroying the topic, ensure this index is empty -- each publisher must clean up its own
-    ///       pending request futures.
-    cy_tree_t* request_futures_by_seqno;
+    cy_tree_t* request_futures_by_tag;
+
+    /// Random-initialized when topic created, then incremented with each publish.
+    /// Only the 56 least significant bits are used; ignore the top 8 bits.
+    uint64_t pub_next_tag_56bit;
 
     /// States related to tracking publishers and subscribers on this topic. The topic is removed when none left.
     struct cy_topic_coupling_t* couplings;
@@ -213,6 +215,8 @@ struct cy_t
 
     /// For detecting timed out responses. This index spans all topics.
     cy_tree_t* request_futures_by_deadline;
+
+    size_t p2p_extent;
 };
 
 /// Platform-specific implementation of cy_t.
@@ -265,6 +269,10 @@ typedef struct cy_vtable_t
     void (*unsubscribe)(cy_topic_t*);
 
     void (*topic_destroy)(cy_topic_t*);
+
+    /// Sets/updates the maximum extent of incoming P2P transfers. Messages larger than this may be truncated.
+    /// The initial value prior to the first invocation is transport-defined.
+    void (*p2p_extent)(cy_t*, size_t);
 
     /// Instructs the underlying transport layer to send a peer-to-peer transfer to the specified remote node.
     /// The message lifetime ends upon return from this function.

@@ -280,23 +280,24 @@ typedef struct cy_p2p_context_t
 /// Stores the origin information of a received message to allow sending a P2P response back to the sender.
 /// None of the fields may be altered by the application.
 ///
-/// The triplet of (remote-ID, topic hash, message seqno) uniquely identifies the original message within the network.
+/// The triplet of (remote-ID, topic hash, request tag) uniquely identifies the original message within the network.
 /// Consequently, if response streaming is used, it uniquely identifies the response stream.
 /// One can obtain a convenient 64-bit stream identifier by hashing these three values together; given a good hash,
 /// the collision probability is astronomically low and is negligible for all practical purposes:
 ///
-///     const uint64_t key[3] = { b->remote_id, b->topic_hash, b->message_seqno };
+///     const uint64_t key[3] = { b->remote_id, b->topic_hash, b->request_tag };
 ///     return rapidhash(key, sizeof(key));
 ///
 typedef struct cy_breadcrumb_t
 {
     cy_t* cy; ///< The owning Cy instance.
 
-    uint64_t remote_id;     ///< Uniquely identifies the source node within the network.
-    uint64_t topic_hash;    ///< Identifies the topic the message was received from.
-    uint64_t message_seqno; ///< The sequence number of the received message this breadcrumb can respond to.
+    /// Stream identifier triplet. Can be hashed down to a single 64-bit value if needed.
+    uint64_t remote_id;   ///< Uniquely identifies the source node within the network.
+    uint64_t topic_hash;  ///< Identifies the topic the original request message was received from.
+    uint64_t request_tag; ///< The tag of the original request message this breadcrumb can respond to.
 
-    uint64_t         response_seqno; ///< Incremented with each response sent (incl. failed); starts at zero.
+    uint64_t         seqno; ///< Incremented with each response sent (incl. failed); starts at zero.
     cy_p2p_context_t p2p_context;
 } cy_breadcrumb_t;
 
