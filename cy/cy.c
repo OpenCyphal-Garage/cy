@@ -582,26 +582,6 @@ typedef struct cy_topic_coupling_t
     cy_substitution_t substitutions[];
 } cy_topic_coupling_t;
 
-typedef struct
-{
-    size_t  extent;
-    cy_us_t reordering_window;
-} subscriber_params_t;
-
-struct cy_subscriber_t
-{
-    subscriber_root_t* root; ///< Many-to-one relationship, never NULL.
-    cy_subscriber_t*   next; ///< Lists all subscribers under the same root.
-
-    subscriber_params_t params;
-
-    // TODO: DEDUPLICATION ON RETRANSMISSION, RELIABLE ONLY
-    // TODO: REORDERING
-
-    cy_user_context_t        user_context;
-    cy_subscriber_callback_t callback;
-};
-
 static int32_t cavl_comp_topic_hash(const void* const user, const cy_tree_t* const node)
 {
     const uint64_t          outer = *(uint64_t*)user;
@@ -777,43 +757,7 @@ static cy_topic_t* topic_find_by_subject_id(const cy_t* const cy, const uint32_t
     return topic;
 }
 
-/// This is linear complexity but we expect to have few subscribers per topic, so it is acceptable.
-/// If this becomes a problem, we can simply store the subscription parameters in the topic fields.
-/// The disambiguation logic is up to review/improvement in the future based on real-world experience.
-static subscriber_params_t deduce_subscription_params(const cy_topic_t* const topic)
-{
-    subscriber_params_t final = { .extent = 0, .reordering_window = BIG_BANG };
-    // Go over all couplings and all subscribers in each coupling.
-    // A coupling corresponds to a particular name that matched the topic.
-    // Each coupling has a list of subscribers under its root sharing that name.
-    const cy_topic_coupling_t* cpl = topic->couplings;
-    assert(cpl != NULL);
-    while (cpl != NULL) {
-        const bool             verbatim = cpl->root->index_pattern == NULL; // no substitution tokens in the name
-        const cy_subscriber_t* sub      = cpl->root->head;
-        subscriber_params_t    agg      = sub->params;
-        sub                             = sub->next;
-        while (sub != NULL) {
-            agg.extent            = larger(agg.extent, sub->params.extent);
-            agg.reordering_window = max_i64(agg.reordering_window, sub->params.reordering_window);
-            sub                   = sub->next;
-        }
-        if (verbatim) {
-            final = agg;
-            break; // Verbatim subscription takes precedence, ignore the rest.
-        }
-        // If only pattern subscriptions exist, merge them all.
-        final.extent            = larger(final.extent, agg.extent);
-        final.reordering_window = max_i64(final.reordering_window, agg.reordering_window);
-        cpl                     = cpl->next;
-    }
-    CY_TRACE(topic->cy,
-             "📬 %s extent=%zu rwin=%lld",
-             topic_repr(topic).str,
-             final.extent,
-             (long long) final.reordering_window);
-    return final;
-}
+static size_t get_subscription_extent(const cy_topic_t* const topic);
 
 /// If a subscription is needed but is not active, this function will attempt to resubscribe.
 /// Errors are handled via the platform handler, so from the caller's perspective this is infallible.
@@ -821,15 +765,10 @@ static void topic_ensure_subscribed(cy_topic_t* const topic)
 {
     cy_t* const cy = topic->cy;
     if ((topic->couplings != NULL) && (!topic->subscribed)) {
-        const subscriber_params_t params = deduce_subscription_params(topic);
-        const cy_err_t            res    = cy->vtable->subscribe(topic, params.extent);
-        topic->subscribed                = res == CY_OK;
-        CY_TRACE(topic->cy,
-                 "🗞️ %s extent=%zu rwin=%lld result=%d",
-                 topic_repr(topic).str,
-                 params.extent,
-                 (long long)params.reordering_window,
-                 res);
+        const size_t   extent = get_subscription_extent(topic);
+        const cy_err_t res    = cy->vtable->subscribe(topic, extent);
+        topic->subscribed     = res == CY_OK;
+        CY_TRACE(topic->cy, "🗞️ %s extent=%zu result=%d", topic_repr(topic).str, extent, res);
         if (!topic->subscribed) {
             topic->cy->vtable->on_subscription_error(topic->cy, topic, res); // not our problem anymore
         }
@@ -1500,6 +1439,56 @@ void cy_unadvertise(cy_publisher_t* const pub)
 //                                                      SUBSCRIBER
 // =====================================================================================================================
 
+typedef struct
+{
+    size_t  extent;
+    cy_us_t reordering_window;
+} subscriber_params_t;
+
+struct cy_subscriber_t
+{
+    subscriber_root_t* root; ///< Many-to-one relationship, never NULL.
+    cy_subscriber_t*   next; ///< Lists all subscribers under the same root.
+
+    subscriber_params_t params;
+
+    // TODO: DEDUPLICATION ON RETRANSMISSION, RELIABLE ONLY
+    // TODO: REORDERING
+
+    cy_user_context_t        user_context;
+    cy_subscriber_callback_t callback;
+};
+
+/// This is linear complexity but we expect to have few subscribers per topic, so it is acceptable.
+static size_t get_subscription_extent(const cy_topic_t* const topic)
+{
+    size_t total = 0;
+    // Go over all couplings and all subscribers in each coupling.
+    // A coupling corresponds to a particular name that matched the topic.
+    // Each coupling has a list of subscribers under its root sharing that name.
+    const cy_topic_coupling_t* cpl = topic->couplings;
+    assert(cpl != NULL);
+    while (cpl != NULL) {
+        const bool             verbatim = cpl->root->index_pattern == NULL; // no substitution tokens in the name
+        const cy_subscriber_t* sub      = cpl->root->head;
+        size_t                 agg      = sub->params.extent;
+        sub                             = sub->next;
+        while (sub != NULL) {
+            agg = larger(agg, sub->params.extent);
+            sub = sub->next;
+        }
+        if (verbatim) {
+            total = agg;
+            break; // Verbatim subscription takes precedence, ignore the rest.
+        }
+        // If only pattern subscriptions exist, merge them all.
+        total = larger(total, agg);
+        cpl   = cpl->next;
+    }
+    CY_TRACE(topic->cy, "📬 %s extent=%zu", topic_repr(topic).str, total);
+    return total;
+}
+
 /// Returns non-NULL on OOM, which aborts the traversal early.
 static void* wkv_cb_couple_new_subscription(const wkv_event_t evt)
 {
@@ -1508,24 +1497,11 @@ static void* wkv_cb_couple_new_subscription(const wkv_event_t evt)
     cy_t* const                  cy    = topic->cy;
     assert((sub != NULL) && (topic != NULL));
     // Sample the old parameters before the new coupling is created to decide if we need to refresh the subscription.
-    const subscriber_params_t param_old = topic->subscribed
-                                            ? deduce_subscription_params(topic)
-                                            : (subscriber_params_t){ .extent = 0, .reordering_window = BIG_BANG };
-    const cy_err_t            res       = topic_couple(topic, sub->root, evt.substitution_count, evt.substitutions);
+    const size_t   extent_old = topic->subscribed ? get_subscription_extent(topic) : 0;
+    const cy_err_t res        = topic_couple(topic, sub->root, evt.substitution_count, evt.substitutions);
     if (res == CY_OK) {
-        bool refresh_subscription = false;
-        if (topic->subscribed) {
-            const subscriber_params_t param_new = deduce_subscription_params(topic);
-            // The resubscription decision heuristics are subject to refinement.
-            refresh_subscription = (param_new.extent > param_old.extent) || //
-                                   (param_new.reordering_window != param_old.reordering_window);
-        }
-        if (refresh_subscription) {
-            CY_TRACE(cy,
-                     "🚧 %s subscription refresh params: extent=%zu rwin=%lld",
-                     topic_repr(topic).str,
-                     param_old.extent,
-                     (long long)param_old.reordering_window);
+        if (topic->subscribed && (get_subscription_extent(topic) > extent_old)) {
+            CY_TRACE(cy, "🚧 %s subscription refresh", topic_repr(topic).str);
             cy->vtable->unsubscribe(topic);
             topic->subscribed = false;
         }
