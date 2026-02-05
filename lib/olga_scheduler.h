@@ -37,6 +37,7 @@ typedef struct olga_event_t olga_event_t;
 /// Represents a user-handled future event.
 /// When the handler is invoked, the event is already removed from the scheduler.
 /// If necessary, it can be re-inserted immediately from within the handler with a new deadline.
+/// It is safe to destroy the event inside the handler.
 /// The time units can be arbitrary.
 struct olga_event_t
 {
@@ -110,7 +111,7 @@ static inline CAVL2_RELATION olga_private_compare(const void* user, const CAVL2_
 static inline void olga_defer(olga_t* const self,
                               const int64_t deadline,
                               void* const   user,
-                              void (*const handler)(olga_t* sched, olga_event_t* event, int64_t now),
+                              void (*const handler)(olga_t*, olga_event_t*, int64_t now),
                               olga_event_t* const out_event)
 {
     assert(self != NULL);
@@ -135,6 +136,14 @@ static inline void olga_cancel(olga_t* const self, olga_event_t* const event)
     event->deadline = INT64_MIN;
 }
 
+/// True if the event is currently pending in the scheduler.
+static inline bool olga_is_pending(const olga_t* const self, const olga_event_t* const event)
+{
+    assert(self != NULL);
+    assert(event != NULL);
+    return cavl2_is_inserted(self->events, &event->base);
+}
+
 /// Execute pending events strictly in the order of their deadlines until there are no pending events left.
 /// Events with the same deadline are executed in the FIFO order.
 /// The handler receives a freshly sampled `now` taken immediately before invocation.
@@ -157,6 +166,7 @@ static inline olga_spin_result_t olga_spin(olga_t* const self)
         }
         cavl2_remove(&self->events, &event->base);
         event->handler(self, event, out.now);
+        // event is no longer valid -- may be destroyed in the handler.
 
         const int64_t lateness = out.now - deadline; // Non-negative because now >= deadline.
         if (lateness > out.worst_lateness) {

@@ -76,6 +76,7 @@
 #define CAVL2_RELATION int32_t
 #define CAVL2_T        cy_tree_t
 #include <cavl2.h>
+#include <olga_scheduler.h>
 
 #define RAPIDHASH_COMPACT // because we hash strings <96 bytes long
 #include <rapidhash.h>
@@ -1455,12 +1456,11 @@ typedef struct
     bool                request_done;
     cy_request_result_t result;
 
-    uint64_t tag;                     ///< Needed for response correlation.
-    cy_us_t  first_response_deadline; ///< No deadline tracking after the first response.
+    uint64_t tag; ///< Needed for response correlation.
 
     cy_tree_t        index_tag;      ///< Per-topic tag index.
-    cy_tree_t        index_deadline; ///< Global across all topics; inserted until the first response only.
     cy_list_member_t member_pending; ///< List of pending requests for cancellation when publisher is destroyed.
+    olga_event_t     timeout;
 } request_future_t;
 
 static void* request_future_result(cy_future_t* const self) { return &((request_future_t*)self)->result; }
@@ -1469,7 +1469,7 @@ static cy_future_status_t request_future_status(const cy_future_t* const self)
 {
     const request_future_t* const f    = (const request_future_t*)self;
     const bool                    live = cavl2_is_inserted(f->pub->topic->request_futures_by_tag, &f->index_tag);
-    if (cavl2_is_inserted(self->cy->request_futures_by_deadline, &f->index_deadline)) {
+    if (olga_is_pending(self->cy->olga, &f->timeout)) {
         assert(live);
         return cy_future_pending;
     }
@@ -1486,7 +1486,7 @@ static void request_future_cancel(cy_future_t* const self)
         f->base.cy->vtable->cancel(f->base.cy, f->cancellation_token);
     }
     (void)cavl2_remove_if(&f->pub->topic->request_futures_by_tag, &f->index_tag);
-    (void)cavl2_remove_if(&self->cy->request_futures_by_deadline, &f->index_deadline);
+    olga_cancel(self->cy->olga, &f->timeout);
     delist(&f->pub->request_futures, &f->member_pending);
     assert(f->request_done && (request_future_status(self) != cy_future_pending));
 }
@@ -1499,6 +1499,13 @@ static void request_future_finalize(cy_future_t* const self)
     cy_message_destroy(&f->result.response.message.content);
 }
 
+static void request_future_on_timeout(olga_t* const sched, olga_event_t* const event, const int64_t now)
+{
+    (void)sched;
+    (void)now;
+    future_cancel_and_notify((cy_future_t*)event->user);
+}
+
 static void on_request_feedback(void* const context, const uint16_t acknowledgements)
 {
     request_future_t* const f = (request_future_t*)context;
@@ -1509,17 +1516,6 @@ static void on_request_feedback(void* const context, const uint16_t acknowledgem
             future_notify(&f->base); // future invalidated
         }
     }
-}
-
-static int32_t cavl_comp_future_response_deadline(const void* const user, const cy_tree_t* const node)
-{
-    assert((user != NULL) && (node != NULL));
-    const request_future_t* const outer = (const request_future_t*)user;
-    const request_future_t* const inner = CAVL2_TO_OWNER(node, request_future_t, index_deadline);
-    if (outer->first_response_deadline != inner->first_response_deadline) {
-        return (outer->first_response_deadline > inner->first_response_deadline) ? +1 : -1;
-    }
-    return (outer > inner) ? +1 : -1; // TODO FIXME: Pointer comparison here is ill-defined; use a different tiebreak
 }
 
 /// To find a pending response, one needs to locate the topic by hash first, if it exists when the response arrives.
@@ -1561,7 +1557,6 @@ cy_future_t* cy_request(cy_publisher_t* const pub,
     fut->result.response.remote_id = UINT64_MAX; // Likely to be invalid, just for clarity.
     fut->result.response.seqno     = UINT64_MAX; // Ditto, this seqno is unreachable in practice.
     fut->result.response.message   = (cy_message_ts_t){ .timestamp = BIG_BANG, .content = message_empty };
-    fut->first_response_deadline   = first_response_deadline;
     fut->tag                       = pub->topic->pub_next_tag_56bit++ & HEADER_TAG_MASK;
 
     // Compose the header.
@@ -1582,27 +1577,10 @@ cy_future_t* cy_request(cy_publisher_t* const pub,
                                                                &fut->index_tag,
                                                                cavl2_trivial_factory);
     assert(fut_tid_tree == &fut->index_tag);
-    (void)cavl2_find_or_insert(&cy->request_futures_by_deadline,
-                               fut,
-                               cavl_comp_future_response_deadline,
-                               &fut->index_deadline,
-                               cavl2_trivial_factory);
+    olga_defer(cy->olga, first_response_deadline, fut, request_future_on_timeout, &fut->timeout);
     enlist_head(&pub->request_futures, &fut->member_pending);
     CY_TRACE(cy, "📩 %s #%016llx new request future", topic_repr(pub->topic).str, (unsigned long long)fut->tag);
     return (cy_future_t*)fut;
-}
-
-static void retire_expired_request_futures(const cy_t* cy, const cy_us_t now)
-{
-    request_future_t* fut =
-      CAVL2_TO_OWNER(cavl2_min(cy->request_futures_by_deadline), request_future_t, index_deadline);
-    while ((fut != NULL) && (fut->first_response_deadline < now)) {
-        future_cancel_and_notify(&fut->base);
-        // We could have avoided the second min lookup by replacing this with a cavl2_next_greater(), but the problem
-        // is that the user callback may modify the tree, and we don't want to put constraints on the callback behavior.
-        // A more sophisticated solution is to mark the tree as modified, but it's not worth the effort.
-        fut = CAVL2_TO_OWNER(cavl2_min(cy->request_futures_by_deadline), request_future_t, index_deadline);
-    }
 }
 
 cy_prio_t cy_priority(const cy_publisher_t* const pub) { return (pub != NULL) ? pub->priority : cy_prio_nominal; }
@@ -1983,6 +1961,8 @@ static bool is_prime_u32(const uint32_t n)
     return true;
 }
 
+static cy_us_t olga_now(olga_t* const sched) { return cy_now((cy_t*)sched->user); }
+
 cy_err_t cy_new(cy_t* const              cy,
                 const cy_vtable_t* const vtable,
                 const wkv_str_t          home,
@@ -2001,6 +1981,13 @@ cy_err_t cy_new(cy_t* const              cy,
     memset(cy, 0, sizeof(*cy));
     cy->vtable             = vtable;
     cy->subject_id_modulus = subject_id_modulus;
+
+    // TODO FIXME: move cy_t inside cy.c and store olga by value.
+    cy->olga = mem_alloc_zero(cy, sizeof(olga_t));
+    if (cy->olga == NULL) {
+        return CY_ERR_MEMORY;
+    }
+    olga_init(cy->olga, cy, olga_now);
 
     // Only home needs to be freed at destruction.
     char* const home_z = mem_alloc(cy, (home.len + 1) + (larger(namespace_.len, 1) + 1));
@@ -2042,8 +2029,6 @@ cy_err_t cy_new(cy_t* const              cy,
     cy->heartbeat_period      = 3 * MEGA; // May be made configurable at some point if necessary.
 
     cy->implicit_topic_timeout = IMPLICIT_TOPIC_DEFAULT_TIMEOUT_us;
-
-    cy->request_futures_by_deadline = NULL;
 
     cy->p2p_extent = HEADER_MAX_BYTES + 1024U; // Arbitrary initial size; will be refined when publishers are created.
     cy->vtable->p2p_extent(cy, cy->p2p_extent);
@@ -2106,8 +2091,8 @@ cy_err_t cy_update(cy_t* const cy)
     if (cy == NULL) {
         return CY_ERR_ARGUMENT;
     }
-    const cy_us_t now = cy_now(cy);
-    retire_expired_request_futures(cy, now);
+    const olga_spin_result_t spin_result = olga_spin(cy->olga);
+    const cy_us_t            now         = (spin_result.now == BIG_BANG) ? cy_now(cy) : spin_result.now;
     retire_expired_implicit_topics(cy, now);
     return heartbeat_poll(cy, now);
 }

@@ -170,6 +170,9 @@ struct cy_t
 {
     const struct cy_vtable_t* vtable;
 
+    // TODO FIXME: move cy_t inside cy.c and store olga by value.
+    struct olga_t* olga;
+
     /// Namespace is a prefix added to all topics created on this instance, unless the topic name starts with `/`.
     /// Local node name is prefixed to the topic name if it starts with `~/`.
     /// The final resolved topic name exchanged on the wire has the leading/trailing/duplicate separators removed.
@@ -212,9 +215,6 @@ struct cy_t
     /// The values of these tree nodes point to instances of subscriber_root_t.
     wkv_t subscribers_by_name;    ///< Both explicit and patterns.
     wkv_t subscribers_by_pattern; ///< Only patterns for implicit subscriptions on heartbeat.
-
-    /// For detecting timed out responses. This index spans all topics.
-    cy_tree_t* request_futures_by_deadline;
 
     size_t p2p_extent;
 };
