@@ -40,9 +40,9 @@
 /// The modulus shall be a prime number because the subject-ID function uses a quadratic probing strategy:
 ///     subject_id = CY_PINNED_SUBJECT_ID_MAX + (hash + evictions^2) mod modulus
 /// See https://en.wikipedia.org/wiki/Quadratic_probing
-#define CY_SUBJECT_ID_MODULUS_17bit 122869      // -1+8191=0x0001FFF3; (2**17-1)-0x0001FFF3=12 identifiers unused
-#define CY_SUBJECT_ID_MODULUS_23bit 8380417     // -1+8191=0x007FFFFF; (2**23-1)-0x007FFFFF=0  identifiers unused
-#define CY_SUBJECT_ID_MODULUS_32bit 4294959083U // -1+8191=0xFFFFFFE9; (2**32-1)-0xFFFFFFE9=22 identifiers unused
+#define CY_SUBJECT_ID_MODULUS_17bit 122869ULL     // -1+8191=0x0001FFF3; (2**17-1)-0x0001FFF3=12 identifiers unused
+#define CY_SUBJECT_ID_MODULUS_23bit 8380417ULL    // -1+8191=0x007FFFFF; (2**23-1)-0x007FFFFF=0  identifiers unused
+#define CY_SUBJECT_ID_MODULUS_32bit 4294959083ULL // -1+8191=0xFFFFFFE9; (2**32-1)-0xFFFFFFE9=22 identifiers unused
 
 /// If CY_CONFIG_TRACE is defined and is non-zero, cy_trace() shall be defined externally.
 #ifndef CY_CONFIG_TRACE
@@ -148,9 +148,6 @@ typedef struct cy_topic_t
     cy_us_t ts_origin;   ///< An approximation of when the topic was first seen on the network.
     cy_us_t ts_animated; ///< Last time the topic saw activity that prevents it from being retired.
 
-    /// Used for matching pending response states against received responses by transfer-ID.
-    cy_tree_t* request_futures_by_tag;
-
     /// Random-initialized when topic created, then incremented with each publish.
     /// Only the 56 least significant bits are used; ignore the top 8 bits.
     uint64_t pub_next_tag_56bit;
@@ -215,6 +212,13 @@ struct cy_t
     /// The values of these tree nodes point to instances of subscriber_root_t.
     wkv_t subscribers_by_name;    ///< Both explicit and patterns.
     wkv_t subscribers_by_pattern; ///< Only patterns for implicit subscriptions on heartbeat.
+
+    /// Pending network state indexes. Removal is guided by remote nodes and by deadline (via olga).
+    /// We use separate indexes because messages use the same tag for ack and response correlation,
+    /// and also for faster lookup.
+    cy_tree_t* publish_futures_by_tag;
+    cy_tree_t* request_futures_by_tag;
+    cy_tree_t* response_futures_by_tag;
 
     size_t p2p_extent;
 };
@@ -315,11 +319,13 @@ cy_err_t cy_update(cy_t* const cy);
 
 static inline bool cy_topic_has_subscribers(const cy_topic_t* const topic) { return topic->couplings != NULL; }
 
-/// New message received on a topic. The data ownership is taken by this function.
-void cy_on_message(cy_t* const cy, const uint32_t subject_id, const uint64_t remote_id, cy_message_ts_t message);
-
-/// New P2P message is received. The data ownership is taken by this function.
-void cy_on_p2p(cy_t* const cy, const cy_p2p_context_t p2p_context, const uint64_t remote_id, cy_message_ts_t message);
+/// New message received on a topic or P2P. The data ownership is taken by this function.
+/// The subject-ID is UINT64_MAX for P2P messages.
+void cy_on_message(cy_t* const            cy,
+                   const cy_p2p_context_t p2p_context,
+                   const uint64_t         subject_id,
+                   const uint64_t         remote_id,
+                   cy_message_ts_t        message);
 
 /// For diagnostics and logging only. Do not use in embedded and real-time applications.
 /// This function is only required if CY_CONFIG_TRACE is defined and is nonzero; otherwise it should be left undefined.

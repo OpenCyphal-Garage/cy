@@ -101,6 +101,9 @@
 /// Topics created explicitly by the application (without substitution tokens) are not affected by this timeout.
 #define IMPLICIT_TOPIC_DEFAULT_TIMEOUT_us (3600 * MEGA)
 
+/// Pending ack transfers will timeout from the tx buffer after this time if not transmitted (interface stalled).
+#define ACK_TX_TIMEOUT MEGA
+
 #define TREE_NULL ((cy_tree_t){ NULL, { NULL, NULL }, 0 })
 
 static const wkv_str_t str_invalid = { .len = SIZE_MAX, .str = NULL };
@@ -110,9 +113,10 @@ typedef unsigned char byte_t;
 /// The maximum header size is needed to calculate the extent correctly.
 /// It is added to the serialized message size.
 /// Later revisions of the protocol may increase this size, although it is best to avoid it if possible.
-#define HEADER_MAX_BYTES 16U
-#define HEADER_TYPE_MASK 31U
-#define HEADER_TAG_MASK  ((1ULL << 56U) - 1ULL)
+#define HEADER_MAX_BYTES  16U
+#define HEADER_TYPE_MASK  31U
+#define HEADER_TAG_MASK   ((1ULL << 56U) - 1ULL)
+#define HEADER_SEQNO_MASK ((1ULL << 48U) - 1ULL)
 
 typedef enum
 {
@@ -238,6 +242,54 @@ static topic_repr_t topic_repr(const cy_topic_t* const topic)
 
 #endif
 
+// SERIALIZATION PRIMITIVES
+
+static byte_t* serialize_u32(byte_t* ptr, const uint32_t value)
+{
+    for (size_t i = 0; i < 4; i++) {
+        *ptr++ = (byte_t)((byte_t)(value >> (i * 8U)) & 0xFFU);
+    }
+    return ptr;
+}
+static byte_t* serialize_u40(byte_t* ptr, const uint64_t value)
+{
+    for (size_t i = 0; i < 5; i++) {
+        *ptr++ = (byte_t)((byte_t)(value >> (i * 8U)) & 0xFFU);
+    }
+    return ptr;
+}
+static byte_t* serialize_u64(byte_t* ptr, const uint64_t value)
+{
+    for (size_t i = 0; i < 8; i++) {
+        *ptr++ = (byte_t)((byte_t)(value >> (i * 8U)) & 0xFFU);
+    }
+    return ptr;
+}
+static uint64_t deserialize_u40(const byte_t* ptr)
+{
+    uint64_t value = 0;
+    for (size_t i = 0; i < 5; i++) {
+        value |= ((uint64_t)*ptr++ << (i * 8U));
+    }
+    return value;
+}
+static uint64_t deserialize_u56(const byte_t* ptr)
+{
+    uint64_t value = 0;
+    for (size_t i = 0; i < 7; i++) {
+        value |= ((uint64_t)*ptr++ << (i * 8U));
+    }
+    return value;
+}
+static uint64_t deserialize_u64(const byte_t* ptr)
+{
+    uint64_t value = 0;
+    for (size_t i = 0; i < 8; i++) {
+        value |= ((uint64_t)*ptr++ << (i * 8U));
+    }
+    return value;
+}
+
 // =====================================================================================================================
 //                                                    LIST UTILITIES
 // =====================================================================================================================
@@ -354,15 +406,23 @@ typedef struct cy_future_vtable_t
 {
     cy_future_status_t (*status)(const cy_future_t*);
     void* (*result)(cy_future_t*);
-    void (*cancel)(cy_future_t*);   ///< Pre: status() == pending; post: status() != pending.
+    void (*cancel)(cy_future_t*); ///< Pre: status() == pending; post: status() != pending.
+    void (*timeout)(cy_future_t*);
     void (*finalize)(cy_future_t*); ///< Invoked immediately before destruction; pre: status() != pending.
 } cy_future_vtable_t;
 
+/// For simplicity, the base future provides built-in timeout and key lookup capabilities. This simplifies usage.
 struct cy_future_t
 {
-    cy_t*                     cy;
-    cy_user_context_t         context;
-    cy_future_callback_t      callback;
+    cy_tree_t index; ///< Futures are always indexed. This is the first field for ptr equivalence.
+    uint64_t  key;   ///< Futures indexed on this unique key; the meaning depends on the future type.
+
+    olga_event_t timeout; ///< Futures can always expire on timeout.
+    cy_t*        cy;
+
+    cy_user_context_t    context;
+    cy_future_callback_t callback;
+
     const cy_future_vtable_t* vtable;
 };
 
@@ -370,9 +430,12 @@ static void* future_new(cy_t* const cy, const cy_future_vtable_t* const vtbl, co
 {
     assert(derived_size >= sizeof(cy_future_t));
     assert(vtbl != NULL);
-    assert((vtbl->status != NULL) && (vtbl->result != NULL) && (vtbl->cancel != NULL) && (vtbl->finalize != NULL));
+    assert((vtbl->status != NULL) && (vtbl->result != NULL) && (vtbl->cancel != NULL) && (vtbl->timeout != NULL) &&
+           (vtbl->finalize != NULL));
     cy_future_t* const future = (cy_future_t*)mem_alloc_zero(cy, derived_size);
     if (future != NULL) {
+        future->index    = TREE_NULL;
+        future->timeout  = OLGA_EVENT_INIT;
         future->cy       = cy;
         future->context  = CY_USER_CONTEXT_EMPTY;
         future->callback = NULL;
@@ -380,6 +443,54 @@ static void* future_new(cy_t* const cy, const cy_future_vtable_t* const vtbl, co
     }
     return future;
 }
+
+// FUTURE INDEXING
+
+static int32_t future_cavl_compare(const void* const user, const cy_tree_t* const node)
+{
+    const uint64_t outer = *(const uint64_t*)user;
+    const uint64_t inner = ((const cy_future_t*)node)->key;
+    return (outer == inner) ? 0 : ((outer > inner) ? +1 : -1); // NOLINT(*-nested-conditional-operator)
+}
+
+/// Returns false if such key already exists (index not modified).
+static bool future_index_insert(cy_future_t* const self, cy_tree_t** const index, const uint64_t key)
+{
+    self->key = key;
+    return cavl2_find_or_insert(index, &self->index, future_cavl_compare, &self->key, cavl2_trivial_factory) ==
+           &self->index;
+}
+
+/// MUST be inserted, otherwise UB.
+static void future_index_remove(cy_future_t* const self, cy_tree_t** const index)
+{
+    assert(cavl2_is_inserted(*index, &self->index));
+    cavl2_remove(index, &self->index);
+}
+
+static cy_future_t* future_index_lookup(cy_tree_t** const index, const uint64_t key)
+{
+    return (cy_future_t*)cavl2_find(*index, &key, future_cavl_compare);
+}
+
+// FUTURE TIMEOUT
+
+static void future_timeout_trampoline(olga_t* const sched, olga_event_t* const event, const cy_us_t now)
+{
+    (void)sched;
+    (void)now;
+    cy_future_t* const self = (cy_future_t*)event->user;
+    self->vtable->timeout(self);
+}
+
+static void future_deadline_arm(cy_future_t* const self, const cy_us_t deadline)
+{
+    olga_defer(self->cy->olga, deadline, self, future_timeout_trampoline, &self->timeout);
+}
+
+static void future_deadline_disarm(cy_future_t* const self) { olga_cancel(self->cy->olga, &self->timeout); }
+
+// FUTURE HELPERS
 
 /// Remember that the user callback may destroy the future!
 /// The future pointer is thus invalidated after this function; any access counts as use-after-free.
@@ -393,11 +504,18 @@ static void future_notify(cy_future_t* const self)
 static void future_cancel_and_notify(cy_future_t* const self)
 {
     if (cy_future_status(self) == cy_future_pending) {
+        future_deadline_disarm(self);
         self->vtable->cancel(self);
         assert(cy_future_status(self) != cy_future_pending);
         future_notify(self);
     }
 }
+
+/// Stub for futures that do not require finalization.
+// ReSharper disable once CppParameterMayBeConstPtrOrRef
+static void future_noop(cy_future_t* const self) { (void)self; }
+
+// FUTURE API
 
 cy_future_status_t cy_future_status(const cy_future_t* const self) { return self->vtable->status(self); }
 void*              cy_future_result(cy_future_t* const self) { return self->vtable->result(self); }
@@ -424,10 +542,6 @@ void cy_future_destroy(cy_future_t* const self)
         mem_free(self->cy, self);
     }
 }
-
-/// Stub for futures that do not require finalization.
-// ReSharper disable once CppParameterMayBeConstPtrOrRef
-static void future_noop(cy_future_t* const self) { (void)self; }
 
 // =====================================================================================================================
 //                                                      TOPICS
@@ -465,30 +579,22 @@ typedef struct cy_topic_coupling_t
     cy_substitution_t substitutions[];
 } cy_topic_coupling_t;
 
-struct cy_publisher_t
-{
-    cy_topic_t* topic; ///< Many-to-one relationship, never NULL; the topic is reference counted.
-    cy_prio_t   priority;
-
-    // Pending futures to clean up on destruction.
-    // Each is tied to its own publisher for better API experience.
-    cy_list_t publish_futures;
-    cy_list_t request_futures;
-};
-
 typedef struct
 {
     size_t  extent;
     cy_us_t reordering_window;
 } subscriber_params_t;
 
-/// TODO: REORDERING WINDOW (negative reordering window for unordered)
 struct cy_subscriber_t
 {
     subscriber_root_t* root; ///< Many-to-one relationship, never NULL.
     cy_subscriber_t*   next; ///< Lists all subscribers under the same root.
 
-    subscriber_params_t      params;
+    subscriber_params_t params;
+
+    // TODO: DEDUPLICATION ON RETRANSMISSION, RELIABLE ONLY
+    // TODO: REORDERING
+
     cy_user_context_t        user_context;
     cy_subscriber_callback_t callback;
 };
@@ -868,15 +974,14 @@ static cy_err_t topic_new(cy_t* const        cy,
     topic->evictions = evictions;
     topic->hash      = hash;
 
-    const cy_us_t now             = cy_now(cy);
-    topic->ts_origin              = now - (pow2us(lage) * MEGA);
-    topic->ts_animated            = now;
-    topic->pub_next_tag_56bit     = cy->vtable->random(cy); // bits above 56 are ignored (can be arbitrary)
-    topic->request_futures_by_tag = NULL;
-    topic->couplings              = NULL;
-    topic->subscribed             = false;
-    topic->pub_count              = 0;
-    topic->user_context           = CY_USER_CONTEXT_EMPTY;
+    const cy_us_t now         = cy_now(cy);
+    topic->ts_origin          = now - (pow2us(lage) * MEGA);
+    topic->ts_animated        = now;
+    topic->pub_next_tag_56bit = cy->vtable->random(cy); // bits above 56 are ignored (can be arbitrary)
+    topic->couplings          = NULL;
+    topic->subscribed         = false;
+    topic->pub_count          = 0;
+    topic->user_context       = CY_USER_CONTEXT_EMPTY;
 
     if (cavl_count(cy->topics_by_hash) >= (cy->subject_id_modulus / 4)) {
         goto bad_name;
@@ -1029,44 +1134,6 @@ static cy_topic_t* topic_subscribe_if_matching(cy_t* const       cy,
 
 #define HEARTBEAT_OFFSET_TOPIC_NAME 24U
 #define HEARTBEAT_SIZE_MAX          (HEARTBEAT_OFFSET_TOPIC_NAME + CY_TOPIC_NAME_MAX)
-
-static byte_t* serialize_u32(byte_t* ptr, const uint32_t value)
-{
-    for (size_t i = 0; i < 4; i++) {
-        *ptr++ = (byte_t)((byte_t)(value >> (i * 8U)) & 0xFFU);
-    }
-    return ptr;
-}
-static byte_t* serialize_u40(byte_t* ptr, const uint64_t value)
-{
-    for (size_t i = 0; i < 5; i++) {
-        *ptr++ = (byte_t)((byte_t)(value >> (i * 8U)) & 0xFFU);
-    }
-    return ptr;
-}
-static byte_t* serialize_u64(byte_t* ptr, const uint64_t value)
-{
-    for (size_t i = 0; i < 8; i++) {
-        *ptr++ = (byte_t)((byte_t)(value >> (i * 8U)) & 0xFFU);
-    }
-    return ptr;
-}
-static uint64_t deserialize_u40(const byte_t* ptr)
-{
-    uint64_t value = 0;
-    for (size_t i = 0; i < 5; i++) {
-        value |= ((uint64_t)*ptr++ << (i * 8U));
-    }
-    return value;
-}
-static uint64_t deserialize_u64(const byte_t* ptr)
-{
-    uint64_t value = 0;
-    for (size_t i = 0; i < 8; i++) {
-        value |= ((uint64_t)*ptr++ << (i * 8U));
-    }
-    return value;
-}
 
 static cy_err_t publish_heartbeat(const cy_t* const cy,
                                   const cy_us_t     now,
@@ -1304,6 +1371,13 @@ static void on_heartbeat(cy_subscriber_t* const sub, cy_arrival_t* const arrival
 //                                                      PUBLISHER
 // =====================================================================================================================
 
+struct cy_publisher_t
+{
+    cy_topic_t* topic; ///< Many-to-one relationship, never NULL; the topic is reference counted.
+    cy_prio_t   priority;
+    cy_list_t   publish_futures; ///< For cancellation when the publisher is destroyed.
+};
+
 cy_publisher_t* cy_advertise(cy_t* const cy, const wkv_str_t name) { return cy_advertise_client(cy, name, 0); }
 
 cy_publisher_t* cy_advertise_client(cy_t* const cy, const wkv_str_t name, const size_t response_extent)
@@ -1326,7 +1400,6 @@ cy_publisher_t* cy_advertise_client(cy_t* const cy, const wkv_str_t name, const 
     const cy_err_t res   = topic_ensure(cy, &pub->topic, resolved);
     pub->priority        = cy_prio_nominal;
     pub->publish_futures = LIST_EMPTY;
-    pub->request_futures = LIST_EMPTY;
     if (res == CY_OK) {
         assert(pub->topic != NULL);
         pub->topic->pub_count++;
@@ -1375,7 +1448,8 @@ typedef struct
     cy_future_t         base;
     cy_publisher_t*     owner;
     cy_publish_result_t result;
-    cy_list_member_t    member_pending;
+    cy_list_member_t    publish_futures_member;
+    /// TODO ADD RETRANSMISSION STATES
 } publish_future_t;
 
 static void* publish_future_result(cy_future_t* const self) { return &((publish_future_t*)self)->result; }
@@ -1393,12 +1467,12 @@ static void publish_future_cancel(cy_future_t* const self)
 {
     publish_future_t* const f = (publish_future_t*)self;
     if (f->owner != NULL) {
-        delist(&f->owner->publish_futures, &f->member_pending);
+        delist(&f->owner->publish_futures, &f->publish_futures_member);
         f->owner = NULL; // Suppress the callback if the feedback notification is invoked from cancel().
         // Message is still pending feedback; cancel transfer to avoid dangling callback into freed memory.
         f->base.cy->vtable->cancel(f->base.cy, f->token);
     }
-    assert((f->member_pending.next == NULL) && (f->member_pending.prev == NULL));
+    assert((f->publish_futures_member.next == NULL) && (f->publish_futures_member.prev == NULL));
 }
 
 static void on_publish_feedback(void* const context, const uint16_t acknowledgements)
@@ -1442,7 +1516,7 @@ cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadli
             mem_free(cy, fut);
             fut = NULL;
         } else {
-            enlist_head(&pub->publish_futures, &fut->member_pending);
+            enlist_head(&pub->publish_futures, &fut->publish_futures_member);
         }
     }
     return (cy_future_t*)fut;
@@ -1450,17 +1524,9 @@ cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadli
 
 typedef struct
 {
-    cy_future_t     base;
-    cy_publisher_t* pub;
-
-    bool                request_done;
+    cy_future_t         base;
+    publish_future_t*   publish;
     cy_request_result_t result;
-
-    uint64_t tag; ///< Needed for response correlation.
-
-    cy_tree_t        index_tag;      ///< Per-topic tag index.
-    cy_list_member_t member_pending; ///< List of pending requests for cancellation when publisher is destroyed.
-    olga_event_t     timeout;
 } request_future_t;
 
 static void* request_future_result(cy_future_t* const self) { return &((request_future_t*)self)->result; }
@@ -1478,14 +1544,15 @@ static cy_future_status_t request_future_status(const cy_future_t* const self)
 
 static void request_future_cancel(cy_future_t* const self)
 {
-    request_future_t* const f = (request_future_t*)self;
+    request_future_t* const f  = (request_future_t*)self;
+    cy_t* const             cy = self->cy;
     if (!f->request_done) {
         // It is essential that we cancel not only to stop the no longer useful message from being sent,
         // but also to prevent the future feedback callback from operating on a dead future pointer.
         f->request_done = true; // Prevent on_request_feedback() from invoking the future_notify() if it is invoked.
         f->base.cy->vtable->cancel(f->base.cy, f->cancellation_token);
     }
-    (void)cavl2_remove_if(&f->pub->topic->request_futures_by_tag, &f->index_tag);
+    (void)cavl2_remove_if(&cy->request_futures_by_tag, &f->index_tag);
     olga_cancel(self->cy->olga, &f->timeout);
     delist(&f->pub->request_futures, &f->member_pending);
     assert(f->request_done && (request_future_status(self) != cy_future_pending));
@@ -1516,18 +1583,6 @@ static void on_request_feedback(void* const context, const uint16_t acknowledgem
             future_notify(&f->base); // future invalidated
         }
     }
-}
-
-/// To find a pending response, one needs to locate the topic by hash first, if it exists when the response arrives.
-static int32_t cavl_comp_future_response_tag(const void* const user, const cy_tree_t* const node)
-{
-    assert((user != NULL) && (node != NULL));
-    const uint64_t                outer = *(uint64_t*)user;
-    const request_future_t* const inner = CAVL2_TO_OWNER(node, request_future_t, index_tag);
-    if (outer == inner->tag) {
-        return 0;
-    }
-    return (outer >= inner->tag) ? +1 : -1;
 }
 
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
@@ -1598,24 +1653,15 @@ void cy_unadvertise(cy_publisher_t* const pub)
     if (pub == NULL) {
         return;
     }
+
     // Finalize pending publish futures.
     while (true) {
-        publish_future_t* const fut = LIST_TAIL(pub->publish_futures, publish_future_t, member_pending);
+        publish_future_t* const fut = LIST_TAIL(pub->publish_futures, publish_future_t, publish_futures_member);
         if (fut == NULL) {
             break;
         }
         future_cancel_and_notify(&fut->base);
-        assert(fut != LIST_TAIL(pub->publish_futures, publish_future_t, member_pending)); // Must delist.
-    }
-
-    // Finalize pending request futures.
-    while (true) {
-        request_future_t* const fut = LIST_TAIL(pub->request_futures, request_future_t, member_pending);
-        if (fut == NULL) {
-            break;
-        }
-        future_cancel_and_notify(&fut->base);
-        assert(fut != LIST_TAIL(pub->request_futures, request_future_t, member_pending)); // Must delist.
+        assert(fut != LIST_TAIL(pub->publish_futures, publish_future_t, publish_futures_member)); // Must delist.
     }
 
     // Dereference the topic.
@@ -1624,8 +1670,7 @@ void cy_unadvertise(cy_publisher_t* const pub)
     assert(topic->pub_count > 0);
     topic->pub_count--;
     if (topic->pub_count == 0) {
-        assert(topic->request_futures_by_tag == NULL); // All pending requests must have been cancelled.
-        if (cy_topic_has_subscribers(topic)) {         // Demote to implicit; will be eventually garbage collected.
+        if (cy_topic_has_subscribers(topic)) { // Demote to implicit; will be eventually garbage collected.
             enlist_head(&topic->cy->list_implicit, &topic->list_implicit);
             assert(is_implicit(topic));
         }
@@ -2030,6 +2075,10 @@ cy_err_t cy_new(cy_t* const              cy,
 
     cy->implicit_topic_timeout = IMPLICIT_TOPIC_DEFAULT_TIMEOUT_us;
 
+    cy->publish_futures_by_tag  = NULL;
+    cy->request_futures_by_tag  = NULL;
+    cy->response_futures_by_tag = NULL;
+
     cy->p2p_extent = HEADER_MAX_BYTES + 1024U; // Arbitrary initial size; will be refined when publishers are created.
     cy->vtable->p2p_extent(cy, cy->p2p_extent);
 
@@ -2097,147 +2146,235 @@ cy_err_t cy_update(cy_t* const cy)
     return heartbeat_poll(cy, now);
 }
 
-void cy_on_topic_collision(cy_topic_t* const topic)
+static void on_message(cy_t* const            cy,
+                       const cy_p2p_context_t p2p_context,
+                       const uint64_t         subject_id,
+                       const uint64_t         remote_id,
+                       cy_topic_t* const      topic,
+                       const uint64_t         tag,
+                       cy_message_ts_t        message)
 {
-    if (topic != NULL) {
-        // A remote node may keep triggering collisions even after the protocol has reconfigured itself
-        // if the colliding message is stuck in the transport tx buffer being retransmitted repeatedly,
-        // waiting for acknowledgement. This is benign though because the exponential backoff will eventually
-        // reduce the collision rate and avoid flooding the network with the redundant gossips.
-        // In the future we should introduce some rate limiting for urgent gossips.
-        schedule_gossip_urgent(topic);
-    }
-}
-
-void cy_on_message(cy_topic_t* const      topic,
-                   const uint64_t         remote_id,
-                   const uint64_t         transfer_id,
-                   cy_message_ts_t        message,
-                   const cy_p2p_context_t p2p_context)
-{
-    assert((topic != NULL) && (topic->cy != NULL) && (message.timestamp >= 0));
     implicit_animate(topic, message.timestamp);
     cy_breadcrumb_t breadcrumb = {
-        .cy          = topic->cy,
+        .cy          = cy,
         .remote_id   = remote_id,
         .topic_hash  = topic->hash,
-        .transfer_id = transfer_id,
+        .request_tag = tag,
         .seqno       = 0,
         .p2p_context = p2p_context,
     };
-    const cy_topic_coupling_t* cpl   = topic->couplings;
-    bool                       moved = false;
-    // A callback may unsubscribe, so we have to store the next pointer early.
-    // A topic has one or more couplings, one per subscription name: at most one verbatim and zero or more patterns.
-    // Each coupling has one or more subscribers, all sharing the same subscription name and same subscriber root.
-    while (cpl != NULL) {
-        const cy_topic_coupling_t* const next_cpl = cpl->next;
-        cy_subscriber_t*                 sub      = cpl->root->head;
-        assert(sub != NULL);
-        while (sub != NULL) {
-            cy_subscriber_t* const next_sub = sub->next;
-            assert(sub->callback != NULL);
-            // Rebuild the struct before every callback because the callbacks are allowed to mutate it.
-            // Most topics only have a single subscription so this is not too expensive in practice.
-            cy_arrival_t arrival = {
-                .message       = message,
-                .breadcrumb    = &breadcrumb,
-                .topic         = topic,
-                .substitutions = { .count = cpl->substitution_count, .substitutions = cpl->substitutions },
-            };
-            sub->callback(sub, &arrival);
-            if ((arrival.message.content.vtable == &message_empty_vtable) ||
-                (cy_message_size(arrival.message.content) < cy_message_size(message.content))) {
-                assert(!moved); // At most one handler can take ownership of the payload.
-                moved = true;
-            }
-            sub = next_sub;
-        }
-        cpl = next_cpl;
-    }
-    if (!moved) {
-        cy_message_destroy(&message.content);
+    // TODO: RETRANSMISSION DETECTION
+    // TODO: REORDERING
+}
+
+static void on_response(cy_t* const             cy,
+                        const cy_p2p_context_t  p2p_context,
+                        const uint64_t          remote_id,
+                        request_future_t* const future,
+                        const uint64_t          seqno,
+                        const uint16_t          tag,
+                        cy_message_ts_t         message)
+{
+    //
+}
+
+static void on_message_ack(cy_t* const cy, publish_future_t* const future)
+{
+    //
+}
+
+static void on_response_ack(cy_t* const cy, response_future_t* const future, const bool positive)
+{
+    //
+}
+
+static void send_message_ack(cy_t* const            cy,
+                             const cy_p2p_context_t p2p_context,
+                             const uint64_t         remote_id,
+                             const uint64_t         tag,
+                             const uint64_t         topic_hash,
+                             const cy_us_t          deadline)
+{
+    byte_t header[16];
+    (void)serialize_u64(serialize_u64(header, (tag << 8U) | (uint64_t)header_msg_ack), topic_hash);
+    const cy_err_t err =
+      cy->vtable->p2p(cy, &p2p_context, deadline, remote_id, (cy_bytes_t){ .size = sizeof(header), .data = header });
+    if (err != CY_OK) {
+        CY_TRACE(cy,
+                 "⚠️ Failed to send message ACK to %016llx for tag %016llx on topic %016llx: %d",
+                 (unsigned long long)remote_id,
+                 (unsigned long long)tag,
+                 (unsigned long long)topic_hash,
+                 (int)err);
     }
 }
 
-void cy_on_p2p(cy_t* const cy, const uint64_t remote_id, cy_message_ts_t message)
+static void send_response_ack(cy_t* const            cy,
+                              const cy_p2p_context_t p2p_context,
+                              const uint64_t         remote_id,
+                              const uint64_t         request_tag,
+                              const uint64_t         seqno,
+                              const uint16_t         tag,
+                              const bool             positive,
+                              const cy_us_t          deadline)
+{
+    byte_t              header[16];
+    const header_type_t header_type = positive ? header_rsp_ack : header_rsp_nack;
+    (void)serialize_u64(serialize_u64(header, (request_tag << 56U) | (uint64_t)header_type),
+                        seqno | ((uint64_t)tag << 48U));
+    const cy_err_t err =
+      cy->vtable->p2p(cy, &p2p_context, deadline, remote_id, (cy_bytes_t){ .size = sizeof(header), .data = header });
+    if (err != CY_OK) {
+        CY_TRACE(cy,
+                 "⚠️ Failed to send response %s to %016llx for seqno %016llx: %d",
+                 positive ? "ACK" : "NACK",
+                 (unsigned long long)remote_id,
+                 (unsigned long long)seqno,
+                 (int)err);
+    }
+}
+
+void cy_on_message(cy_t* const            cy,
+                   const cy_p2p_context_t p2p_context,
+                   const uint64_t         subject_id,
+                   const uint64_t         remote_id,
+                   cy_message_ts_t        message)
 {
     assert((cy != NULL) && (message.timestamp >= 0));
-
-    // Deserialize and validate the P2P header.
-    byte_t header_serialized[P2P_HEADER_BYTES];
-    if (cy_message_read(&message.content, 0, P2P_HEADER_BYTES, header_serialized) != P2P_HEADER_BYTES) {
-        CY_TRACE(cy, "📏 P2P message has unreadable header (%zu bytes)", cy_message_size(message.content));
-        cy_message_destroy(&message.content);
-        return;
+    byte_t header[HEADER_MAX_BYTES];
+    if (HEADER_MAX_BYTES != cy_message_read(&message.content, 0, HEADER_MAX_BYTES, header)) {
+        return; // Malformed message; ignore.
     }
-    message.content.skip += P2P_HEADER_BYTES;
-    const byte_t p2p_header_version        = header_serialized[0] & 0xFU;
-    const byte_t p2p_header_flags_incompat = (byte_t)(header_serialized[0] >> 4U) & 0xFU;
-    if ((p2p_header_version != 0) || (p2p_header_flags_incompat != 0U)) {
-        CY_TRACE(cy,
-                 "❓ P2P message unsupported: header version=%u flags_incompat=0x%x",
-                 (unsigned)p2p_header_version,
-                 (unsigned)p2p_header_flags_incompat);
-        cy_message_destroy(&message.content);
-        return;
-    }
-    const uint64_t seqno       = deserialize_u40(&header_serialized[3]);
-    const uint64_t topic_hash  = deserialize_u64(&header_serialized[8]);
-    const uint64_t transfer_id = deserialize_u64(&header_serialized[16]);
+    message.content.skip += HEADER_MAX_BYTES;
+    const header_type_t type = (header[0] & HEADER_TYPE_MASK);
 
-    // Lookup the topic and the pending request future, if any. Ignore if correlation fails.
-    const cy_topic_t* const topic = cy_topic_find_by_hash(cy, topic_hash);
-    if (topic != NULL) {
-        request_future_t* const fut = CAVL2_TO_OWNER(
-          cavl2_find(topic->request_futures_by_transfer_id, &transfer_id, cavl_comp_future_response_transfer_id),
-          request_future_t,
-          index_transfer_id);
-        if (fut != NULL) {
-            assert(fut->pub->topic->cy == cy);
-#if CY_CONFIG_TRACE
-            if (!fut->request_done) {
-                CY_TRACE(cy,
-                         "🔀 %s #%016llx response before request ack",
-                         topic_repr(fut->pub->topic).str,
-                         (unsigned long long)fut->transfer_id);
+    // This is the central entry point for all incoming messages. It's complex but there's an advantage to keeping the
+    // central dispatch logic in one place because of the tight coupling between different parts of the stack.
+    switch (type) {
+
+        case header_msg_be:
+        case header_msg_rel: {
+            assert(subject_id < (CY_PINNED_SUBJECT_ID_MAX + cy->subject_id_modulus)); // transport must ensure
+            const uint64_t    tag        = deserialize_u56(&header[1]);
+            const uint64_t    topic_hash = deserialize_u64(&header[8]);
+            cy_topic_t* const topic      = cy_topic_find_by_hash(cy, topic_hash);
+            if (topic != NULL) {
+                if (type == header_msg_rel) {
+                    send_message_ack(cy, // This is either new or retransmit, must ack either way.
+                                     p2p_context,
+                                     remote_id,
+                                     tag,
+                                     topic_hash,
+                                     message.timestamp + ACK_TX_TIMEOUT);
+                }
+                if (cy_topic_subject_id(topic) != subject_id) {
+                    // We happen to be subscribed to both of the divergent subject-IDs, so we can process the message
+                    // despite the divergence.
+                    CY_TRACE(cy,
+                             "⚠️ Subject-ID divergence on message from %016llx for topic %016llx: expected %lu got %llu"
+                             " Scheduling urgent gossip to repair consensus",
+                             (unsigned long long)remote_id,
+                             (unsigned long long)topic_hash,
+                             (unsigned long)cy_topic_subject_id(topic),
+                             (unsigned long long)subject_id);
+                    schedule_gossip_urgent(topic);
+                }
+                on_message(cy, p2p_context, subject_id, remote_id, topic, tag, message);
+            } else {
+                cy_topic_t* const other_topic = topic_find_by_subject_id(cy, (uint32_t)subject_id);
+                assert(other_topic->hash != topic_hash);
+                if (other_topic != NULL) {
+                    // Gossip to either update the remotes or solicit a newer allocation state from them.
+                    CY_TRACE(cy,
+                             "⚠️ Subject-ID collision on message from %016llx: topic %016llx vs %016llx"
+                             " Scheduling urgent gossip to repair consensus",
+                             (unsigned long long)remote_id,
+                             (unsigned long long)topic_hash,
+                             (unsigned long long)other_topic->hash);
+                    schedule_gossip_urgent(other_topic);
+                } else {
+                    CY_TRACE(cy,
+                             "⚠️ Unsolicited message from %016llx on topic %016llx subject %08x: unknown topic&subject",
+                             (unsigned long long)remote_id,
+                             (unsigned long long)topic_hash,
+                             (unsigned)subject_id);
+                }
             }
-#endif
-            // The future becomes successful after the first response is received.
-            const bool first_response = cavl2_remove_if(&cy->request_futures_by_deadline, &fut->index_deadline);
-            assert((!first_response) || (fut->result.response.seqno == UINT64_MAX));
-            (void)first_response;
-
-            // TODO: Add optional response ordering recovery such that seqno is strictly increasing.
-            // We have everything needed to do that here, but it's a bit of work and not strictly necessary right now.
-            // The reordering state (a tree of backlogged responses and a timer) will be stored in request_future_t.
-
-            // Clean up the old message if it is not the first response and the user didn't move it.
-            cy_message_destroy(&fut->result.response.message.content);
-
-            // Set up the new result.
-            fut->result.response.message.timestamp = message.timestamp;
-            fut->result.response.message.content   = cy_message_move(&message.content);
-            fut->result.response.remote_id         = remote_id;
-            fut->result.response.seqno             = seqno;
-
-            // Notify the application. The future remains valid to accept additional responses, if any, until destroyed.
-            future_notify(&fut->base);
-        } else {
-            CY_TRACE(cy, "❓ %s orphan #%016llx", topic_repr(topic).str, (unsigned long long)transfer_id);
-            cy_message_destroy(&message.content); // Unexpected response.
+            break;
         }
-    } else {
-        CY_TRACE(cy, "❓ T%016llx no such topic", (unsigned long long)topic_hash);
-        cy_message_destroy(&message.content); // The topic was destroyed while waiting for the response.
+
+        case header_msg_ack: {
+            const uint64_t tag = deserialize_u56(&header[1]);
+            assert(type == header_msg_ack);
+            publish_future_t* const future = (publish_future_t*)future_index_lookup(&cy->publish_futures_by_tag, tag);
+            if (future != NULL) {
+                on_message_ack(cy, future);
+            } else {
+                CY_TRACE(cy,
+                         "⚠️ Orphan message ACK from %016llx for tag %016llx",
+                         (unsigned long long)remote_id,
+                         (unsigned long long)tag);
+            }
+            break;
+        }
+
+        case header_rsp_be:
+        case header_rsp_rel: {
+            const uint64_t          request_tag = deserialize_u56(&header[1]);
+            const uint64_t          seqno_tag   = deserialize_u64(&header[8]);
+            const uint16_t          tag         = (seqno_tag >> 48U) & 0xFFFFU;
+            const uint64_t          seqno       = seqno_tag & HEADER_SEQNO_MASK;
+            request_future_t* const future =
+              (request_future_t*)future_index_lookup(&cy->request_futures_by_tag, request_tag);
+            if (type == header_rsp_rel) {
+                /// A known ambiguity exists if the server sends a reliable response that is accepted, but the
+                /// first positive-ack is lost; the server will retransmit the response, but the client application
+                /// may no longer be listening if it only needed a single response; the second response will be a
+                /// nack instead of a pack. If this becomes a problem, store a short list of recently
+                /// positively-acked responses in the Cy state.
+                send_response_ack(cy,
+                                  p2p_context,
+                                  remote_id,
+                                  request_tag,
+                                  seqno,
+                                  tag,
+                                  future != NULL,
+                                  message.timestamp + ACK_TX_TIMEOUT);
+            }
+            if (future != NULL) {
+                on_response(cy, p2p_context, remote_id, future, seqno, tag, message);
+            } else {
+                CY_TRACE(cy,
+                         "⚠️ Orphan response from %016llx for request tag %016llx",
+                         (unsigned long long)remote_id,
+                         (unsigned long long)request_tag);
+            }
+            break;
+        }
+
+        case header_rsp_ack:
+        case header_rsp_nack: {
+            const uint64_t request_tag = deserialize_u56(&header[1]);
+            const uint64_t seqno_tag   = deserialize_u64(&header[8]);
+            const uint64_t key = rapidhash((uint64_t[3]){ remote_id, request_tag, seqno_tag }, 24); // local transform
+            response_future_t* const future =
+              (response_future_t*)future_index_lookup(&cy->response_futures_by_tag, key);
+            if (future != NULL) {
+                on_response_ack(cy, future, type == header_rsp_ack);
+            } else {
+                CY_TRACE(cy,
+                         "⚠️ Orphan response %s from %016llx for key %016llx",
+                         (type == header_rsp_ack) ? "ACK" : "NACK",
+                         (unsigned long long)remote_id,
+                         (unsigned long long)key);
+            }
+            break;
+        }
+
+        default:
+            CY_TRACE(cy, "⚠️ Unsupported message from %016llx: header type %02x", (unsigned long long)remote_id, type);
+            break;
     }
-    // TODO: Currently, we silently drop orphaned responses without informing the remote because reliable transfers
-    //       provide only transport-layer reliability without regard to the higher layer protocol state. This is
-    //       suboptimal. In the future, we may consider implementing e2e ACK gating by extending the transport layer
-    //       API, such that the transport would postpone sending ACK until after delivering the transfer to Cy.
-    //       This way we would get an opportunity to return a flag back to the transport indicating whether the
-    //       transfer should be acknowledged or not. This feature naturally calls for the introduction of NACKs as well
-    //       to let the remote distinguish between network unreachability and higher-layer rejections.
 }
 
 // =====================================================================================================================

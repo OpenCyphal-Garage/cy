@@ -389,12 +389,25 @@ void cy_subscriber_name(const cy_subscriber_t* const self, char* const out_name)
 /// No effect if the subscriber pointer is NULL.
 void cy_unsubscribe(cy_subscriber_t* const self);
 
+/// If streaming responses are used, streaming should continue only as long as the response futures materialize to
+/// cy_response_acknowledged; otherwise, the stream should be ceased.
+///
+/// A known ambiguity exists if the server sends a reliable response that is accepted, but the pack is lost;
+/// the server will retransmit the response, but the client application may no longer be listening if it only needed
+/// a single response; the second response will be a nack instead of a pack.
+/// TODO If this becomes a problem, store a short list of recently positively-acked responses in the Cy state.
+typedef enum cy_response_status_t
+{
+    cy_response_timeout      = 0, ///< Remote did not respond before the deadline.
+    cy_response_acknowledged = 1, ///< Remote responded and acknowledged the response.
+    cy_response_rejected     = 2, ///< Remote received the response but the application is no longer interested in it.
+} cy_response_status_t;
+
 /// Future result of sending a reliable response message.
-/// The future will succeed if the response is acknowledged by the remote node before the deadline.
-/// There appears to be no need to provide the `acknowledged` field separately, as the future status already
-/// conveys that information.
+/// The future will succeed iff the response is cy_response_acknowledged.
 typedef struct cy_response_result_t
 {
+    cy_response_status_t status;
     uint64_t seqno; ///< The unique sequence number used for this response message. Constant, always available.
 } cy_response_result_t;
 
