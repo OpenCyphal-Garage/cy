@@ -155,11 +155,8 @@ typedef struct cy_topic_t
     size_t   pub_count; ///< Number of active advertisements; counted for garbage collection.
 
     /// Subscriber-related states.
-    bool subscribed; ///< May be (tentatively) false even with couplings!=NULL on resubscription error.
     struct cy_topic_coupling_t* couplings;
-    /// States related to deduplication of reliable messages (lost ack handling).
-    /// If an ack is lost, the remote will resend the message, and we need to be able to detect that and
-    /// ignore the duplicate (and ack it again).
+    bool       subscribed; ///< May be (tentatively) false even with couplings!=NULL on resubscription error.
     cy_tree_t* sub_index_dedup_by_remote_id;
     cy_list_t  sub_list_dedup_by_recency;
 

@@ -1454,6 +1454,10 @@ void cy_unadvertise(cy_publisher_t* const pub)
 //                                                      SUBSCRIBER
 // =====================================================================================================================
 
+// RELIABLE MESSAGE DEDUPLICATION TO MITIGATE ACK LOSS
+
+#define DEDUP_HISTORY 64U
+
 /// An instance is kept per remote node that publishes messages on a given topic, or P2P.
 /// It is used for deduplication of reliable messages received from that remote; duplications occur when the remote
 /// doesn't receive (enough) acks and is trying to retransmit while we already have the message from prior attempts.
@@ -1471,8 +1475,6 @@ typedef struct
     uint64_t bitmap;
 } dedup_t;
 static_assert((sizeof(void*) > 4) || (sizeof(dedup_t) <= (64 - 8)), "should fit in a 64-byte o1heap block");
-
-#define DEDUP_HISTORY 64U
 
 typedef struct
 {
@@ -1553,12 +1555,50 @@ static cy_tree_t* dedup_factory(void* const user)
         state->bitmap = 0;
     }
     CY_TRACE(ctx->owner->cy,
-             "🧹 Allocating dedup state for remote_id=%016llx tag=%016llx: %s",
+             "🧹 remote_id=%016llx tag=%016llx: %s",
              (unsigned long long)ctx->remote_id,
              (unsigned long long)ctx->tag,
              (state != NULL) ? "ok" : "OUT OF MEMORY");
     return (state != NULL) ? &state->index_remote_id : NULL;
 }
+
+// MESSAGE ORDERING RECOVERY
+
+/// How many messages can be interned in the reordering buffer at most; more messages will force early window closure.
+/// The number should be small; partly because messages typically don't reorder beyond a few tag counts, partly
+/// because for reasons of efficiency we keep all slots as a static preallocated array for quick linear scans,
+/// which work faster than BST lookups for small arrays.
+#define REORDERING_SLOTS 8U
+
+/// Messages with the tag that lags behind the head by this value (modulo 2**56) or more are considered new
+/// and will reset the reordering state. The probability of randomly choosing a new tag that falls into this
+/// range is astronomically low and is negligible for all practical purposes.
+#define REORDERING_LOOKBACK 1024U
+
+typedef struct
+{
+    uint64_t     tag; ///< UINT64_MAX if empty
+    cy_message_t message;
+} reordering_slot_t;
+
+/// Subscribers operating in the ordered mode use this instance, one per remote node per subscription,
+/// to enforce strictly-increasing order of message tags (modulo 2**56) from each remote node.
+/// Missing messages are waited for for up to the reordering_window, after which they are considered lost and the gap
+/// is closed by advancing the expected tag; if missing messages show up later, they are considered late and dropped.
+/// Each subscription must have its own instance because they may use different settings (e.g., reordering window).
+typedef struct
+{
+    cy_tree_t        index_remote_id; ///< For lookup when new messages received.
+    cy_list_member_t list_recency;    ///< For removal of old entries when a remote ceases publishing.
+
+    uint64_t remote_id;
+    cy_us_t  last_active_at;
+
+    uint64_t          last_ejected_tag; ///< Tag seen by the application; lesser tags are not allowed.
+    reordering_slot_t slots[REORDERING_SLOTS];
+} reordering_t;
+
+// SUBSCRIPTION DATA PATH
 
 typedef struct
 {
@@ -1573,7 +1613,8 @@ struct cy_subscriber_t
 
     subscriber_params_t params;
 
-    // TODO: REORDERING
+    cy_tree_t* index_reordering_by_remote_id;
+    cy_list_t  list_reordering_by_recency;
 
     cy_user_context_t        user_context;
     cy_subscriber_callback_t callback;
