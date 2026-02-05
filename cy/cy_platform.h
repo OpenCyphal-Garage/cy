@@ -148,14 +148,20 @@ typedef struct cy_topic_t
     cy_us_t ts_origin;   ///< An approximation of when the topic was first seen on the network.
     cy_us_t ts_animated; ///< Last time the topic saw activity that prevents it from being retired.
 
-    /// Random-initialized when topic created, then incremented with each publish.
-    /// Only the 56 least significant bits are used; ignore the top 8 bits.
+    /// Publisher-related states.
+    /// The tag counter is random-initialized when topic created, then incremented with each publish;
+    /// only the 56 least significant bits are used; ignore the top 8 bits.
     uint64_t pub_next_tag_56bit;
+    size_t   pub_count; ///< Number of active advertisements; counted for garbage collection.
 
-    /// States related to tracking publishers and subscribers on this topic. The topic is removed when none left.
+    /// Subscriber-related states.
+    bool subscribed; ///< May be (tentatively) false even with couplings!=NULL on resubscription error.
     struct cy_topic_coupling_t* couplings;
-    bool   subscribed; ///< May be (tentatively) false even with couplings!=NULL on resubscription error.
-    size_t pub_count;  ///< Number of active advertisements; counted for garbage collection.
+    /// States related to deduplication of reliable messages (lost ack handling).
+    /// If an ack is lost, the remote will resend the message, and we need to be able to detect that and
+    /// ignore the duplicate (and ack it again).
+    cy_tree_t* sub_index_dedup_by_remote_id;
+    cy_list_t  sub_list_dedup_by_recency;
 
     /// User context for application-specific use, such as linking it with external data.
     cy_user_context_t user_context;
@@ -224,6 +230,9 @@ struct cy_t
     cy_tree_t* response_futures_by_tag;
 
     size_t p2p_extent;
+
+    /// Slow topic iteration state. Updated every cy_update(); when NULL, restart from scratch.
+    cy_topic_t* topic_iter;
 };
 
 /// Platform-specific implementation of cy_t.

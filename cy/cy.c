@@ -107,6 +107,11 @@
 /// Pending ack transfers will timeout from the tx buffer after this time if not transmitted (interface stalled).
 #define ACK_TX_TIMEOUT MEGA
 
+/// Soft states associated with a remote node publishing on a topic or P2P will be discarded when stale for this long.
+#define SESSION_LIFETIME (60 * MEGA)
+
+#define UINTMAX_BITS ((int)(sizeof(uintmax_t) * CHAR_BIT))
+
 #define TREE_NULL ((cy_tree_t){ NULL, { NULL, NULL }, 0 })
 
 static const wkv_str_t str_invalid = { .len = SIZE_MAX, .str = NULL };
@@ -116,10 +121,10 @@ typedef unsigned char byte_t;
 /// The maximum header size is needed to calculate the extent correctly.
 /// It is added to the serialized message size.
 /// Later revisions of the protocol may increase this size, although it is best to avoid it if possible.
-#define HEADER_MAX_BYTES  16U
-#define HEADER_TYPE_MASK  31U
-#define HEADER_TAG_MASK   ((1ULL << 56U) - 1ULL)
-#define HEADER_SEQNO_MASK ((1ULL << 48U) - 1ULL)
+#define HEADER_MAX_BYTES 16U
+#define HEADER_TYPE_MASK 31U
+
+#define SEQNO48_MASK ((1ULL << 48U) - 1ULL)
 
 typedef enum
 {
@@ -131,6 +136,16 @@ typedef enum
     header_rsp_ack  = 5,
     header_rsp_nack = 6,
 } header_type_t;
+
+#define TAG56_MASK ((1ULL << 56U) - 1ULL)
+
+/// The number of increments to a needed to reach a==b.
+static inline uint64_t tag56_forward_distance(uint64_t a, uint64_t b)
+{
+    a &= TAG56_MASK;
+    b &= TAG56_MASK;
+    return (b - a) & TAG56_MASK; // in [0, 2^56)
+}
 
 static size_t  larger(const size_t a, const size_t b) { return (a > b) ? a : b; }
 static size_t  smaller(const size_t a, const size_t b) { return (a < b) ? a : b; }
@@ -1439,6 +1454,112 @@ void cy_unadvertise(cy_publisher_t* const pub)
 //                                                      SUBSCRIBER
 // =====================================================================================================================
 
+/// An instance is kept per remote node that publishes messages on a given topic, or P2P.
+/// It is used for deduplication of reliable messages received from that remote; duplications occur when the remote
+/// doesn't receive (enough) acks and is trying to retransmit while we already have the message from prior attempts.
+/// Stale instances are removed on timeout.
+typedef struct
+{
+    cy_tree_t        index_remote_id; ///< For lookup when new reliable messages received.
+    cy_list_member_t list_recency;    ///< For removal of old entries when a remote ceases publishing.
+
+    uint64_t remote_id;
+    cy_us_t  last_active_at;
+
+    // bitmap[0]=tag-1, bitmap[1]=tag-2, bitmap[2]=tag-3, ..., bitmap[63]=tag-64; tag itself is implicitly true.
+    uint64_t tag;
+    uint64_t bitmap;
+} dedup_t;
+static_assert((sizeof(void*) > 4) || (sizeof(dedup_t) <= (64 - 8)), "should fit in a 64-byte o1heap block");
+
+#define DEDUP_HISTORY 64U
+
+typedef struct
+{
+    cy_topic_t* owner;
+    uint64_t    remote_id;
+    uint64_t    tag;
+    cy_us_t     now;
+} dedup_factory_context_t;
+
+/// Returns true if duplicate.
+static bool dedup_update(dedup_t* const self, cy_topic_t* const owner, const uint64_t tag, const cy_us_t now)
+{
+    // Update the recency information.
+    self->last_active_at = now;
+    enlist_head(&owner->sub_list_dedup_by_recency, &self->list_recency);
+
+    // Consult with the bitmap for duplication and update its state.
+    const uint64_t fwd = tag56_forward_distance(self->tag, tag);
+    const uint64_t rev = tag56_forward_distance(tag, self->tag);
+    if (rev == 0) {
+        assert(fwd == rev);
+        return true;
+    }
+    if (rev <= DEDUP_HISTORY) { // Either duplicate or out-of-order; bit already in the bitmap.
+        if ((self->bitmap & (1ULL << (rev - 1))) != 0) {
+            return true;
+        }
+        self->bitmap |= (1ULL << (rev - 1));
+    } else {
+        if (fwd < DEDUP_HISTORY) {
+            self->bitmap = (self->bitmap << fwd) | (1ULL << (fwd - 1U)); // Mark the previous current-tag as well.
+        } else if (fwd == DEDUP_HISTORY) {
+            self->bitmap = 1ULL << (DEDUP_HISTORY - 1U); // Mark the previous current; special case to avoid shift by 64
+        } else {
+            self->bitmap = 0; // A large tag jump in either direction is treated as a session restart.
+        }
+        self->tag = tag;
+    }
+    return false;
+}
+
+static void dedup_destroy(dedup_t* const self, cy_topic_t* const owner)
+{
+    delist(&owner->sub_list_dedup_by_recency, &self->list_recency);
+    assert(cavl2_is_inserted(owner->sub_index_dedup_by_remote_id, &self->index_remote_id));
+    cavl2_remove(&owner->sub_index_dedup_by_remote_id, &self->index_remote_id);
+    mem_free(owner->cy, self);
+}
+
+static void dedup_drop_stale(cy_topic_t* const owner, const cy_us_t now)
+{
+    while (true) {
+        dedup_t* const dd = LIST_TAIL(owner->sub_list_dedup_by_recency, dedup_t, list_recency);
+        if ((dd == NULL) || ((dd->last_active_at + SESSION_LIFETIME) >= now)) {
+            break;
+        }
+        CY_TRACE(owner->cy, "🧹 N%016llx tag=%016llx", (unsigned long long)dd->remote_id, (unsigned long long)dd->tag);
+        dedup_destroy(dd, owner);
+    }
+}
+
+static int32_t dedup_cavl_compare(const void* const user, const cy_tree_t* const node)
+{
+    const uint64_t outer = *(const uint64_t*)user;
+    const uint64_t inner = ((const dedup_t*)node)->remote_id;
+    return (outer == inner) ? 0 : ((outer > inner) ? +1 : -1); // NOLINT(*-nested-conditional-operator)
+}
+
+static cy_tree_t* dedup_factory(void* const user)
+{
+    const dedup_factory_context_t* const ctx = (dedup_factory_context_t*)user;
+    dedup_drop_stale(ctx->owner, ctx->now); // A quick check that might free up some memory for the new entry.
+    dedup_t* const state = mem_alloc_zero(ctx->owner->cy, sizeof(dedup_t));
+    if (state != NULL) {
+        state->remote_id = ctx->remote_id;
+        // The tag itself is implicitly considered received, so we start with a distant tag value to avoid false-dup.
+        state->tag    = (ctx->tag + DEDUP_HISTORY + 1U) & TAG56_MASK;
+        state->bitmap = 0;
+    }
+    CY_TRACE(ctx->owner->cy,
+             "🧹 Allocating dedup state for remote_id=%016llx tag=%016llx: %s",
+             (unsigned long long)ctx->remote_id,
+             (unsigned long long)ctx->tag,
+             (state != NULL) ? "ok" : "OUT OF MEMORY");
+    return (state != NULL) ? &state->index_remote_id : NULL;
+}
+
 typedef struct
 {
     size_t  extent;
@@ -1452,12 +1573,56 @@ struct cy_subscriber_t
 
     subscriber_params_t params;
 
-    // TODO: DEDUPLICATION ON RETRANSMISSION, RELIABLE ONLY
     // TODO: REORDERING
 
     cy_user_context_t        user_context;
     cy_subscriber_callback_t callback;
 };
+
+// Returns true if the message was accepted, false if it should not be acknowledged (e.g. late drop for ordered subs).
+static bool on_message(cy_t* const            cy,
+                       const cy_p2p_context_t p2p_context,
+                       const uint64_t         remote_id,
+                       cy_topic_t* const      topic,
+                       const uint64_t         tag,
+                       cy_message_ts_t        message,
+                       const bool             reliable)
+{
+    // TODO: Fast-track processing for heartbeat messages?
+    implicit_animate(topic, message.timestamp);
+
+    // Reliable transfers may be duplicated in case of ACK loss.
+    // Non-reliable transfers are deduplicated by the transport, which makes them much more efficient.
+    if (reliable) {
+        dedup_factory_context_t ctx = { .owner = topic, .remote_id = remote_id, .tag = tag, .now = message.timestamp };
+        dedup_t* const dedup = CAVL2_TO_OWNER(cavl2_find_or_insert(&topic->sub_index_dedup_by_remote_id, // ------
+                                                                   &remote_id,
+                                                                   dedup_cavl_compare,
+                                                                   &ctx,
+                                                                   dedup_factory),
+                                              dedup_t,
+                                              index_remote_id);
+        if (dedup == NULL) { // Out of memory.
+            return false;    // The remote will retransmit and we might be able to accept it then.
+        }
+        assert(dedup->remote_id == remote_id);
+        if (dedup_update(dedup, topic, tag, message.timestamp)) {
+            CY_TRACE(cy, "🍒 Dup N%016llx tag=%016llx", (unsigned long long)remote_id, (unsigned long long)tag);
+            return true; // Already received, ack but don't process.
+        }
+    }
+    // TODO: REORDERING
+
+    cy_breadcrumb_t breadcrumb = {
+        .cy          = cy,
+        .remote_id   = remote_id,
+        .topic_hash  = topic->hash,
+        .request_tag = tag,
+        .seqno       = 0,
+        .p2p_context = p2p_context,
+    };
+    return false;
+}
 
 /// This is linear complexity but we expect to have few subscribers per topic, so it is acceptable.
 static size_t get_subscription_extent(const cy_topic_t* const topic)
@@ -1866,30 +2031,18 @@ cy_err_t cy_update(cy_t* const cy)
     const olga_spin_result_t spin_result = olga_spin(cy->olga);
     const cy_us_t            now         = (spin_result.now == BIG_BANG) ? cy_now(cy) : spin_result.now;
     retire_expired_implicit_topics(cy, now);
-    return heartbeat_poll(cy, now);
-}
 
-static void on_message(cy_t* const            cy,
-                       const cy_p2p_context_t p2p_context,
-                       const uint64_t         remote_id,
-                       cy_topic_t* const      topic,
-                       const uint64_t         tag,
-                       cy_message_ts_t        message,
-                       const bool             reliable)
-{
-    implicit_animate(topic, message.timestamp);
-    cy_breadcrumb_t breadcrumb = {
-        .cy          = cy,
-        .remote_id   = remote_id,
-        .topic_hash  = topic->hash,
-        .request_tag = tag,
-        .seqno       = 0,
-        .p2p_context = p2p_context,
-    };
-    if (reliable) {
-        // TODO: RETRANSMISSION DETECTION
+    // Topic iteration -- one at a time for managing non-time-critical stale states with minimal costs.
+    if (cy->topic_iter == NULL) {
+        cy->topic_iter = cy_topic_iter_first(cy);
     }
-    // TODO: REORDERING
+    if (cy->topic_iter != NULL) {
+        dedup_drop_stale(cy->topic_iter, now);
+        // TODO: do other things
+        cy->topic_iter = cy_topic_iter_next(cy->topic_iter);
+    }
+
+    return heartbeat_poll(cy, now);
 }
 
 #if 0
@@ -2012,14 +2165,6 @@ void cy_on_message(cy_t* const            cy,
             cy_topic_t* const topic      = cy_topic_find_by_hash(cy, topic_hash);
             const bool        reliable   = type == header_msg_rel;
             if (topic != NULL) {
-                if (reliable) {
-                    send_message_ack(cy, // This is either new or retransmit, must ack either way.
-                                     p2p_context,
-                                     remote_id,
-                                     tag,
-                                     topic_hash,
-                                     message.timestamp + ACK_TX_TIMEOUT);
-                }
                 if (cy_topic_subject_id(topic) != subject_id) {
                     // We happen to be subscribed to both of the divergent subject-IDs, so we can process the message
                     // despite the divergence.
@@ -2032,7 +2177,15 @@ void cy_on_message(cy_t* const            cy,
                              (unsigned long long)subject_id);
                     schedule_gossip_urgent(topic);
                 }
-                on_message(cy, p2p_context, remote_id, topic, tag, message, reliable);
+                const bool accepted = on_message(cy, p2p_context, remote_id, topic, tag, message, reliable);
+                if (reliable && accepted) {
+                    send_message_ack(cy, // This is either new or retransmit, must ack either way.
+                                     p2p_context,
+                                     remote_id,
+                                     tag,
+                                     topic_hash,
+                                     message.timestamp + ACK_TX_TIMEOUT);
+                }
             } else {
                 cy_topic_t* const other_topic = topic_find_by_subject_id(cy, (uint32_t)subject_id);
                 assert(other_topic->hash != topic_hash);
@@ -2078,7 +2231,7 @@ void cy_on_message(cy_t* const            cy,
             const uint64_t          request_tag = deserialize_u56(&header[1]);
             const uint64_t          seqno_tag   = deserialize_u64(&header[8]);
             const uint16_t          tag         = (seqno_tag >> 48U) & 0xFFFFU;
-            const uint64_t          seqno       = seqno_tag & HEADER_SEQNO_MASK;
+            const uint64_t          seqno       = seqno_tag & SEQNO48_MASK;
             request_future_t* const future =
               (request_future_t*)future_index_lookup(&cy->request_futures_by_tag, request_tag);
             if (type == header_rsp_rel) {
