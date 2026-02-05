@@ -192,6 +192,9 @@ struct cy_t
 
     cy_us_t implicit_topic_timeout;
 
+    /// Used to derive the actual ack timeout.
+    cy_us_t ack_baseline_timeout;
+
     /// Topics are indexed in multiple ways for various lookups.
     /// Remember that pinned topics have small hash ≤8184, hence they are always on the left of the hash tree,
     /// and can be traversed quickly if needed.

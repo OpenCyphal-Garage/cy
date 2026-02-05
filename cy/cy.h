@@ -240,8 +240,16 @@ cy_future_t* cy_request(cy_publisher_t* const pub,
                         const cy_us_t         first_response_deadline,
                         const cy_bytes_t      message);
 
+/// Defaults to cy_prio_nominal for all newly created publishers.
 cy_prio_t cy_priority(const cy_publisher_t* const pub);
 void      cy_priority_set(cy_publisher_t* const pub, const cy_prio_t priority);
+
+/// A message will be retransmitted if there is no acknowledgment within this timeout period.
+/// This timeout is only a hint that can be altered by the library according to heuristics;
+/// in particular, each subsequent retransmission uses a larger timeout.
+/// A sensible default is automatically chosen when the publisher is created; it rarely needs to be changed.
+cy_us_t cy_ack_timeout(const cy_publisher_t* const pub);
+void    cy_ack_timeout_set(cy_publisher_t* const pub, const cy_us_t timeout);
 
 /// Each publisher is always linked to a specific single topic.
 /// This pointer remains valid for the entire lifetime of the publisher.
