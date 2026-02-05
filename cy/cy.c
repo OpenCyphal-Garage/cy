@@ -122,10 +122,8 @@ typedef unsigned char byte_t;
 /// It is added to the serialized message size.
 /// Later revisions of the protocol may increase this size, although it is best to avoid it if possible.
 #define HEADER_MAX_BYTES 16U
+
 #define HEADER_TYPE_MASK 31U
-
-#define SEQNO48_MASK ((1ULL << 48U) - 1ULL)
-
 typedef enum
 {
     header_msg_be   = 0,
@@ -136,6 +134,8 @@ typedef enum
     header_rsp_ack  = 5,
     header_rsp_nack = 6,
 } header_type_t;
+
+#define SEQNO48_MASK ((1ULL << 48U) - 1ULL)
 
 #define TAG56_MASK ((1ULL << 56U) - 1ULL)
 
