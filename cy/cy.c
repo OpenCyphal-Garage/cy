@@ -1707,7 +1707,7 @@ static void reordering_eject(reordering_t* const self, reordering_slot_t* const 
     assert((self->interned_by_lin_tag == NULL) == (self->interned_count == 0));
 
     // Update the state with the removed slot.
-    assert(slot->lin_tag < (1ULL << 48U)); // ensure linearized by comparing against an arbitrarily chosen large value
+    assert(slot->lin_tag < (1ULL << 48U)); // ensure linearized by comparing against some unreachable value
     assert(self->tag_baseline <= TAG56_MASK);
     assert(self->subscriber->params.reordering_window >= 0); // we should only end up here if ordered mode is used
     assert(slot->lin_tag > self->last_ejected_lin_tag);      // ensure ordered sequence seen by the application
@@ -1730,10 +1730,8 @@ static void reordering_eject(reordering_t* const self, reordering_slot_t* const 
     cy_message_refcount_dec(arrival.message.content);
 }
 
-/// Force eject min-valued linearized tag, then keep ejecting subsequent tags as long as they are in order until gap.
-static void reordering_eject_force(reordering_t* const self)
+static void reordering_scan(reordering_t* const self, bool force_first)
 {
-    bool first = true;
     while (true) {
         reordering_slot_t* const slot =
           CAVL2_TO_OWNER(cavl2_min(self->interned_by_lin_tag), reordering_slot_t, index_lin_tag);
@@ -1741,8 +1739,8 @@ static void reordering_eject_force(reordering_t* const self)
             olga_cancel(self->topic->cy->olga, &self->timeout);
             break;
         }
-        if (first || ((self->last_ejected_lin_tag + 1U) == slot->lin_tag)) {
-            first = false;
+        if (force_first || ((self->last_ejected_lin_tag + 1U) == slot->lin_tag)) {
+            force_first = false;
             reordering_eject(self, slot);
         } else { // We have pending slots but there is a gap, need to wait for missing messages to arrive first.
             const cy_us_t deadline = slot->message.timestamp + self->subscriber->params.reordering_window;
@@ -1755,7 +1753,7 @@ static void reordering_on_window_expiration(olga_t* const sched, olga_event_t* c
 {
     (void)sched;
     (void)now;
-    reordering_eject_force(event->user);
+    reordering_scan(event->user, true);
 }
 
 /// Ejects all messages in the correct order and leaves the state empty & idle.
@@ -1808,6 +1806,7 @@ static bool reordering_push(reordering_t* const self, const uint64_t tag, const 
         subscriber_invoke(
           self->subscriber,
           make_arrival(self->topic, self->remote_id, self->p2p_context, tag, message, self->substitutions));
+        reordering_scan(self, false); // The just-ejected message may have closed an earlier gap.
         return true;
     }
 
@@ -1849,16 +1848,15 @@ static bool reordering_push(reordering_t* const self, const uint64_t tag, const 
                  (unsigned long long)self->last_ejected_lin_tag);
         return false;
     }
-    cy_message_refcount_inc(message.content); // stayin' alive
-    slot->message              = message;
     slot->lin_tag              = lin_tag;
     cy_tree_t* const slot_tree = cavl2_find_or_insert(&self->interned_by_lin_tag,
                                                       &slot->lin_tag,
                                                       reordering_slot_cavl_compare,
                                                       &slot->index_lin_tag,
                                                       cavl2_trivial_factory);
-    assert(slot_tree == &slot->index_lin_tag);
-    (void)slot_tree;
+    assert(slot_tree == &slot->index_lin_tag); // already checked for duplicates above
+    cy_message_refcount_inc(message.content);  // stayin' alive
+    slot->message = message;
     self->interned_count++;
     assert((self->interned_count == 1) || olga_is_pending(cy->olga, &self->timeout));
     if (!olga_is_pending(cy->olga, &self->timeout)) {
@@ -1877,7 +1875,6 @@ static void reordering_destroy(reordering_t* const self)
     mem_free(self->subscriber->root->cy, self);
 }
 
-// TODO invoke from cy_update().
 static void reordering_drop_stale(cy_subscriber_t* const owner, const cy_us_t now)
 {
     while (true) {
@@ -1910,7 +1907,9 @@ static cy_tree_t* reordering_cavl_factory(void* const user)
     reordering_drop_stale(outer->subscriber, outer->now); // Might free up some memory for the new entry.
     reordering_t* const self = mem_alloc_zero(outer->subscriber->root->cy, sizeof(reordering_t));
     if (self != NULL) {
+        self->timeout             = OLGA_EVENT_INIT;
         self->remote_id           = outer->remote_id;
+        self->subscriber          = outer->subscriber;
         self->topic               = outer->topic;
         self->substitutions       = outer->substitutions;
         self->interned_count      = 0;
@@ -1993,6 +1992,7 @@ static bool on_message(cy_t* const            cy,
                 if (rr != NULL) { // Simply ignore on OOM, nothing we can do.
                     assert(rr->remote_id == remote_id);
                     assert(rr->topic == topic);
+                    assert(rr->subscriber == sub);
                     rr->p2p_context = p2p_context; // keep the latest known return path discovery from the transport
                     if (reordering_push(rr, tag, message)) {
                         acknowledge = true;
@@ -2000,6 +2000,7 @@ static bool on_message(cy_t* const            cy,
                 }
             } else {
                 subscriber_invoke(sub, make_arrival(topic, remote_id, p2p_context, tag, message, substitutions));
+                acknowledge = true;
             }
             sub = next_sub;
         }
@@ -2167,9 +2168,11 @@ cy_subscriber_t* cy_subscribe_ordered(cy_t* const     cy,
                                       const cy_us_t   reordering_window)
 {
     if ((cy != NULL) && (reordering_window >= 0)) {
-        const subscriber_params_t params = { .extent              = extent,
-                                             .reordering_window   = reordering_window,
-                                             .reordering_capacity = REORDERING_CAPACITY_DEFAULT };
+        const subscriber_params_t params = {
+            .extent              = extent,
+            .reordering_window   = min_i64(reordering_window, SESSION_LIFETIME / 2), // sane limit for extra paranoia
+            .reordering_capacity = REORDERING_CAPACITY_DEFAULT,
+        };
         return subscribe(cy, name, params);
     }
     return NULL;
@@ -2431,7 +2434,16 @@ cy_err_t cy_update(cy_t* const cy)
     }
     if (cy->topic_iter != NULL) {
         dedup_drop_stale(cy->topic_iter, now);
-        // TODO: do other things
+        // Do we accept the full subscriber scan here?
+        const cy_topic_coupling_t* cpl = cy->topic_iter->couplings;
+        while (cpl != NULL) {
+            cy_subscriber_t* sub = cpl->root->head;
+            while (sub != NULL) {
+                reordering_drop_stale(sub, now);
+                sub = sub->next;
+            }
+            cpl = cpl->next;
+        }
         cy->topic_iter = cy_topic_iter_next(cy->topic_iter);
     }
 
@@ -2542,6 +2554,7 @@ void cy_on_message(cy_t* const            cy,
     assert(message.content->refcount == 1);
     byte_t header[HEADER_MAX_BYTES];
     if (HEADER_MAX_BYTES != cy_message_read(message.content, 0, HEADER_MAX_BYTES, header)) {
+        cy_message_refcount_dec(message.content);
         return; // Malformed message; ignore.
     }
     message_skip(message.content, HEADER_MAX_BYTES);
