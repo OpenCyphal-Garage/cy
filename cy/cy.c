@@ -88,6 +88,18 @@
 #include <assert.h>
 #include <string.h>
 
+#if __STDC_VERSION__ < 201112L
+#define static_assert(x, ...)        typedef char _static_assert_gl(_static_assertion_, __LINE__)[(x) ? 1 : -1]
+#define _static_assert_gl(a, b)      _static_assert_gl_impl(a, b)
+#define _static_assert_gl_impl(a, b) a##b
+#endif
+
+#if __STDC_VERSION__ >= 201112L
+#define CY_THREAD_LOCAL _Thread_local
+#else
+#define CY_THREAD_LOCAL
+#endif
+
 #define KILO 1000L
 #define MEGA 1000000LL
 
@@ -799,8 +811,8 @@ static void topic_allocate(cy_topic_t* const topic, const uint64_t new_evictions
     cy_t* const cy = topic->cy;
     assert(cavl_count(cy->topics_by_hash) <= (cy->subject_id_modulus / 4));
 #if CY_CONFIG_TRACE
-    static const int         call_depth_indent = 2;
-    static _Thread_local int call_depth        = 0U;
+    static const int           call_depth_indent = 2;
+    static CY_THREAD_LOCAL int call_depth        = 0U;
     call_depth++;
     CY_TRACE(cy,
              "🔍%*s %s evict=%llu->%llu lage=%+d subscribed=%d couplings=%p",

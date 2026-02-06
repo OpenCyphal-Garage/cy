@@ -133,7 +133,7 @@ typedef struct cy_message_vtable_t
 ///     2. winner has seen more evictions (i.e., larger subject-ID mod max_topics).
 /// When a topic is reallocated, it retains its current age.
 /// Conflict resolution may result in a temporary jitter if it happens to occur near log2(age) integer boundary.
-typedef struct cy_topic_t
+struct cy_topic_t
 {
     /// All indexes that this topic is a member of. Indexes are very fast log(N) lookup structures.
     cy_tree_t   index_hash; ///< Hash index handle MUST be the first field.
@@ -179,7 +179,7 @@ typedef struct cy_topic_t
 
     /// User context for application-specific use, such as linking it with external data.
     cy_user_context_t user_context;
-} cy_topic_t;
+};
 
 /// Instances of cy are not copyable; they are always accessed via pointer provided during initialization.
 /// Creation of a new topic may cause resubscription of any existing topics (all topics in the unlikely worst case).
