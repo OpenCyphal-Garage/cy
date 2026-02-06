@@ -50,7 +50,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -pedantic -fstrict-aliasin
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wsign-conversion -Wmissing-declarations -Wold-style-cast")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wsign-promo -Wzero-as-null-pointer-constant")
 
-include_directories(${CMAKE_SOURCE_DIR}/lib)
+include_directories(SYSTEM ${CMAKE_SOURCE_DIR}/lib)
 
 add_subdirectory(cy)
 add_subdirectory(cy_udp_posix)
