@@ -7,8 +7,8 @@ set(CMAKE_CTEST_ARGUMENTS "-V")  # Enable test outputs when running `make test`
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_VERBOSE_MAKEFILE ON)
 
-# Use -DNO_STATIC_ANALYSIS=1 to suppress static analysis.
-# If not suppressed, the tools used here shall be available, otherwise the build will fail.
+# Static analysis.
+set(NO_STATIC_ANALYSIS OFF CACHE BOOL "Disable static analysis to speed up the build")
 if (NOT NO_STATIC_ANALYSIS)
     find_program(clang_tidy NAMES clang-tidy)
     if (NOT clang_tidy)
@@ -19,7 +19,7 @@ if (NOT NO_STATIC_ANALYSIS)
     set(CMAKE_C_CLANG_TIDY ${clang_tidy})
 endif ()
 
-# clang-format
+# Code formatting.
 find_program(clang_format NAMES clang-format)
 if (NOT clang_format)
     message(STATUS "Could not locate clang-format")
@@ -35,7 +35,7 @@ else ()
     add_custom_target(format COMMAND ${clang_format} -i -fallback-style=none -style=file --verbose ${format_files})
 endif ()
 
-# Build options
+# Build options.
 # C
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
