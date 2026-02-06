@@ -79,14 +79,31 @@ typedef struct cy_list_t
     cy_list_member_t* tail; ///< NULL if list empty
 } cy_list_t;
 
+struct cy_message_t
+{
+    size_t                            refcount;
+    const struct cy_message_vtable_t* vtable;
+};
+
 /// Platform-specific implementation of cy_message_t.
 typedef struct cy_message_vtable_t
 {
-    void (*destroy)(cy_message_t*);
+    /// This is used to skip the session-layer header after receiving the message.
+    /// All subsequent reads must add this offset to the requested offset.
+    /// The effect is incremental if invoked more than once.
+    void (*skip)(cy_message_t*, size_t offset);
 
-    /// The offset is supplied with the skip already applied.
-    /// It is guaranteed by the caller that the offset+size does not exceed the message size.
-    size_t (*read)(cy_message_t*, size_t offset, size_t size, void*);
+    /// The implementation must add add the skip offset to the requested offset and adjust the size accordingly.
+    /// The implementation must limit the size if the requested range exceeds the available message size.
+    /// The return value is the number of bytes copied to the output buffer after adjusting the offset and size for
+    /// the skip and bounds.
+    size_t (*read)(const cy_message_t*, size_t offset, size_t size, void* output);
+
+    /// The size sans the skip offset.
+    size_t (*size)(const cy_message_t*);
+
+    /// Invalidates the message instance. Cy invokes this when the refcount drops to zero.
+    void (*destroy)(cy_message_t*);
 } cy_message_vtable_t;
 
 /// This is the base type that is extended by the platform layer with transport- and platform-specific entities,

@@ -56,7 +56,7 @@
 ///
 ///     uint5  type
 ///     void3
-///     uint56 request_tag
+///     uint56 message_tag
 ///     uint48 seqno
 ///     uint16 tag
 ///     # Header size 16 bytes.
@@ -369,52 +369,39 @@ static void* ptr_unbias(const void* const ptr, const size_t offset)
 //                                                  MESSAGE BUFFER
 // =====================================================================================================================
 
-// ReSharper disable CppParameterMayBeConstPtrOrRef
+size_t cy_message_size(const cy_message_t* const msg) { return (msg != NULL) ? msg->vtable->size(msg) : 0; }
 
-/// These are provided for safety only, to ensure valid behavior shall the user attempt to operate on an empty message.
-static void   v_message_empty_destroy(cy_message_t* const self) { (void)self; }
-static size_t v_message_empty_read(cy_message_t* const self, const size_t offset, const size_t size, void* const dest)
+size_t cy_message_read(const cy_message_t* const msg, size_t offset, const size_t size, void* const destination)
 {
-    (void)self;
-    (void)dest;
-    (void)offset;
-    (void)size;
-    return 0;
-}
-static const cy_message_vtable_t message_empty_vtable = { .destroy = v_message_empty_destroy,
-                                                          .read    = v_message_empty_read };
-static const cy_message_t        message_empty        = { .vtable = &message_empty_vtable };
-
-size_t cy_message_size(const cy_message_t msg) { return msg.size_total - smaller(msg.size_total, msg.skip); }
-
-cy_message_t cy_message_move(cy_message_t* const msg)
-{
-    const cy_message_t ret = *msg;
-    *msg                   = message_empty;
-    return ret;
+    return ((msg != NULL) && (msg->vtable != NULL) && (destination != NULL))
+             ? msg->vtable->read(msg, offset, size, destination)
+             : 0;
 }
 
-size_t cy_message_read(cy_message_t* const cursor, size_t offset, const size_t size, void* const destination)
+void cy_message_refcount_inc(cy_message_t* const msg)
 {
-    if ((cursor != NULL) && (cursor->vtable != NULL) && (destination != NULL)) {
-        offset += cursor->skip;
-        if (offset < cursor->size_total) {
-            const size_t to_read = smaller(size, cursor->size_total - offset);
-            return cursor->vtable->read(cursor, offset, to_read, destination);
-        }
+    if (msg != NULL) {
+        assert(msg->refcount > 0);
+        msg->refcount++;
     }
-    return 0;
 }
 
-void cy_message_destroy(cy_message_t* const msg)
+void cy_message_refcount_dec(cy_message_t* const msg)
 {
     if ((msg != NULL) && (msg->vtable != NULL)) {
-        msg->vtable->destroy(msg);
-        (void)cy_message_move(msg);
+        assert(msg->refcount > 0);
+        msg->refcount--;
+        if (msg->refcount == 0) {
+            msg->vtable->destroy(msg);
+        }
     }
 }
 
-// ReSharper restore CppParameterMayBeConstPtrOrRef
+static void message_skip(cy_message_t* const msg, const size_t offset)
+{
+    assert((msg != NULL) && (msg->vtable != NULL) && (msg->vtable->skip != NULL));
+    msg->vtable->skip(msg, offset);
+}
 
 // =====================================================================================================================
 //                                                      FUTURE
@@ -1180,18 +1167,18 @@ typedef struct
 
 /// The name buffer shall be at least CY_TOPIC_NAME_MAX+1 bytes long.
 /// On failure, the version is set to zero (which corresponds to Cyphal v1.0 heartbeat with no topic information).
-static hb_t heartbeat_deserialize(cy_message_t msg, byte_t* const name_buf)
+static hb_t heartbeat_deserialize(const cy_message_t* const msg, byte_t* const name_buf)
 {
     hb_t out = { .version = 0, .topic_name = { .len = 0, .str = (const char*)name_buf } };
     // implicit zero extension rule -- assume zero if absent from the message
-    (void)cy_message_read(&msg, 7, 1, &out.version);
+    (void)cy_message_read(msg, 7, 1, &out.version);
     if (out.version == 0) {
         return (hb_t){ 0 }; // Cyphal v1.0 heartbeat carries no topic information. Simply ignore.
     }
     if (out.version == 1) {
         static const size_t prefix_size = 8 + 5 + 1 + 1 + 1; // hash, evictions, lage, reserved, name_len
         assert(prefix_size <= CY_TOPIC_NAME_MAX + 1);
-        if (prefix_size != cy_message_read(&msg, 8, prefix_size, name_buf)) {
+        if (prefix_size != cy_message_read(msg, 8, prefix_size, name_buf)) {
             return (hb_t){ 0 }; // invalid size
         }
         out.topic_hash      = deserialize_u64(name_buf + 0);
@@ -1199,7 +1186,7 @@ static hb_t heartbeat_deserialize(cy_message_t msg, byte_t* const name_buf)
         out.topic_lage      = (int_fast8_t)name_buf[13];
         out.topic_name.len  = name_buf[15];
         if ((out.topic_name.len > CY_TOPIC_NAME_MAX) ||
-            (out.topic_name.len != cy_message_read(&msg, 24, out.topic_name.len, name_buf))) {
+            (out.topic_name.len != cy_message_read(msg, 24, out.topic_name.len, name_buf))) {
             return (hb_t){ 0 }; // invalid size
         }
         name_buf[out.topic_name.len] = 0; // this is not mandatory but convenient for logging/debugging
@@ -1577,8 +1564,8 @@ static cy_tree_t* dedup_factory(void* const user)
 
 typedef struct
 {
-    uint64_t     tag; ///< UINT64_MAX if empty
-    cy_message_t message;
+    uint64_t        tag; ///< UINT64_MAX if empty
+    cy_message_ts_t message;
 } reordering_slot_t;
 
 /// Subscribers operating in the ordered mode use this instance, one per remote node per subscription,
@@ -1658,7 +1645,7 @@ static bool on_message(cy_t* const            cy,
         .cy          = cy,
         .remote_id   = remote_id,
         .topic_hash  = topic->hash,
-        .request_tag = tag,
+        .message_tag = tag,
         .seqno       = 0,
         .p2p_context = p2p_context,
     };
@@ -1853,7 +1840,7 @@ static cy_err_t do_respond(cy_breadcrumb_t* const breadcrumb, const cy_us_t dead
     const uint16_t      tag         = 0U;
     assert(seqno < (1ULL << 48U)); // Sanity check -- this is unreachable.
     byte_t header[16];
-    (void)serialize_u64(serialize_u64(header, (breadcrumb->request_tag << 56U) | (uint64_t)header_type),
+    (void)serialize_u64(serialize_u64(header, (breadcrumb->message_tag << 56U) | (uint64_t)header_type),
                         seqno | ((uint64_t)tag << 48U));
     const cy_bytes_t headed_message = { .size = sizeof(header), .data = header, .next = &message };
 
@@ -2158,7 +2145,7 @@ static void send_message_ack(cy_t* const            cy,
 static void send_response_ack(cy_t* const            cy,
                               const cy_p2p_context_t p2p_context,
                               const uint64_t         remote_id,
-                              const uint64_t         request_tag,
+                              const uint64_t         message_tag,
                               const uint64_t         seqno,
                               const uint16_t         tag,
                               const bool             positive,
@@ -2166,7 +2153,7 @@ static void send_response_ack(cy_t* const            cy,
 {
     byte_t              header[16];
     const header_type_t header_type = positive ? header_rsp_ack : header_rsp_nack;
-    (void)serialize_u64(serialize_u64(header, (request_tag << 56U) | (uint64_t)header_type),
+    (void)serialize_u64(serialize_u64(header, (message_tag << 56U) | (uint64_t)header_type),
                         seqno | ((uint64_t)tag << 48U));
     const cy_err_t err =
       cy->vtable->p2p(cy, &p2p_context, deadline, remote_id, (cy_bytes_t){ .size = sizeof(header), .data = header });
@@ -2187,11 +2174,12 @@ void cy_on_message(cy_t* const            cy,
                    cy_message_ts_t        message)
 {
     assert((cy != NULL) && (message.timestamp >= 0));
+    assert(message.content->refcount == 1);
     byte_t header[HEADER_MAX_BYTES];
-    if (HEADER_MAX_BYTES != cy_message_read(&message.content, 0, HEADER_MAX_BYTES, header)) {
+    if (HEADER_MAX_BYTES != cy_message_read(message.content, 0, HEADER_MAX_BYTES, header)) {
         return; // Malformed message; ignore.
     }
-    message.content.skip += HEADER_MAX_BYTES;
+    message_skip(message.content, HEADER_MAX_BYTES);
     const header_type_t type = (header[0] & HEADER_TYPE_MASK);
 
     // This is the central entry point for all incoming messages. It's complex but there's an advantage to keeping the
@@ -2269,12 +2257,12 @@ void cy_on_message(cy_t* const            cy,
 #if 0
         case header_rsp_be:
         case header_rsp_rel: {
-            const uint64_t          request_tag = deserialize_u56(&header[1]);
+            const uint64_t          message_tag = deserialize_u56(&header[1]);
             const uint64_t          seqno_tag   = deserialize_u64(&header[8]);
             const uint16_t          tag         = (seqno_tag >> 48U) & 0xFFFFU;
             const uint64_t          seqno       = seqno_tag & SEQNO48_MASK;
             request_future_t* const future =
-              (request_future_t*)future_index_lookup(&cy->request_futures_by_tag, request_tag);
+              (request_future_t*)future_index_lookup(&cy->request_futures_by_tag, message_tag);
             if (type == header_rsp_rel) {
                 /// A known ambiguity exists if the server sends a reliable response that is accepted, but the
                 /// first positive-ack is lost; the server will retransmit the response, but the client application
@@ -2284,7 +2272,7 @@ void cy_on_message(cy_t* const            cy,
                 send_response_ack(cy,
                                   p2p_context,
                                   remote_id,
-                                  request_tag,
+                                  message_tag,
                                   seqno,
                                   tag,
                                   future != NULL,
@@ -2296,16 +2284,16 @@ void cy_on_message(cy_t* const            cy,
                 CY_TRACE(cy,
                          "⚠️ Orphan response from %016llx for request tag %016llx",
                          (unsigned long long)remote_id,
-                         (unsigned long long)request_tag);
+                         (unsigned long long)message_tag);
             }
             break;
         }
 
         case header_rsp_ack:
         case header_rsp_nack: {
-            const uint64_t request_tag = deserialize_u56(&header[1]);
+            const uint64_t message_tag = deserialize_u56(&header[1]);
             const uint64_t seqno_tag   = deserialize_u64(&header[8]);
-            const uint64_t key = rapidhash((uint64_t[3]){ remote_id, request_tag, seqno_tag }, 24); // local transform
+            const uint64_t key = rapidhash((uint64_t[3]){ remote_id, message_tag, seqno_tag }, 24); // local transform
             response_future_t* const future =
               (response_future_t*)future_index_lookup(&cy->response_futures_by_tag, key);
             if (future != NULL) {
@@ -2324,6 +2312,7 @@ void cy_on_message(cy_t* const            cy,
             CY_TRACE(cy, "⚠️ Unsupported message from %016llx: header type %02x", (unsigned long long)remote_id, type);
             break;
     }
+    cy_message_refcount_dec(message.content);
 }
 
 // =====================================================================================================================

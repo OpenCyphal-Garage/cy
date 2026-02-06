@@ -88,40 +88,25 @@ typedef union cy_user_context_t
 //                                                  MESSAGE BUFFER
 // =====================================================================================================================
 
-/// A type-erased movable received transfer buffer handle with a platform-specific implementation.
+/// An abstract buffer handle with a platform-specific implementation.
 /// It allows the platform layer to eliminate data copying until/unless explicitly requested by the application.
 /// Some transport libraries (e.g., libudpard) store the data in a set of segments obtained directly from the NIC.
-/// Use cy_message_read to access the data.
-/// Avoid copying instances, consider using cy_message_move() instead.
-/// Do not access any of the fields directly; use the provided functions instead.
-typedef struct cy_message_t
-{
-    void*  state[2];   ///< Opaque implementation-specific soft state.
-    size_t size_total; ///< Must contain the total size of the scattered buffer data in bytes, incl. the skip.
-    size_t skip;       ///< Reads will start from this offset within the message; size will return size_total-skip.
-    const struct cy_message_vtable_t* vtable;
-} cy_message_t;
+/// Use cy_message_read to access the data. To retain/release instances, use refcount functions.
+typedef struct cy_message_t cy_message_t;
 
-/// Returns the size of the scattered buffer in bytes. The size of a moved-from instance is zero.
-size_t cy_message_size(const cy_message_t msg);
-
-/// A convenience helper that returns a copy of the message object and invalidates the original.
-/// Use this to transfer the ownership of the message to another message object.
-cy_message_t cy_message_move(cy_message_t* const msg);
+/// It is not necessary to check the size before reading the data; the read function checks the bounds so it is
+/// safe to request an out-of-bounds read; only the available data will be copied.
+size_t cy_message_size(const cy_message_t* const msg);
 
 /// This is the only way to access the received message data.
 /// It gathers `size` bytes of data located at `offset` bytes from payload origin into the provided contiguous buffer.
 /// The function returns the number of bytes copied.
 /// If the requested range exceeds the available message size, only the available bytes are copied.
-/// The implementation may be optimized for highly efficient sequential access by caching soft states in the cursor
-/// instance. This is particularly useful for message deserialization by reading the fields out one by one.
-/// Given (nearly-)sequential access, the complexity is linear in the size.
-size_t cy_message_read(cy_message_t* const cursor, size_t offset, const size_t size, void* const destination);
+size_t cy_message_read(const cy_message_t* const msg, size_t offset, const size_t size, void* const destination);
 
-/// Must be invoked at least once on a message object obtained from a received transfer.
-/// No effect if the instance is already moved-from or if the pointer is NULL.
-/// Subsequent calls have no effect; the passed instance will be moved-from.
-void cy_message_destroy(cy_message_t* const msg);
+/// Use reference counting to manage the lifetime of message instances.
+void cy_message_refcount_inc(cy_message_t* const msg);
+void cy_message_refcount_dec(cy_message_t* const msg);
 
 /// A message with an associated non-negative arrival timestamp.
 /// The timestamp is carried over from the low-level NIC driver, which defines the accuracy, which is typically high
@@ -129,8 +114,8 @@ void cy_message_destroy(cy_message_t* const msg);
 /// The timestamp of a multi-frame transfer equals the arrival time of the first frame of that transfer.
 typedef struct cy_message_ts_t
 {
-    cy_us_t      timestamp;
-    cy_message_t content;
+    cy_us_t       timestamp;
+    cy_message_t* content;
 } cy_message_ts_t;
 
 // =====================================================================================================================
@@ -293,7 +278,7 @@ typedef struct cy_p2p_context_t
 /// One can obtain a convenient 64-bit stream identifier by hashing these three values together; given a good hash,
 /// the collision probability is astronomically low and is negligible for all practical purposes:
 ///
-///     const uint64_t key[3] = { b->remote_id, b->topic_hash, b->request_tag };
+///     const uint64_t key[3] = { b->remote_id, b->topic_hash, b->message_tag };
 ///     return rapidhash(key, sizeof(key));
 ///
 typedef struct cy_breadcrumb_t
@@ -303,7 +288,7 @@ typedef struct cy_breadcrumb_t
     /// Stream identifier triplet. Can be hashed down to a single 64-bit value if needed.
     uint64_t remote_id;   ///< Uniquely identifies the source node within the network.
     uint64_t topic_hash;  ///< Identifies the topic the original request message was received from.
-    uint64_t request_tag; ///< The tag of the original request message this breadcrumb can respond to.
+    uint64_t message_tag; ///< The tag of the original request message this breadcrumb can respond to.
 
     uint64_t         seqno; ///< Incremented with each response sent (incl. failed); starts at zero.
     cy_p2p_context_t p2p_context;
@@ -331,13 +316,8 @@ typedef struct cy_substitution_set_t
 /// Event information for a received message from a topic subscription.
 typedef struct cy_arrival_t
 {
-    /// Optionally, the user callback can take ownership of the message using cy_message_move();
-    /// however, to avoid use-after-free, the following rules must be followed:
-    /// 1. At most one callback can move the message out of the arrival instance.
-    /// 2. If the message is moved out, it shall not be destroyed (see cy_message_destroy()) until after the last
-    ///    callback returns, unless it is the last callback to process it.
-    /// If the message is not moved out, it will be destroyed automatically after return from the callback.
-    /// If these restrictions become too limiting, we may introduce simple reference counting for messages.
+    /// The message will be given with refcount=1. If the application needs to keep it after return from the callback,
+    /// it must increment the refcount using cy_message_refcount_inc() to avoid premature destruction.
     cy_message_ts_t message;
 
     /// Use cy_respond() to send a P2P response directly to the publisher of this message if needed.
