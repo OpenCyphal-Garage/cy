@@ -21,7 +21,7 @@ void cy_trace(cy_t* const         cy,
     static const int32_t mega = 1000000;
     static const int32_t kilo = 1000;
     (void)fprintf(stderr, //
-                  "CY_TRACE(%p) %lld.%03lld %s:%04u:%s: ",
+                  "CY_TRACE(%p) %06lld.%03lld %s:%04u:%s: ",
                   (void*)cy,
                   (long long)(now / mega),
                   (long long)((now % mega) / kilo),

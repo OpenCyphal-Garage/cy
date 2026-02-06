@@ -15,9 +15,10 @@ Update docs/examples when public API behavior changes.
 - `examples/`: runnable demos.
 - `lib/`: single-header dependencies plus the `lib/libudpard` git submodule.
 - `formal_verification/`: TLA+ models and helper scripts.
-- `dsdl/`: core Cyphal DSDL definitions.
 
-## Build, Test, and Development Commands
+## Build, Test, and Development
+
+The test suite in `tests/` is the primary development environment for Cy. It is composed of two parts: intrusive tests in C `#include <cy.c>` directly to reach and test the internals, and API-level tests in C++ that use the public API and test the library as a black box. It is preferable to test all behaviors through the API only, and resort to intrusive tests only when necessary to reach internal logic that cannot be tested through the API.
 
 If you need a build directory, create one in the project root named with a `build` prefix; you can also use existing build directories if you prefer so, but avoid using `cmake-build-*` because these are used by CLion.
 
@@ -27,7 +28,7 @@ When compiling, use multiple jobs to use all CPU cores.
 
 Run all tests in debug build to ensure that all assertion checks are enabled.
 
-It is best to use Clang-Format to format the code when done editing.
+Use Clang-Format to format the code when done editing.
 
 ```sh
 git submodule update --init --recursive

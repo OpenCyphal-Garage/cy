@@ -948,6 +948,8 @@ static cy_err_t topic_new(cy_t* const        cy,
     topic->pub_next_tag_56bit = cy->vtable->random(cy); // bits above 56 are ignored (can be arbitrary)
     topic->couplings          = NULL;
     topic->subscribed         = false;
+    topic->sub_index_dedup_by_remote_id = NULL;
+    topic->sub_list_dedup_by_recency    = LIST_EMPTY;
     topic->pub_count          = 0;
     topic->user_context       = CY_USER_CONTEXT_EMPTY;
 

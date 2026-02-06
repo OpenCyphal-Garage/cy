@@ -1,5 +1,4 @@
 #include "helpers.h"
-#include <stdlib.h>
 
 void cy_test_serialize_u56(unsigned char out[7], uint64_t value)
 {
@@ -42,16 +41,3 @@ void cy_test_make_message_header(unsigned char  out[16],
     cy_test_serialize_u56(&out[1], tag56);
     cy_test_serialize_u64(&out[8], topic_hash);
 }
-
-void* cy_test_realloc(void* const ptr, const size_t size)
-{
-    if (size == 0U) {
-        free(ptr);
-        return NULL;
-    }
-    return realloc(ptr, size);
-}
-
-void* cy_test_zalloc(const size_t size) { return calloc(1U, size); }
-
-void cy_test_free(void* const ptr) { free(ptr); }

@@ -1,23 +1,20 @@
 #include <cy.c> // NOLINT(bugprone-suspicious-include)
 #include <unity.h>
-#include <stdlib.h>
+#include "helpers.h"
 #include <string.h>
 
 typedef struct
 {
-    cy_t        cy;
-    cy_vtable_t vtable;
-    cy_us_t     now;
+    cy_t           cy;
+    cy_vtable_t    vtable;
+    guarded_heap_t heap;
+    cy_us_t        now;
 } dedup_fixture_t;
 
 static void* fixture_realloc(cy_t* const cy, void* const ptr, const size_t size)
 {
-    (void)cy;
-    if (size == 0U) {
-        free(ptr);
-        return NULL;
-    }
-    return realloc(ptr, size);
+    dedup_fixture_t* const self = (dedup_fixture_t*)cy;
+    return guarded_heap_realloc(&self->heap, ptr, size);
 }
 
 static cy_us_t fixture_now(const cy_t* const cy) { return ((const dedup_fixture_t*)cy)->now; }
@@ -25,6 +22,7 @@ static cy_us_t fixture_now(const cy_t* const cy) { return ((const dedup_fixture_
 static void dedup_fixture_init(dedup_fixture_t* const self)
 {
     memset(self, 0, sizeof(*self));
+    guarded_heap_init(&self->heap, UINT64_C(0xDED0A110C0FFEE01));
     self->vtable.now     = fixture_now;
     self->vtable.realloc = fixture_realloc;
     self->cy.vtable      = &self->vtable;
@@ -70,6 +68,8 @@ static void test_dedup_first_and_exact_duplicate(void)
     TEST_ASSERT_TRUE(dedup_update(dd, &owner, 100U, 1001));
 
     dedup_cleanup(&owner);
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&fixture.heap));
 }
 
 static void test_dedup_out_of_order_seen_once(void)
@@ -85,6 +85,8 @@ static void test_dedup_out_of_order_seen_once(void)
     TEST_ASSERT_TRUE(dedup_update(dd, &owner, 199U, 12));
 
     dedup_cleanup(&owner);
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&fixture.heap));
 }
 
 static void test_dedup_wraparound(void)
@@ -100,6 +102,8 @@ static void test_dedup_wraparound(void)
     TEST_ASSERT_TRUE(dedup_update(dd, &owner, 0U, 2));
 
     dedup_cleanup(&owner);
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&fixture.heap));
 }
 
 static void test_dedup_drop_stale(void)
@@ -115,6 +119,8 @@ static void test_dedup_drop_stale(void)
     TEST_ASSERT_NULL(owner.sub_index_dedup_by_remote_id);
     TEST_ASSERT_NULL(owner.sub_list_dedup_by_recency.head);
     TEST_ASSERT_NULL(owner.sub_list_dedup_by_recency.tail);
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&fixture.heap));
 }
 
 void setUp(void) {}

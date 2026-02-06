@@ -1,11 +1,12 @@
 #include "message.h"
+#include "guarded_heap.h"
 #include <assert.h>
-#include <stdlib.h>
 #include <string.h>
 
 typedef struct
 {
     cy_message_t  base;
+    void*         heap_context;
     size_t        skip_offset;
     size_t        payload_size;
     unsigned char payload[];
@@ -63,7 +64,7 @@ static void test_message_destroy(cy_message_t* const msg)
     self->base.vtable   = NULL;
     self->base.refcount = 0;
     self->skip_offset   = self->payload_size;
-    free(self);
+    guarded_heap_free(self->heap_context, self);
 }
 
 static const cy_message_vtable_t g_vtable = {
@@ -73,17 +74,18 @@ static const cy_message_vtable_t g_vtable = {
     .destroy = test_message_destroy,
 };
 
-cy_message_t* cy_test_message_make(const void* const data, const size_t size)
+cy_message_t* cy_test_message_make(void* const heap_context, const void* const data, const size_t size)
 {
     if ((size > 0U) && (data == NULL)) {
         return NULL;
     }
-    test_message_t* const self = (test_message_t*)malloc(sizeof(test_message_t) + size);
+    test_message_t* const self = (test_message_t*)guarded_heap_alloc(heap_context, sizeof(test_message_t) + size);
     if (self == NULL) {
         return NULL;
     }
     self->base.refcount = 1U;
     self->base.vtable   = &g_vtable;
+    self->heap_context  = heap_context;
     self->skip_offset   = 0U;
     self->payload_size  = size;
     if (size > 0U) {

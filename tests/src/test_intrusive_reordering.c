@@ -1,15 +1,16 @@
 #include <cy.c> // NOLINT(bugprone-suspicious-include)
 #include <unity.h>
+#include "helpers.h"
 #include "message.h"
-#include <stdlib.h>
 #include <string.h>
 
 typedef struct
 {
-    cy_t        cy;
-    cy_vtable_t vtable;
-    olga_t      olga;
-    cy_us_t     now;
+    cy_t           cy;
+    cy_vtable_t    vtable;
+    guarded_heap_t heap;
+    olga_t         olga;
+    cy_us_t        now;
 } reorder_fixture_t;
 
 typedef struct
@@ -30,12 +31,8 @@ typedef struct
 
 static void* fixture_realloc(cy_t* const cy, void* const ptr, const size_t size)
 {
-    (void)cy;
-    if (size == 0U) {
-        free(ptr);
-        return NULL;
-    }
-    return realloc(ptr, size);
+    reorder_fixture_t* const self = (reorder_fixture_t*)cy;
+    return guarded_heap_realloc(&self->heap, ptr, size);
 }
 
 static cy_us_t fixture_now(const cy_t* const cy) { return ((const reorder_fixture_t*)cy)->now; }
@@ -52,6 +49,7 @@ static void reorder_env_init(reorder_env_t* const self)
 {
     memset(self, 0, sizeof(*self));
 
+    guarded_heap_init(&self->fixture.heap, UINT64_C(0xA110CA7E5EED1234));
     self->fixture.vtable.now     = fixture_now;
     self->fixture.vtable.realloc = fixture_realloc;
     self->fixture.cy.vtable      = &self->fixture.vtable;
@@ -93,7 +91,7 @@ static void reorder_env_cleanup(reorder_env_t* const self)
 
 static bool push_message(reorder_env_t* const self, const uint64_t tag, const cy_us_t ts, const unsigned char payload)
 {
-    cy_message_t* const msg = cy_test_message_make(&payload, 1);
+    cy_message_t* const msg = cy_test_message_make(&self->fixture.heap, &payload, 1);
     TEST_ASSERT_NOT_NULL(msg);
     const cy_message_ts_t mts = { .timestamp = ts, .content = msg };
     const bool            out = reordering_push(&self->rr, tag, mts);
@@ -126,6 +124,8 @@ static void test_reordering_duplicate_interned_message_is_idempotent(void)
     TEST_ASSERT_EQUAL_size_t(0, env.rr.interned_count);
 
     reorder_env_cleanup(&env);
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&env.fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&env.fixture.heap));
 }
 
 static void test_reordering_gap_closure_flushes_followers(void)
@@ -150,6 +150,8 @@ static void test_reordering_gap_closure_flushes_followers(void)
     TEST_ASSERT_EQUAL_size_t(0, env.rr.interned_count);
 
     reorder_env_cleanup(&env);
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&env.fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&env.fixture.heap));
 }
 
 static void test_reordering_late_drop(void)
@@ -164,6 +166,8 @@ static void test_reordering_late_drop(void)
     TEST_ASSERT_EQUAL_size_t(1, env.capture.count);
 
     reorder_env_cleanup(&env);
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&env.fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&env.fixture.heap));
 }
 
 static void test_reordering_timeout_forces_ejection(void)
@@ -183,6 +187,8 @@ static void test_reordering_timeout_forces_ejection(void)
     TEST_ASSERT_EQUAL_size_t(0, env.rr.interned_count);
 
     reorder_env_cleanup(&env);
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&env.fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&env.fixture.heap));
 }
 
 void setUp(void)

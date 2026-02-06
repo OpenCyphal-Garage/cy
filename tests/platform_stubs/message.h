@@ -8,7 +8,7 @@ extern "C"
 {
 #endif
 
-cy_message_t* cy_test_message_make(const void* data, size_t size);
+cy_message_t* cy_test_message_make(void* heap_context, const void* data, size_t size);
 
 size_t cy_test_message_live_count(void);
 size_t cy_test_message_destroy_count(void);

@@ -5,7 +5,6 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <cstring>
 
 namespace {
@@ -22,7 +21,9 @@ struct arrival_capture_t
 
 struct test_platform_t final : cy_t
 {
-    cy_vtable_t vtable{};
+    cy_vtable_t    vtable{};
+    guarded_heap_t core_heap{};
+    guarded_heap_t message_heap{};
 
     cy_us_t       now{ 0 };
     std::uint64_t random_state{ 1U };
@@ -43,8 +44,8 @@ extern "C" cy_us_t platform_now(const cy_t* const cy) { return platform_from_con
 
 extern "C" void* platform_realloc(cy_t* const cy, void* const ptr, const size_t size)
 {
-    (void)cy;
-    return cy_test_realloc(ptr, size);
+    test_platform_t* const self = platform_from(cy);
+    return guarded_heap_realloc(&self->core_heap, ptr, size);
 }
 
 extern "C" std::uint64_t platform_random(cy_t* const cy)
@@ -56,8 +57,8 @@ extern "C" std::uint64_t platform_random(cy_t* const cy)
 
 extern "C" cy_topic_t* platform_new_topic(cy_t* const cy)
 {
-    (void)cy;
-    return static_cast<cy_topic_t*>(cy_test_zalloc(sizeof(cy_topic_t)));
+    test_platform_t* const self = platform_from(cy);
+    return static_cast<cy_topic_t*>(guarded_heap_alloc(&self->core_heap, sizeof(cy_topic_t)));
 }
 
 extern "C" cy_err_t platform_publish(cy_topic_t* const topic,
@@ -81,7 +82,13 @@ extern "C" cy_err_t platform_subscribe(cy_topic_t* const topic, const size_t ext
 
 extern "C" void platform_unsubscribe(cy_topic_t* const topic) { (void)topic; }
 
-extern "C" void platform_topic_destroy(cy_topic_t* const topic) { cy_test_free(topic); }
+extern "C" void platform_topic_destroy(cy_topic_t* const topic)
+{
+    if (topic != nullptr) {
+        test_platform_t* const self = platform_from(topic->cy);
+        guarded_heap_free(&self->core_heap, topic);
+    }
+}
 
 extern "C" void platform_p2p_extent(cy_t* const cy, const size_t extent) { platform_from(cy)->p2p_extent = extent; }
 
@@ -136,7 +143,9 @@ extern "C" void on_arrival_capture(cy_subscriber_t* const sub, const cy_arrival_
 
 void platform_init(test_platform_t* const self)
 {
-    *self                              = test_platform_t{};
+    *self = test_platform_t{};
+    guarded_heap_init(&self->core_heap, UINT64_C(0xFACEB00C12345678));
+    guarded_heap_init(&self->message_heap, UINT64_C(0xDEC0DE1234567890));
     self->vtable.now                   = platform_now;
     self->vtable.realloc               = platform_realloc;
     self->vtable.random                = platform_random;
@@ -165,7 +174,7 @@ void dispatch_message(test_platform_t* const  self,
     std::array<unsigned char, 17> wire{};
     cy_test_make_message_header(wire.data(), type, tag, cy_topic_hash(topic));
     wire[16]                = payload_byte;
-    cy_message_t* const msg = cy_test_message_make(wire.data(), wire.size());
+    cy_message_t* const msg = cy_test_message_make(&self->message_heap, wire.data(), wire.size());
     TEST_ASSERT_NOT_NULL(msg);
 
     cy_message_ts_t message;
@@ -182,7 +191,7 @@ void test_api_malformed_header_drops_message()
     platform_init(&platform);
 
     const std::array<unsigned char, 3> wire = { 0x01U, 0x02U, 0x03U };
-    cy_message_t* const                msg  = cy_test_message_make(wire.data(), wire.size());
+    cy_message_t* const                msg  = cy_test_message_make(&platform.message_heap, wire.data(), wire.size());
     TEST_ASSERT_NOT_NULL(msg);
     cy_message_ts_t mts;
     mts.timestamp              = 10;
@@ -193,6 +202,10 @@ void test_api_malformed_header_drops_message()
     TEST_ASSERT_EQUAL_size_t(1, cy_test_message_destroy_count());
     TEST_ASSERT_EQUAL_size_t(0, cy_test_message_live_count());
     TEST_ASSERT_EQUAL_size_t(0, platform.p2p_count);
+
+    cy_destroy(static_cast<cy_t*>(&platform));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&platform.message_heap));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&platform.message_heap));
 }
 
 void test_api_reliable_duplicate_acked_once_to_application()
@@ -221,6 +234,10 @@ void test_api_reliable_duplicate_acked_once_to_application()
     TEST_ASSERT_EQUAL_size_t(2, platform.p2p_count);
     TEST_ASSERT_EQUAL_UINT8(HeaderMsgAck, static_cast<uint8_t>(platform.last_p2p[0] & 31U));
     TEST_ASSERT_EQUAL_size_t(0, cy_test_message_live_count());
+
+    cy_destroy(static_cast<cy_t*>(&platform));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&platform.message_heap));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&platform.message_heap));
 }
 
 void test_api_ordered_subscriber_timeout_flush()
@@ -252,6 +269,10 @@ void test_api_ordered_subscriber_timeout_flush()
     TEST_ASSERT_EQUAL_UINT64(8U, capture.tags[0]);
     TEST_ASSERT_EQUAL_UINT64(9U, capture.tags[1]);
     TEST_ASSERT_EQUAL_size_t(0, cy_test_message_live_count());
+
+    cy_destroy(static_cast<cy_t*>(&platform));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&platform.message_heap));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&platform.message_heap));
 }
 } // namespace
 
