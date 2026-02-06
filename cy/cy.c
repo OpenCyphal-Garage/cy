@@ -1690,7 +1690,6 @@ typedef struct
     cy_subscriber_t*      subscriber;
     cy_topic_t*           topic;
     cy_substitution_set_t substitutions;
-    cy_p2p_context_t      p2p_context;
     uint64_t              tag;
 } reordering_context_t;
 
@@ -1714,7 +1713,7 @@ static void reordering_eject(reordering_t* const self, reordering_slot_t* const 
     assert(slot->lin_tag > self->last_ejected_lin_tag);      // ensure ordered sequence seen by the application
     self->last_ejected_lin_tag = slot->lin_tag;
 
-    // Construct the arrival instance. It copies the relevanto states from the slot so that it can be destroyed.
+    // Construct the arrival instance. It copies the relevant states from the slot so that it can be destroyed.
     assert(slot->message.timestamp >= 0);
     assert(slot->message.content != NULL);
     const cy_arrival_t arrival = make_arrival(self->topic,
@@ -1848,7 +1847,7 @@ static bool reordering_push(reordering_t* const self, const uint64_t tag, const 
                  (unsigned long long)tag,
                  (unsigned long long)lin_tag,
                  (unsigned long long)self->last_ejected_lin_tag);
-        return false; // The remote will likely retransmit and we might be able to accept it then, hopefully.
+        return false;
     }
     cy_message_refcount_inc(message.content); // stayin' alive
     slot->message              = message;
@@ -1905,7 +1904,7 @@ static int32_t reordering_cavl_compare(const void* const user, const cy_tree_t* 
     return (outer->remote_id > inner->remote_id) ? +1 : -1;
 }
 
-static cy_tree_t* reordering_cavl_factory(const void* const user)
+static cy_tree_t* reordering_cavl_factory(void* const user)
 {
     const reordering_context_t* const outer = (const reordering_context_t*)user;
     reordering_drop_stale(outer->subscriber, outer->now); // Might free up some memory for the new entry.
@@ -1914,7 +1913,6 @@ static cy_tree_t* reordering_cavl_factory(const void* const user)
         self->remote_id           = outer->remote_id;
         self->topic               = outer->topic;
         self->substitutions       = outer->substitutions;
-        self->p2p_context         = outer->p2p_context;
         self->interned_count      = 0;
         self->interned_by_lin_tag = NULL;
         reordering_resequence(self, outer->tag);
@@ -1961,9 +1959,54 @@ static bool on_message(cy_t* const            cy,
             return true; // Already received, ack but don't process.
         }
     }
-    // TODO: REORDERING
 
-    return false;
+    // Go over the matching subscribers and invoke the handlers.
+    // Remember that one topic may match many subscribers, and a single pattern subscriber may match many topics.
+    bool                       acknowledge = false;
+    const cy_topic_coupling_t* cpl         = topic->couplings;
+    while (cpl != NULL) {
+        const cy_topic_coupling_t* const next_cpl = cpl->next;
+        cy_subscriber_t*                 sub      = cpl->root->head;
+        assert(sub != NULL); // Otherwise it should have been removed from the coupling list.
+        while (sub != NULL) {
+            cy_subscriber_t* const      next_sub      = sub->next;
+            const cy_substitution_set_t substitutions = { .count         = cpl->substitution_count,
+                                                          .substitutions = cpl->substitutions };
+            const bool use_reordering = (sub->params.reordering_window >= 0) && (sub->params.reordering_capacity > 1);
+            if (use_reordering) {
+                reordering_context_t ctx = {
+                    .now           = message.timestamp,
+                    .remote_id     = remote_id,
+                    .subscriber    = sub,
+                    .topic         = topic, // The topic and coupling references will be kept alive by the subscriber.
+                    .substitutions = substitutions,
+                    .tag           = tag,
+                };
+                // Will either find an existing state or create a new one; NULL on OOM only.
+                reordering_t* const rr = CAVL2_TO_OWNER(cavl2_find_or_insert(&sub->index_reordering_by_remote_id, //
+                                                                             &ctx,
+                                                                             reordering_cavl_compare,
+                                                                             &ctx,
+                                                                             reordering_cavl_factory),
+                                                        reordering_t,
+                                                        index);
+                if (rr != NULL) { // Simply ignore on OOM, nothing we can do.
+                    assert(rr->remote_id == remote_id);
+                    assert(rr->topic == topic);
+                    rr->p2p_context = p2p_context; // keep the latest known return path discovery from the transport
+                    if (reordering_push(rr, tag, message)) {
+                        acknowledge = true;
+                    }
+                }
+            } else {
+                subscriber_invoke(sub, make_arrival(topic, remote_id, p2p_context, tag, message, substitutions));
+            }
+            sub = next_sub;
+        }
+        cpl = next_cpl;
+    }
+
+    return acknowledge;
 }
 
 /// This is linear complexity but we expect to have few subscribers per topic, so it is acceptable.
