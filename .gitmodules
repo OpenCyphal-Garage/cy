@@ -1,3 +1,6 @@
 [submodule "lib/libudpard"]
 	path = lib/libudpard
 	url = https://github.com/OpenCyphal/libudpard
+[submodule "lib/unity"]
+	path = lib/unity
+	url = https://github.com/ThrowTheSwitch/Unity
