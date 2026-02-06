@@ -11,8 +11,8 @@ typedef struct
     unsigned char payload[];
 } test_message_t;
 
-static size_t g_live_count    = 0;
-static size_t g_destroy_count = 0;
+static size_t g_live_count    = 0; // NOLINT(*-non-const-global-variables)
+static size_t g_destroy_count = 0; // NOLINT(*-non-const-global-variables)
 
 static size_t smaller(const size_t a, const size_t b) { return (a < b) ? a : b; }
 

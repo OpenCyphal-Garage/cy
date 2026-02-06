@@ -56,8 +56,6 @@ function(cy_gen_test name compile_flags link_flags c_standard)
             CXX_STANDARD_REQUIRED ON
             CXX_EXTENSIONS OFF
             COMPILE_WARNING_AS_ERROR ON
-            C_CLANG_TIDY ""
-            CXX_CLANG_TIDY ""
     )
     set_property(GLOBAL APPEND PROPERTY CY_TEST_EXECUTABLE_TARGETS ${name})
     add_test(NAME "run_${name}" COMMAND ${name})
