@@ -1314,7 +1314,7 @@ static void on_heartbeat(cy_subscriber_t* const sub, const cy_arrival_t arrival)
             // infringing node) that we are using this subject-ID, so that the loser knows that it has to move.
             // If we lost, we need to gossip this topic ASAP as well because every other participant on this topic
             // will also move, but the trick is that the others could have settled on different subject-IDs.
-            // Everyone needs to publish their own new allocation and then we will pick max subject-ID out of that.
+            // Everyone needs to publish their own new allocation and then we will pick max eviction counter of all.
             if (win) {
                 assert(!is_pinned(mine->hash));
                 heartbeat_begin(cy);
