@@ -8,17 +8,16 @@
 #include <cstdlib>
 #include <cstring>
 
-namespace
-{
+namespace {
 constexpr std::uint8_t HeaderMsgBestEffort = 0U;
 constexpr std::uint8_t HeaderMsgReliable   = 1U;
 constexpr std::uint8_t HeaderMsgAck        = 2U;
 
 struct arrival_capture_t
 {
-    std::size_t                         count{0};
-    std::array<std::uint64_t, 16>       tags{};
-    std::array<unsigned char, 16>       first_payload_byte{};
+    std::size_t                   count{ 0 };
+    std::array<std::uint64_t, 16> tags{};
+    std::array<unsigned char, 16> first_payload_byte{};
 };
 
 struct test_platform_t
@@ -26,15 +25,15 @@ struct test_platform_t
     cy_t        cy{};
     cy_vtable_t vtable{};
 
-    cy_us_t now{0};
-    std::uint64_t random_state{1U};
+    cy_us_t       now{ 0 };
+    std::uint64_t random_state{ 1U };
 
-    std::size_t p2p_count{0};
+    std::size_t                   p2p_count{ 0 };
     std::array<unsigned char, 16> last_p2p{};
-    std::size_t p2p_extent{0};
+    std::size_t                   p2p_extent{ 0 };
 
-    std::size_t subscription_error_count{0};
-    cy_err_t    last_subscription_error{CY_OK};
+    std::size_t subscription_error_count{ 0 };
+    cy_err_t    last_subscription_error{ CY_OK };
 };
 
 static test_platform_t* platform_from(cy_t* const cy) { return reinterpret_cast<test_platform_t*>(cy); }
@@ -94,7 +93,7 @@ extern "C" void platform_topic_destroy(cy_topic_t* const topic) { std::free(topi
 
 extern "C" void platform_p2p_extent(cy_t* const cy, const size_t extent) { platform_from(cy)->p2p_extent = extent; }
 
-extern "C" cy_err_t platform_p2p(cy_t* const                  cy,
+extern "C" cy_err_t platform_p2p(cy_t* const                   cy,
                                  const cy_p2p_context_t* const p2p_context,
                                  const cy_us_t                 deadline,
                                  const std::uint64_t           remote_id,
@@ -112,8 +111,8 @@ extern "C" cy_err_t platform_p2p(cy_t* const                  cy,
         if ((frag->size == 0U) || (frag->data == nullptr)) {
             continue;
         }
-        const std::size_t to_copy = (self->last_p2p.size() - copied < frag->size) ? (self->last_p2p.size() - copied)
-                                                                                   : frag->size;
+        const std::size_t to_copy =
+          (self->last_p2p.size() - copied < frag->size) ? (self->last_p2p.size() - copied) : frag->size;
         std::memcpy(&self->last_p2p[copied], frag->data, to_copy);
         copied += to_copy;
     }
@@ -145,7 +144,7 @@ extern "C" void on_arrival_capture(cy_subscriber_t* const sub, const cy_arrival_
 
 static void platform_init(test_platform_t* const self)
 {
-    *self = test_platform_t{};
+    *self                              = test_platform_t{};
     self->vtable.now                   = platform_now;
     self->vtable.realloc               = platform_realloc;
     self->vtable.random                = platform_random;
@@ -172,7 +171,7 @@ static void dispatch_message(test_platform_t* const self,
 {
     std::array<unsigned char, 17> wire{};
     cy_test_make_message_header(wire.data(), type, tag, cy_topic_hash(topic));
-    wire[16] = payload_byte;
+    wire[16]                = payload_byte;
     cy_message_t* const msg = cy_test_message_make(wire.data(), wire.size());
     TEST_ASSERT_NOT_NULL(msg);
 
@@ -192,9 +191,9 @@ static void test_api_malformed_header_drops_message(void)
     std::array<unsigned char, 3> wire = { 0x01U, 0x02U, 0x03U };
     cy_message_t* const          msg  = cy_test_message_make(wire.data(), wire.size());
     TEST_ASSERT_NOT_NULL(msg);
-    cy_message_ts_t       mts;
-    mts.timestamp = 10;
-    mts.content   = msg;
+    cy_message_ts_t mts;
+    mts.timestamp              = 10;
+    mts.content                = msg;
     const cy_p2p_context_t p2p = { { 0 } };
 
     cy_on_message(&platform.cy, p2p, 0U, 1234U, mts);
@@ -209,7 +208,7 @@ static void test_api_reliable_duplicate_acked_once_to_application(void)
     platform_init(&platform);
     cy_test_message_reset_counters();
 
-    arrival_capture_t capture{};
+    arrival_capture_t      capture{};
     cy_subscriber_t* const sub = cy_subscribe(&platform.cy, wkv_key("rx/dup"), 256U);
     TEST_ASSERT_NOT_NULL(sub);
 
@@ -237,7 +236,7 @@ static void test_api_ordered_subscriber_timeout_flush(void)
     platform_init(&platform);
     cy_test_message_reset_counters();
 
-    arrival_capture_t capture{};
+    arrival_capture_t      capture{};
     cy_subscriber_t* const sub = cy_subscribe_ordered(&platform.cy, wkv_key("rx/ord"), 256U, 10);
     TEST_ASSERT_NOT_NULL(sub);
 

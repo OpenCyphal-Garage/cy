@@ -5,9 +5,9 @@
 
 typedef struct
 {
-    cy_message_t base;
-    size_t       skip_offset;
-    size_t       payload_size;
+    cy_message_t  base;
+    size_t        skip_offset;
+    size_t        payload_size;
     unsigned char payload[];
 } test_message_t;
 
@@ -24,7 +24,10 @@ static void test_message_skip(cy_message_t* const msg, const size_t offset)
     self->skip_offset += smaller(offset, available);
 }
 
-static size_t test_message_read(const cy_message_t* const msg, const size_t offset, const size_t size, void* const output)
+static size_t test_message_read(const cy_message_t* const msg,
+                                const size_t              offset,
+                                const size_t              size,
+                                void* const               output)
 {
     const test_message_t* const self = (const test_message_t*)msg;
     if ((output == NULL) || (self->skip_offset > self->payload_size)) {
@@ -57,9 +60,9 @@ static void test_message_destroy(cy_message_t* const msg)
     assert(g_live_count > 0U);
     g_live_count--;
     g_destroy_count++;
-    self->base.vtable = NULL;
+    self->base.vtable   = NULL;
     self->base.refcount = 0;
-    self->skip_offset = self->payload_size;
+    self->skip_offset   = self->payload_size;
     free(self);
 }
 
@@ -80,9 +83,9 @@ cy_message_t* cy_test_message_make(const void* const data, const size_t size)
         return NULL;
     }
     self->base.refcount = 1U;
-    self->base.vtable = &g_vtable;
-    self->skip_offset = 0U;
-    self->payload_size = size;
+    self->base.vtable   = &g_vtable;
+    self->skip_offset   = 0U;
+    self->payload_size  = size;
     if (size > 0U) {
         memcpy(self->payload, data, size);
     }

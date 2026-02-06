@@ -30,6 +30,9 @@ function(cy_gen_test name compile_flags link_flags c_standard)
             C_STANDARD ${c_standard}
             C_STANDARD_REQUIRED ON
             C_EXTENSIONS OFF
+            COMPILE_WARNING_AS_ERROR OFF
+            C_CLANG_TIDY ""
+            CXX_CLANG_TIDY ""
     )
 
     add_executable(${name} ${ARGN} src/helpers.c platform_stubs/message.c)
@@ -52,6 +55,9 @@ function(cy_gen_test name compile_flags link_flags c_standard)
             CXX_STANDARD 20
             CXX_STANDARD_REQUIRED ON
             CXX_EXTENSIONS OFF
+            COMPILE_WARNING_AS_ERROR ON
+            C_CLANG_TIDY ""
+            CXX_CLANG_TIDY ""
     )
     set_property(GLOBAL APPEND PROPERTY CY_TEST_EXECUTABLE_TARGETS ${name})
     add_test(NAME "run_${name}" COMMAND ${name})

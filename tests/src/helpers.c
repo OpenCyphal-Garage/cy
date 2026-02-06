@@ -33,7 +33,10 @@ uint64_t cy_test_deserialize_u64(const unsigned char in[8])
     return out;
 }
 
-void cy_test_make_message_header(unsigned char out[16], const uint8_t type, const uint64_t tag56, const uint64_t topic_hash)
+void cy_test_make_message_header(unsigned char  out[16],
+                                 const uint8_t  type,
+                                 const uint64_t tag56,
+                                 const uint64_t topic_hash)
 {
     out[0] = (unsigned char)(type & 31U);
     cy_test_serialize_u56(&out[1], tag56);

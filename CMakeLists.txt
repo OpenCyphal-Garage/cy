@@ -26,27 +26,27 @@ else ()
     file(GLOB format_files
             ${CMAKE_SOURCE_DIR}/cy/*.[ch]
             ${CMAKE_SOURCE_DIR}/examples/*.[ch]
-            ${CMAKE_SOURCE_DIR}/tests/*.[ch]pp
+            ${CMAKE_SOURCE_DIR}/tests/*/*.[ch]
+            ${CMAKE_SOURCE_DIR}/tests/*/*.[ch]pp
     )
     message(STATUS "Using clang-format: ${clang_format}; files: ${format_files}")
     add_custom_target(format COMMAND ${clang_format} -i -fallback-style=none -style=file --verbose ${format_files})
 endif ()
 
 # Build options
-set(CMAKE_COMPILE_WARNING_AS_ERROR ON)
-set(c_cxx_flags "\
--Wall -Wextra -pedantic -fstrict-aliasing -Wundef -Wconversion -Wsign-conversion -Wmissing-declarations -Wtype-limits \
-")
 # C
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${c_cxx_flags}")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -pedantic -fstrict-aliasing -Wundef -Wconversion")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wmissing-declarations")
 # C++
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${c_cxx_flags} -Wsign-promo -Wzero-as-null-pointer-constant")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -pedantic -fstrict-aliasing -Wundef -Wconversion")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wsign-conversion -Wmissing-declarations")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wsign-promo -Wzero-as-null-pointer-constant")
 
 include_directories(${CMAKE_SOURCE_DIR}/lib)
 

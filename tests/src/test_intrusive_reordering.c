@@ -38,10 +38,7 @@ static void* fixture_realloc(cy_t* const cy, void* const ptr, const size_t size)
     return realloc(ptr, size);
 }
 
-static cy_us_t fixture_now(const cy_t* const cy)
-{
-    return ((const reorder_fixture_t*)cy)->now;
-}
+static cy_us_t fixture_now(const cy_t* const cy) { return ((const reorder_fixture_t*)cy)->now; }
 
 static void on_arrival(cy_subscriber_t* const sub, const cy_arrival_t arrival)
 {
@@ -64,27 +61,27 @@ static void reorder_env_init(reorder_env_t* const self)
 
     self->root.cy = &self->fixture.cy;
 
-    self->sub.root                     = &self->root;
-    self->sub.params.extent            = 0;
-    self->sub.params.reordering_window = 20;
-    self->sub.params.reordering_capacity = 8;
+    self->sub.root                          = &self->root;
+    self->sub.params.extent                 = 0;
+    self->sub.params.reordering_window      = 20;
+    self->sub.params.reordering_capacity    = 8;
     self->sub.index_reordering_by_remote_id = NULL;
-    self->sub.list_reordering_by_recency = LIST_EMPTY;
-    self->sub.callback                 = on_arrival;
-    self->sub.user_context             = CY_USER_CONTEXT_EMPTY;
-    self->sub.user_context.ptr[0]      = &self->capture;
+    self->sub.list_reordering_by_recency    = LIST_EMPTY;
+    self->sub.callback                      = on_arrival;
+    self->sub.user_context                  = CY_USER_CONTEXT_EMPTY;
+    self->sub.user_context.ptr[0]           = &self->capture;
 
     self->topic.cy   = &self->fixture.cy;
     self->topic.hash = 0xABCDEFULL;
 
-    self->rr.timeout             = OLGA_EVENT_INIT;
-    self->rr.remote_id           = 42U;
-    self->rr.subscriber          = &self->sub;
-    self->rr.topic               = &self->topic;
-    self->rr.substitutions.count = 0;
+    self->rr.timeout                     = OLGA_EVENT_INIT;
+    self->rr.remote_id                   = 42U;
+    self->rr.subscriber                  = &self->sub;
+    self->rr.topic                       = &self->topic;
+    self->rr.substitutions.count         = 0;
     self->rr.substitutions.substitutions = NULL;
-    self->rr.interned_count      = 0;
-    self->rr.interned_by_lin_tag = NULL;
+    self->rr.interned_count              = 0;
+    self->rr.interned_by_lin_tag         = NULL;
     reordering_resequence(&self->rr, 8U);
 }
 

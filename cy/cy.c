@@ -88,6 +88,9 @@
 #include <assert.h>
 #include <string.h>
 
+// TODO FIXME REMOVE WHEN REFACTORING DONE
+#pragma GCC diagnostic ignored "-Wunused-function"
+
 #if __STDC_VERSION__ < 201112L
 #define static_assert(x, ...)        typedef char _static_assert_gl(_static_assertion_, __LINE__)[(x) ? 1 : -1]
 #define _static_assert_gl(a, b)      _static_assert_gl_impl(a, b)

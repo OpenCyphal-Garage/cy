@@ -29,12 +29,15 @@ static void dedup_fixture_init(dedup_fixture_t* const self)
 static void dedup_owner_init(cy_topic_t* const owner, dedup_fixture_t* const fixture)
 {
     memset(owner, 0, sizeof(*owner));
-    owner->cy                          = &fixture->cy;
+    owner->cy                           = &fixture->cy;
     owner->sub_index_dedup_by_remote_id = NULL;
-    owner->sub_list_dedup_by_recency  = LIST_EMPTY;
+    owner->sub_list_dedup_by_recency    = LIST_EMPTY;
 }
 
-static dedup_t* dedup_make_state(cy_topic_t* const owner, const uint64_t remote_id, const uint64_t tag, const cy_us_t now)
+static dedup_t* dedup_make_state(cy_topic_t* const owner,
+                                 const uint64_t    remote_id,
+                                 const uint64_t    tag,
+                                 const cy_us_t     now)
 {
     dedup_factory_context_t ctx  = { .owner = owner, .remote_id = remote_id, .tag = tag, .now = now };
     cy_tree_t* const        tree = dedup_factory(&ctx);
