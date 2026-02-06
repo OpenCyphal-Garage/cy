@@ -1745,6 +1745,7 @@ static void reordering_scan(reordering_t* const self, bool force_first)
         } else { // We have pending slots but there is a gap, need to wait for missing messages to arrive first.
             const cy_us_t deadline = slot->message.timestamp + self->subscriber->params.reordering_window;
             olga_defer(self->topic->cy->olga, deadline, self, reordering_on_window_expiration, &self->timeout);
+            break;
         }
     }
 }
@@ -1811,6 +1812,7 @@ static bool reordering_push(reordering_t* const self, const uint64_t tag, const 
     }
 
     // Late arrival or duplicate, the gap is already closed and the application has moved on, cannot accept.
+    // Note that this check does not detect possible duplicates that are currently interned; this is checked below.
     if (lin_tag <= self->last_ejected_lin_tag) {
         CY_TRACE(cy,
                  "🔢 LATE/DUP: N%016llx tag=%016llx lin_tag=%016llx last_ejected_lin_tag=%016llx",
@@ -1836,6 +1838,7 @@ static bool reordering_push(reordering_t* const self, const uint64_t tag, const 
 
     // The most difficult case -- the message is ahead of the next expected but within the reordering window,
     // we need to intern it and hope for the missing messages to arrive before the reordering window expiration.
+    // It may still be a duplicate if somehow it made it past the topic-wise duplicate filter, so we check for that too.
     assert(lin_tag > (self->last_ejected_lin_tag + 1U));
     assert(lin_tag <= (self->last_ejected_lin_tag + self->subscriber->params.reordering_capacity));
     reordering_slot_t* const slot = mem_alloc_zero(cy, sizeof(reordering_slot_t));
@@ -1848,14 +1851,21 @@ static bool reordering_push(reordering_t* const self, const uint64_t tag, const 
                  (unsigned long long)self->last_ejected_lin_tag);
         return false;
     }
-    slot->lin_tag              = lin_tag;
-    cy_tree_t* const slot_tree = cavl2_find_or_insert(&self->interned_by_lin_tag,
-                                                      &slot->lin_tag,
-                                                      reordering_slot_cavl_compare,
-                                                      &slot->index_lin_tag,
-                                                      cavl2_trivial_factory);
-    assert(slot_tree == &slot->index_lin_tag); // already checked for duplicates above
-    cy_message_refcount_inc(message.content);  // stayin' alive
+    cy_tree_t* const slot_tree = cavl2_find_or_insert(
+      &self->interned_by_lin_tag, &lin_tag, reordering_slot_cavl_compare, &slot->index_lin_tag, cavl2_trivial_factory);
+    if (slot_tree != &slot->index_lin_tag) {
+        // There is already an interned message with the same tag, drop the duplicate.
+        CY_TRACE(cy,
+                 "🔢 DUP: N%016llx tag=%016llx lin_tag=%016llx last_ejected_lin_tag=%016llx",
+                 (unsigned long long)self->remote_id,
+                 (unsigned long long)tag,
+                 (unsigned long long)lin_tag,
+                 (unsigned long long)self->last_ejected_lin_tag);
+        mem_free(cy, slot);
+        return true; // Duplicate accepted for reliability semantics; idempotent drop for the application.
+    }
+    cy_message_refcount_inc(message.content); // stayin' alive
+    slot->lin_tag = lin_tag;
     slot->message = message;
     self->interned_count++;
     assert((self->interned_count == 1) || olga_is_pending(cy->olga, &self->timeout));
