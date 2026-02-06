@@ -39,6 +39,10 @@
 /// The payload follows immediately after the header. The header fields are not naturally aligned to conserve space.
 /// The type field is always in the first byte of the header. Void fields are sent zero and ignored on reception.
 ///
+/// Message publications have no negative acknowledgements because they are inherently multicast: even if we can't
+/// accept a message, someone else might be able to. For P2P NACKs are well-defined since these interactions are
+/// always unicast.
+///
 /// type = 0: Best-effort message.
 /// type = 1: Reliable message. Expects ack with the specified tag.
 /// type = 2: Reliable message acknowledgement: message received by the session layer; there is a live subscription.
@@ -145,6 +149,11 @@ static inline uint64_t tag56_forward_distance(uint64_t a, uint64_t b)
     a &= TAG56_MASK;
     b &= TAG56_MASK;
     return (b - a) & TAG56_MASK; // in [0, 2^56)
+}
+
+static inline uint64_t tag56_add(const uint64_t a, const uint64_t b)
+{
+    return ((a & TAG56_MASK) + (b & TAG56_MASK)) & TAG56_MASK;
 }
 
 static size_t  larger(const size_t a, const size_t b) { return (a > b) ? a : b; }
@@ -1196,14 +1205,14 @@ static hb_t heartbeat_deserialize(const cy_message_t* const msg, byte_t* const n
 }
 
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
-static void on_heartbeat(cy_subscriber_t* const sub, cy_arrival_t* const arrival)
+static void on_heartbeat(cy_subscriber_t* const sub, const cy_arrival_t arrival)
 {
     (void)sub;
-    assert(arrival->substitutions.count == 0); // This is a verbatim subscriber.
-    const cy_us_t ts = arrival->message.timestamp;
-    cy_t* const   cy = arrival->topic->cy;
+    assert(arrival.substitutions.count == 0); // This is a verbatim subscriber.
+    const cy_us_t ts = arrival.message.timestamp;
+    cy_t* const   cy = arrival.topic->cy;
     byte_t        scratchpad[CY_TOPIC_NAME_MAX + 1];
-    const hb_t    hb = heartbeat_deserialize(arrival->message.content, scratchpad);
+    const hb_t    hb = heartbeat_deserialize(arrival.message.content, scratchpad);
     if (hb.version == 0) {
         CY_TRACE(cy, "⚠️ Ignoring invalid or Cyphal v1.0 heartbeat");
         return; // Cyphal v1.0 heartbeat or invalid message; nothing to do.
@@ -1441,6 +1450,75 @@ void cy_unadvertise(cy_publisher_t* const pub)
 //                                                      SUBSCRIBER
 // =====================================================================================================================
 
+typedef struct
+{
+    size_t extent;
+
+    /// The reordering mode ensures that the application sees a monotonically increasing sequence of message tags
+    /// per remote publisher.
+    /// If less than zero, no frame reordering will be used -- they will be ejected in the order of arrival.
+    /// Otherwise, out-of-order arrivals will be interned for up to this time waiting for the missing frames
+    /// to show up to fill the gaps. If the gaps are not filled within this time window, the interned frames
+    /// will be ejected in the order of arrival, and the missing frames even if arrive later will be dropped.
+    cy_us_t reordering_window;
+
+    /// The maximum number of messages that can be interned for reordering per remote publisher.
+    /// This is a hard limit to prevent unbounded memory consumption in case of extreme high-rate out-of-order arrivals.
+    /// If the limit is reached, the reordering window will close early and messages will be ejected even while
+    /// waiting for missing frames, as if the time window had elapsed.
+    /// By definition, the limit can only be exceeded if more than reordering_capacity messages arrive within the
+    /// reordering_window time.
+    size_t reordering_capacity;
+} subscriber_params_t;
+
+struct cy_subscriber_t
+{
+    subscriber_root_t* root; ///< Many-to-one relationship, never NULL.
+    cy_subscriber_t*   next; ///< Lists all subscribers under the same root.
+
+    subscriber_params_t params;
+
+    cy_tree_t* index_reordering_by_remote_id;
+    cy_list_t  list_reordering_by_recency;
+
+    cy_user_context_t        user_context;
+    cy_subscriber_callback_t callback;
+};
+
+static cy_breadcrumb_t make_breadcrumb(cy_topic_t* const      topic,
+                                       const uint64_t         remote_id,
+                                       const cy_p2p_context_t p2p_context,
+                                       const uint64_t         message_tag)
+{
+    assert(message_tag <= TAG56_MASK);
+    return (cy_breadcrumb_t){ .cy          = topic->cy,
+                              .remote_id   = remote_id,
+                              .topic_hash  = topic->hash,
+                              .message_tag = message_tag,
+                              .seqno       = 0, // Starts a new sequence.
+                              .p2p_context = p2p_context };
+}
+
+static cy_arrival_t make_arrival(cy_topic_t* const      topic,
+                                 const uint64_t         remote_id,
+                                 const cy_p2p_context_t p2p_context,
+                                 const uint64_t         message_tag,
+                                 cy_message_ts_t        message,
+                                 cy_substitution_set_t  substitutions)
+{
+    return (cy_arrival_t){ .message       = message,
+                           .breadcrumb    = make_breadcrumb(topic, remote_id, p2p_context, message_tag),
+                           .topic         = topic,
+                           .substitutions = substitutions };
+}
+
+static void subscriber_invoke(cy_subscriber_t* const subscriber, const cy_arrival_t arrival)
+{
+    assert(subscriber->callback != NULL);
+    subscriber->callback(subscriber, arrival);
+}
+
+// --------------------------------------------------------------------------------------------------------------------
 // RELIABLE MESSAGE DEDUPLICATION TO MITIGATE ACK LOSS
 
 #define DEDUP_HISTORY 64U
@@ -1461,7 +1539,7 @@ typedef struct
     uint64_t tag;
     uint64_t bitmap;
 } dedup_t;
-static_assert((sizeof(void*) > 4) || (sizeof(dedup_t) <= (64 - 8)), "should fit in a 64-byte o1heap block");
+static_assert((sizeof(void*) > 4) || (sizeof(dedup_t) <= (64 - 8)), "should fit in a small o1heap block");
 
 typedef struct
 {
@@ -1542,70 +1620,315 @@ static cy_tree_t* dedup_factory(void* const user)
         state->bitmap = 0;
     }
     CY_TRACE(ctx->owner->cy,
-             "🧹 remote_id=%016llx tag=%016llx: %s",
+             "🧹 N%016llx tag=%016llx: %s",
              (unsigned long long)ctx->remote_id,
              (unsigned long long)ctx->tag,
              (state != NULL) ? "ok" : "OUT OF MEMORY");
     return (state != NULL) ? &state->index_remote_id : NULL;
 }
 
-// MESSAGE ORDERING RECOVERY
+// --------------------------------------------------------------------------------------------------------------------
+// MESSAGE ORDERING RECOVERY TO MITIGATE TRANSPORT REORDERING AND RELIABLE RETRANSMISSIONS
 
-/// How many messages can be interned in the reordering buffer at most; more messages will force early window closure.
-/// The number should be small; partly because messages typically don't reorder beyond a few tag counts, partly
-/// because for reasons of efficiency we keep all slots as a static preallocated array for quick linear scans,
-/// which work faster than BST lookups for small arrays.
-#define REORDERING_SLOTS 8U
+/// An arbitrarily chosen default.
+#define REORDERING_CAPACITY_DEFAULT 16U
 
-/// Messages with the tag that lags behind the head by this value (modulo 2**56) or more are considered new
-/// and will reset the reordering state. The probability of randomly choosing a new tag that falls into this
-/// range is astronomically low and is negligible for all practical purposes.
-#define REORDERING_LOOKBACK 1024U
+static void reordering_on_window_expiration(olga_t* const sched, olga_event_t* const event, const cy_us_t now);
 
 typedef struct
 {
-    uint64_t        tag; ///< UINT64_MAX if empty
+    cy_tree_t       index_lin_tag;
+    uint64_t        lin_tag; ///< UINT64_MAX if empty.
     cy_message_ts_t message;
 } reordering_slot_t;
+static_assert((sizeof(void*) > 4) || (sizeof(reordering_slot_t) <= (64 - 8)), "should fit in a small o1heap block");
 
-/// Subscribers operating in the ordered mode use this instance, one per remote node per subscription,
+static int32_t reordering_slot_cavl_compare(const void* const user, const cy_tree_t* const node)
+{
+    const uint64_t outer = *(const uint64_t*)user;
+    const uint64_t inner = ((const reordering_slot_t*)node)->lin_tag;
+    return (outer == inner) ? 0 : ((outer > inner) ? +1 : -1); // NOLINT(*-nested-conditional-operator)
+}
+
+/// Subscribers operating in the ordered mode use this instance, one per (remote node & topic) per subscription,
 /// to enforce strictly-increasing order of message tags (modulo 2**56) from each remote node.
+///
 /// Missing messages are waited for for up to the reordering_window, after which they are considered lost and the gap
 /// is closed by advancing the expected tag; if missing messages show up later, they are considered late and dropped.
 /// Each subscription must have its own instance because they may use different settings (e.g., reordering window).
+///
+/// A slot may be ejected on timeout asynchronously with message arrival, which is why the reordering state has to
+/// store the full state associated with the message. A pattern subscription may receive messages from multiple topics
+/// matching the pattern; we need separate reordering state per topic per publisher, keeping in mind that the same
+/// remote may publish on multiple topics matching our subscriber.
 typedef struct
 {
-    cy_tree_t        index_remote_id; ///< For lookup when new messages received.
-    cy_list_member_t list_recency;    ///< For removal of old entries when a remote ceases publishing.
+    cy_tree_t        index;        ///< For lookup when new messages received by (remote-ID, topic hash).
+    cy_list_member_t list_recency; ///< For removal of old entries when a remote ceases publishing.
+    olga_event_t     timeout;      ///< Expires on reordering window closure.
 
     uint64_t remote_id;
     cy_us_t  last_active_at;
 
-    uint64_t          last_ejected_tag; ///< Tag seen by the application; lesser tags are not allowed.
-    reordering_slot_t slots[REORDERING_SLOTS];
-} reordering_t;
+    /// Metadata needed for asynchronous ejection.
+    /// The topic will be kept alive by our subscription, so there is no lifetime issue. Same for the substitutions.
+    cy_subscriber_t*      subscriber;
+    cy_topic_t*           topic;
+    cy_substitution_set_t substitutions; ///< Matching the subscription pattern to topic name.
+    cy_p2p_context_t      p2p_context;   ///< Updated with the latest received message.
 
-// SUBSCRIPTION DATA PATH
+    uint64_t   tag_baseline;         ///< First seen tag in this state; subtract from incoming tags for linearization.
+    uint64_t   last_ejected_lin_tag; ///< Linearized tag seen by the application; lesser tags are not allowed.
+    size_t     interned_count;       ///< Number of currently allocated slots. Usually zero or one.
+    cy_tree_t* interned_by_lin_tag;  ///< reordering_slot_t indexed by linearized tag.
+} reordering_t;
 
 typedef struct
 {
-    size_t  extent;
-    cy_us_t reordering_window;
-} subscriber_params_t;
+    cy_us_t               now;
+    uint64_t              remote_id;
+    cy_subscriber_t*      subscriber;
+    cy_topic_t*           topic;
+    cy_substitution_set_t substitutions;
+    cy_p2p_context_t      p2p_context;
+    uint64_t              tag;
+} reordering_context_t;
 
-struct cy_subscriber_t
+/// Remove the slot and invoke the user callback.
+static void reordering_eject(reordering_t* const self, reordering_slot_t* const slot)
 {
-    subscriber_root_t* root; ///< Many-to-one relationship, never NULL.
-    cy_subscriber_t*   next; ///< Lists all subscribers under the same root.
+    assert(self->topic->cy == self->subscriber->root->cy);
+    cy_t* const cy = self->topic->cy;
 
-    subscriber_params_t params;
+    // Remove the slot from the index.
+    assert(cavl2_is_inserted(self->interned_by_lin_tag, &slot->index_lin_tag));
+    cavl2_remove(&self->interned_by_lin_tag, &slot->index_lin_tag);
+    assert(self->interned_count > 0);
+    self->interned_count--;
+    assert((self->interned_by_lin_tag == NULL) == (self->interned_count == 0));
 
-    cy_tree_t* index_reordering_by_remote_id;
-    cy_list_t  list_reordering_by_recency;
+    // Update the state with the removed slot.
+    assert(slot->lin_tag < (1ULL << 48U)); // ensure linearized by comparing against an arbitrarily chosen large value
+    assert(self->tag_baseline <= TAG56_MASK);
+    assert(self->subscriber->params.reordering_window >= 0); // we should only end up here if ordered mode is used
+    assert(slot->lin_tag > self->last_ejected_lin_tag);      // ensure ordered sequence seen by the application
+    self->last_ejected_lin_tag = slot->lin_tag;
 
-    cy_user_context_t        user_context;
-    cy_subscriber_callback_t callback;
-};
+    // Construct the arrival instance. It copies the relevanto states from the slot so that it can be destroyed.
+    assert(slot->message.timestamp >= 0);
+    assert(slot->message.content != NULL);
+    const cy_arrival_t arrival = make_arrival(self->topic,
+                                              self->remote_id,
+                                              self->p2p_context,
+                                              tag56_add(slot->lin_tag, self->tag_baseline),
+                                              slot->message,
+                                              self->substitutions);
+    mem_free(cy, slot); // Free the slot before the callback to give the application more memory to work with.
+
+    // Invoke the callback with the arrival and dispose the message.
+    // NB: the callback may destroy the subscriber, consider all states invalid.
+    subscriber_invoke(self->subscriber, arrival);
+    cy_message_refcount_dec(arrival.message.content);
+}
+
+/// Force eject min-valued linearized tag, then keep ejecting subsequent tags as long as they are in order until gap.
+static void reordering_eject_force(reordering_t* const self)
+{
+    bool first = true;
+    while (true) {
+        reordering_slot_t* const slot =
+          CAVL2_TO_OWNER(cavl2_min(self->interned_by_lin_tag), reordering_slot_t, index_lin_tag);
+        if (slot == NULL) {
+            olga_cancel(self->topic->cy->olga, &self->timeout);
+            break;
+        }
+        if (first || ((self->last_ejected_lin_tag + 1U) == slot->lin_tag)) {
+            first = false;
+            reordering_eject(self, slot);
+        } else { // We have pending slots but there is a gap, need to wait for missing messages to arrive first.
+            const cy_us_t deadline = slot->message.timestamp + self->subscriber->params.reordering_window;
+            olga_defer(self->topic->cy->olga, deadline, self, reordering_on_window_expiration, &self->timeout);
+        }
+    }
+}
+
+static void reordering_on_window_expiration(olga_t* const sched, olga_event_t* const event, const cy_us_t now)
+{
+    (void)sched;
+    (void)now;
+    reordering_eject_force(event->user);
+}
+
+/// Ejects all messages in the correct order and leaves the state empty & idle.
+static void reordering_eject_all(reordering_t* const self)
+{
+    while (self->interned_count > 0) {
+        reordering_slot_t* const slot =
+          CAVL2_TO_OWNER(cavl2_min(self->interned_by_lin_tag), reordering_slot_t, index_lin_tag);
+        assert(slot != NULL);
+        reordering_eject(self, slot);
+    }
+    assert(self->interned_count == 0);
+    assert(self->interned_by_lin_tag == NULL);
+    olga_cancel(self->topic->cy->olga, &self->timeout);
+}
+
+static void reordering_resequence(reordering_t* const self, const uint64_t tag)
+{
+    // We do NOT accept the message immediately because we don't know if it's in order or not, as we don't have state.
+    // For example, if we receive tag 3, we don't know if it's in a sequence of (3 2 1) or (3 4 5); to properly
+    // handle the former case without message loss we start with the reordering delay.
+    assert(self->interned_count == 0);
+    assert(self->interned_by_lin_tag == NULL);
+    self->tag_baseline         = tag56_forward_distance(self->subscriber->params.reordering_capacity / 2U, tag);
+    self->last_ejected_lin_tag = 0;
+}
+
+/// When a new message is received, let the reordering managed decide if it can be ejected or it needs to be interned.
+/// Returns true if the message is accepted (either ejected or interned) and should be acknowledged (because the
+/// application will eventually see it); false if this is a late drop and should not be acknowledged.
+/// This is only intended for use when the reordering window is non-negative, otherwise no reordering managed is needed.
+static bool reordering_push(reordering_t* const self, const uint64_t tag, const cy_message_ts_t message)
+{
+    assert(self->subscriber->params.reordering_window >= 0);
+    assert(self->subscriber->params.reordering_capacity > 1U); // caller must ensure
+    assert(self->topic->cy == self->subscriber->root->cy);
+    assert(tag <= TAG56_MASK);
+    cy_t* const cy = self->topic->cy;
+
+    // Update the recency information to keep the state alive.
+    self->last_active_at = message.timestamp;
+    enlist_head(&self->subscriber->list_reordering_by_recency, &self->list_recency);
+
+    // Dispatch the message according to its tag ordering.
+    uint64_t lin_tag = tag56_forward_distance(self->tag_baseline, tag);
+
+    // The next expected message can be ejected immediately. No need to allocate state, happy fast path, most common.
+    if (lin_tag == tag56_add(self->last_ejected_lin_tag, 1)) {
+        self->last_ejected_lin_tag = lin_tag;
+        subscriber_invoke(
+          self->subscriber,
+          make_arrival(self->topic, self->remote_id, self->p2p_context, tag, message, self->substitutions));
+        return true;
+    }
+
+    // Late arrival or duplicate, the gap is already closed and the application has moved on, cannot accept.
+    if (lin_tag <= self->last_ejected_lin_tag) {
+        CY_TRACE(cy,
+                 "🔢 LATE/DUP: N%016llx tag=%016llx lin_tag=%016llx last_ejected_lin_tag=%016llx",
+                 (unsigned long long)self->remote_id,
+                 (unsigned long long)tag,
+                 (unsigned long long)lin_tag,
+                 (unsigned long long)self->last_ejected_lin_tag);
+        return false;
+    }
+
+    // Too far ahead meaning that the remote has restarted. Eject all interned messages, if any, and reset the state.
+    if (lin_tag > (self->last_ejected_lin_tag + self->subscriber->params.reordering_capacity)) {
+        CY_TRACE(cy,
+                 "🔢 RESEQUENCING: N%016llx tag=%016llx lin_tag=%016llx last_ejected_lin_tag=%016llx",
+                 (unsigned long long)self->remote_id,
+                 (unsigned long long)tag,
+                 (unsigned long long)lin_tag,
+                 (unsigned long long)self->last_ejected_lin_tag);
+        reordering_eject_all(self);
+        reordering_resequence(self, tag);
+        lin_tag = tag56_forward_distance(self->tag_baseline, tag);
+    }
+
+    // The most difficult case -- the message is ahead of the next expected but within the reordering window,
+    // we need to intern it and hope for the missing messages to arrive before the reordering window expiration.
+    assert(lin_tag > (self->last_ejected_lin_tag + 1U));
+    assert(lin_tag <= (self->last_ejected_lin_tag + self->subscriber->params.reordering_capacity));
+    reordering_slot_t* const slot = mem_alloc_zero(cy, sizeof(reordering_slot_t));
+    if (slot == NULL) {
+        CY_TRACE(cy,
+                 "🔢 OUT OF MEMORY: N%016llx tag=%016llx lin_tag=%016llx last_ejected_lin_tag=%016llx",
+                 (unsigned long long)self->remote_id,
+                 (unsigned long long)tag,
+                 (unsigned long long)lin_tag,
+                 (unsigned long long)self->last_ejected_lin_tag);
+        return false; // The remote will likely retransmit and we might be able to accept it then, hopefully.
+    }
+    cy_message_refcount_inc(message.content); // stayin' alive
+    slot->message              = message;
+    slot->lin_tag              = lin_tag;
+    cy_tree_t* const slot_tree = cavl2_find_or_insert(&self->interned_by_lin_tag,
+                                                      &slot->lin_tag,
+                                                      reordering_slot_cavl_compare,
+                                                      &slot->index_lin_tag,
+                                                      cavl2_trivial_factory);
+    assert(slot_tree == &slot->index_lin_tag);
+    (void)slot_tree;
+    self->interned_count++;
+    assert((self->interned_count == 1) || olga_is_pending(cy->olga, &self->timeout));
+    if (!olga_is_pending(cy->olga, &self->timeout)) {
+        const cy_us_t deadline = message.timestamp + self->subscriber->params.reordering_window;
+        olga_defer(cy->olga, deadline, self, reordering_on_window_expiration, &self->timeout);
+    }
+    return true; // Interned messages WILL eventually be ejected and seen by the application.
+}
+
+static void reordering_destroy(reordering_t* const self)
+{
+    reordering_eject_all(self);
+    delist(&self->subscriber->list_reordering_by_recency, &self->list_recency);
+    assert(cavl2_is_inserted(self->subscriber->index_reordering_by_remote_id, &self->index));
+    cavl2_remove(&self->subscriber->index_reordering_by_remote_id, &self->index);
+    mem_free(self->subscriber->root->cy, self);
+}
+
+// TODO invoke from cy_update().
+static void reordering_drop_stale(cy_subscriber_t* const owner, const cy_us_t now)
+{
+    while (true) {
+        reordering_t* const rr = LIST_TAIL(owner->list_reordering_by_recency, reordering_t, list_recency);
+        if ((rr == NULL) || ((rr->last_active_at + SESSION_LIFETIME) >= now)) {
+            break;
+        }
+        CY_TRACE(owner->root->cy,
+                 "🧹 N%016llx topic=%016llx",
+                 (unsigned long long)rr->remote_id,
+                 (unsigned long long)rr->topic->hash);
+        reordering_destroy(rr);
+    }
+}
+
+static int32_t reordering_cavl_compare(const void* const user, const cy_tree_t* const node)
+{
+    const reordering_context_t* const outer = (const reordering_context_t*)user;
+    const reordering_t*               inner = (const reordering_t*)node;
+    if (outer->remote_id == inner->remote_id) {
+        // NOLINTNEXTLINE(*-nested-conditional-operator)
+        return (outer->topic->hash == inner->topic->hash) ? 0 : ((outer->topic->hash > inner->topic->hash) ? +1 : -1);
+    }
+    return (outer->remote_id > inner->remote_id) ? +1 : -1;
+}
+
+static cy_tree_t* reordering_cavl_factory(const void* const user)
+{
+    const reordering_context_t* const outer = (const reordering_context_t*)user;
+    reordering_drop_stale(outer->subscriber, outer->now); // Might free up some memory for the new entry.
+    reordering_t* const self = mem_alloc_zero(outer->subscriber->root->cy, sizeof(reordering_t));
+    if (self != NULL) {
+        self->remote_id           = outer->remote_id;
+        self->topic               = outer->topic;
+        self->substitutions       = outer->substitutions;
+        self->p2p_context         = outer->p2p_context;
+        self->interned_count      = 0;
+        self->interned_by_lin_tag = NULL;
+        reordering_resequence(self, outer->tag);
+    }
+    CY_TRACE(outer->topic->cy,
+             "🔢 REORDERING: N%016llx tag=%016llx: %s",
+             (unsigned long long)outer->remote_id,
+             (unsigned long long)outer->tag,
+             (self != NULL) ? "ok" : "OUT OF MEMORY");
+    return (self != NULL) ? &self->index : NULL;
+}
+
+// --------------------------------------------------------------------------------------------------------------------
+// SUBSCRIPTION DATA PATH
 
 // Returns true if the message was accepted, false if it should not be acknowledged (e.g. late drop for ordered subs).
 static bool on_message(cy_t* const            cy,
@@ -1616,7 +1939,6 @@ static bool on_message(cy_t* const            cy,
                        cy_message_ts_t        message,
                        const bool             reliable)
 {
-    // TODO: Fast-track processing for heartbeat messages?
     implicit_animate(topic, message.timestamp);
 
     // Reliable transfers may be duplicated in case of ACK loss.
@@ -1641,14 +1963,6 @@ static bool on_message(cy_t* const            cy,
     }
     // TODO: REORDERING
 
-    cy_breadcrumb_t breadcrumb = {
-        .cy          = cy,
-        .remote_id   = remote_id,
-        .topic_hash  = topic->hash,
-        .message_tag = tag,
-        .seqno       = 0,
-        .p2p_context = p2p_context,
-    };
     return false;
 }
 
@@ -1757,6 +2071,12 @@ static cy_err_t ensure_subscriber_root(cy_t* const               cy,
     return CY_OK;
 }
 
+static void subscriber_callback_default(cy_subscriber_t* const sub, const cy_arrival_t arrival)
+{
+    (void)sub;
+    (void)arrival;
+}
+
 static cy_subscriber_t* subscribe(cy_t* const cy, const wkv_str_t name, const subscriber_params_t params)
 {
     assert((cy != NULL) && (params.reordering_window >= -1));
@@ -1772,7 +2092,7 @@ static cy_subscriber_t* subscribe(cy_t* const cy, const wkv_str_t name, const su
     }
     sub->params        = params;
     sub->user_context  = CY_USER_CONTEXT_EMPTY;
-    sub->callback      = NULL;
+    sub->callback      = subscriber_callback_default;
     const cy_err_t res = ensure_subscriber_root(cy, resolved, &sub->root);
     if (res != CY_OK) {
         mem_free(cy, sub);
@@ -1792,7 +2112,7 @@ static cy_subscriber_t* subscribe(cy_t* const cy, const wkv_str_t name, const su
 cy_subscriber_t* cy_subscribe(cy_t* const cy, const wkv_str_t name, const size_t extent)
 {
     if (cy != NULL) {
-        const subscriber_params_t params = { .extent = extent, .reordering_window = -1 };
+        const subscriber_params_t params = { .extent = extent, .reordering_window = -1, .reordering_capacity = 0 };
         return subscribe(cy, name, params);
     }
     return NULL;
@@ -1804,7 +2124,9 @@ cy_subscriber_t* cy_subscribe_ordered(cy_t* const     cy,
                                       const cy_us_t   reordering_window)
 {
     if ((cy != NULL) && (reordering_window >= 0)) {
-        const subscriber_params_t params = { .extent = extent, .reordering_window = reordering_window };
+        const subscriber_params_t params = { .extent              = extent,
+                                             .reordering_window   = reordering_window,
+                                             .reordering_capacity = REORDERING_CAPACITY_DEFAULT };
         return subscribe(cy, name, params);
     }
     return NULL;
@@ -1819,7 +2141,7 @@ void              cy_subscriber_context_set(cy_subscriber_t* const self, const c
 cy_subscriber_callback_t cy_subscriber_callback(const cy_subscriber_t* const self) { return self->callback; }
 void cy_subscriber_callback_set(cy_subscriber_t* const self, const cy_subscriber_callback_t callback)
 {
-    self->callback = callback;
+    self->callback = (callback == NULL) ? subscriber_callback_default : callback;
 }
 
 void cy_subscriber_name(const cy_subscriber_t* const self, char* const out_name)

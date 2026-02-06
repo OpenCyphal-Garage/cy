@@ -323,9 +323,9 @@ typedef struct cy_arrival_t
     /// Use cy_respond() to send a P2P response directly to the publisher of this message if needed.
     /// Multiple responses can be sent if necessary; each will carry a unique sequence number starting from zero.
     /// If responses are needed, this instance should be copied by value only once, as it keeps internal state.
-    /// If multiple subscribers will be sending responses, they must coordinate to use a shared breadcrumb instance.
-    /// This pointer is invalidated after return from the subscription callback; copy if needed later.
-    cy_breadcrumb_t* breadcrumb;
+    /// If multiple subscribers will be sending responses, they must coordinate to use a shared breadcrumb instance
+    /// to avoid seqno counter discontinuity. If no responses are needed, this instance can be discarded.
+    cy_breadcrumb_t breadcrumb;
 
     /// The topic that the message was received from; always non-NULL.
     ///
@@ -343,19 +343,16 @@ typedef struct cy_arrival_t
 
 /// The arrival pointer is mutable to allow moving the message out of it if needed.
 /// The lifetime of the arrival struct ends upon return from the current callback.
-typedef void (*cy_subscriber_callback_t)(cy_subscriber_t*, cy_arrival_t*);
+typedef void (*cy_subscriber_callback_t)(cy_subscriber_t*, cy_arrival_t);
 
 // Future note: eventually, we may want to support sampling subscription pattern:
 // keep the last arrival inside the subscriber instance, and add a function to query it outside of the callback.
 
 /// We intentionally use the exact same API for both verbatim and pattern subscriptions; this is a key design feature.
 ///
-/// It is allowed to remove the subscription from its own callback, but not from the callback of another subscription.
-///
 /// There may be more than one subscriber with the same name (pattern). The library will only keep one
 /// reference-counted topic; upon message arrival, all matching subscribers will be invoked in an unspecified order.
-/// If there is more than one subscriber utilizing different parameters (extent, ordering, etc.) on the same topic,
-/// the library will disambiguate the parameters using simple heuristics.
+/// Each subscriber may use distinct parameters (extent, reordering, etc).
 cy_subscriber_t* cy_subscribe(cy_t* const cy, const wkv_str_t name, const size_t extent);
 
 /// The reordering window must be non-negative.
