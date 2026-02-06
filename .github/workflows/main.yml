@@ -1,0 +1,60 @@
+name: Main Workflow
+on: [ push, pull_request ]
+env:
+  LLVM_VERSION: 20
+
+jobs:
+  debug_tests:
+    runs-on: ubuntu-latest
+    container: ghcr.io/opencyphal/toolshed:ts24.4.3
+    strategy:
+      matrix:
+        toolchain: [ "clang", "gcc" ]
+        include:
+          - toolchain: gcc
+            c-compiler: gcc
+            cxx-compiler: g++
+          - toolchain: clang
+            c-compiler: clang
+            cxx-compiler: clang++
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      # language=bash
+      - run: >
+          cmake
+          -S .
+          -B $GITHUB_WORKSPACE/build
+          -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_C_COMPILER=${{ matrix.c-compiler }}
+          -DCMAKE_CXX_COMPILER=${{ matrix.cxx-compiler }}
+      # language=bash
+      - run: |
+          cd build
+          make -j"$(nproc)" test
+
+  arm:
+    runs-on: ubuntu-latest
+    env:
+      flags: -Wall -Wextra -pedantic -Wconversion -Wtype-limits -Wfatal-errors
+    strategy:
+      matrix:
+        std: [ "c11" ]
+    steps:
+      - uses: actions/checkout@v4
+      # language=bash
+      - run: |
+          sudo apt update -y
+          sudo apt-get install -y gcc-arm-none-eabi
+      - run: arm-none-eabi-gcc -Icy -Ilib cy/cy.c -c -std=${{ matrix.std }} ${{ env.flags }}
+
+  style_check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DoozyX/clang-format-lint-action@v0.20
+        with:
+          source: "./cy ./cy_udp_posix ./examples ./tests"
+          extensions: "c,h,cpp,hpp"
+          clangFormatVersion: ${{ env.LLVM_VERSION }}

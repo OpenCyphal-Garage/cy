@@ -3,6 +3,8 @@
 cmake_minimum_required(VERSION 3.24)
 project(cy C CXX)
 enable_testing()
+set(CMAKE_CTEST_ARGUMENTS "-V")  # Enable test outputs when running `make test`
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Use -DNO_STATIC_ANALYSIS=1 to suppress static analysis.
 # If not suppressed, the tools used here shall be available, otherwise the build will fail.
