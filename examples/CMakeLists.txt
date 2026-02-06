@@ -4,6 +4,13 @@ cmake_minimum_required(VERSION 3.24)
 project(cy_examples CXX)
 enable_testing()
 
+# Overriding the preferred subject-ID creates a very challenging environment for the consensus algorithm,
+# increasing the collision probability to 100%.
+add_compile_definitions(
+        CY_CONFIG_TRACE=1
+        CY_CONFIG_PREFERRED_TOPIC_OVERRIDE=0
+)
+
 # Cy trace logging helper.
 add_library(cy_trace_stderr STATIC cy_trace_stderr.c)
 target_link_libraries(cy_trace_stderr PUBLIC cy)

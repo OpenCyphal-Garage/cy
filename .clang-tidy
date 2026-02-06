@@ -43,3 +43,7 @@ Checks: >-
   -*macro-to-enum,
   -*-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
   -*-avoid-pragma-once,
+  -*-static-cast-downcast,
+  -*-prefer-static-over-anonymous-namespace,
+  -*-avoid-unchecked-container-access,
+  -*-pointer-arithmetic,

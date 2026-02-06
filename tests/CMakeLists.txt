@@ -7,6 +7,8 @@ set(CTEST_OUTPUT_ON_FAILURE ON)
 
 set(unity_root "${CMAKE_SOURCE_DIR}/lib/unity")
 
+add_compile_definitions(CY_CONFIG_TRACE=1)
+
 function(cy_gen_test name compile_flags link_flags c_standard)
     # Build Unity per-target to avoid mixing object architectures between -m32/-m64 variants.
     add_library("${name}_unity" STATIC "${unity_root}/src/unity.c")
@@ -46,6 +48,7 @@ function(cy_gen_test name compile_flags link_flags c_standard)
     target_link_libraries(${name} PRIVATE "${name}_unity")
     target_compile_options(${name} PRIVATE ${compile_flags} -Wno-unused-function)
     target_link_options(${name} PRIVATE ${link_flags})
+    # Clang-Tidy is mandatory in the test suite.
     set_target_properties(
             ${name}
             PROPERTIES

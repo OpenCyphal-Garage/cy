@@ -21,6 +21,8 @@ Update docs/examples when public API behavior changes.
 
 If you need a build directory, create one in the project root named with a `build` prefix; you can also use existing build directories if you prefer so, but avoid using `cmake-build-*` because these are used by CLion.
 
+Clang-Tidy must be enabled during build on all targets except external dependencies (e.g., the test framework). In particular, Clang-Tidy MUST BE ENABLED on the test suite and the Cy library itself.
+
 When compiling, use multiple jobs to use all CPU cores.
 
 Run all tests in debug build to ensure that all assertion checks are enabled.

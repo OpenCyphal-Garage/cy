@@ -7,6 +7,7 @@ typedef struct
 {
     cy_t        cy;
     cy_vtable_t vtable;
+    cy_us_t     now;
 } dedup_fixture_t;
 
 static void* fixture_realloc(cy_t* const cy, void* const ptr, const size_t size)
@@ -19,9 +20,12 @@ static void* fixture_realloc(cy_t* const cy, void* const ptr, const size_t size)
     return realloc(ptr, size);
 }
 
+static cy_us_t fixture_now(const cy_t* const cy) { return ((const dedup_fixture_t*)cy)->now; }
+
 static void dedup_fixture_init(dedup_fixture_t* const self)
 {
     memset(self, 0, sizeof(*self));
+    self->vtable.now     = fixture_now;
     self->vtable.realloc = fixture_realloc;
     self->cy.vtable      = &self->vtable;
 }

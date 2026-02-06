@@ -20,9 +20,8 @@ struct arrival_capture_t
     std::array<unsigned char, 16> first_payload_byte{};
 };
 
-struct test_platform_t
+struct test_platform_t final : cy_t
 {
-    cy_t        cy{};
     cy_vtable_t vtable{};
 
     cy_us_t       now{ 0 };
@@ -36,23 +35,16 @@ struct test_platform_t
     cy_err_t    last_subscription_error{ CY_OK };
 };
 
-static test_platform_t* platform_from(cy_t* const cy) { return reinterpret_cast<test_platform_t*>(cy); }
+test_platform_t* platform_from(cy_t* const cy) { return static_cast<test_platform_t*>(cy); }
 
-static const test_platform_t* platform_from_const(const cy_t* const cy)
-{
-    return reinterpret_cast<const test_platform_t*>(cy);
-}
+const test_platform_t* platform_from_const(const cy_t* const cy) { return static_cast<const test_platform_t*>(cy); }
 
 extern "C" cy_us_t platform_now(const cy_t* const cy) { return platform_from_const(cy)->now; }
 
 extern "C" void* platform_realloc(cy_t* const cy, void* const ptr, const size_t size)
 {
     (void)cy;
-    if (size == 0U) {
-        std::free(ptr);
-        return nullptr;
-    }
-    return std::realloc(ptr, size);
+    return cy_test_realloc(ptr, size);
 }
 
 extern "C" std::uint64_t platform_random(cy_t* const cy)
@@ -65,7 +57,7 @@ extern "C" std::uint64_t platform_random(cy_t* const cy)
 extern "C" cy_topic_t* platform_new_topic(cy_t* const cy)
 {
     (void)cy;
-    return static_cast<cy_topic_t*>(std::calloc(1U, sizeof(cy_topic_t)));
+    return static_cast<cy_topic_t*>(cy_test_zalloc(sizeof(cy_topic_t)));
 }
 
 extern "C" cy_err_t platform_publish(cy_topic_t* const topic,
@@ -89,7 +81,7 @@ extern "C" cy_err_t platform_subscribe(cy_topic_t* const topic, const size_t ext
 
 extern "C" void platform_unsubscribe(cy_topic_t* const topic) { (void)topic; }
 
-extern "C" void platform_topic_destroy(cy_topic_t* const topic) { std::free(topic); }
+extern "C" void platform_topic_destroy(cy_topic_t* const topic) { cy_test_free(topic); }
 
 extern "C" void platform_p2p_extent(cy_t* const cy, const size_t extent) { platform_from(cy)->p2p_extent = extent; }
 
@@ -113,7 +105,7 @@ extern "C" cy_err_t platform_p2p(cy_t* const                   cy,
         }
         const std::size_t to_copy =
           (self->last_p2p.size() - copied < frag->size) ? (self->last_p2p.size() - copied) : frag->size;
-        std::memcpy(&self->last_p2p[copied], frag->data, to_copy);
+        std::memcpy(self->last_p2p.data() + copied, frag->data, to_copy);
         copied += to_copy;
     }
     return CY_OK;
@@ -133,16 +125,16 @@ extern "C" void on_arrival_capture(cy_subscriber_t* const sub, const cy_arrival_
     TEST_ASSERT_NOT_NULL(cap);
     TEST_ASSERT(cap->count < cap->tags.size());
     const std::size_t idx = cap->count++;
-    cap->tags[idx]        = arrival.breadcrumb.message_tag;
+    cap->tags.at(idx)     = arrival.breadcrumb.message_tag;
 
     unsigned char first = 0xFFU;
     if (cy_message_read(arrival.message.content, 0U, 1U, &first) == 0U) {
         first = 0xFFU;
     }
-    cap->first_payload_byte[idx] = first;
+    cap->first_payload_byte.at(idx) = first;
 }
 
-static void platform_init(test_platform_t* const self)
+void platform_init(test_platform_t* const self)
 {
     *self                              = test_platform_t{};
     self->vtable.now                   = platform_now;
@@ -157,17 +149,18 @@ static void platform_init(test_platform_t* const self)
     self->vtable.p2p                   = platform_p2p;
     self->vtable.on_subscription_error = platform_on_subscription_error;
 
-    const cy_err_t err = cy_new(&self->cy, &self->vtable, wkv_key(""), wkv_key(""), CY_SUBJECT_ID_MODULUS_17bit);
+    const cy_err_t err =
+      cy_new(static_cast<cy_t*>(self), &self->vtable, wkv_key(""), wkv_key(""), CY_SUBJECT_ID_MODULUS_17bit);
     TEST_ASSERT_EQUAL_UINT8(CY_OK, err);
 }
 
-static void dispatch_message(test_platform_t* const self,
-                             cy_topic_t* const      topic,
-                             const std::uint8_t     type,
-                             const std::uint64_t    tag,
-                             const std::uint64_t    remote_id,
-                             const cy_us_t          timestamp,
-                             const unsigned char    payload_byte)
+void dispatch_message(test_platform_t* const  self,
+                      const cy_topic_t* const topic,
+                      const std::uint8_t      type,
+                      const std::uint64_t     tag,
+                      const std::uint64_t     remote_id,
+                      const cy_us_t           timestamp,
+                      const unsigned char     payload_byte)
 {
     std::array<unsigned char, 17> wire{};
     cy_test_make_message_header(wire.data(), type, tag, cy_topic_hash(topic));
@@ -180,44 +173,44 @@ static void dispatch_message(test_platform_t* const self,
     message.content   = msg;
 
     const cy_p2p_context_t p2p = { { 0 } };
-    cy_on_message(&self->cy, p2p, cy_topic_subject_id(topic), remote_id, message);
+    cy_on_message(static_cast<cy_t*>(self), p2p, cy_topic_subject_id(topic), remote_id, message);
 }
 
-static void test_api_malformed_header_drops_message(void)
+void test_api_malformed_header_drops_message()
 {
     test_platform_t platform;
     platform_init(&platform);
 
-    std::array<unsigned char, 3> wire = { 0x01U, 0x02U, 0x03U };
-    cy_message_t* const          msg  = cy_test_message_make(wire.data(), wire.size());
+    const std::array<unsigned char, 3> wire = { 0x01U, 0x02U, 0x03U };
+    cy_message_t* const                msg  = cy_test_message_make(wire.data(), wire.size());
     TEST_ASSERT_NOT_NULL(msg);
     cy_message_ts_t mts;
     mts.timestamp              = 10;
     mts.content                = msg;
     const cy_p2p_context_t p2p = { { 0 } };
 
-    cy_on_message(&platform.cy, p2p, 0U, 1234U, mts);
+    cy_on_message(static_cast<cy_t*>(&platform), p2p, 0U, 1234U, mts);
     TEST_ASSERT_EQUAL_size_t(1, cy_test_message_destroy_count());
     TEST_ASSERT_EQUAL_size_t(0, cy_test_message_live_count());
     TEST_ASSERT_EQUAL_size_t(0, platform.p2p_count);
 }
 
-static void test_api_reliable_duplicate_acked_once_to_application(void)
+void test_api_reliable_duplicate_acked_once_to_application()
 {
     test_platform_t platform;
     platform_init(&platform);
     cy_test_message_reset_counters();
 
     arrival_capture_t      capture{};
-    cy_subscriber_t* const sub = cy_subscribe(&platform.cy, wkv_key("rx/dup"), 256U);
+    cy_subscriber_t* const sub = cy_subscribe(static_cast<cy_t*>(&platform), wkv_key("rx/dup"), 256U);
     TEST_ASSERT_NOT_NULL(sub);
 
-    cy_user_context_t context = CY_USER_CONTEXT_EMPTY;
-    context.ptr[0]            = &capture;
+    auto context   = CY_USER_CONTEXT_EMPTY;
+    context.ptr[0] = &capture;
     cy_subscriber_context_set(sub, context);
     cy_subscriber_callback_set(sub, on_arrival_capture);
 
-    cy_topic_t* const topic = cy_topic_find_by_name(&platform.cy, wkv_key("rx/dup"));
+    const cy_topic_t* const topic = cy_topic_find_by_name(static_cast<cy_t*>(&platform), wkv_key("rx/dup"));
     TEST_ASSERT_NOT_NULL(topic);
 
     dispatch_message(&platform, topic, HeaderMsgReliable, 0x1234U, 0xAAU, 100, 0x11U);
@@ -230,22 +223,22 @@ static void test_api_reliable_duplicate_acked_once_to_application(void)
     TEST_ASSERT_EQUAL_size_t(0, cy_test_message_live_count());
 }
 
-static void test_api_ordered_subscriber_timeout_flush(void)
+void test_api_ordered_subscriber_timeout_flush()
 {
     test_platform_t platform;
     platform_init(&platform);
     cy_test_message_reset_counters();
 
     arrival_capture_t      capture{};
-    cy_subscriber_t* const sub = cy_subscribe_ordered(&platform.cy, wkv_key("rx/ord"), 256U, 10);
+    cy_subscriber_t* const sub = cy_subscribe_ordered(static_cast<cy_t*>(&platform), wkv_key("rx/ord"), 256U, 10);
     TEST_ASSERT_NOT_NULL(sub);
 
-    cy_user_context_t context = CY_USER_CONTEXT_EMPTY;
-    context.ptr[0]            = &capture;
+    auto context   = CY_USER_CONTEXT_EMPTY;
+    context.ptr[0] = &capture;
     cy_subscriber_context_set(sub, context);
     cy_subscriber_callback_set(sub, on_arrival_capture);
 
-    cy_topic_t* const topic = cy_topic_find_by_name(&platform.cy, wkv_key("rx/ord"));
+    const cy_topic_t* const topic = cy_topic_find_by_name(static_cast<cy_t*>(&platform), wkv_key("rx/ord"));
     TEST_ASSERT_NOT_NULL(topic);
 
     dispatch_message(&platform, topic, HeaderMsgBestEffort, 8U, 0xBBU, 100, 0x41U);
@@ -254,7 +247,7 @@ static void test_api_ordered_subscriber_timeout_flush(void)
     TEST_ASSERT_EQUAL_size_t(0, platform.p2p_count);
 
     platform.now = 1000;
-    TEST_ASSERT_EQUAL_UINT8(CY_OK, cy_update(&platform.cy));
+    TEST_ASSERT_EQUAL_UINT8(CY_OK, cy_update(static_cast<cy_t*>(&platform)));
     TEST_ASSERT_EQUAL_size_t(2, capture.count);
     TEST_ASSERT_EQUAL_UINT64(8U, capture.tags[0]);
     TEST_ASSERT_EQUAL_UINT64(9U, capture.tags[1]);
