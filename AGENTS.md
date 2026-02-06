@@ -11,7 +11,7 @@ Update docs/examples when public API behavior changes.
 ## Project Structure & Module Organization
 
 - `cy/`: the library itself, which is transport-agnostic and platform-agnostic.
-- `cy_udp_posix/`: POSIX/BSD-socket glue layer built on LibUDPard.
+- `tests/`: the test suite.
 - `examples/`: runnable demos.
 - `lib/`: single-header dependencies plus the `lib/libudpard` git submodule.
 - `formal_verification/`: TLA+ models and helper scripts.
@@ -42,3 +42,5 @@ cmake --build build-debug --target format
 - Naming patterns: `cy_*` functions, `cy_*_t` types, `CY_*` macros. Internal definitions need no prefixing.
 - Keep code compact and add brief comments before non-obvious logic.
 - Treat warnings as errors and keep compatibility with strict warning flags.
+- Module entities are prefixed with the module name; e.g., `foo.h` contains `foo_bar`, `foo_baz_t`, `FOO_QUX`.
+  Module-local statics need no prefixing.
