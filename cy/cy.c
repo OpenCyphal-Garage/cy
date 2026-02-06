@@ -2098,6 +2098,7 @@ static cy_err_t ensure_subscriber_root(cy_t* const               cy,
         return CY_ERR_MEMORY;
     }
     subscriber_root_t* const root = (subscriber_root_t*)node->value;
+    root->cy                      = cy;
 
     // Insert the new root into the indexes.
     root->index_name = node;

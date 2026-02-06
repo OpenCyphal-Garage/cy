@@ -59,3 +59,4 @@ add_compile_definitions(
 add_subdirectory(cy)
 add_subdirectory(cy_udp_posix)
 add_subdirectory(examples)
+add_subdirectory(tests)
