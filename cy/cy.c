@@ -103,7 +103,7 @@
 #define CY_THREAD_LOCAL
 #endif
 
-#define KILO 1000L
+#define KILO 1000LL
 #define MEGA 1000000LL
 
 /// The earliest and latest representable time in microseconds.
@@ -2476,7 +2476,7 @@ cy_err_t cy_update(cy_t* const cy)
     return heartbeat_poll(cy, now);
 }
 
-#if 0
+#if 0 // NOLINT(readability-avoid-unconditional-preprocessor-if)
 static void on_response(cy_t* const             cy,
                         const cy_p2p_context_t  p2p_context,
                         const uint64_t          remote_id,
@@ -2489,7 +2489,7 @@ static void on_response(cy_t* const             cy,
 }
 #endif
 
-#if 0
+#if 0 // NOLINT(readability-avoid-unconditional-preprocessor-if)
 static void on_message_ack(cy_t* const cy, publish_future_t* const future)
 {
     // Currently, we use a very simple implementation that ceases delivery attempts after the first acknowledgment
@@ -2517,7 +2517,7 @@ static void on_message_ack(cy_t* const cy, publish_future_t* const future)
 }
 #endif
 
-#if 0
+#if 0 // NOLINT(readability-avoid-unconditional-preprocessor-if)
 static void on_response_ack(cy_t* const cy, response_future_t* const future, const bool positive)
 {
     //
@@ -2642,7 +2642,7 @@ void cy_on_message(cy_t* const            cy,
             break;
         }
 
-#if 0
+#if 0 // NOLINT(readability-avoid-unconditional-preprocessor-if)
         case header_msg_ack: {
             const uint64_t tag = deserialize_u56(&header[1]);
             assert(type == header_msg_ack);
@@ -2658,7 +2658,7 @@ void cy_on_message(cy_t* const            cy,
             break;
         }
 #endif
-#if 0
+#if 0 // NOLINT(readability-avoid-unconditional-preprocessor-if)
         case header_rsp_be:
         case header_rsp_rel: {
             const uint64_t          message_tag = deserialize_u56(&header[1]);

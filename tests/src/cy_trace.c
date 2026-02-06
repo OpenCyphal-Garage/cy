@@ -30,7 +30,7 @@ void cy_trace(cy_t* const         cy,
                   func);
 
     // Print the message.
-    va_list args;
+    va_list args = { 0 };
     va_start(args, format);
     (void)vfprintf(stderr, format, args);
     va_end(args);

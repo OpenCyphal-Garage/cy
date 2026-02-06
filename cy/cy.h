@@ -138,15 +138,15 @@ typedef enum cy_future_status_t
     cy_future_success = 1,
     cy_future_failure = 2,
 } cy_future_status_t;
-cy_future_status_t cy_future_status(const cy_future_t* const future);
+cy_future_status_t cy_future_status(const cy_future_t* const self);
 
 /// The result depends on the type of the future; some intermediate results may be available while still pending.
 /// The lifetime of the returned pointer is bound to the lifetime of the future instance (valid until destroyed).
-void* cy_future_result(cy_future_t* const future);
+void* cy_future_result(cy_future_t* const self);
 
 /// The application can store arbitrary data in the context to share information with the future callback, if used.
-cy_user_context_t cy_future_context(const cy_future_t* const future);
-void              cy_future_context_set(cy_future_t* const future, const cy_user_context_t context);
+cy_user_context_t cy_future_context(const cy_future_t* const self);
+void              cy_future_context_set(cy_future_t* const self, const cy_user_context_t context);
 
 /// The callback is guaranteed to be invoked when the future completes (successfully or not);
 /// also, it may be invoked when the future is still pending to provide intermediate progress updates.
@@ -155,13 +155,13 @@ void              cy_future_context_set(cy_future_t* const future, const cy_user
 /// If the future is already completed, the callback will be invoked immediately before this function returns,
 /// unless it was already set.
 /// It is safe to destroy the future from within its own callback (but it is not safe to destroy another future).
-cy_future_callback_t cy_future_callback(const cy_future_t* const future);
-void                 cy_future_callback_set(cy_future_t* const future, const cy_future_callback_t callback);
+cy_future_callback_t cy_future_callback(const cy_future_t* const self);
+void                 cy_future_callback_set(cy_future_t* const self, const cy_future_callback_t callback);
 
 /// Every future must be destroyed. If the future is still pending, the associated action will be cancelled.
 /// A future may be destroyed from within its own callback.
 /// If a future is not of interest, use this function as the future callback to ensure automatic destruction.
-void cy_future_destroy(cy_future_t* const future);
+void cy_future_destroy(cy_future_t* const self);
 
 // =====================================================================================================================
 //                                                      PUBLISHER
