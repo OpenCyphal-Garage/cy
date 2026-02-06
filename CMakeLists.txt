@@ -25,9 +25,10 @@ if (NOT clang_format)
 else ()
     file(GLOB format_files
             ${CMAKE_SOURCE_DIR}/cy/*.[ch]
-            ${CMAKE_SOURCE_DIR}/examples/*.[ch]
             ${CMAKE_SOURCE_DIR}/tests/*/*.[ch]
             ${CMAKE_SOURCE_DIR}/tests/*/*.[ch]pp
+            ${CMAKE_SOURCE_DIR}/examples/*.[ch]
+            ${CMAKE_SOURCE_DIR}/cy_udp_posix/*.[ch]
     )
     message(STATUS "Using clang-format: ${clang_format}; files: ${format_files}")
     add_custom_target(format COMMAND ${clang_format} -i -fallback-style=none -style=file --verbose ${format_files})

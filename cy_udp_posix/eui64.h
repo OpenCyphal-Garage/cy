@@ -47,7 +47,7 @@ static inline uint64_t eui64_semirandom(void)
 #elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
     {
         // Use sysctl kern.hostid for host identifier
-        int      mib[2] = {CTL_KERN, KERN_HOSTID};
+        int      mib[2] = { CTL_KERN, KERN_HOSTID };
         uint32_t hostid = 0;
         size_t   len    = sizeof(hostid);
         if (sysctl(mib, 2, &hostid, &len, NULL, 0) != 0) {
