@@ -35,7 +35,7 @@ function(cy_gen_test name compile_flags link_flags c_standard)
             CXX_CLANG_TIDY ""
     )
 
-    add_executable(${name} ${ARGN} src/helpers.c platform_stubs/message.c)
+    add_executable(${name} ${ARGN} src/helpers.c src/cy_trace.c platform_stubs/message.c)
     target_include_directories(
             ${name}
             PRIVATE

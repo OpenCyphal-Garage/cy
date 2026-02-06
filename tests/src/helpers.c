@@ -1,5 +1,4 @@
 #include "helpers.h"
-#include <stdarg.h>
 
 void cy_test_serialize_u56(unsigned char out[7], uint64_t value)
 {
@@ -41,21 +40,4 @@ void cy_test_make_message_header(unsigned char  out[16],
     out[0] = (unsigned char)(type & 31U);
     cy_test_serialize_u56(&out[1], tag56);
     cy_test_serialize_u64(&out[8], topic_hash);
-}
-
-void cy_trace(cy_t* const         cy,
-              const char* const   file,
-              const uint_fast16_t line,
-              const char* const   func,
-              const char* const   format,
-              ...)
-{
-    (void)cy;
-    (void)file;
-    (void)line;
-    (void)func;
-    (void)format;
-    va_list va;
-    va_start(va, format);
-    va_end(va);
 }
