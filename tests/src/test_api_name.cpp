@@ -62,17 +62,17 @@ void test_name_is_valid_invalid_chars()
     // Space (32) is invalid.
     TEST_ASSERT_FALSE(cy_name_is_valid(wkv_key("foo bar")));
     // Control characters are invalid.
-    const char with_tab[] = { 'a', '\t', 'b', '\0' };
-    TEST_ASSERT_FALSE(cy_name_is_valid(wkv_key(with_tab)));
-    const char      with_nul_inside[] = { 'a', '\0', 'b' };
-    const wkv_str_t nul_mid           = { 3, with_nul_inside };
+    const std::array<char, 4> with_tab = { 'a', '\t', 'b', '\0' };
+    TEST_ASSERT_FALSE(cy_name_is_valid(wkv_key(with_tab.data())));
+    const std::array<char, 3> with_nul_inside = { 'a', '\0', 'b' };
+    const wkv_str_t           nul_mid         = { 3, with_nul_inside.data() };
     TEST_ASSERT_FALSE(cy_name_is_valid(nul_mid));
     // DEL (127) is invalid.
-    const char with_del[] = { 'a', '\x7f', '\0' };
-    TEST_ASSERT_FALSE(cy_name_is_valid(wkv_key(with_del)));
+    const std::array<char, 3> with_del = { 'a', '\x7f', '\0' };
+    TEST_ASSERT_FALSE(cy_name_is_valid(wkv_key(with_del.data())));
     // High bit (128+) is invalid.
-    const char with_high[] = { 'a', '\x80', '\0' };
-    TEST_ASSERT_FALSE(cy_name_is_valid(wkv_key(with_high)));
+    const std::array<char, 3> with_high = { 'a', '\x80', '\0' };
+    TEST_ASSERT_FALSE(cy_name_is_valid(wkv_key(with_high.data())));
 }
 
 // ----- cy_name_is_verbatim -----
