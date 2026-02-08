@@ -80,6 +80,20 @@ jobs:
       - run: cd $GITHUB_WORKSPACE/build && make -j"$(nproc)"
       - run: cd $GITHUB_WORKSPACE/build && make test
       - run: cd $GITHUB_WORKSPACE/build && make coverage
+      # Export Cobertura report for Coveralls, tracking only cy/cy.c.
+      - run: |
+          cd "$GITHUB_WORKSPACE/build"
+          gcovr \
+            --root "$GITHUB_WORKSPACE" \
+            --filter '.*/cy/cy\.c$' \
+            --xml-pretty \
+            --output "$GITHUB_WORKSPACE/build/coverage/cy.cobertura.xml" \
+            --print-summary
+      - uses: coverallsapp/github-action@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          file: build/coverage/cy.cobertura.xml
+          format: cobertura
       - uses: actions/upload-artifact@v4
         with:
           name: coverage-report
