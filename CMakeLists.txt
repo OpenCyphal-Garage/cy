@@ -8,7 +8,7 @@ project(cy C CXX)
 enable_testing()
 set(CMAKE_CTEST_ARGUMENTS "-V")  # Enable test outputs when running `make test`
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-set(CMAKE_VERBOSE_MAKEFILE ON)
+#set(CMAKE_VERBOSE_MAKEFILE ON)
 
 # Static analysis.
 option(NO_STATIC_ANALYSIS "Disable static analysis to speed up the build" OFF)
@@ -61,15 +61,17 @@ if (COVERAGE)
     add_link_options(--coverage)
     add_compile_definitions(NDEBUG=1)  # Disable assertions to remove uncovered fault branches from the report.
     find_program(gcovr NAMES gcovr REQUIRED)
+    set(coverage_report_html "${CMAKE_BINARY_DIR}/coverage/index.html")
     add_custom_target(coverage
         COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/coverage
         COMMAND ${gcovr}
             --root         ${CMAKE_SOURCE_DIR}
             --filter       ${CMAKE_SOURCE_DIR}/cy/
-            --html-details ${CMAKE_BINARY_DIR}/coverage/index.html
+            --html-details ${coverage_report_html}
             --print-summary
+            COMMAND ${CMAKE_COMMAND} -E echo "📜 📜 📜 COVERAGE REPORT: file://${coverage_report_html} 📜 📜 📜"
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-        COMMENT "Generating branch coverage HTML report in ${CMAKE_BINARY_DIR}/coverage/"
+        COMMENT "Generating branch coverage HTML report"
     )
 endif ()
 

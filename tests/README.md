@@ -14,7 +14,7 @@ Use Clang-Format to format the code when done editing.
 
 Refer to the CI workflow files and `CMakeLists.txt` for the recommended practices on how to build and run the test suite.
 
-For coverage measurement:
+For coverage measurement, enable CMake option `COVERAGE`, build and run the tests, then build the `coverage` target to generate the report:
 
 ```bash
 cmake -B build -DCOVERAGE=ON -DNO_STATIC_ANALYSIS=ON
