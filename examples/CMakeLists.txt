@@ -4,6 +4,8 @@ cmake_minimum_required(VERSION 3.24)
 project(cy_examples CXX)
 enable_testing()
 
+include_directories(SYSTEM "${CMAKE_SOURCE_DIR}/lib")
+
 # Overriding the preferred subject-ID creates a very challenging environment for the consensus algorithm,
 # increasing the collision probability to 100%.
 add_compile_definitions(

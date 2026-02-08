@@ -630,6 +630,7 @@ static int32_t cavl_comp_topic_subject_id(const void* const user, const cy_tree_
 
 static void topic_destroy(cy_topic_t* const topic)
 {
+    (void)topic;
     assert(topic != NULL);
     // TODO implement
 }
@@ -878,6 +879,7 @@ static void topic_allocate(cy_topic_t* const topic, const uint64_t new_evictions
                                                       cy_topic_t,
                                                       index_subject_id);
         assert(self == topic);
+        (void)self;
         assert(!topic->subscribed);
         // Allocation done (end of the recursion chain), schedule gossip and resubscribe if needed.
         // If a resubscription failed in the past, we will retry here as long as there is at least one live subscriber.
@@ -967,6 +969,7 @@ static cy_err_t topic_new(cy_t* const        cy,
     const cy_tree_t* const res_tree =
       cavl2_find_or_insert(&cy->topics_by_hash, &topic->hash, &cavl_comp_topic_hash, topic, &cavl2_trivial_factory);
     assert(res_tree == &topic->index_hash); // Cannot invoke this if such topic already exists!
+    (void)res_tree;
 
     // Ensure the topic is in the gossip index. This is needed for allocation.
     // This does not apply to pinned topics, which are never gossiped.

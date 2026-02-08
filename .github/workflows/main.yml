@@ -4,7 +4,7 @@ env:
   LLVM_VERSION: 20
 
 jobs:
-  debug_tests:
+  test_debug:
     runs-on: ubuntu-latest
     container: ghcr.io/opencyphal/toolshed:ts24.4.3
     strategy:
@@ -31,6 +31,59 @@ jobs:
           -DCMAKE_CXX_COMPILER=${{ matrix.cxx-compiler }}
       - run: cd $GITHUB_WORKSPACE/build && make -j"$(nproc)"
       - run: cd $GITHUB_WORKSPACE/build && make test
+
+  test_release:
+    runs-on: ubuntu-latest
+    container: ghcr.io/opencyphal/toolshed:ts24.4.3
+    strategy:
+      matrix:
+        toolchain: [ "clang", "gcc" ]
+        include:
+          - toolchain: gcc
+            c-compiler: gcc
+            cxx-compiler: g++
+          - toolchain: clang
+            c-compiler: clang
+            cxx-compiler: clang++
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      # language=bash
+      - run: >
+          cmake
+          -S .
+          -B $GITHUB_WORKSPACE/build
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER=${{ matrix.c-compiler }}
+          -DCMAKE_CXX_COMPILER=${{ matrix.cxx-compiler }}
+          -DNO_STATIC_ANALYSIS=ON
+      - run: cd $GITHUB_WORKSPACE/build && make -j"$(nproc)"
+      - run: cd $GITHUB_WORKSPACE/build && make test
+
+  test_coverage:
+    runs-on: ubuntu-latest
+    container: ghcr.io/opencyphal/toolshed:ts24.4.3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - run: pip install --break-system-packages gcovr
+      # language=bash
+      - run: >
+          cmake
+          -S .
+          -B $GITHUB_WORKSPACE/build
+          -DCMAKE_BUILD_TYPE=Debug
+          -DCOVERAGE=ON
+          -DNO_STATIC_ANALYSIS=ON
+      - run: cd $GITHUB_WORKSPACE/build && make -j"$(nproc)"
+      - run: cd $GITHUB_WORKSPACE/build && make test
+      - run: cd $GITHUB_WORKSPACE/build && make coverage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: build/coverage/
 
   arm:
     runs-on: ubuntu-latest

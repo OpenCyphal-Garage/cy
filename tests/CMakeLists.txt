@@ -5,6 +5,8 @@ project(cy_tests C CXX)
 
 set(CTEST_OUTPUT_ON_FAILURE ON)
 
+include_directories(SYSTEM "${CMAKE_SOURCE_DIR}/lib")
+
 set(unity_root "${CMAKE_SOURCE_DIR}/lib/unity")
 
 function(cy_gen_test name compile_flags link_flags c_standard definitions)
