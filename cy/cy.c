@@ -733,7 +733,7 @@ static void schedule_gossip(cy_topic_t* const topic)
 static bool parse_hash_override(const wkv_str_t s, uint64_t* const out)
 {
     *out                  = 0;
-    const char* const end = (const char*)s.str + s.len;
+    const char* const end = s.str + s.len;
     for (size_t i = 0; i < smaller(s.len, 17); i++) {
         const unsigned char ch = (unsigned char)*(end - (i + 1));
         if (ch == '#') {

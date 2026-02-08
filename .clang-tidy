@@ -14,6 +14,8 @@ Checks: >-
   performance-*,
   portability-*,
   readability-*,
+  misc-const-correctness,
+  readability-non-const-parameter,
   -cppcoreguidelines-avoid-const-or-ref-data-members,
   -cppcoreguidelines-avoid-do-while,
   -google-readability-todo,
@@ -47,3 +49,12 @@ Checks: >-
   -*-prefer-static-over-anonymous-namespace,
   -*-avoid-unchecked-container-access,
   -*-pointer-arithmetic,
+CheckOptions:
+  - key: misc-const-correctness.TransformPointersAsValues
+    value: 'true'
+  - key: misc-const-correctness.TransformReferences
+    value: 'true'
+  - key: misc-const-correctness.TransformValues
+    value: 'true'
+  - key: misc-const-correctness.WarnPointersAsValues
+    value: 'true'
