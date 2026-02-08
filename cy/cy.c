@@ -1748,7 +1748,6 @@ static void reordering_eject(reordering_t* const self, reordering_slot_t* const 
     mem_free(cy, slot); // Free the slot before the callback to give the application more memory to work with.
 
     // Invoke the callback with the arrival and dispose the message.
-    // NB: the callback may destroy the subscriber, consider all states invalid.
     subscriber_invoke(self->subscriber, arrival);
     cy_message_refcount_dec(arrival.message.content);
 }
@@ -2235,7 +2234,12 @@ void cy_subscriber_name(const cy_subscriber_t* const self, char* const out_name)
     wkv_get_key(&self->root->cy->subscribers_by_name, self->root->index_name, out_name);
 }
 
-void cy_unsubscribe(cy_subscriber_t* const self) { (void)self; }
+void cy_unsubscribe(cy_subscriber_t* const self)
+{
+    // TODO: Do not destroy the subscriber immediately; schedule an olga event instead with zero deferral timeout.
+    //   This will allow unsubscribing from within a callback. We'll need a test for that.
+    (void)self;
+}
 
 static cy_err_t do_respond(cy_breadcrumb_t* const breadcrumb, const cy_us_t deadline, const cy_bytes_t message)
 {
