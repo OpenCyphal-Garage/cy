@@ -429,6 +429,115 @@ static void test_reordering_partial_gap_closure(void)
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&env.fixture.heap));
 }
 
+/// Regression: with minimum capacity, a duplicate of the resequenced message must be caught by the AVL-tree
+/// dedup check in the interning section, NOT by the fast-path branch. This test ensures REORDERING_CAPACITY_MIN
+/// is large enough to prevent the following control-path bug:
+///
+/// After resequence, the triggering message is interned at lin_tag = capacity/2 and last_ejected_lin_tag = 0.
+/// If capacity were too small (e.g., 2), capacity/2 = 1, which equals last_ejected_lin_tag + 1 — exactly
+/// the fast-path condition (reordering_push line ~1828: lin_tag == tag56_add(self->last_ejected_lin_tag, 1)).
+/// A subsequent retransmission of the same tag would then:
+///   1. Hit the fast-path branch (lin_tag=1 == 0+1), bypassing the AVL-tree duplicate check entirely.
+///   2. Be delivered to the application a second time (the first delivery will happen later via timeout).
+///   3. Advance last_ejected_lin_tag to 1, orphaning the interned copy (also at lin_tag=1).
+///   4. On timeout, reordering_scan force-ejects the orphaned slot, hitting the assertion in reordering_eject
+///      (slot->lin_tag > self->last_ejected_lin_tag → 1 > 1 → fails).
+///
+/// With REORDERING_CAPACITY_MIN=4, capacity/2=2, so the resequenced message lands at lin_tag=2, strictly above
+/// the fast-path position (0+1=1). Duplicates get lin_tag=2, miss the fast path, and reach the AVL-tree check.
+static void test_reordering_min_capacity_resequence_dup_is_deduped(void)
+{
+    reorder_env_t env;
+    reorder_env_init(&env);
+    env.sub.params.reordering_capacity = REORDERING_CAPACITY_MIN; // Override to the minimum allowed.
+
+    // Establish state: tag=5 (lin_tag=1) immediately ejected via fast path.
+    TEST_ASSERT_TRUE(push_message(&env, 5U, 10, 0x50U));
+    TEST_ASSERT_EQUAL_size_t(1, env.capture.count);
+    TEST_ASSERT_EQUAL_UINT64(5U, env.capture.tags[0]);
+
+    // Jump far ahead: tag=50000 triggers resequence in reordering_push.
+    // New baseline = tag56_forward_distance(capacity/2=2, 50000) = 49998, last_ejected_lin_tag = 0.
+    // Recomputed lin_tag = tag56_forward_distance(49998, 50000) = 2.
+    // Since 2 != 0+1, NOT fast-pathed; since 2 > 0+1, interned at position 2.
+    TEST_ASSERT_TRUE(push_message(&env, 50000U, 100, 0xAAU));
+    TEST_ASSERT_EQUAL_size_t(1, env.capture.count); // Only tag=5 delivered so far.
+    TEST_ASSERT_EQUAL_size_t(1, env.rr.interned_count);
+
+    // Duplicate of tag=50000 arrives (e.g., reliable retransmission before ack received).
+    // lin_tag = tag56_forward_distance(49998, 50000) = 2.
+    // Fast-path check: 2 == tag56_add(0, 1) = 1 → NO. (This is the critical check.)
+    // Late check: 2 <= 0 → NO.
+    // Resequence: 2 > 0 + 4 → NO.
+    // Interning: AVL tree finds existing slot at lin_tag=2 → duplicate dropped.
+    TEST_ASSERT_TRUE(push_message(&env, 50000U, 101, 0xFFU));
+    TEST_ASSERT_EQUAL_size_t(1, env.capture.count); // No new delivery.
+    TEST_ASSERT_EQUAL_size_t(1, env.rr.interned_count); // Still just one interned slot, not two.
+
+    // Let the timeout force-eject the single interned message. Verify exactly one delivery of tag=50000.
+    spin_to(&env, 1000);
+    TEST_ASSERT_EQUAL_size_t(2, env.capture.count);
+    TEST_ASSERT_EQUAL_UINT64(50000U, env.capture.tags[1]);
+    TEST_ASSERT_EQUAL_size_t(0, env.rr.interned_count);
+
+    reorder_env_cleanup(&env);
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&env.fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&env.fixture.heap));
+}
+
+/// Regression: with minimum capacity, an older sibling arriving after resequence must NOT be dropped as "late."
+/// This test ensures REORDERING_CAPACITY_MIN is large enough to preserve at least one slot for older messages.
+///
+/// After resequence, tag_baseline = tag56_forward_distance(capacity/2, tag) and last_ejected_lin_tag = 0.
+/// If capacity were too small (e.g., 2), capacity/2 = 1, so tag_baseline = tag - 1. An older sibling at
+/// tag-1 would then compute lin_tag = tag56_forward_distance(tag-1, tag-1) = 0. The late-drop check
+/// (reordering_push line ~1839: lin_tag <= self->last_ejected_lin_tag) evaluates 0 <= 0 → true, and the
+/// older sibling is silently dropped. This completely defeats the purpose of the resequence delay, which
+/// exists specifically to allow older siblings to arrive first (see comment in reordering_resequence).
+///
+/// With REORDERING_CAPACITY_MIN=4, capacity/2=2, so tag_baseline = tag - 2. An older sibling at tag-1 gets
+/// lin_tag = 1 = last_ejected(0) + 1, hitting the fast-path branch. It is accepted and ejected immediately,
+/// and the subsequent reordering_scan flushes the resequenced message at lin_tag=2.
+static void test_reordering_min_capacity_resequence_older_sibling_accepted(void)
+{
+    reorder_env_t env;
+    reorder_env_init(&env);
+    env.sub.params.reordering_capacity = REORDERING_CAPACITY_MIN; // Override to the minimum allowed.
+
+    // Establish state: tag=5 (lin_tag=1) immediately ejected via fast path.
+    TEST_ASSERT_TRUE(push_message(&env, 5U, 10, 0x50U));
+    TEST_ASSERT_EQUAL_size_t(1, env.capture.count);
+    TEST_ASSERT_EQUAL_UINT64(5U, env.capture.tags[0]);
+
+    // Jump far ahead: tag=50000 triggers resequence in reordering_push.
+    // New baseline = tag56_forward_distance(2, 50000) = 49998, last_ejected_lin_tag = 0.
+    // tag=50000 interned at lin_tag=2.
+    TEST_ASSERT_TRUE(push_message(&env, 50000U, 100, 0xAAU));
+    TEST_ASSERT_EQUAL_size_t(1, env.capture.count);
+    TEST_ASSERT_EQUAL_size_t(1, env.rr.interned_count);
+
+    // Older sibling tag=49999 arrives.
+    // lin_tag = tag56_forward_distance(49998, 49999) = 1.
+    // Fast-path check: 1 == tag56_add(0, 1) = 1 → YES. Ejected immediately.
+    // Then reordering_scan finds interned slot at lin_tag=2 == last_ejected(1)+1 → ejects it too.
+    // Both delivered in correct order: 49999 first, then 50000.
+    TEST_ASSERT_TRUE(push_message(&env, 49999U, 101, 0xBBU));
+    TEST_ASSERT_EQUAL_size_t(3, env.capture.count);
+    TEST_ASSERT_EQUAL_UINT64(49999U, env.capture.tags[1]);
+    TEST_ASSERT_EQUAL_UINT64(50000U, env.capture.tags[2]);
+    TEST_ASSERT_EQUAL_size_t(0, env.rr.interned_count);
+
+    // An even-older sibling (tag=49998) is now correctly dropped as late: after ejecting 49999 and 50000,
+    // last_ejected_lin_tag=2. tag=49998 gives lin_tag=tag56_forward_distance(49998, 49998)=0, and 0<=2 → late.
+    // This is expected: capacity/2-1=1 is the maximum number of older siblings accommodated at min capacity.
+    TEST_ASSERT_FALSE(push_message(&env, 49998U, 102, 0xCCU));
+    TEST_ASSERT_EQUAL_size_t(3, env.capture.count);
+
+    reorder_env_cleanup(&env);
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&env.fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&env.fixture.heap));
+}
+
 /// After full in-order delivery, verify that subsequent in-order messages continue to be ejected immediately.
 static void test_reordering_continuous_in_order_after_gap(void)
 {
@@ -482,6 +591,8 @@ int main(void)
     RUN_TEST(test_reordering_late_after_timeout);
     RUN_TEST(test_reordering_capacity_overflow_resequence);
     RUN_TEST(test_reordering_partial_gap_closure);
+    RUN_TEST(test_reordering_min_capacity_resequence_dup_is_deduped);
+    RUN_TEST(test_reordering_min_capacity_resequence_older_sibling_accepted);
     RUN_TEST(test_reordering_continuous_in_order_after_gap);
     return UNITY_END();
 }
