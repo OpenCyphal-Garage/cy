@@ -29,10 +29,8 @@ jobs:
           -DCMAKE_BUILD_TYPE=Debug
           -DCMAKE_C_COMPILER=${{ matrix.c-compiler }}
           -DCMAKE_CXX_COMPILER=${{ matrix.cxx-compiler }}
-      # language=bash
-      - run: |
-          cd build
-          make -j"$(nproc)" test
+      - run: cd $GITHUB_WORKSPACE/build && make -j"$(nproc)"
+      - run: cd $GITHUB_WORKSPACE/build && make test
 
   arm:
     runs-on: ubuntu-latest

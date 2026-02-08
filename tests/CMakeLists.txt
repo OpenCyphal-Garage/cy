@@ -7,7 +7,7 @@ set(CTEST_OUTPUT_ON_FAILURE ON)
 
 set(unity_root "${CMAKE_SOURCE_DIR}/lib/unity")
 
-add_compile_definitions(CY_CONFIG_TRACE=1)
+add_compile_definitions(CY_CONFIG_TRACE=1)  # TODO: build intrusive tests with tracing disabled; API tests with enabled
 
 function(cy_gen_test name compile_flags link_flags c_standard)
     # Build Unity per-target to avoid mixing object architectures between -m32/-m64 variants.
@@ -78,17 +78,3 @@ endfunction()
 cy_gen_test_intrusive_matrix(test_intrusive_dedup src/test_intrusive_dedup.c)
 cy_gen_test_intrusive_matrix(test_intrusive_reordering src/test_intrusive_reordering.c)
 cy_gen_test_arch_matrix(test_api_rx 11 src/test_api_rx.cpp ${CMAKE_SOURCE_DIR}/cy/cy.c)
-
-get_property(cy_test_executable_targets GLOBAL PROPERTY CY_TEST_EXECUTABLE_TARGETS)
-if (cy_test_executable_targets)
-    add_test(
-            NAME build_test_binaries
-            COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --parallel --target ${cy_test_executable_targets}
-    )
-    set_tests_properties(build_test_binaries PROPERTIES FIXTURES_SETUP cy_test_binaries_built)
-
-    get_property(cy_test_ctest_names GLOBAL PROPERTY CY_TEST_CTEST_NAMES)
-    if (cy_test_ctest_names)
-        set_tests_properties(${cy_test_ctest_names} PROPERTIES FIXTURES_REQUIRED cy_test_binaries_built)
-    endif ()
-endif ()

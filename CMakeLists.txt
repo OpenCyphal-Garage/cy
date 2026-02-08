@@ -53,6 +53,6 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wsign-promo -Wzero-as-null-pointer-cons
 include_directories(SYSTEM ${CMAKE_SOURCE_DIR}/lib)
 
 add_subdirectory(cy)
-add_subdirectory(cy_udp_posix)
-add_subdirectory(examples)
+#add_subdirectory(cy_udp_posix) # TODO: temporarily disabled until the refactoring is complete
+#add_subdirectory(examples)     # TODO: temporarily disabled until the refactoring is complete
 add_subdirectory(tests)
