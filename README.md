@@ -276,7 +276,7 @@ The main development environment is the test suite under `tests/`, please refer 
 
 The code must be Clang-Formatted; use `make format` to do that.
 
-### 📝 Design nodes
+### 📝 Design notes
 
 Pattern subscriptions are perhaps the most convoluted part of the library because patterns imply that a single subscription can match multiple topics, and a single topic may match multiple subscriptions under different names. The library introduces dynamically allocated coupling objects that link a topic with the matching subscribers. Also, the library has to manage the lifetime of subscriptions created automatically on a pattern match; such subscriptions and their topics are called "implicit" and they expire automatically when there is no activity for a certain large predefined timeout.
 
