@@ -343,32 +343,54 @@ static void test_reordering_late_after_timeout(void)
 }
 
 /// Capacity overflow triggers resequencing: if a message is too far ahead, all interned messages are ejected
-/// and the state is reset.
+/// and the state is reset. The resequenced message must NOT be ejected immediately because we don't know
+/// whether older siblings are about to arrive (see the comment in reordering_resequence).
+/// Here we verify the full scenario: baseline 4, establish state via tag=5, then jump to tag=50000.
+/// After resequencing, 50000 is interned (not delivered). Then 49999 and 49998 arrive -- also interned.
+/// Finally, 49997 arrives -- that is the first expected tag, so it ejects and flushes the full chain
+/// in the correct order: 49997, 49998, 49999, 50000.
 static void test_reordering_capacity_overflow_resequence(void)
 {
     reorder_env_t env;
     reorder_env_init(&env);
 
-    // Intern tag=6 (lin_tag=2), normal gap.
-    TEST_ASSERT_TRUE(push_message(&env, 6U, 10, 0x60U));
-    TEST_ASSERT_EQUAL_size_t(1, env.rr.interned_count);
-    TEST_ASSERT_EQUAL_size_t(0, env.capture.count);
-
-    // Push a tag that is much further ahead than the capacity (8) allows.
-    // With last_ejected_lin_tag=0 and capacity=8, any lin_tag > 8 triggers resequence.
-    // tag_baseline=4, so we need tag such that tag56_forward_distance(4, tag) > 8 + 0 = 8.
-    // tag = 4 + 9 = 13 => lin_tag = 9 > 8 => resequence!
-    TEST_ASSERT_TRUE(push_message(&env, 13U, 11, 0xD0U));
-    // The old interned message (tag=6) should have been force-ejected before the resequence.
+    // Establish initial state: tag=5 (lin_tag=1) is immediately ejected.
+    TEST_ASSERT_TRUE(push_message(&env, 5U, 10, 0x50U));
     TEST_ASSERT_EQUAL_size_t(1, env.capture.count);
-    TEST_ASSERT_EQUAL_UINT64(6U, env.capture.tags[0]);
-    // After resequence, the new message (tag=13) is interned awaiting ordering context.
-    TEST_ASSERT_EQUAL_size_t(1, env.rr.interned_count);
+    TEST_ASSERT_EQUAL_UINT64(5U, env.capture.tags[0]);
+    TEST_ASSERT_EQUAL_size_t(0, env.rr.interned_count);
 
-    // Let the new resequenced state timeout.
-    spin_to(&env, 1000);
-    TEST_ASSERT_EQUAL_size_t(2, env.capture.count);
-    TEST_ASSERT_EQUAL_UINT64(13U, env.capture.tags[1]);
+    // Jump far ahead: tag=50000.
+    // Old lin_tag = tag56_forward_distance(4, 50000) = 49996, which is >> last_ejected(1) + capacity(8) = 9.
+    // This triggers resequence: reordering_eject_all (nothing interned), then reordering_resequence(self, 50000).
+    // New baseline = tag56_forward_distance(4, 50000) = 49996, last_ejected_lin_tag = 0.
+    // Recomputed lin_tag = tag56_forward_distance(49996, 50000) = 4.
+    // Since 4 != 0+1, the message is NOT ejected; it is interned awaiting ordering context.
+    TEST_ASSERT_TRUE(push_message(&env, 50000U, 100, 0xAAU));
+    TEST_ASSERT_EQUAL_size_t(1, env.capture.count); // Still only the initial tag=5 was delivered.
+    TEST_ASSERT_EQUAL_size_t(1, env.rr.interned_count);
+    TEST_ASSERT_TRUE(olga_is_pending(env.fixture.cy.olga, &env.rr.timeout));
+
+    // An older sibling 49999 arrives (lin_tag=3). Also interned (gap at lin_tag 1 and 2).
+    TEST_ASSERT_TRUE(push_message(&env, 49999U, 101, 0xBBU));
+    TEST_ASSERT_EQUAL_size_t(1, env.capture.count); // No delivery yet.
+    TEST_ASSERT_EQUAL_size_t(2, env.rr.interned_count);
+
+    // Another older sibling 49998 arrives (lin_tag=2). Still a gap at lin_tag=1.
+    TEST_ASSERT_TRUE(push_message(&env, 49998U, 102, 0xCCU));
+    TEST_ASSERT_EQUAL_size_t(1, env.capture.count);
+    TEST_ASSERT_EQUAL_size_t(3, env.rr.interned_count);
+
+    // The gap filler 49997 arrives (lin_tag=1 == last_ejected(0)+1). Fast path ejects it,
+    // then reordering_scan flushes 49998 (lin=2), 49999 (lin=3), 50000 (lin=4) in order.
+    TEST_ASSERT_TRUE(push_message(&env, 49997U, 103, 0xDDU));
+    TEST_ASSERT_EQUAL_size_t(5, env.capture.count);
+    TEST_ASSERT_EQUAL_UINT64(5U, env.capture.tags[0]);     // original
+    TEST_ASSERT_EQUAL_UINT64(49997U, env.capture.tags[1]); // gap filler
+    TEST_ASSERT_EQUAL_UINT64(49998U, env.capture.tags[2]);
+    TEST_ASSERT_EQUAL_UINT64(49999U, env.capture.tags[3]);
+    TEST_ASSERT_EQUAL_UINT64(50000U, env.capture.tags[4]);
+    TEST_ASSERT_EQUAL_size_t(0, env.rr.interned_count);
 
     reorder_env_cleanup(&env);
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&env.fixture.heap));
