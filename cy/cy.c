@@ -1653,6 +1653,9 @@ static cy_tree_t* dedup_factory(void* const user)
 /// An arbitrarily chosen default.
 #define REORDERING_CAPACITY_DEFAULT 16U
 
+/// Smaller values are clamped to this. See the implementation to see why.
+#define REORDERING_CAPACITY_MIN 4U
+
 static void reordering_on_window_expiration(olga_t* const sched, olga_event_t* const event, const cy_us_t now);
 
 typedef struct
@@ -1745,7 +1748,6 @@ static void reordering_eject(reordering_t* const self, reordering_slot_t* const 
     mem_free(cy, slot); // Free the slot before the callback to give the application more memory to work with.
 
     // Invoke the callback with the arrival and dispose the message.
-    // NB: the callback may destroy the subscriber, consider all states invalid.
     subscriber_invoke(self->subscriber, arrival);
     cy_message_refcount_dec(arrival.message.content);
 }
@@ -1798,6 +1800,7 @@ static void reordering_resequence(reordering_t* const self, const uint64_t tag)
     // handle the former case without message loss we start with the reordering delay.
     assert(self->interned_count == 0);
     assert(self->interned_by_lin_tag == NULL);
+    assert(self->subscriber->params.reordering_capacity >= REORDERING_CAPACITY_MIN);
     self->tag_baseline         = tag56_forward_distance(self->subscriber->params.reordering_capacity / 2U, tag);
     self->last_ejected_lin_tag = 0;
 }
@@ -1809,7 +1812,7 @@ static void reordering_resequence(reordering_t* const self, const uint64_t tag)
 static bool reordering_push(reordering_t* const self, const uint64_t tag, const cy_message_ts_t message)
 {
     assert(self->subscriber->params.reordering_window >= 0);
-    assert(self->subscriber->params.reordering_capacity > 1U); // caller must ensure
+    assert(self->subscriber->params.reordering_capacity >= REORDERING_CAPACITY_MIN); // caller must ensure
     assert(self->topic->cy == self->subscriber->root->cy);
     assert(tag <= TAG56_MASK);
     cy_t* const cy = self->topic->cy;
@@ -1859,6 +1862,8 @@ static bool reordering_push(reordering_t* const self, const uint64_t tag, const 
     // The most difficult case -- the message is ahead of the next expected but within the reordering window,
     // we need to intern it and hope for the missing messages to arrive before the reordering window expiration.
     // It may still be a duplicate if somehow it made it past the topic-wise duplicate filter, so we check for that too.
+    // For the assertion to hold, we must ensure that the reordering capacity is at least 4, otherwise the resequencing
+    // logic would set the baseline too low for the assertion to hold.
     assert(lin_tag > (self->last_ejected_lin_tag + 1U));
     assert(lin_tag <= (self->last_ejected_lin_tag + self->subscriber->params.reordering_capacity));
     reordering_slot_t* const slot = mem_alloc_zero(cy, sizeof(reordering_slot_t));
@@ -2001,7 +2006,8 @@ static bool on_message(cy_t* const            cy,
             cy_subscriber_t* const      next_sub      = sub->next;
             const cy_substitution_set_t substitutions = { .count         = cpl->substitution_count,
                                                           .substitutions = cpl->substitutions };
-            const bool use_reordering = (sub->params.reordering_window >= 0) && (sub->params.reordering_capacity > 1);
+            const bool use_reordering = (sub->params.reordering_window >= 0) && // minimums enforced at API level
+                                        (sub->params.reordering_capacity >= REORDERING_CAPACITY_MIN);
             if (use_reordering) {
                 reordering_context_t ctx = {
                     .now           = message.timestamp,
@@ -2152,7 +2158,7 @@ static void subscriber_callback_default(cy_subscriber_t* const sub, const cy_arr
     (void)arrival;
 }
 
-static cy_subscriber_t* subscribe(cy_t* const cy, const wkv_str_t name, const subscriber_params_t params)
+static cy_subscriber_t* subscribe(cy_t* const cy, const wkv_str_t name, subscriber_params_t params)
 {
     assert((cy != NULL) && (params.reordering_window >= -1));
     char            name_buf[CY_TOPIC_NAME_MAX + 1U];
@@ -2165,6 +2171,8 @@ static cy_subscriber_t* subscribe(cy_t* const cy, const wkv_str_t name, const su
     if (sub == NULL) {
         return NULL;
     }
+    params.reordering_capacity =
+      (params.reordering_capacity == 0) ? 0 : larger(params.reordering_capacity, REORDERING_CAPACITY_MIN);
     sub->params        = params;
     sub->user_context  = CY_USER_CONTEXT_EMPTY;
     sub->callback      = subscriber_callback_default;
@@ -2226,7 +2234,12 @@ void cy_subscriber_name(const cy_subscriber_t* const self, char* const out_name)
     wkv_get_key(&self->root->cy->subscribers_by_name, self->root->index_name, out_name);
 }
 
-void cy_unsubscribe(cy_subscriber_t* const self) { (void)self; }
+void cy_unsubscribe(cy_subscriber_t* const self)
+{
+    // TODO: Do not destroy the subscriber immediately; schedule an olga event instead with zero deferral timeout.
+    //   This will allow unsubscribing from within a callback. We'll need a test for that.
+    (void)self;
+}
 
 static cy_err_t do_respond(cy_breadcrumb_t* const breadcrumb, const cy_us_t deadline, const cy_bytes_t message)
 {

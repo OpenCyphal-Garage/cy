@@ -67,7 +67,7 @@ typedef struct cy_bytes_t
 /// The size can be changed arbitrarily, it's a trivial trade-off between flexibility and memory usage.
 /// This size must be the same for all translation units to avoid ABI incompatibilities.
 #ifndef CY_USER_CONTEXT_PTR_COUNT
-#define CY_USER_CONTEXT_PTR_COUNT 3
+#define CY_USER_CONTEXT_PTR_COUNT 2
 #endif
 
 /// An opaque user context enabling the application to share data with callbacks. It is intended to be passed by value.

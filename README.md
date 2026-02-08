@@ -101,7 +101,7 @@ Instead of polling, one can also attach a callback to be invoked once the future
 to pass arbitrary context data to the callback, use `cy_user_context_t`:
 
 ```c++
-cy_future_context_set(future, (cy_user_context_t){ { "🐈", NULL, (void*)123456 } });
+cy_future_context_set(future, (cy_user_context_t){ { "🐈", (void*)123456 } });
 cy_future_callback_set(future, on_future_done);
 ```
 ```c++
@@ -135,7 +135,7 @@ cy_future_callback_set(future, cy_future_destroy);  // Will destroy itself when 
 size_t extent = 1024 * 100;  // max message size in bytes; excess truncated
 cy_subscriber_t* my_sub = cy_subscribe(cy, wkv_key("my/topic"), extent); // See also cy_subscribe_ordered()
 if (my_sub == NULL) { ... }  // handle error
-cy_subscriber_context_set(my_sub, (cy_user_context_t){ { "🐱", (void*)654321, NULL } }); // optional context
+cy_subscriber_context_set(my_sub, (cy_user_context_t){ { "🐱", NULL } }); // optional context
 cy_subscriber_callback_set(my_sub, on_message); // callback invoked upon message arrival
 ```
 
@@ -270,7 +270,15 @@ For example, to subscribe to subject-ID 1234, use the topic name `#04d2`.
 
 Cyphal v1.1 has no RPC in the same way as Cyphal/CAN v1.0 does; instead, it uses pub/sub for everything, including request/response interactions. Thus, to use RPC in a legacy CAN network, a low-level CAN transport access is required.
 
-## 📝 Design notes
+## 🛠 Development
+
+The main development environment is the test suite under `tests/`, please refer there for specific instructions.
+
+The code must be Clang-Formatted; use `make format` to do that.
+
+### 📝 Design notes
+
+Pattern subscriptions are perhaps the most convoluted part of the library because patterns imply that a single subscription can match multiple topics, and a single topic may match multiple subscriptions under different names. The library introduces dynamically allocated coupling objects that link a topic with the matching subscribers. Also, the library has to manage the lifetime of subscriptions created automatically on a pattern match; such subscriptions and their topics are called "implicit" and they expire automatically when there is no activity for a certain large predefined timeout.
 
 ```mermaid
 classDiagram
