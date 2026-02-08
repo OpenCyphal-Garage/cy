@@ -101,7 +101,7 @@ Instead of polling, one can also attach a callback to be invoked once the future
 to pass arbitrary context data to the callback, use `cy_user_context_t`:
 
 ```c++
-cy_future_context_set(future, (cy_user_context_t){ { "🐈", NULL, (void*)123456 } });
+cy_future_context_set(future, (cy_user_context_t){ { "🐈", (void*)123456 } });
 cy_future_callback_set(future, on_future_done);
 ```
 ```c++
@@ -135,7 +135,7 @@ cy_future_callback_set(future, cy_future_destroy);  // Will destroy itself when 
 size_t extent = 1024 * 100;  // max message size in bytes; excess truncated
 cy_subscriber_t* my_sub = cy_subscribe(cy, wkv_key("my/topic"), extent); // See also cy_subscribe_ordered()
 if (my_sub == NULL) { ... }  // handle error
-cy_subscriber_context_set(my_sub, (cy_user_context_t){ { "🐱", (void*)654321, NULL } }); // optional context
+cy_subscriber_context_set(my_sub, (cy_user_context_t){ { "🐱", NULL } }); // optional context
 cy_subscriber_callback_set(my_sub, on_message); // callback invoked upon message arrival
 ```
 
