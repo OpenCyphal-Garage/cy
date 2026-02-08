@@ -1,4 +1,7 @@
 # Copyright (c) Pavel Kirienko <pavel@opencyphal.org>
+#
+# This recipe is intended only for library development.
+# Do not use it in production; add cy/cy.c to your build directly instead, along with the cy/ directory for includes.
 
 cmake_minimum_required(VERSION 3.24)
 project(cy C CXX)
@@ -8,7 +11,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_VERBOSE_MAKEFILE ON)
 
 # Static analysis.
-set(NO_STATIC_ANALYSIS OFF CACHE BOOL "Disable static analysis to speed up the build")
+option(NO_STATIC_ANALYSIS "Disable static analysis to speed up the build" OFF)
 if (NOT NO_STATIC_ANALYSIS)
     find_program(clang_tidy NAMES clang-tidy)
     if (NOT clang_tidy)
@@ -50,9 +53,26 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -pedantic -fstrict-aliasin
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wsign-conversion -Wmissing-declarations -Wold-style-cast")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wsign-promo -Wzero-as-null-pointer-constant")
 
-include_directories(SYSTEM ${CMAKE_SOURCE_DIR}/lib)
+# Coverage.
+option(COVERAGE "Enable branch coverage measurement" OFF)
+if (COVERAGE)
+    message(STATUS "Enabling branch coverage measurement")
+    add_compile_options(--coverage -Wno-unused-variable -Wno-unused-parameter -Wno-unused-but-set-variable)
+    add_link_options(--coverage)
+    add_compile_definitions(NDEBUG=1)  # Disable assertions to remove uncovered fault branches from the report.
+    find_program(gcovr NAMES gcovr REQUIRED)
+    add_custom_target(coverage
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/coverage
+        COMMAND ${gcovr}
+            --root         ${CMAKE_SOURCE_DIR}
+            --filter       ${CMAKE_SOURCE_DIR}/cy/
+            --html-details ${CMAKE_BINARY_DIR}/coverage/index.html
+            --print-summary
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        COMMENT "Generating branch coverage HTML report in ${CMAKE_BINARY_DIR}/coverage/"
+    )
+endif ()
 
-add_subdirectory(cy)
 #add_subdirectory(cy_udp_posix) # TODO: temporarily disabled until the refactoring is complete
 #add_subdirectory(examples)     # TODO: temporarily disabled until the refactoring is complete
 add_subdirectory(tests)

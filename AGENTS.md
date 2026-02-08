@@ -2,6 +2,8 @@
 
 Read `README.md` for general information about the project, as well as all READMEs in subdirectories if you see any.
 
+The library sources are under the `cy/` directory; everything else is ancillary.
+
 The library code must be fully portable between different architectures and compilers, from baremetal to POSIX, from 8-bit to 64-bit.
 
 You must read all files in their entirety instead of using search tools for best context awareness.
