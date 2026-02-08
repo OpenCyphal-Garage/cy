@@ -5,6 +5,8 @@
 
 _pub/sub without steroids_
 
+[![CI](https://github.com/OpenCyphal-Garage/cy/actions/workflows/main.yml/badge.svg)](https://github.com/OpenCyphal-Garage/cy/actions/workflows/main.yml)
+
 </div>
 
 -----
