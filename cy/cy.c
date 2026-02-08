@@ -395,7 +395,7 @@ static void* ptr_unbias(const void* const ptr, const size_t offset)
 
 size_t cy_message_size(const cy_message_t* const msg) { return (msg != NULL) ? msg->vtable->size(msg) : 0; }
 
-size_t cy_message_read(const cy_message_t* const msg, size_t offset, const size_t size, void* const destination)
+size_t cy_message_read(const cy_message_t* const msg, const size_t offset, const size_t size, void* const destination)
 {
     return ((msg != NULL) && (msg->vtable != NULL) && (destination != NULL))
              ? msg->vtable->read(msg, offset, size, destination)
@@ -732,8 +732,8 @@ static void schedule_gossip(cy_topic_t* const topic)
 /// Parses the hexadecimal hash override suffix if present and valid. Example: "sensors/temperature#1a2b".
 static bool parse_hash_override(const wkv_str_t s, uint64_t* const out)
 {
-    *out            = 0;
-    char* const end = (char*)s.str + s.len;
+    *out                  = 0;
+    const char* const end = (const char*)s.str + s.len;
     for (size_t i = 0; i < smaller(s.len, 17); i++) {
         const unsigned char ch = (unsigned char)*(end - (i + 1));
         if (ch == '#') {
@@ -790,7 +790,7 @@ static size_t get_subscription_extent(const cy_topic_t* const topic);
 /// Errors are handled via the platform handler, so from the caller's perspective this is infallible.
 static void topic_ensure_subscribed(cy_topic_t* const topic)
 {
-    cy_t* const cy = topic->cy;
+    const cy_t* const cy = topic->cy;
     if ((topic->couplings != NULL) && (!topic->subscribed)) {
         const size_t   extent = get_subscription_extent(topic);
         const cy_err_t res    = cy->vtable->subscribe(topic, extent);
@@ -1519,12 +1519,12 @@ static cy_breadcrumb_t make_breadcrumb(cy_topic_t* const      topic,
                               .p2p_context = p2p_context };
 }
 
-static cy_arrival_t make_arrival(cy_topic_t* const      topic,
-                                 const uint64_t         remote_id,
-                                 const cy_p2p_context_t p2p_context,
-                                 const uint64_t         message_tag,
-                                 cy_message_ts_t        message,
-                                 cy_substitution_set_t  substitutions)
+static cy_arrival_t make_arrival(cy_topic_t* const           topic,
+                                 const uint64_t              remote_id,
+                                 const cy_p2p_context_t      p2p_context,
+                                 const uint64_t              message_tag,
+                                 const cy_message_ts_t       message,
+                                 const cy_substitution_set_t substitutions)
 {
     return (cy_arrival_t){ .message       = message,
                            .breadcrumb    = make_breadcrumb(topic, remote_id, p2p_context, message_tag),
@@ -1876,7 +1876,7 @@ static bool reordering_push(reordering_t* const self, const uint64_t tag, const 
                  (unsigned long long)self->last_ejected_lin_tag);
         return false;
     }
-    cy_tree_t* const slot_tree = cavl2_find_or_insert(
+    const cy_tree_t* const slot_tree = cavl2_find_or_insert(
       &self->interned_by_lin_tag, &lin_tag, reordering_slot_cavl_compare, &slot->index_lin_tag, cavl2_trivial_factory);
     if (slot_tree != &slot->index_lin_tag) {
         // There is already an interned message with the same tag, drop the duplicate.
@@ -1968,7 +1968,7 @@ static bool on_message(cy_t* const            cy,
                        const uint64_t         remote_id,
                        cy_topic_t* const      topic,
                        const uint64_t         tag,
-                       cy_message_ts_t        message,
+                       const cy_message_ts_t  message,
                        const bool             reliable)
 {
     implicit_animate(topic, message.timestamp);
@@ -2786,7 +2786,7 @@ static wkv_str_t name_normalize(const size_t in_size, const char* in, const size
     }
     const char* const in_end      = in + in_size;
     char*             out         = dest;
-    char* const       out_end     = dest + dest_size;
+    const char* const out_end     = dest + dest_size;
     bool              pending_sep = false;
     while (in < in_end) {
         const char c = *in++;
@@ -2853,7 +2853,7 @@ wkv_str_t cy_name_expand_home(wkv_str_t name, const wkv_str_t home, const size_t
 wkv_str_t cy_name_resolve(const wkv_str_t name,
                           wkv_str_t       namespace_,
                           const wkv_str_t home,
-                          size_t          dest_size,
+                          const size_t    dest_size,
                           char*           dest)
 {
     if (dest == NULL) {

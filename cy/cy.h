@@ -102,7 +102,7 @@ size_t cy_message_size(const cy_message_t* const msg);
 /// It gathers `size` bytes of data located at `offset` bytes from payload origin into the provided contiguous buffer.
 /// The function returns the number of bytes copied.
 /// If the requested range exceeds the available message size, only the available bytes are copied.
-size_t cy_message_read(const cy_message_t* const msg, size_t offset, const size_t size, void* const destination);
+size_t cy_message_read(const cy_message_t* const msg, const size_t offset, const size_t size, void* const destination);
 
 /// Use reference counting to manage the lifetime of message instances.
 void cy_message_refcount_inc(cy_message_t* const msg);
@@ -513,7 +513,7 @@ wkv_str_t cy_name_expand_home(wkv_str_t name, const wkv_str_t home, const size_t
 wkv_str_t cy_name_resolve(const wkv_str_t name,
                           wkv_str_t       namespace_,
                           const wkv_str_t home,
-                          size_t          dest_size,
+                          const size_t    dest_size,
                           char*           dest);
 
 #ifdef __cplusplus
