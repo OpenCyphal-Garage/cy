@@ -68,7 +68,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
-      - run: pip install gcovr
+      - run: pip install --break-system-packages gcovr
       # language=bash
       - run: >
           cmake
