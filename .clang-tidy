@@ -49,6 +49,11 @@ Checks: >-
   -*-prefer-static-over-anonymous-namespace,
   -*-avoid-unchecked-container-access,
   -*-pointer-arithmetic,
+  -*-use-using,
+  -*-use-enum-class,
+  -*-enum-size,
+  -*-macro-usage,
+  -*-deprecated-headers,
 CheckOptions:
   - key: misc-const-correctness.TransformPointersAsValues
     value: 'true'
