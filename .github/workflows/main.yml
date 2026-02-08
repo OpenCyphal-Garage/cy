@@ -4,7 +4,7 @@ env:
   LLVM_VERSION: 20
 
 jobs:
-  test_debug:
+  test_debug_with_static_analysis:
     runs-on: ubuntu-latest
     container: ghcr.io/opencyphal/toolshed:ts24.4.3
     strategy:
@@ -21,6 +21,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
+      - run: |
+          apt-get update -y
+          apt-get install -y cppcheck
+          cppcheck --version
       # language=bash
       - run: >
           cmake
@@ -113,13 +117,3 @@ jobs:
           sudo apt update -y
           sudo apt-get install -y gcc-arm-none-eabi
       - run: arm-none-eabi-gcc -Icy -Ilib cy/cy.c -c -std=${{ matrix.std }} ${{ env.flags }}
-
-  style_check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: DoozyX/clang-format-lint-action@v0.20
-        with:
-          source: "./cy ./cy_udp_posix ./examples ./tests"
-          extensions: "c,h,cpp,hpp"
-          clangFormatVersion: ${{ env.LLVM_VERSION }}

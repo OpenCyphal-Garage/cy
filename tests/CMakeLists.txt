@@ -35,10 +35,12 @@ function(cy_gen_test name compile_flags link_flags c_standard definitions)
             COMPILE_WARNING_AS_ERROR OFF
             C_CLANG_TIDY ""
             CXX_CLANG_TIDY ""
+            C_CPPCHECK ""
+            CXX_CPPCHECK ""
     )
 
     # Build the test executable.
-    # Clang-Tidy is mandatory in the test suite.
+    # Clang-Tidy and Cppcheck are mandatory in the test suite.
     add_executable(${name} ${ARGN})
     target_include_directories(
             ${name}

@@ -266,7 +266,7 @@ typedef struct
 static topic_repr_t topic_repr(const cy_topic_t* const topic)
 {
     assert(topic != NULL);
-    topic_repr_t out;
+    topic_repr_t out = { 0 };
     char*        ptr = out.str;
     *ptr++           = 'T';
     ptr += to_hex(topic->hash, 64, ptr).len;
@@ -1505,10 +1505,10 @@ struct cy_subscriber_t
     cy_subscriber_callback_t callback;
 };
 
-static cy_breadcrumb_t make_breadcrumb(cy_topic_t* const      topic,
-                                       const uint64_t         remote_id,
-                                       const cy_p2p_context_t p2p_context,
-                                       const uint64_t         message_tag)
+static cy_breadcrumb_t make_breadcrumb(const cy_topic_t* const topic,
+                                       const uint64_t          remote_id,
+                                       const cy_p2p_context_t  p2p_context,
+                                       const uint64_t          message_tag)
 {
     assert(message_tag <= TAG56_MASK);
     return (cy_breadcrumb_t){ .cy          = topic->cy,
@@ -2082,7 +2082,6 @@ static void* wkv_cb_couple_new_subscription(const wkv_event_t evt)
     const cy_subscriber_t* const sub   = (cy_subscriber_t*)evt.context;
     cy_topic_t* const            topic = (cy_topic_t*)evt.node->value;
     cy_t* const                  cy    = topic->cy;
-    assert((sub != NULL) && (topic != NULL));
     // Sample the old parameters before the new coupling is created to decide if we need to refresh the subscription.
     const size_t   extent_old = topic->subscribed ? get_subscription_extent(topic) : 0;
     const cy_err_t res        = topic_couple(topic, sub->root, evt.substitution_count, evt.substitutions);
@@ -2611,10 +2610,10 @@ void cy_on_message(cy_t* const            cy,
         case header_msg_be:
         case header_msg_rel: {
             assert(subject_id < (CY_PINNED_SUBJECT_ID_MAX + cy->subject_id_modulus)); // transport must ensure
-            const uint64_t    tag        = deserialize_u56(&header[1]);
-            const uint64_t    topic_hash = deserialize_u64(&header[8]);
-            cy_topic_t* const topic      = cy_topic_find_by_hash(cy, topic_hash);
-            const bool        reliable   = type == header_msg_rel;
+            const uint64_t    tag      = deserialize_u56(&header[1]);
+            const uint64_t    hash     = deserialize_u64(&header[8]);
+            cy_topic_t* const topic    = cy_topic_find_by_hash(cy, hash);
+            const bool        reliable = type == header_msg_rel;
             if (topic != NULL) {
                 if (cy_topic_subject_id(topic) != subject_id) {
                     // We happen to be subscribed to both of the divergent subject-IDs, so we can process the message
@@ -2623,7 +2622,7 @@ void cy_on_message(cy_t* const            cy,
                              "⚠️ Subject-ID divergence on message from %016llx for topic %016llx: expected %lu got %llu"
                              " Scheduling urgent gossip to repair consensus",
                              (unsigned long long)remote_id,
-                             (unsigned long long)topic_hash,
+                             (unsigned long long)hash,
                              (unsigned long)cy_topic_subject_id(topic),
                              (unsigned long long)subject_id);
                     schedule_gossip_urgent(topic);
@@ -2634,26 +2633,26 @@ void cy_on_message(cy_t* const            cy,
                                      p2p_context,
                                      remote_id,
                                      tag,
-                                     topic_hash,
+                                     hash,
                                      message.timestamp + ACK_TX_TIMEOUT);
                 }
             } else {
                 cy_topic_t* const other_topic = topic_find_by_subject_id(cy, (uint32_t)subject_id);
-                assert(other_topic->hash != topic_hash);
                 if (other_topic != NULL) {
+                    assert(other_topic->hash != hash);
                     // Gossip to either update the remotes or solicit a newer allocation state from them.
                     CY_TRACE(cy,
                              "⚠️ Subject-ID collision on message from %016llx: topic %016llx vs %016llx"
                              " Scheduling urgent gossip to repair consensus",
                              (unsigned long long)remote_id,
-                             (unsigned long long)topic_hash,
+                             (unsigned long long)hash,
                              (unsigned long long)other_topic->hash);
                     schedule_gossip_urgent(other_topic);
                 } else {
                     CY_TRACE(cy,
                              "⚠️ Unsolicited message from %016llx on topic %016llx subject %08x: unknown topic&subject",
                              (unsigned long long)remote_id,
-                             (unsigned long long)topic_hash,
+                             (unsigned long long)hash,
                              (unsigned)subject_id);
                 }
             }

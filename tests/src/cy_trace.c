@@ -3,7 +3,7 @@
 #include <stdarg.h>
 #include <string.h>
 
-void cy_trace(cy_t* const         cy,
+void cy_trace(cy_t* const         cy, // cppcheck-suppress constParameterPointer
               const char* const   file,
               const uint_fast16_t line,
               const char* const   func,
@@ -30,7 +30,7 @@ void cy_trace(cy_t* const         cy,
                   func);
 
     // Print the message.
-    va_list args = { 0 };
+    va_list args; // NOLINT(*-init-variables)
     va_start(args, format);
     (void)vfprintf(stderr, format, args);
     va_end(args);

@@ -85,7 +85,7 @@ static bool allocation_total_size(const size_t payload_size, size_t* const out)
 
 static header_t* header_from_payload(void* const payload)
 {
-    unsigned char* const raw = (unsigned char*)payload;
+    const unsigned char* const raw = (unsigned char*)payload;
     return (header_t*)(raw - GUARDED_HEAP_CANARY_SIZE - sizeof(header_t));
 }
 
@@ -134,7 +134,7 @@ static void* allocate_fragment(guarded_heap_t* const self, const size_t size)
     return payload;
 }
 
-static size_t fragment_size_checked(guarded_heap_t* const self, const void* const payload)
+static size_t fragment_size_checked(const guarded_heap_t* const self, const void* const payload)
 {
     const header_t* const header = header_from_payload_const(payload);
     if (header->owner != self) {
@@ -227,9 +227,9 @@ void guarded_heap_free(void* const context, void* const ptr)
     if (header->owner != self) {
         panic("wrong context");
     }
-    unsigned char* const front   = (unsigned char*)(header + 1U);
-    unsigned char* const payload = front + GUARDED_HEAP_CANARY_SIZE;
-    unsigned char* const back    = payload + header->payload_size;
+    unsigned char* const       front   = (unsigned char*)(header + 1U);
+    unsigned char* const       payload = front + GUARDED_HEAP_CANARY_SIZE;
+    const unsigned char* const back    = payload + header->payload_size;
 
     if (!check_canary(front, header->front_seed)) {
         panic("front canary mismatch");
