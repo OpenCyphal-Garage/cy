@@ -270,7 +270,15 @@ For example, to subscribe to subject-ID 1234, use the topic name `#04d2`.
 
 Cyphal v1.1 has no RPC in the same way as Cyphal/CAN v1.0 does; instead, it uses pub/sub for everything, including request/response interactions. Thus, to use RPC in a legacy CAN network, a low-level CAN transport access is required.
 
-## 📝 Design notes
+## 🛠 Development
+
+The main development environment is the test suite under `tests/`, please refer there for specific instructions.
+
+The code must be Clang-Formatted; use `make format` to do that.
+
+### 📝 Design nodes
+
+Pattern subscriptions are perhaps the most convoluted part of the library because patterns imply that a single subscription can match multiple topics, and a single topic may match multiple subscriptions under different names. The library introduces dynamically allocated coupling objects that link a topic with the matching subscribers. Also, the library has to manage the lifetime of subscriptions created automatically on a pattern match; such subscriptions and their topics are called "implicit" and they expire automatically when there is no activity for a certain large predefined timeout.
 
 ```mermaid
 classDiagram

@@ -471,7 +471,7 @@ static void test_reordering_min_capacity_resequence_dup_is_deduped(void)
     // Resequence: 2 > 0 + 4 → NO.
     // Interning: AVL tree finds existing slot at lin_tag=2 → duplicate dropped.
     TEST_ASSERT_TRUE(push_message(&env, 50000U, 101, 0xFFU));
-    TEST_ASSERT_EQUAL_size_t(1, env.capture.count); // No new delivery.
+    TEST_ASSERT_EQUAL_size_t(1, env.capture.count);     // No new delivery.
     TEST_ASSERT_EQUAL_size_t(1, env.rr.interned_count); // Still just one interned slot, not two.
 
     // Let the timeout force-eject the single interned message. Verify exactly one delivery of tag=50000.
