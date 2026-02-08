@@ -10,7 +10,7 @@ include_directories(SYSTEM "${CMAKE_SOURCE_DIR}/lib")
 # increasing the collision probability to 100%.
 add_compile_definitions(
         CY_CONFIG_TRACE=1
-        CY_CONFIG_PREFERRED_TOPIC_OVERRIDE=0
+        CY_CONFIG_PREFERRED_SUBJECT_OVERRIDE=0
 )
 
 # Cy trace logging helper.

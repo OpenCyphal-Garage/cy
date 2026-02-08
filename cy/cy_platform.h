@@ -26,58 +26,19 @@
 /// which maximizes topic allocation collisions. Pinned topics are unaffected.
 /// This can be used to stress-test the consensus algorithm.
 /// This value shall be identical for all nodes in the network; otherwise, divergent allocations will occur.
-#ifndef CY_CONFIG_PREFERRED_TOPIC_OVERRIDE
+#ifndef CY_CONFIG_PREFERRED_SUBJECT_OVERRIDE
 // Never define in production use.
 #endif
 
-/// The subject-ID modulus depends on the width of the subject-ID field in the transport protocol.
-/// All nodes in the network shall share the same value.
-/// If heterogeneously redundant transports are used, then the smallest modulus shall be used.
-///
-/// The full range of used subject-ID values is [0, CY_PINNED_SUBJECT_ID_MAX+modulus),
-/// where the values below or equal to CY_PINNED_SUBJECT_ID_MAX are used for pinned topics only.
-///
-/// The modulus shall be a prime number because the subject-ID function uses a quadratic probing strategy:
-///     subject_id = CY_PINNED_SUBJECT_ID_MAX + (hash + evictions^2) mod modulus
-/// See https://en.wikipedia.org/wiki/Quadratic_probing
+/// See the subject_id_modulus for details.
 #define CY_SUBJECT_ID_MODULUS_17bit 122869ULL     // -1+8191=0x0001FFF3; (2**17-1)-0x0001FFF3=12 identifiers unused
 #define CY_SUBJECT_ID_MODULUS_23bit 8380417ULL    // -1+8191=0x007FFFFF; (2**23-1)-0x007FFFFF=0  identifiers unused
 #define CY_SUBJECT_ID_MODULUS_32bit 4294959083ULL // -1+8191=0xFFFFFFE9; (2**32-1)-0xFFFFFFE9=22 identifiers unused
-
-/// If CY_CONFIG_TRACE is defined and is non-zero, cy_trace() shall be defined externally.
-#ifndef CY_CONFIG_TRACE
-#define CY_CONFIG_TRACE 0
-#endif
-#if CY_CONFIG_TRACE
-#define CY_TRACE(cy, ...) cy_trace(cy, __FILE__, __LINE__, __func__, __VA_ARGS__)
-#else
-#define CY_TRACE(cy, ...) (void)cy
-#endif
 
 #ifdef __cplusplus
 extern "C"
 {
 #endif
-
-typedef struct cy_tree_t cy_tree_t;
-struct cy_tree_t
-{
-    cy_tree_t*  up;
-    cy_tree_t*  lr[2];
-    int_fast8_t bf;
-};
-
-typedef struct cy_list_member_t cy_list_member_t;
-struct cy_list_member_t
-{
-    cy_list_member_t* next;
-    cy_list_member_t* prev;
-};
-typedef struct cy_list_t
-{
-    cy_list_member_t* head; ///< NULL if list empty
-    cy_list_member_t* tail; ///< NULL if list empty
-} cy_list_t;
 
 struct cy_message_t
 {
@@ -106,151 +67,54 @@ typedef struct cy_message_vtable_t
     void (*destroy)(cy_message_t*);
 } cy_message_vtable_t;
 
-/// This is the base type that is extended by the platform layer with transport- and platform-specific entities,
-/// such as socket handles, etc. Instantiation is therefore done inside the platform layer in the heap or some
-/// other dynamic storage. The user code is not expected to interact with the topic type, and the only reason it is
-/// defined in the header file is to allow the platform layer to use it.
-///
-/// Topic instances are allocated in some kind of dynamic storage (heap or block pool) and are pinned (never copied).
-///
-/// A topic name is suffixed to the namespace name of the node that owns it, unless it begins with a `/`.
-/// The leading `~` in the name is replaced with the local node name, which is set during node initialization.
-/// Repeated and trailing slashes are removed.
-///
-/// A topic that is only used by pattern subscriptions (like `ins/?/data/*`, without publishers or explicit
-/// subscriptions) is called implicit. Such topics are automatically retired when they see no traffic and
-/// no gossips from publishers or receiving subscribers for implicit_topic_timeout.
-/// This is needed to prevent implicit pattern subscriptions from lingering forever when all publishers are gone.
-/// See https://github.com/pavel-kirienko/cy/issues/15.
-///
-/// CRDT merge rules, first rule takes precedence:
-/// - on collision (same subject-ID, different hash):
-///     1. winner is pinned;
-///     2. winner is older;
-///     3. winner has smaller hash.
-/// - on divergence (same hash, different subject-ID):
-///     1. winner is older;
-///     2. winner has seen more evictions (i.e., larger subject-ID mod max_topics).
-/// When a topic is reallocated, it retains its current age.
-/// Conflict resolution may result in a temporary jitter if it happens to occur near log2(age) integer boundary.
-struct cy_topic_t
+/// A subject writer is used to send messages on the subject specified at the time of its construction.
+/// There is at most one subject writer per subject.
+typedef struct cy_subject_writer_t
 {
-    /// All indexes that this topic is a member of. Indexes are very fast log(N) lookup structures.
-    cy_tree_t   index_hash; ///< Hash index handle MUST be the first field.
-    cy_tree_t   index_subject_id;
-    wkv_node_t* index_name;
+    const struct cy_subject_writer_vtable_t* vtable;
+} cy_subject_writer_t;
 
-    /// All lists that this topic is a member of. Lists are used for ordering with fast constant-time insertion/removal.
-    cy_list_member_t list_implicit;      ///< Last animated topic is at the end of the list.
-    cy_list_member_t list_gossip_urgent; ///< High-priority gossips. Fetch from the tail.
-    cy_list_member_t list_gossip;        ///< Normal-priority gossips. Fetch from the tail.
-
-    cy_t* cy;
-
-    /// The name length is stored in index_name. This string is also NUL-terminated for convenience.
-    /// We need to store the full name to allow valid references from name substitutions during pattern matching.
-    char* name;
-
-    /// Whenever a topic conflicts with another one locally, arbitration is performed, and the loser has its
-    /// eviction counter incremented. The eviction counter is used as a Lamport clock counting the loss events.
-    /// Higher clock wins because it implies that any lower value is non-viable since it has been known to cause
-    /// at least one collision anywhere on the network. The counter MUST NOT BE CHANGED without removing the topic
-    /// from the subject-ID index tree!
-    uint64_t evictions;
-
-    /// hash=rapidhash(topic_name); except for a pinned topic, hash=subject_id<=CY_PINNED_SUBJECT_ID_MAX.
-    uint64_t hash;
-
-    /// Event timestamps used for state management.
-    cy_us_t ts_origin;   ///< An approximation of when the topic was first seen on the network.
-    cy_us_t ts_animated; ///< Last time the topic saw activity that prevents it from being retired.
-
-    /// Publisher-related states.
-    /// The tag counter is random-initialized when topic created, then incremented with each publish;
-    /// only the 56 least significant bits are used; ignore the top 8 bits.
-    uint64_t pub_next_tag_56bit;
-    size_t   pub_count; ///< Number of active advertisements; counted for garbage collection.
-
-    /// Subscriber-related states.
-    struct cy_topic_coupling_t* couplings;
-    bool       subscribed; ///< May be (tentatively) false even with couplings!=NULL on resubscription error.
-    cy_tree_t* sub_index_dedup_by_remote_id;
-    cy_list_t  sub_list_dedup_by_recency;
-
-    /// User context for application-specific use, such as linking it with external data.
-    cy_user_context_t user_context;
-};
-
-/// Instances of cy are not copyable; they are always accessed via pointer provided during initialization.
-/// Creation of a new topic may cause resubscription of any existing topics (all topics in the unlikely worst case).
-struct cy_t
+typedef struct cy_subject_writer_vtable_t
 {
-    const struct cy_vtable_t* vtable;
+    /// Instructs the underlying transport layer to non-blockingly publish a new message on the subject.
+    /// Message lifetime ends upon return from this function. Returns CY_OK on success, or an error code on failure.
+    cy_err_t (*send)(cy_subject_writer_t*, cy_us_t deadline, cy_prio_t priority, cy_bytes_t message);
 
-    // TODO FIXME: move cy_t inside cy.c and store olga by value.
-    struct olga_t* olga;
+    void (*destroy)(cy_subject_writer_t*);
+} cy_subject_writer_vtable_t;
 
-    /// Namespace is a prefix added to all topics created on this instance, unless the topic name starts with `/`.
-    /// Local node name is prefixed to the topic name if it starts with `~/`.
-    /// The final resolved topic name exchanged on the wire has the leading/trailing/duplicate separators removed.
-    /// Both strings are stored in the same heap block pointed to by `home`. Both are NUL-terminated.
-    wkv_str_t ns;
-    wkv_str_t home;
+/// A subject reader is created when the higher layer requires data from the specified subject-ID.
+/// The transport layer must report all received messages via cy_on_message().
+typedef struct cy_subject_reader_t
+{
+    const struct cy_subject_reader_vtable_t* vtable;
+} cy_subject_reader_t;
 
-    cy_us_t ts_started;
+typedef struct cy_subject_reader_vtable_t
+{
+    void (*destroy)(cy_subject_reader_t*);
+} cy_subject_reader_vtable_t;
 
-    /// Cannot be changed after startup. Must be the same for all nodes in the network.
-    /// https://github.com/OpenCyphal-Garage/cy/issues/12#issuecomment-3577831960
+/// Abstracts away the specifics of the transport (UDP, serial, CAN, etc) and the platform where Cy is running
+/// (POSIX, baremetal MCU, RTOS, etc).
+struct cy_platform_t
+{
+    /// The subject-ID modulus depends on the width of the subject-ID field in the transport protocol.
+    /// All nodes in the network shall share the same value.
+    /// If heterogeneously redundant transports are used, then the smallest modulus shall be used.
+    ///
+    /// The full range of used subject-ID values is [0, CY_PINNED_SUBJECT_ID_MAX+modulus),
+    /// where the values below or equal to CY_PINNED_SUBJECT_ID_MAX are used for pinned topics only.
+    ///
+    /// The modulus shall be a prime number because the subject-ID function uses a quadratic probing strategy:
+    ///     subject_id = CY_PINNED_SUBJECT_ID_MAX + (hash + evictions^2) mod modulus
+    /// See https://en.wikipedia.org/wiki/Quadratic_probing
     uint32_t subject_id_modulus;
 
-    /// Heartbeat topic and related items.
-    cy_publisher_t*  heartbeat_pub;
-    cy_subscriber_t* heartbeat_sub;
-    cy_us_t          heartbeat_period;
-    cy_us_t          heartbeat_next;
-    cy_us_t          heartbeat_next_urgent;
-
-    cy_us_t implicit_topic_timeout;
-
-    /// Used to derive the actual ack timeout.
-    cy_us_t ack_baseline_timeout;
-
-    /// Topics are indexed in multiple ways for various lookups.
-    /// Remember that pinned topics have small hash ≤8184, hence they are always on the left of the hash tree,
-    /// and can be traversed quickly if needed.
-    wkv_t      topics_by_name;       // Contains ALL topics, never empty since we always have at least the heartbeat.
-    cy_tree_t* topics_by_hash;       // ditto
-    cy_tree_t* topics_by_subject_id; // All except pinned, since they do not collide. May be empty.
-
-    /// Topic lists for ordering.
-    cy_list_t list_implicit;      ///< Most recently animated topic is at the head.
-    cy_list_t list_gossip_urgent; ///< High-priority gossips. Newest at the head.
-    cy_list_t list_gossip;        ///< Normal-priority gossips. Newest at the head.
-    cy_list_t list_scout_pending; ///< Lists subscriber_root_t that are due for gossiping.
-
-    /// When a heartbeat is received, its topic name will be compared against the patterns,
-    /// and if a match is found, a new subscription will be constructed automatically; if a new topic instance
-    /// has to be created for that, such instance is called implicit. Implicit instances are retired automatically
-    /// when there are no explicit counterparts left and there is no traffic on the topic for a while.
-    /// The values of these tree nodes point to instances of subscriber_root_t.
-    wkv_t subscribers_by_name;    ///< Both explicit and patterns.
-    wkv_t subscribers_by_pattern; ///< Only patterns for implicit subscriptions on heartbeat.
-
-    /// Pending network state indexes. Removal is guided by remote nodes and by deadline (via olga).
-    /// We use separate indexes because messages use the same tag for ack and response correlation,
-    /// and also for faster lookup.
-    cy_tree_t* publish_futures_by_tag;
-    cy_tree_t* request_futures_by_tag;
-    cy_tree_t* response_futures_by_tag;
-
-    size_t p2p_extent;
-
-    /// Slow topic iteration state. Updated every cy_update(); when NULL, restart from scratch.
-    cy_topic_t* topic_iter;
+    const struct cy_platform_vtable_t* vtable;
 };
 
-/// Platform-specific implementation of cy_t.
-typedef struct cy_vtable_t
+typedef struct cy_platform_vtable_t
 {
     /// Returns the current monotonic time in microseconds. The initial time shall be non-negative.
     cy_us_t (*now)(const cy_t*);
@@ -281,24 +145,10 @@ typedef struct cy_vtable_t
     ///     return rapidhash_withSeed(seed, sizeof(seed), local_uid);
     uint64_t (*random)(cy_t*);
 
-    /// Allocates a new topic that is initially neither subscribed nor advertised. NULL if out of memory.
-    cy_topic_t* (*new_topic)(cy_t*);
-
-    /// Instructs the underlying transport layer to non-blockingly publish a new message on the topic.
-    /// All received responses are reported via cy_on_response().
-    /// Message lifetime ends upon return from this function.
-    cy_err_t (*publish)(cy_topic_t*, cy_us_t deadline, cy_prio_t priority, cy_bytes_t message);
-
-    /// Instructs the underlying transport layer to create a new subscription on the topic.
-    /// Messages received on this topic will be reported via cy_on_message().
-    /// The topic is guaranteed to not be subscribed to when this function is invoked.
-    /// TODO: Should we implement an optimization to allow quick extent change without full resubscription?
-    cy_err_t (*subscribe)(cy_topic_t*, size_t extent);
-
-    /// Instructs the underlying transport to destroy an existing subscription. Infallible by design.
-    void (*unsubscribe)(cy_topic_t*);
-
-    void (*topic_destroy)(cy_topic_t*);
+    /// The destruction is managed through their own vtables.
+    /// The factories return NULL on OOM.
+    cy_subject_writer_t* (*subject_writer)(cy_t*, uint32_t subject_id);
+    cy_subject_reader_t* (*subject_reader)(cy_t*, uint32_t subject_id, size_t extent);
 
     /// Sets/updates the maximum extent of incoming P2P transfers. Messages larger than this may be truncated.
     /// The initial value prior to the first invocation is transport-defined.
@@ -310,40 +160,22 @@ typedef struct cy_vtable_t
     /// it must be stored inside the responder context prior to cy_on_message() invocation.
     cy_err_t (*p2p)(cy_t*, const cy_p2p_context_t*, cy_us_t deadline, uint64_t remote_id, cy_bytes_t message);
 
-    /// If an allocation collision or divergence are discovered, Cy may reassign the topic to a different subject-ID.
-    /// To do that, it will first unsubscribe the topic using the corresponding function,
-    /// and then invoke the subscription function to recreate the subscription with the new subject-ID.
-    /// The unsubscription function is infallible, but the subscription function may fail.
-    /// If it does, this callback will be invoked to inform the user about the failure,
-    /// along with the error code returned by the subscription function.
-    ///
-    /// The callback is also used to report errors that occur when attempting to create a new topic that matches a
-    /// pattern subscriber; in this case, the topic pointer will be NULL.
+    /// This handler is used to report asynchronous errors occurring in Cy. In particular, it is used for topic
+    /// resubscription errors occurring in response to consensus updates, and also in cases where Cy is unable to
+    /// create an implicit subscription on pattern match due to lack of memory.
     ///
     /// Normally, the error handler does not need to do anything specific aside from perhaps logging/reporting the
-    /// error. Cy will keep attempting to repair the topic periodically as long as it exists.
-    void (*on_subscription_error)(cy_t*, cy_topic_t*, cy_err_t);
-} cy_vtable_t;
+    /// error. Cy will keep attempting to repeat the failing operation continuously until it succeeds or the condition
+    /// requiring the operation is lifted.
+    ///
+    /// Since Cy is a single-file library, the line number uniquely identifies the error site.
+    /// The topic pointer is NULL if the error prevented the creation of a new topic instance.
+    void (*on_error)(cy_t*, cy_topic_t*, uint16_t line_number, cy_err_t);
 
-/// See cy_name_... for name resolution details.
-/// The node name should be unique in the network; one way to ensure this is to default it to the node UID as hex.
-cy_err_t cy_new(cy_t* const              cy,
-                const cy_vtable_t* const vtable,
-                const wkv_str_t          home,
-                const wkv_str_t          namespace_,
-                const uint32_t           subject_id_modulus);
-void     cy_destroy(cy_t* const cy);
-
-/// Hidden from the application because the application is not expected to need this.
-uint32_t cy_topic_subject_id(const cy_topic_t* const topic);
-
-/// This function must be invoked periodically to ensure liveness.
-/// The most efficient invocation schedule is guided by min(cy->heartbeat_next, cy->heartbeat_next_urgent),
-/// but not less often than every 10 ms; if fixed-rate updates are desired, then the recommended period is 1 ms.
-/// The returned value indicates the success of the heartbeat publication, if any took place, or zero.
-cy_err_t cy_update(cy_t* const cy);
-
-static inline bool cy_topic_has_subscribers(const cy_topic_t* const topic) { return topic->couplings != NULL; }
+    /// Runs the event loop until the specified deadline, or until the first error. Early exit is allowed.
+    /// If the deadline is in the past, update the event loop once without blocking and return.
+    cy_err_t (*spin_until)(cy_t*, cy_us_t deadline);
+} cy_platform_vtable_t;
 
 /// New message received on a topic or P2P. The data ownership is taken by this function.
 /// The subject-ID is UINT64_MAX for P2P messages.
@@ -351,21 +183,7 @@ void cy_on_message(cy_t* const            cy,
                    const cy_p2p_context_t p2p_context,
                    const uint64_t         subject_id,
                    const uint64_t         remote_id,
-                   cy_message_ts_t        message);
-
-/// For diagnostics and logging only. Do not use in embedded and real-time applications.
-/// This function is only required if CY_CONFIG_TRACE is defined and is nonzero; otherwise it should be left undefined.
-/// Other modules that build on Cy can also use it; e.g., transport-specific glue modules.
-extern void cy_trace(cy_t* const         cy,
-                     const char* const   file,
-                     const uint_fast16_t line,
-                     const char* const   func,
-                     const char* const   format,
-                     ...)
-#if defined(__GNUC__) || defined(__clang__)
-  __attribute__((__format__(__printf__, 5, 6)))
-#endif
-  ;
+                   const cy_message_ts_t  message);
 
 #ifdef __cplusplus
 }

@@ -15,7 +15,7 @@
 ///     - A specified REMOTE NODE direct PEER-TO-PEER.
 ///
 /// The transport layer supports messages of arbitrary size, providing SEGMENTATION/REASSEMBLY transparently to the
-/// higher layers.
+/// higher layers. The transport layer guarantees message integrity.
 ///
 /// The transport layer DOES NOT provide message ordering recovery or reliable delivery (messages may arrive out of
 /// order or may not arrive at all).
@@ -137,6 +137,92 @@ static const wkv_str_t str_invalid = { .len = SIZE_MAX, .str = NULL };
 
 typedef unsigned char byte_t;
 
+typedef struct cy_tree_t cy_tree_t;
+struct cy_tree_t
+{
+    cy_tree_t*  up;
+    cy_tree_t*  lr[2];
+    int_fast8_t bf;
+};
+
+typedef struct cy_list_member_t cy_list_member_t;
+struct cy_list_member_t
+{
+    cy_list_member_t* next;
+    cy_list_member_t* prev;
+};
+typedef struct cy_list_t
+{
+    cy_list_member_t* head; ///< NULL if list empty
+    cy_list_member_t* tail; ///< NULL if list empty
+} cy_list_t;
+
+struct cy_t
+{
+    const cy_vtable_t* vtable;
+
+    // TODO FIXME: move cy_t inside cy.c and store olga by value.
+    olga_t* olga;
+
+    /// Namespace is a prefix added to all topics created on this instance, unless the topic name starts with `/`.
+    /// Local node name is prefixed to the topic name if it starts with `~/`.
+    /// The final resolved topic name exchanged on the wire has the leading/trailing/duplicate separators removed.
+    /// Both strings are stored in the same heap block pointed to by `home`. Both are NUL-terminated.
+    wkv_str_t ns;
+    wkv_str_t home;
+
+    cy_us_t ts_started;
+
+    /// Cannot be changed after startup. Must be the same for all nodes in the network.
+    /// https://github.com/OpenCyphal-Garage/cy/issues/12#issuecomment-3577831960
+    uint32_t subject_id_modulus;
+
+    /// Heartbeat topic and related items.
+    cy_publisher_t*  heartbeat_pub;
+    cy_subscriber_t* heartbeat_sub;
+    cy_us_t          heartbeat_period;
+    cy_us_t          heartbeat_next;
+    cy_us_t          heartbeat_next_urgent;
+
+    cy_us_t implicit_topic_timeout;
+
+    /// Used to derive the actual ack timeout.
+    cy_us_t ack_baseline_timeout;
+
+    /// Topics are indexed in multiple ways for various lookups.
+    /// Remember that pinned topics have small hash ≤8184, hence they are always on the left of the hash tree,
+    /// and can be traversed quickly if needed.
+    wkv_t      topics_by_name;       // Contains ALL topics, never empty since we always have at least the heartbeat.
+    cy_tree_t* topics_by_hash;       // ditto
+    cy_tree_t* topics_by_subject_id; // All except pinned, since they do not collide. May be empty.
+
+    /// Topic lists for ordering.
+    cy_list_t list_implicit;      ///< Most recently animated topic is at the head.
+    cy_list_t list_gossip_urgent; ///< High-priority gossips. Newest at the head.
+    cy_list_t list_gossip;        ///< Normal-priority gossips. Newest at the head.
+    cy_list_t list_scout_pending; ///< Lists subscriber_root_t that are due for gossiping.
+
+    /// When a heartbeat is received, its topic name will be compared against the patterns,
+    /// and if a match is found, a new subscription will be constructed automatically; if a new topic instance
+    /// has to be created for that, such instance is called implicit. Implicit instances are retired automatically
+    /// when there are no explicit counterparts left and there is no traffic on the topic for a while.
+    /// The values of these tree nodes point to instances of subscriber_root_t.
+    wkv_t subscribers_by_name;    ///< Both explicit and patterns.
+    wkv_t subscribers_by_pattern; ///< Only patterns for implicit subscriptions on heartbeat.
+
+    /// Pending network state indexes. Removal is guided by remote nodes and by deadline (via olga).
+    /// We use separate indexes because messages use the same tag for ack and response correlation,
+    /// and also for faster lookup.
+    cy_tree_t* publish_futures_by_tag;
+    cy_tree_t* request_futures_by_tag;
+    cy_tree_t* response_futures_by_tag;
+
+    size_t p2p_extent;
+
+    /// Slow topic iteration state. Updated every cy_update(); when NULL, restart from scratch.
+    cy_topic_t* topic_iter;
+};
+
 /// The maximum header size is needed to calculate the extent correctly.
 /// It is added to the serialized message size.
 /// Later revisions of the protocol may increase this size, although it is best to avoid it if possible.
@@ -256,30 +342,6 @@ static wkv_str_t to_hex(uint64_t value, const size_t bit_width, char* const out)
     }
     out[len] = '\0';
     return (wkv_str_t){ .len = len, .str = out };
-}
-
-/// A human-friendly representation of the topic for logging and diagnostics.
-typedef struct
-{
-    char str[CY_TOPIC_NAME_MAX + 32];
-} topic_repr_t;
-static topic_repr_t topic_repr(const cy_topic_t* const topic)
-{
-    assert(topic != NULL);
-    topic_repr_t out = { 0 };
-    char*        ptr = out.str;
-    *ptr++           = 'T';
-    ptr += to_hex(topic->hash, 64, ptr).len;
-    *ptr++ = '@';
-    ptr += to_hex(cy_topic_subject_id(topic), 32, ptr).len;
-    *ptr++               = '\'';
-    const wkv_str_t name = cy_topic_name(topic);
-    memcpy(ptr, name.str, name.len);
-    ptr += name.len;
-    *ptr++ = '\'';
-    *ptr   = '\0';
-    assert((ptr - out.str) <= (ptrdiff_t)sizeof(out.str));
-    return out;
 }
 
 #endif
@@ -576,6 +638,98 @@ void cy_future_destroy(cy_future_t* const self)
 //                                                      TOPICS
 // =====================================================================================================================
 
+/// A topic that is only used by pattern subscriptions (like `ins/?/data/*`, without publishers or explicit
+/// subscriptions) is called implicit. Such topics are automatically retired when they see no traffic and
+/// no gossips from publishers or receiving subscribers for implicit_topic_timeout.
+/// This is needed to prevent implicit pattern subscriptions from lingering forever when all publishers are gone.
+/// See https://github.com/pavel-kirienko/cy/issues/15.
+///
+/// CRDT merge rules, first rule takes precedence:
+/// - on collision (same subject-ID, different hash):
+///     1. winner is pinned;
+///     2. winner is older;
+///     3. winner has smaller hash.
+/// - on divergence (same hash, different subject-ID):
+///     1. winner is older;
+///     2. winner has seen more evictions (i.e., larger subject-ID mod max_topics).
+/// When a topic is reallocated, it retains its current age.
+/// Conflict resolution may result in a temporary jitter if it happens to occur near log2(age) integer boundary.
+struct cy_topic_t
+{
+    /// All indexes that this topic is a member of. Indexes are very fast log(N) lookup structures.
+    cy_tree_t   index_hash; ///< Hash index handle MUST be the first field.
+    cy_tree_t   index_subject_id;
+    wkv_node_t* index_name;
+
+    /// All lists that this topic is a member of. Lists are used for ordering with fast constant-time insertion/removal.
+    cy_list_member_t list_implicit;      ///< Last animated topic is at the end of the list.
+    cy_list_member_t list_gossip_urgent; ///< High-priority gossips. Fetch from the tail.
+    cy_list_member_t list_gossip;        ///< Normal-priority gossips. Fetch from the tail.
+
+    cy_t* cy;
+
+    /// The name length is stored in index_name. This string is also NUL-terminated for convenience.
+    /// We need to store the full name to allow valid references from name substitutions during pattern matching.
+    char* name;
+
+    /// Whenever a topic conflicts with another one locally, arbitration is performed, and the loser has its
+    /// eviction counter incremented. The eviction counter is used as a Lamport clock counting the loss events.
+    /// Higher clock wins because it implies that any lower value is non-viable since it has been known to cause
+    /// at least one collision anywhere on the network. The counter MUST NOT BE CHANGED without removing the topic
+    /// from the subject-ID index tree!
+    uint64_t evictions;
+
+    /// hash=rapidhash(topic_name); except for a pinned topic, hash=subject_id<=CY_PINNED_SUBJECT_ID_MAX.
+    uint64_t hash;
+
+    /// Event timestamps used for state management.
+    cy_us_t ts_origin;   ///< An approximation of when the topic was first seen on the network.
+    cy_us_t ts_animated; ///< Last time the topic saw activity that prevents it from being retired.
+
+    /// Publisher-related states.
+    /// The tag counter is random-initialized when topic created, then incremented with each publish;
+    /// only the 56 least significant bits are used; ignore the top 8 bits.
+    uint64_t pub_next_tag_56bit;
+    size_t   pub_count; ///< Number of active advertisements; counted for garbage collection.
+
+    /// Subscriber-related states.
+    struct cy_topic_coupling_t* couplings;
+    bool       subscribed; ///< May be (tentatively) false even with couplings!=NULL on resubscription error.
+    cy_tree_t* sub_index_dedup_by_remote_id;
+    cy_list_t  sub_list_dedup_by_recency;
+
+    /// User context for application-specific use, such as linking it with external data.
+    cy_user_context_t user_context;
+};
+
+#if CY_CONFIG_TRACE
+
+/// A human-friendly representation of the topic for logging and diagnostics.
+typedef struct
+{
+    char str[CY_TOPIC_NAME_MAX + 32];
+} topic_repr_t;
+static topic_repr_t topic_repr(const cy_topic_t* const topic)
+{
+    assert(topic != NULL);
+    topic_repr_t out = { 0 };
+    char*        ptr = out.str;
+    *ptr++           = 'T';
+    ptr += to_hex(topic->hash, 64, ptr).len;
+    *ptr++ = '@';
+    ptr += to_hex(cy_topic_subject_id(topic), 32, ptr).len;
+    *ptr++               = '\'';
+    const wkv_str_t name = cy_topic_name(topic);
+    memcpy(ptr, name.str, name.len);
+    ptr += name.len;
+    *ptr++ = '\'';
+    *ptr   = '\0';
+    assert((ptr - out.str) <= (ptrdiff_t)sizeof(out.str));
+    return out;
+}
+
+#endif
+
 /// For each topic we are subscribed to, there is a single subscriber root.
 /// The application can create an arbitrary number of subscribers per topic, which all go under the same root.
 /// If pattern subscriptions are used, a single root may match multiple topics; the matching is tracked using
@@ -766,11 +920,11 @@ static uint32_t topic_subject_id(const cy_t* const cy, const uint64_t hash, cons
     if (is_pinned(hash)) {
         return (uint32_t)hash;
     }
-#ifndef CY_CONFIG_PREFERRED_TOPIC_OVERRIDE
+#ifndef CY_CONFIG_PREFERRED_SUBJECT_OVERRIDE
     return CY_PINNED_SUBJECT_ID_MAX + (uint32_t)((hash + (evictions * evictions)) % cy->subject_id_modulus);
 #else
     (void)hash;
-    return (uint32_t)((CY_CONFIG_PREFERRED_TOPIC_OVERRIDE + (evictions * evictions)) % cy->subject_id_modulus);
+    return (uint32_t)((CY_CONFIG_PREFERRED_SUBJECT_OVERRIDE + (evictions * evictions)) % cy->subject_id_modulus);
 #endif
 }
 
@@ -794,11 +948,8 @@ static void topic_ensure_subscribed(cy_topic_t* const topic)
     if ((topic->couplings != NULL) && (!topic->subscribed)) {
         const size_t   extent = get_subscription_extent(topic);
         const cy_err_t res    = cy->vtable->subscribe(topic, extent);
-        topic->subscribed     = res == CY_OK;
+        topic->subscribed     = res == CY_OK; // The platform layer will handle the failure. We will retry later again.
         CY_TRACE(topic->cy, "🗞️ %s extent=%zu result=%d", topic_repr(topic).str, extent, res);
-        if (!topic->subscribed) {
-            topic->cy->vtable->on_subscription_error(topic->cy, topic, res); // not our problem anymore
-        }
     }
 }
 
@@ -2591,7 +2742,7 @@ void cy_on_message(cy_t* const            cy,
                    const cy_p2p_context_t p2p_context,
                    const uint64_t         subject_id,
                    const uint64_t         remote_id,
-                   cy_message_ts_t        message)
+                   const cy_message_ts_t  message)
 {
     assert((cy != NULL) && (message.timestamp >= 0));
     assert(message.content->refcount == 1);
@@ -2850,7 +3001,7 @@ wkv_str_t cy_name_expand_home(wkv_str_t name, const wkv_str_t home, const size_t
 }
 
 wkv_str_t cy_name_resolve(const wkv_str_t name,
-                          wkv_str_t       namespace_,
+                          wkv_str_t       name_space,
                           const wkv_str_t home,
                           const size_t    dest_size,
                           char*           dest)
@@ -2864,11 +3015,11 @@ wkv_str_t cy_name_resolve(const wkv_str_t name,
     if (cy_name_is_homeful(name)) {
         return cy_name_expand_home(name, home, dest_size, dest);
     }
-    if (cy_name_is_homeful(namespace_)) {
-        namespace_ = cy_name_expand_home(namespace_, home, dest_size, dest);
-        if (namespace_.len >= dest_size) {
+    if (cy_name_is_homeful(name_space)) {
+        name_space = cy_name_expand_home(name_space, home, dest_size, dest);
+        if (name_space.len >= dest_size) {
             return str_invalid;
         }
     }
-    return cy_name_join(namespace_, name, dest_size, dest);
+    return cy_name_join(name_space, name, dest_size, dest);
 }

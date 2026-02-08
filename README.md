@@ -310,4 +310,3 @@ direction LR
     _subscriber_root "1" o-- "*" subscriber
     note "Automatically managed private entities are prefixed with '_'"
 ```
-

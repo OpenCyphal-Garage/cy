@@ -38,8 +38,9 @@ extern "C"
 typedef uint_fast8_t cy_err_t;
 typedef int64_t      cy_us_t; ///< Monotonic microsecond timestamp. Signed to permit arithmetics in the past.
 
-typedef struct cy_t       cy_t;
-typedef struct cy_topic_t cy_topic_t;
+typedef struct cy_t          cy_t;
+typedef struct cy_topic_t    cy_topic_t;
+typedef struct cy_platform_t cy_platform_t;
 
 typedef enum cy_prio_t
 {
@@ -78,8 +79,7 @@ typedef union cy_user_context_t
 } cy_user_context_t;
 
 #ifdef __cplusplus
-#define CY_USER_CONTEXT_EMPTY \
-    cy_user_context_t {}
+#define CY_USER_CONTEXT_EMPTY (cy_user_context_t{})
 #else
 #define CY_USER_CONTEXT_EMPTY ((cy_user_context_t){ .ptr = { NULL } })
 #endif
@@ -417,11 +417,41 @@ cy_future_t* cy_respond_reliable(cy_breadcrumb_t* const breadcrumb, const cy_us_
 //                                                  NODE & TOPIC
 // =====================================================================================================================
 
+/// The new instance will be heap-allocated via the platform layer API.
+cy_t* cy_new(const cy_platform_t* const platform);
+void  cy_destroy(cy_t* const cy);
+
+/// This function must be invoked periodically to ensure liveness.
+/// The returned value indicates the success of the heartbeat publication, if any took place, or zero.
+/// Transient failures normally should be logged & ignored.
+/// The function will return not later than the specified deadline. It may return early.
+cy_err_t cy_spin_until(cy_t* const cy, const cy_us_t deadline);
+
+/// Similar to the normal spin, but it will not block.
+/// This is useful if blocking is implemented outside of the Cy's event loop.
+cy_err_t cy_spin_once(cy_t* const cy);
+
 /// Returns the current time in microseconds. Always non-negative.
 cy_us_t cy_now(const cy_t* const cy);
 
-/// TODO implement remapping
-cy_err_t cy_map(cy_t* const cy, const wkv_str_t from, const wkv_str_t to);
+/// See cy_name_... for name resolution details. The provided names will be validated and normalized.
+/// The home should be unique in the network; one way to ensure this is to default it to the node's unique ID.
+/// The returned strings are NUL-terminated. The lifetime is bound to the Cy instance.
+/// Mutators fail if the supplied string is invalid.
+/// The default home and namespace are empty. They can be changed only before the first topic is created.
+wkv_str_t cy_home(const cy_t* const cy);
+cy_err_t  cy_home_set(const cy_t* const cy, const wkv_str_t home);
+wkv_str_t cy_namespace(const cy_t* const cy);
+cy_err_t  cy_namespace_set(const cy_t* const cy, const wkv_str_t name_space);
+
+/// TODO not implemented
+cy_err_t cy_remap(cy_t* const cy, const wkv_str_t from, const wkv_str_t to);
+
+/// Like cy_remap(), but the remappings are read from a string of the form "from1=to1 from2=to2 "...
+/// The from/to are separated with `=` (equals sign), and the remapping pairs are separated with ASCII whitespace.
+/// This is designed to support single-string configuration parameters storing all remappings in one place.
+/// TODO not implemented
+cy_err_t cy_remap_parse(cy_t* const cy, const wkv_str_t spec_string);
 
 // TODO: add a way to dump/restore topic configuration for instant initialization. This may be platform-specific.
 
@@ -451,8 +481,6 @@ cy_t*     cy_topic_owner(const cy_topic_t* const topic);
 /// It can be used to associate arbitrary application-specific data with the topic.
 /// Returns NULL iff the topic pointer is NULL.
 cy_user_context_t* cy_topic_user_context(cy_topic_t* const topic);
-
-// TODO: topic hooks: extern functions similar to cy_trace invoked when a topic is created/destroyed/(un)subscribed/etc.
 
 // =====================================================================================================================
 //                                                      NAMES
@@ -511,10 +539,40 @@ wkv_str_t cy_name_expand_home(wkv_str_t name, const wkv_str_t home, const size_t
 /// On failure, the output string has length SIZE_MAX and NULL data pointer.
 /// The destination is not NUL-terminated.
 wkv_str_t cy_name_resolve(const wkv_str_t name,
-                          wkv_str_t       namespace_,
+                          wkv_str_t       name_space,
                           const wkv_str_t home,
                           const size_t    dest_size,
                           char*           dest);
+
+// =====================================================================================================================
+//                                                      MONITORING & DIAGNOSTICS
+// =====================================================================================================================
+
+// TODO: topic hooks: extern functions similar to cy_trace invoked when a topic is created/destroyed/(un)subscribed/etc.
+
+/// If CY_CONFIG_TRACE is defined and is non-zero, cy_trace() shall be defined externally.
+#ifndef CY_CONFIG_TRACE
+#define CY_CONFIG_TRACE 0
+#endif
+#if CY_CONFIG_TRACE
+#define CY_TRACE(cy, ...) cy_trace(cy, __FILE__, __LINE__, __func__, __VA_ARGS__)
+#else
+#define CY_TRACE(cy, ...) (void)cy
+#endif
+
+/// For diagnostics and logging only. Do not use in embedded and real-time applications.
+/// This function is only required if CY_CONFIG_TRACE is defined and is nonzero; otherwise it should be left undefined.
+/// Other modules that build on Cy can also use it; e.g., transport-specific glue modules.
+extern void cy_trace(cy_t* const         cy,
+                     const char* const   file,
+                     const uint_fast16_t line,
+                     const char* const   func,
+                     const char* const   format,
+                     ...)
+#if defined(__GNUC__) || defined(__clang__)
+  __attribute__((__format__(__printf__, 5, 6)))
+#endif
+  ;
 
 #ifdef __cplusplus
 }
