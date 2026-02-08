@@ -1,4 +1,4 @@
-# Copyright (c) Pavel Kirienko
+# Copyright (c) Pavel Kirienko <pavel@opencyphal.org>
 
 cmake_minimum_required(VERSION 3.24)
 project(cy C CXX)
