@@ -155,15 +155,15 @@ typedef struct cy_platform_vtable_t
     cy_subject_writer_t* (*subject_writer)(cy_t*, uint32_t subject_id);
     cy_subject_reader_t* (*subject_reader)(cy_t*, uint32_t subject_id, size_t extent);
 
-    /// Sets/updates the maximum extent of incoming P2P transfers. Messages larger than this may be truncated.
-    /// The initial value prior to the first invocation is transport-defined.
-    void (*p2p_extent)(cy_t*, size_t);
-
     /// Instructs the underlying transport layer to send a peer-to-peer transfer to the specified remote node.
     /// The message lifetime ends upon return from this function.
     /// If the transport layer needs any additional metadata to send a P2P message (e.g., destination address/port),
     /// it must be stored inside the responder context prior to cy_on_message() invocation.
     cy_err_t (*p2p)(cy_t*, const cy_p2p_context_t*, cy_us_t deadline, uint64_t remote_id, cy_bytes_t message);
+
+    /// Sets/updates the maximum extent of incoming P2P transfers. Messages larger than this may be truncated.
+    /// The initial value prior to the first invocation is transport-defined.
+    void (*p2p_extent)(cy_t*, size_t);
 
     /// This handler is used to report asynchronous errors occurring in Cy. In particular, it is used for topic
     /// resubscription errors occurring in response to consensus updates, and also in cases where Cy is unable to
@@ -179,7 +179,7 @@ typedef struct cy_platform_vtable_t
 
     /// Runs the event loop until the specified deadline, or until the first error. Early exit is allowed.
     /// If the deadline is in the past, update the event loop once without blocking and return.
-    cy_err_t (*spin_until)(cy_t*, cy_us_t deadline);
+    cy_err_t (*spin)(cy_t*, cy_us_t deadline);
 } cy_platform_vtable_t;
 
 /// Returns the platform instance associated with the given Cy instance.

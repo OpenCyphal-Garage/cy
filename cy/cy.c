@@ -2650,7 +2650,7 @@ cy_err_t cy_spin_until(cy_t* const cy, const cy_us_t deadline)
     cy_err_t err = CY_OK;
     do {
         const cy_us_t wait_deadline = min_i64(deadline, min_i64(cy->heartbeat_next_urgent, cy->heartbeat_next));
-        err                         = cy->platform->vtable->spin_until(cy, wait_deadline);
+        err                         = cy->platform->vtable->spin(cy, wait_deadline);
         if (err == CY_OK) {
             err = poll(cy, &now);
         }

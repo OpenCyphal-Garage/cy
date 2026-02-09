@@ -21,6 +21,8 @@ extern "C"
 
 #define CY_UDP_POSIX_IFACE_COUNT_MAX 3
 
+#define CY_UDP_POSIX_ASYNC_ERROR_SLOTS 4
+
 typedef struct cy_udp_posix_stats_t
 {
     size_t subject_writer_count;
@@ -47,10 +49,10 @@ typedef struct cy_udp_posix_stats_t
 
     struct cy_udp_posix_stats_cy_async_err_t
     {
-        uint16_t line; ///< Zero if unused, otherwise contains the line number in cy.c.
+        uint16_t line_number; ///< Zero if unused, otherwise contains the line number in cy.c.
         uint64_t count;
         cy_us_t  last_at;
-    } cy_async_errors[4];
+    } cy_async_errors[CY_UDP_POSIX_ASYNC_ERROR_SLOTS];
 } cy_udp_posix_stats_t;
 
 /// Unused interfaces should have zero addresses; to parse IP address strings see udp_wrapper_parse_iface_address().

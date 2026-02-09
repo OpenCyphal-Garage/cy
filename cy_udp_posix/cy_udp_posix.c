@@ -353,8 +353,8 @@ static void v_on_msg(udpard_rx_t* const rx, udpard_rx_port_t* const port, const 
 
 static void v_on_msg_stateless(udpard_rx_t* const rx, udpard_rx_port_t* const port, const udpard_rx_transfer_t tr)
 {
-    cy_udp_posix_t* const owner = rx->user;
-    subject_reader_t* const self = port->user;
+    cy_udp_posix_t* const   owner = rx->user;
+    subject_reader_t* const self  = port->user;
     static_assert(sizeof(self->history) / sizeof(self->history[0]) == 2, "");
     // In the stateless mode, libudpard does not bother deduplicating messages. The heartbeat subscriber does not
     // care about duplicates, so we could just pass all messages as-is and it will work fine, but it would waste
@@ -453,17 +453,17 @@ reject:
     return (cy_subject_reader_t*)self;
 }
 
-// ----------------------------------------  CY VTABLE  ----------------------------------------
+// ----------------------------------------  PLATFORM  ----------------------------------------
 
-static cy_us_t v_now(const cy_t* const cy)
+static cy_us_t v_now(cy_platform_t* const base)
 {
-    (void)cy;
+    (void)base;
     return cy_udp_posix_now();
 }
 
-static void* v_realloc(cy_t* const cy, void* const ptr, const size_t new_size)
+static void* v_realloc(cy_platform_t* const base, void* const ptr, const size_t new_size)
 {
-    (void)cy;
+    (void)base;
     // TODO: currently we do not track the memory usage by Cy, but it would be useful to do so.
     if (new_size > 0) {
         return realloc(ptr, new_size);
@@ -472,23 +472,19 @@ static void* v_realloc(cy_t* const cy, void* const ptr, const size_t new_size)
     return NULL;
 }
 
-static uint64_t v_random(cy_t* const cy)
+static uint64_t v_random(cy_platform_t* const base)
 {
-    return prng64(&((cy_udp_posix_t*)cy)->prng_state, ((cy_udp_posix_t*)cy)->udpard_tx.local_uid);
+    return prng64(&((cy_udp_posix_t*)base)->prng_state, ((cy_udp_posix_t*)base)->udpard_tx.local_uid);
 }
 
 /// Invoked by Cy when the application desires to respond to a message received earlier.
-static cy_err_t v_p2p(cy_t* const                    cy,
-                      const cy_p2p_context_t* const  p2p_context,
-                      const cy_us_t                  deadline,
-                      const uint64_t                 remote_id,
-                      const cy_bytes_t               message,
-                      cy_cancellation_token_t* const out_cancellation_token,
-                      void* const                    reliable_context,
-                      void (*const reliable_feedback)(void* reliable_context, bool acknowledged))
+static cy_err_t v_p2p(cy_t* const                   cy,
+                      const cy_p2p_context_t* const p2p_context,
+                      const cy_us_t                 deadline,
+                      const uint64_t                remote_id,
+                      const cy_bytes_t              message)
 {
-    cy_udp_posix_t* const cy_udp   = (cy_udp_posix_t*)cy;
-    const bool            reliable = reliable_feedback != NULL;
+    cy_udp_posix_t* const owner = (cy_udp_posix_t*)cy_platform(cy);
 
     // Unbox the P2P context.
     p2p_ctx_t inner;
@@ -499,55 +495,92 @@ static cy_err_t v_p2p(cy_t* const                    cy,
         remote.endpoints[i] = inner.endpoints[i];
     }
 
-    // Set up libudpard context for the callback.
-    udpard_user_context_t udpard_context = UDPARD_USER_CONTEXT_NULL;
-    if (reliable) {
-        const p2p_feedback_context_t boxed = { .context = reliable_context, .feedback = reliable_feedback };
-        static_assert(sizeof(boxed) <= sizeof(udpard_context), "");
-        memcpy(&udpard_context, &boxed, sizeof(boxed)); // respect strict aliasing
-    }
-
-    // The other part of the cancellation token is set later.
-    if (out_cancellation_token != NULL) {
-        out_cancellation_token->id[0] = remote_id; // Takes the place of the topic hash in normal publications.
-    }
-
     // Push the message.
-    // We need better error reporting in libudpard, this is really unwieldy.
-    const uint64_t e_oom      = cy_udp->udpard_tx.errors_oom;
-    const uint64_t e_capacity = cy_udp->udpard_tx.errors_capacity;
+    // We may need better error reporting in libudpard, this is a bit unwieldy.
+    const uint64_t e_oom      = owner->udpard_tx.errors_oom;
+    const uint64_t e_capacity = owner->udpard_tx.errors_capacity;
     //
-    const bool ok = udpard_tx_push_p2p(&cy_udp->udpard_tx,
+    const bool ok = udpard_tx_push_p2p(&owner->udpard_tx,
                                        cy_udp_posix_now(),
                                        deadline,
                                        inner.priority,
                                        remote,
                                        cy_bytes_to_udpard_bytes(message),
-                                       reliable ? on_p2p_feedback : NULL,
-                                       udpard_context,
-                                       (out_cancellation_token == NULL) ? NULL : &out_cancellation_token->id[1]);
+                                       NULL,
+                                       UDPARD_USER_CONTEXT_NULL,
+                                       NULL);
 
     // Report the result.
     CY_TRACE(cy, "💬 N%016llx res=%u", (unsigned long long)remote.uid, ok);
     if (ok) {
         return CY_OK;
     }
-    if (cy_udp->udpard_tx.errors_oom > e_oom) {
+    if (owner->udpard_tx.errors_oom > e_oom) {
         return CY_ERR_MEMORY;
     }
-    if (cy_udp->udpard_tx.errors_capacity > e_capacity) {
+    if (owner->udpard_tx.errors_capacity > e_capacity) {
         return CY_ERR_CAPACITY;
     }
     return CY_ERR_ARGUMENT;
 }
 
-static const cy_vtable_t cy_vtable = { .now                   = v_now,
-                                       .realloc               = v_realloc,
-                                       .random                = v_random,
-                                       .new_topic             = v_topic_new,
-                                       .p2p                   = v_p2p,
-                                       .cancel                = v_cancel,
-                                       .on_subscription_error = v_on_subscription_error };
+static void v_p2p_extent(cy_t* const cy, const size_t extent)
+{
+    cy_udp_posix_t* const owner = (cy_udp_posix_t*)cy_platform(cy);
+    // In this transport, the P2P extent is trivial to change -- just update a variable; no dependent states to update.
+    // We are aware that changing the extent may sometimes, under very specific circumstances involving out-of-order
+    // frame arrival, cause some in-progress transfers to be lost, but it's exceedingly unlikely and we normally use
+    // reliable delivery for P2P. To minimize the impact, we liberally increase the size at every update.
+    if (extent > owner->p2p_port.extent) {
+        owner->p2p_port.extent = extent * 2; // increase to minimize disturbance
+        CY_TRACE(cy, "📏 P2P response extent increased to %zu bytes", cy->p2p_port.extent);
+    }
+}
+
+static void v_on_async_error(cy_t* const cy, cy_topic_t* const topic, const uint16_t line_number)
+{
+    (void)topic;
+    cy_udp_posix_t* const owner = (cy_udp_posix_t*)cy_platform(cy);
+    CY_TRACE(cy, "⚠️ Error at cy.c:%u topic='%s'", line_number, topic != NULL ? cy_topic_name(topic).str : "");
+    // Find either a free slot or a slot with the matching line number.
+    struct cy_udp_posix_stats_cy_async_err_t* slot = NULL;
+    for (size_t i = 0; i < CY_UDP_POSIX_ASYNC_ERROR_SLOTS; i++) {
+        const uint16_t ln = owner->stats.cy_async_errors[i].line_number;
+        if ((ln == 0) || (ln == line_number)) {
+            slot = &owner->stats.cy_async_errors[i];
+            if (ln == line_number) {
+                break;
+            }
+        }
+    }
+    if (slot == NULL) { // All slots taken, replace the oldest. This should never happen, we have enough slots.
+        slot = &owner->stats.cy_async_errors[0];
+        for (size_t i = 1; i < CY_UDP_POSIX_ASYNC_ERROR_SLOTS; i++) {
+            if (owner->stats.cy_async_errors[i].last_at < slot->last_at) {
+                slot = &owner->stats.cy_async_errors[i];
+            }
+        }
+        slot->count = 0;
+    }
+    slot->line_number = line_number;
+    slot->count++;
+    slot->last_at = cy_udp_posix_now();
+}
+
+static cy_err_t v_spin(cy_t*, cy_us_t deadline)
+{
+    //
+}
+
+static const cy_platform_vtable_t platform_vtable = { .now            = v_now,
+                                                      .realloc        = v_realloc,
+                                                      .random         = v_random,
+                                                      .subject_writer = v_subject_writer,
+                                                      .subject_reader = v_subject_reader,
+                                                      .p2p            = v_p2p,
+                                                      .p2p_extent     = v_p2p_extent,
+                                                      .on_async_error = v_on_async_error,
+                                                      .spin           = v_spin };
 
 // ----------------------------------------  END OF PLATFORM INTERFACE  ----------------------------------------
 
@@ -559,6 +592,7 @@ cy_us_t cy_udp_posix_now(void)
     }
     return (ts.tv_sec * 1000000) + (ts.tv_nsec / 1000);
 }
+
 static void v_on_p2p_msg(udpard_rx_t* const rx, udpard_rx_port_t* const port, const udpard_rx_transfer_t tr)
 {
     cy_udp_posix_t* const cy = rx->user;
