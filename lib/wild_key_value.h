@@ -66,8 +66,8 @@ extern "C"
 
 /// These can be overridden at runtime on a per-container basis after wkv_init().
 #define WKV_DEFAULT_SEPARATOR '/'
-#define WKV_DEFAULT_SUB_ONE   '?'
-#define WKV_DEFAULT_SUB_ANY   '*'
+#define WKV_DEFAULT_SUB_ONE   '*'
+#define WKV_DEFAULT_SUB_ANY   '>'
 
 struct wkv_t;
 struct wkv_edge_t;
@@ -255,7 +255,7 @@ static inline void wkv_del(wkv_t* const self, wkv_node_t* const node);
 /// Returns the value and key of the element at the specified index, or NULL if the index is out of range.
 /// The ordering is unspecified but stable between wkv_set() and wkv_del().
 ///
-/// One could also use wkv_match() with the "*" pattern to list keys, but the difference here is that this function
+/// One could also use wkv_match() with the ">" pattern to list keys, but the difference here is that this function
 /// works for keys composed of arbitrary characters, while wkv_match() assumes that certain characters (substitutions)
 /// have special meaning.
 ///
@@ -271,10 +271,10 @@ static inline wkv_node_t* wkv_at(wkv_t* const self, size_t index);
 
 /// Search patterns may contain substitution tokens. WKV currently recognizes the following substitutions:
 ///
-/// -   One-segment substitution: "abc/?/def" -- matches "abc/123/def", with "123" being the substitution.
+/// -   One-segment substitution: "abc/*/def" -- matches "abc/123/def", with "123" being the substitution.
 ///     The substitution token must be the only text in the segment; otherwise, the segment is treated verbatim.
 ///
-/// -   Any-segment substitution: "abc/*/def" -- matches any number of segments, including zero;
+/// -   Any-segment substitution: "abc/>/def" -- matches any number of segments, including zero;
 ///     e.g. "abc/def", "abc/xyz/def", "abc/xyz/qwe/def".
 ///     There may be at most one any-segment substitution token in the pattern; if more are found,
 ///     the following occurrences are treated verbatim (no substitution will take place).
@@ -287,21 +287,21 @@ static inline wkv_node_t* wkv_at(wkv_t* const self, size_t index);
 /// It is difficult to avoid these issues without a significant performance and memory penalty,
 /// hence the limitation is imposed.
 ///
-/// Hint: a sequence of "?/*" is similar to the glob recursive wildcard "**".
+/// Hint: a sequence of "*/>" is similar to the glob recursive wildcard "**".
 ///
 /// When a pattern match occurs, WKV provides a list of substitutions that had to be made to match the key against
 /// the pattern; this is conceptually similar to capture groups in regular expressions.
 /// The elements are ordered in the same way as they appear in the pattern, and each element specifies which
 /// substitution token it is produced for via 'ordinal'.
 ///
-/// For example, pattern "abc/?/def/*" matching "abc/123/def/foo/456/xyz" produces the following substitution list,
+/// For example, pattern "abc/*/def/>" matching "abc/123/def/foo/456/xyz" produces the following substitution list,
 /// with the ordinals as specified:
 /// 1. #0 "123"
 /// 2. #1 "foo"
 /// 3. #1 "456"
 /// 4. #1 "xyz"
 ///
-/// Another example: pattern "abc/*/def" matching "abc/def" produces no substitutions.
+/// Another example: pattern "abc/>/def" matching "abc/def" produces no substitutions.
 struct wkv_substitution_t
 {
     wkv_str_t           str;     ///< The string that matched the substitution token in the pattern.
@@ -665,7 +665,7 @@ static inline void* _wkv_match(const _wkv_hit_ctx_t* const    ctx,
                                const _wkv_substitution_list_t subs,
                                const bool                     any_seen);
 
-/// Matches one-segment substitution: a/?/b
+/// Matches one-segment substitution: a/*/b
 static inline void* _wkv_match_sub_one(const _wkv_hit_ctx_t* const    ctx,
                                        const wkv_node_t* const        node,
                                        const _wkv_split_t             qs,
@@ -686,7 +686,7 @@ static inline void* _wkv_match_sub_one(const _wkv_hit_ctx_t* const    ctx,
     return result;
 }
 
-/// Matches many-segment substitution (one or more): a/+/b ==> a/?/b, a/?/?/b, a/?/?/?/b, ...
+/// Matches many-segment substitution (one or more): a/+/b ==> a/*/b, a/*/*/b, a/*/*/*/b, ...
 static inline void* _wkv_match_sub_many(const _wkv_hit_ctx_t* const    ctx,
                                         const wkv_node_t* const        node,
                                         const _wkv_split_t             qs,
@@ -710,7 +710,7 @@ static inline void* _wkv_match_sub_many(const _wkv_hit_ctx_t* const    ctx,
     return result;
 }
 
-/// Matches any-segment substitution (zero or more): a/*/b ==> a/b, a/?/b, a/?/?/b, ...
+/// Matches any-segment substitution (zero or more): a/>/b ==> a/b, a/*/b, a/*/*/b, ...
 static inline void* _wkv_match_sub_any(const _wkv_hit_ctx_t* const    ctx,
                                        const wkv_node_t* const        node,
                                        const _wkv_split_t             qs,

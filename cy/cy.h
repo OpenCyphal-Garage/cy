@@ -302,7 +302,7 @@ typedef struct cy_substitution_t
 
 /// When a name pattern match occurs, Cy will store the string substitutions that had to be made to
 /// achieve the match. The substitutions are listed in the order of their occurrence in the pattern.
-/// For example, if the pattern is "ins/?/data/*" and the key is "ins/0/data/foo/456",
+/// For example, if the pattern is "ins/*/data/#" and the key is "ins/0/data/foo/456",
 /// then the substitutions will be (together with their ordinals):
 ///  1. #0 "0"
 ///  2. #1 "foo"
@@ -418,21 +418,8 @@ cy_future_t* cy_respond_reliable(cy_breadcrumb_t* const breadcrumb, const cy_us_
 // =====================================================================================================================
 
 /// The new instance will be heap-allocated via the platform layer API.
-cy_t* cy_new(const cy_platform_t* const platform);
+cy_t* cy_new(cy_platform_t* const platform);
 void  cy_destroy(cy_t* const cy);
-
-/// This function must be invoked periodically to ensure liveness.
-/// The returned value indicates the success of the heartbeat publication, if any took place, or zero.
-/// Transient failures normally should be logged & ignored.
-/// The function will return not later than the specified deadline. It may return early.
-cy_err_t cy_spin_until(cy_t* const cy, const cy_us_t deadline);
-
-/// Similar to the normal spin, but it will not block.
-/// This is useful if blocking is implemented outside of the Cy's event loop.
-cy_err_t cy_spin_once(cy_t* const cy);
-
-/// Returns the current time in microseconds. Always non-negative.
-cy_us_t cy_now(const cy_t* const cy);
 
 /// See cy_name_... for name resolution details. The provided names will be validated and normalized.
 /// The home should be unique in the network; one way to ensure this is to default it to the node's unique ID.
@@ -440,9 +427,19 @@ cy_us_t cy_now(const cy_t* const cy);
 /// Mutators fail if the supplied string is invalid.
 /// The default home and namespace are empty. They can be changed only before the first topic is created.
 wkv_str_t cy_home(const cy_t* const cy);
-cy_err_t  cy_home_set(const cy_t* const cy, const wkv_str_t home);
 wkv_str_t cy_namespace(const cy_t* const cy);
-cy_err_t  cy_namespace_set(const cy_t* const cy, const wkv_str_t name_space);
+cy_err_t  cy_home_set(cy_t* const cy, const wkv_str_t home);
+cy_err_t  cy_namespace_set(cy_t* const cy, const wkv_str_t name_space);
+
+/// This function must be invoked periodically to ensure liveness.
+/// The returned value indicates the success of the heartbeat publication, if any took place, or zero.
+/// Transient failures normally should be logged & ignored.
+/// The function will return not later than the specified deadline. It may return early.
+cy_err_t               cy_spin_until(cy_t* const cy, const cy_us_t deadline);
+static inline cy_err_t cy_spin_once(cy_t* const cy) { return cy_spin_until(cy, 0); }
+
+/// Returns the current time in microseconds. Always non-negative.
+cy_us_t cy_now(const cy_t* const cy);
 
 /// TODO not implemented
 cy_err_t cy_remap(cy_t* const cy, const wkv_str_t from, const wkv_str_t to);
@@ -492,14 +489,13 @@ cy_user_context_t* cy_topic_user_context(cy_topic_t* const topic);
 /// and ROS2 where the maximum is 248. In practice, topics very rarely exceed ~100 characters.
 #define CY_TOPIC_NAME_MAX 200
 
-/// The max namespace length should also provide space for at least one separator and a one-character topic name.
-#define CY_NAMESPACE_NAME_MAX (CY_TOPIC_NAME_MAX - 2)
-
 /// A valid name consists of printable ASCII characters except SPACE.
 /// A normalized name does not begin with a separator, does not end with a separator, and does not contain
 /// consecutive separators.
-extern const char cy_name_sep;  ///< '/'
-extern const char cy_name_home; ///< '~'
+extern const char cy_name_sep;  ///< `/`
+extern const char cy_name_home; ///< `~` -- replaced with the home of the current node. Homes should be unique.
+extern const char cy_name_one;  ///< `*` -- matches any single name component: "abc/*/def" => "abc/123/def".
+extern const char cy_name_any;  ///< `>` -- matches zero or more components: "abc/>" => "abc", "abc/def", "abc/def/ghi".
 
 /// True iff the given name is valid according to the Cy naming rules. An empty name is not a valid name.
 bool cy_name_is_valid(const wkv_str_t name);
@@ -507,6 +503,10 @@ bool cy_name_is_valid(const wkv_str_t name);
 /// Returns true iff the name can only match a single topic, which is called a verbatim name;
 /// conversely, returns false for patterns that can match more than one topic.
 /// This is useful for some applications that want to ensure that certain names can match only one topic.
+///
+/// There may be at most one zero-or-more substitution token used, and if used, it must be the last token of the name.
+/// Otherwise, the behavior is currently unstable; it is well-defined internally but may change between minor versions
+/// and result in wire compatibility issues.
 bool cy_name_is_verbatim(const wkv_str_t name);
 
 /// Whether the name is relative to the home namespace ~ or is absolute.
@@ -545,7 +545,7 @@ wkv_str_t cy_name_resolve(const wkv_str_t name,
                           char*           dest);
 
 // =====================================================================================================================
-//                                                      MONITORING & DIAGNOSTICS
+//                                                  MONITORING & DIAGNOSTICS
 // =====================================================================================================================
 
 // TODO: topic hooks: extern functions similar to cy_trace invoked when a topic is created/destroyed/(un)subscribed/etc.

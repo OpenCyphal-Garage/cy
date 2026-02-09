@@ -153,11 +153,11 @@ Cy *intentionally uses the same API* for both concrete and pattern subscriptions
 as this enables flexible configuration at the time of integration/runtime as opposed to compile time only.
 To create a pattern subscription, simply use a topic name that contains substitution wildcards:
 
-* `?` -- matches a single path segment; e.g., `sensors/?/temperature` matches `sensors/engine/temperature` and `sensors/cabin/temperature`.
-* `*` -- matches zero or more path segments; e.g., `*/status` matches `status`, `subsystem/foo/status`, etc.
+* `*` -- matches a single name segment; e.g., `sensors/?/temperature` matches `sensors/engine/temperature` and `sensors/cabin/temperature`.
+* `>` -- matches zero or more name segments; e.g., `sensors/>` matches `sensors`, `sensors/engine/temperature`, etc.
 
 Cyphal is designed to be lightweight and efficient, which is why we don't support substitution characters *within*
-path segments; e.g., `sensor*/eng?ne` will be treated as a literal topic name.
+name segments; e.g., `sensor*/eng>` will be treated as a literal topic name.
 
 The message arrival callback looks like this for all subscribers (ordered, unordered, verbatim, pattern):
 

@@ -109,6 +109,7 @@ struct cy_platform_t
     /// The modulus shall be a prime number because the subject-ID function uses a quadratic probing strategy:
     ///     subject_id = CY_PINNED_SUBJECT_ID_MAX + (hash + evictions^2) mod modulus
     /// See https://en.wikipedia.org/wiki/Quadratic_probing
+    /// See https://github.com/OpenCyphal-Garage/cy/issues/12#issuecomment-3577831960
     uint32_t subject_id_modulus;
 
     const struct cy_platform_vtable_t* vtable;
@@ -117,13 +118,13 @@ struct cy_platform_t
 typedef struct cy_platform_vtable_t
 {
     /// Returns the current monotonic time in microseconds. The initial time shall be non-negative.
-    cy_us_t (*now)(const cy_t*);
+    cy_us_t (*now)(cy_platform_t*);
 
     /// The semantics are per the standard realloc from stdlib, except:
     /// - If the size is zero, it must behave like free() (which is often the case in realloc() but technically an UB).
     /// - Constant-complexity is preferred -- the API complexity specs are given assuming O(1) alloc/free operations,
     ///   unless an expansion is needed, in which case the complexity is linear in the old size of the block.
-    void* (*realloc)(cy_t*, void*, size_t);
+    void* (*realloc)(cy_platform_t*, void*, size_t);
 
     /// Returns a random 64-bit unsigned integer.
     /// A TRNG is preferred; if not available, a PRNG will suffice, but its initial state should be distinct across
@@ -143,7 +144,7 @@ typedef struct cy_platform_vtable_t
     ///     static uint_fast16_t g_counter = 0;
     ///     const uint64_t seed[] = { ((uint64_t)rtc_get_time() << 16U) + ++g_counter };
     ///     return rapidhash_withSeed(seed, sizeof(seed), local_uid);
-    uint64_t (*random)(cy_t*);
+    uint64_t (*random)(cy_platform_t*);
 
     /// The destruction is managed through their own vtables.
     /// The factories return NULL on OOM.
@@ -170,12 +171,15 @@ typedef struct cy_platform_vtable_t
     ///
     /// Since Cy is a single-file library, the line number uniquely identifies the error site.
     /// The topic pointer is NULL if the error prevented the creation of a new topic instance.
-    void (*on_error)(cy_t*, cy_topic_t*, uint16_t line_number, cy_err_t);
+    void (*on_async_error)(cy_t*, cy_topic_t*, uint16_t line_number);
 
     /// Runs the event loop until the specified deadline, or until the first error. Early exit is allowed.
     /// If the deadline is in the past, update the event loop once without blocking and return.
     cy_err_t (*spin_until)(cy_t*, cy_us_t deadline);
 } cy_platform_vtable_t;
+
+/// Returns the platform instance associated with the given Cy instance.
+cy_platform_t* cy_platform(cy_t* const cy);
 
 /// New message received on a topic or P2P. The data ownership is taken by this function.
 /// The subject-ID is UINT64_MAX for P2P messages.
