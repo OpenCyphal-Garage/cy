@@ -938,7 +938,8 @@ static uint32_t topic_subject_id_impl(const cy_t* const cy, const uint64_t hash,
         return (uint32_t)hash;
     }
 #ifndef CY_CONFIG_PREFERRED_SUBJECT_OVERRIDE
-    return CY_PINNED_SUBJECT_ID_MAX + (uint32_t)((hash + (evictions * evictions)) % cy->platform->subject_id_modulus);
+    return CY_PINNED_SUBJECT_ID_MAX + 1U +
+           (uint32_t)((hash + (evictions * evictions)) % cy->platform->subject_id_modulus);
 #else
     (void)hash;
     return (uint32_t)((CY_CONFIG_PREFERRED_SUBJECT_OVERRIDE + (evictions * evictions)) % cy->subject_id_modulus);
@@ -961,14 +962,15 @@ static cy_topic_t* topic_find_by_subject_id(const cy_t* const cy, const uint32_t
     return topic;
 }
 
-static size_t get_subscription_extent(const cy_topic_t* const topic);
+static size_t get_subscription_extent_with_overhead(const cy_topic_t* const topic);
 
 /// If a subscription is needed but there is no subject reader, this function will attempt to create one.
 static void topic_ensure_subscribed(cy_topic_t* const topic)
 {
     cy_t* const cy = topic->cy;
     if ((topic->couplings != NULL) && (topic->sub_reader == NULL)) { // A subject reader is needed but missing!
-        const size_t   extent     = get_subscription_extent(topic);
+        const size_t extent = get_subscription_extent_with_overhead(topic);
+        assert(extent >= HEADER_MAX_BYTES);
         const uint32_t subject_id = topic_subject_id(topic);
         topic->sub_reader         = cy->platform->vtable->subject_reader(cy, subject_id, extent);
         CY_TRACE(topic->cy,
@@ -1019,7 +1021,6 @@ static void topic_allocate(cy_topic_t* const topic, const uint64_t new_evictions
         topic->sub_reader = NULL;
     }
     if (topic->pub_writer != NULL) {
-        assert(topic->pub_count > 0);
         topic->pub_writer->vtable->destroy(topic->pub_writer);
         topic->pub_writer = NULL;
     }
@@ -1663,7 +1664,8 @@ void cy_unadvertise(cy_publisher_t* const pub)
 
 typedef struct
 {
-    size_t extent;
+    /// The extent from the application without the overhead.
+    size_t extent_pure;
 
     /// The reordering mode ensures that the application sees a monotonically increasing sequence of message tags
     /// per remote publisher.
@@ -2238,7 +2240,8 @@ static bool on_message(cy_t* const            cy,
 }
 
 /// This is linear complexity but we expect to have few subscribers per topic, so it is acceptable.
-static size_t get_subscription_extent(const cy_topic_t* const topic)
+/// The returned value is at least HEADER_MAX_BYTES large.
+static size_t get_subscription_extent_with_overhead(const cy_topic_t* const topic)
 {
     size_t total = 0;
     // Go over all couplings and all subscribers in each coupling.
@@ -2249,10 +2252,10 @@ static size_t get_subscription_extent(const cy_topic_t* const topic)
     while (cpl != NULL) {
         const bool             verbatim = cpl->root->index_pattern == NULL; // no substitution tokens in the name
         const cy_subscriber_t* sub      = cpl->root->head;
-        size_t                 agg      = sub->params.extent;
+        size_t                 agg      = sub->params.extent_pure;
         sub                             = sub->next;
         while (sub != NULL) {
-            agg = larger(agg, sub->params.extent);
+            agg = larger(agg, sub->params.extent_pure);
             sub = sub->next;
         }
         if (verbatim) {
@@ -2264,7 +2267,7 @@ static size_t get_subscription_extent(const cy_topic_t* const topic)
         cpl   = cpl->next;
     }
     CY_TRACE(topic->cy, "📬 %s extent=%zu", topic_repr(topic).str, total);
-    return total;
+    return total + HEADER_MAX_BYTES;
 }
 
 /// Returns non-NULL on OOM, which aborts the traversal early.
@@ -2274,10 +2277,10 @@ static void* wkv_cb_couple_new_subscription(const wkv_event_t evt)
     cy_topic_t* const            topic = (cy_topic_t*)evt.node->value;
     cy_t* const                  cy    = topic->cy;
     // Sample the old parameters before the new coupling is created to decide if we need to refresh the subject reader.
-    const size_t   extent_old = (topic->sub_reader != NULL) ? get_subscription_extent(topic) : 0;
+    const size_t   extent_old = (topic->sub_reader != NULL) ? get_subscription_extent_with_overhead(topic) : 0;
     const cy_err_t res        = topic_couple(topic, sub->root, evt.substitution_count, evt.substitutions);
     if (res == CY_OK) {
-        if ((topic->sub_reader != NULL) && (get_subscription_extent(topic) > extent_old)) {
+        if ((topic->sub_reader != NULL) && (get_subscription_extent_with_overhead(topic) > extent_old)) {
             CY_TRACE(cy, "🚧 %s subject reader refresh", topic_repr(topic).str);
             topic->sub_reader->vtable->destroy(topic->sub_reader);
             topic->sub_reader = NULL;
@@ -2378,14 +2381,15 @@ static cy_subscriber_t* subscribe(cy_t* const cy, const wkv_str_t name, subscrib
         cy_unsubscribe(sub);
         return NULL;
     }
-    CY_TRACE(cy, "✨'%s' extent=%zu rwin=%lld", resolved.str, params.extent, (long long)params.reordering_window);
+    CY_TRACE(
+      cy, "✨'%s' extent_pure=%zu rwin=%lld", resolved.str, params.extent_pure, (long long)params.reordering_window);
     return sub;
 }
 
 cy_subscriber_t* cy_subscribe(cy_t* const cy, const wkv_str_t name, const size_t extent)
 {
     if (cy != NULL) {
-        const subscriber_params_t params = { .extent = extent, .reordering_window = -1, .reordering_capacity = 0 };
+        const subscriber_params_t params = { .extent_pure = extent, .reordering_window = -1, .reordering_capacity = 0 };
         return subscribe(cy, name, params);
     }
     return NULL;
@@ -2398,7 +2402,7 @@ cy_subscriber_t* cy_subscribe_ordered(cy_t* const     cy,
 {
     if ((cy != NULL) && (reordering_window >= 0)) {
         const subscriber_params_t params = {
-            .extent              = extent,
+            .extent_pure         = extent,
             .reordering_window   = min_i64(reordering_window, SESSION_LIFETIME / 2), // sane limit for extra paranoia
             .reordering_capacity = REORDERING_CAPACITY_DEFAULT,
         };
@@ -2561,7 +2565,7 @@ cy_t* cy_new(cy_platform_t* const platform)
              "🚀 ts_started=%llu subject_id_modulus=%lu",
              (unsigned long long)cy->ts_started,
              (unsigned long)cy->platform->subject_id_modulus);
-    return CY_OK;
+    return cy;
 }
 
 void cy_destroy(cy_t* const cy) { (void)cy; }
@@ -2576,7 +2580,7 @@ cy_err_t cy_home_set(cy_t* const cy, const wkv_str_t home)
 
 cy_err_t cy_namespace_set(cy_t* const cy, const wkv_str_t name_space)
 {
-    return (!cy_name_is_homeful(name_space)) ? name_assign(cy, &cy->home, name_space) : CY_ERR_ARGUMENT;
+    return (!cy_name_is_homeful(name_space)) ? name_assign(cy, &cy->ns, name_space) : CY_ERR_ARGUMENT;
 }
 
 static cy_err_t heartbeat_poll(cy_t* const cy, const cy_us_t now)
