@@ -220,7 +220,7 @@ static cy_message_t* make_message(cy_udp_posix_t* const owner, const size_t size
     };
     message_t* const msg = mem_alloc_zero(owner, sizeof(message_t));
     if (msg != NULL) {
-        msg->base     = CY_MESSAGE_INIT((frag->view.size == size) ? &vtable_1frame : &vtable);
+        msg->base     = CY_MESSAGE_INIT(((frag != NULL) && (frag->view.size == size)) ? &vtable_1frame : &vtable);
         msg->owner    = owner;
         msg->fragment = frag;
         msg->skip     = 0;
@@ -353,6 +353,7 @@ static void v_on_msg(udpard_rx_t* const rx, udpard_rx_port_t* const port, const 
 
 static void v_on_msg_stateless(udpard_rx_t* const rx, udpard_rx_port_t* const port, const udpard_rx_transfer_t tr)
 {
+    cy_udp_posix_t* const owner = rx->user;
     subject_reader_t* const self = port->user;
     static_assert(sizeof(self->history) / sizeof(self->history[0]) == 2, "");
     // In the stateless mode, libudpard does not bother deduplicating messages. The heartbeat subscriber does not
@@ -373,6 +374,7 @@ static void v_on_msg_stateless(udpard_rx_t* const rx, udpard_rx_port_t* const po
                  (unsigned long long)tr.transfer_id,
                  (unsigned long long)tr.remote.uid,
                  (unsigned long long)msg_fingerprint);
+        udpard_fragment_free_all(tr.payload, udpard_make_deleter(owner->mem));
     }
 }
 
