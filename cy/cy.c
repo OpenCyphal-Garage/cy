@@ -13,6 +13,9 @@
 /// The transport layer provides UNRELIABLE DEDUPLICATED (at most one) UNORDERED DELIVERY of messages either to;
 ///     - A GROUP OF SUBSCRIBERS on a given SUBJECT identified with a numerical subject-ID (IGMP group, CAN ID, etc).
 ///     - A specified REMOTE NODE direct PEER-TO-PEER.
+/// An exception is applied to the heartbeat topic: deduplication is not required on this topic to improve scalability;
+/// the library is prepared to deal with occasional message duplication on this topic. This exception is due to the
+/// fact that all nodes participate in the heartbeat traffic, which may put some strain on the smaller nodes.
 ///
 /// The transport layer supports messages of arbitrary size, providing SEGMENTATION/REASSEMBLY transparently to the
 /// higher layers. The transport layer guarantees message integrity.
@@ -639,7 +642,7 @@ void cy_future_destroy(cy_future_t* const self)
 //                                                      TOPICS
 // =====================================================================================================================
 
-/// A topic that is only used by pattern subscriptions (like `ins/?/data/*`, without publishers or explicit
+/// A topic that is only used by pattern subscriptions (like `ins/*/data/>`, without publishers or explicit
 /// subscriptions) is called implicit. Such topics are automatically retired when they see no traffic and
 /// no gossips from publishers or receiving subscribers for implicit_topic_timeout.
 /// This is needed to prevent implicit pattern subscriptions from lingering forever when all publishers are gone.
@@ -982,6 +985,8 @@ static void topic_ensure_subscribed(cy_topic_t* const topic)
                  (void*)topic->sub_reader);
         if (topic->sub_reader == NULL) {
             ON_ASYNC_ERROR(cy, topic);
+        } else {
+            topic->sub_reader->subject_id = subject_id;
         }
     }
 }
@@ -2796,11 +2801,11 @@ static void send_response_ack(cy_t* const            cy,
     }
 }
 
-void cy_on_message(cy_t* const            cy,
-                   const cy_p2p_context_t p2p_context,
-                   const uint64_t         subject_id,
-                   const uint64_t         remote_id,
-                   const cy_message_ts_t  message)
+void cy_on_message(cy_t* const                      cy,
+                   const cy_p2p_context_t           p2p_context,
+                   const uint64_t                   remote_id,
+                   const cy_subject_reader_t* const subject_reader,
+                   const cy_message_ts_t            message)
 {
     assert((cy != NULL) && (message.timestamp >= 0));
     assert(message.content->refcount == 1);
@@ -2818,7 +2823,6 @@ void cy_on_message(cy_t* const            cy,
 
         case header_msg_be:
         case header_msg_rel: {
-            assert(subject_id <= (CY_PINNED_SUBJECT_ID_MAX + cy->platform->subject_id_modulus)); // platform must ensure
             const uint64_t    tag      = deserialize_u56(&header[1]);
             const uint64_t    hash     = deserialize_u64(&header[8]);
             cy_topic_t* const topic    = cy_topic_find_by_hash(cy, hash);

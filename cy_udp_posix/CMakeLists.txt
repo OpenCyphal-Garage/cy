@@ -3,6 +3,7 @@
 cmake_minimum_required(VERSION 3.24)
 project(cy_udp_posix C)
 
+include_directories("${CMAKE_SOURCE_DIR}/cy")
 include_directories(SYSTEM "${CMAKE_SOURCE_DIR}/lib")
 
 # LibUDPard static library.

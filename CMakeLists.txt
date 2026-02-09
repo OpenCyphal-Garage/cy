@@ -94,6 +94,6 @@ if (COVERAGE)
 endif ()
 
 # SUBDIRECTORIES
-#add_subdirectory(cy_udp_posix) # TODO: temporarily disabled until the refactoring is complete
+add_subdirectory(cy_udp_posix) # TODO: temporarily disabled until the refactoring is complete
 #add_subdirectory(examples)     # TODO: temporarily disabled until the refactoring is complete
 add_subdirectory(tests)

@@ -31,6 +31,10 @@ The following external dependencies are required, all single-header-only:
 - [`olga_scheduler.h`](https://github.com/Zubax/olga_scheduler) --- A simple event loop (Zubax Robotics, MIT license).
 - [`rapidhash.h`](https://github.com/Nicoshev/rapidhash) --- A good 64-bit hash (Nicolas De Carli, BSD 2-clause license).
 
+On an embedded system, one may also prefer to use [`o1heap`](https://github.com/pavel-kirienko/o1heap) for memory
+management, but this is not a hard dependency -- any allocator will work. O1Heap is the recommended choice for embedded
+platforms due to its hard determinism and low fragmentation.
+
 ## 📚 API crash course
 
 The library is extremely simple and easy to use on any platform.

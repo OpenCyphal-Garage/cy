@@ -47,6 +47,7 @@ struct cy_message_t
     size_t                            refcount;
     const struct cy_message_vtable_t* vtable;
 };
+#define CY_MESSAGE_INIT(vtable_ptr) ((cy_message_t){ .refcount = 1, .vtable = (vtable_ptr) })
 
 /// Platform-specific implementation of cy_message_t.
 typedef struct cy_message_vtable_t
@@ -60,7 +61,7 @@ typedef struct cy_message_vtable_t
     /// The implementation must limit the size if the requested range exceeds the available message size.
     /// The return value is the number of bytes copied to the output buffer after adjusting the offset and size for
     /// the skip and bounds.
-    size_t (*read)(const cy_message_t*, size_t offset, size_t size, void* output);
+    size_t (*read)(const cy_message_t*, size_t offset, size_t size, void*);
 
     /// The size sans the skip offset.
     size_t (*size)(const cy_message_t*);
@@ -89,6 +90,7 @@ typedef struct cy_subject_writer_vtable_t
 /// The transport layer must report all received messages via cy_on_message().
 typedef struct cy_subject_reader_t
 {
+    uint32_t                                 subject_id;
     const struct cy_subject_reader_vtable_t* vtable;
 } cy_subject_reader_t;
 
@@ -184,12 +186,12 @@ typedef struct cy_platform_vtable_t
 cy_platform_t* cy_platform(cy_t* const cy);
 
 /// New message received on a topic or P2P. The data ownership is taken by this function.
-/// The subject-ID is UINT64_MAX for P2P messages.
-void cy_on_message(cy_t* const            cy,
-                   const cy_p2p_context_t p2p_context,
-                   const uint64_t         subject_id,
-                   const uint64_t         remote_id,
-                   const cy_message_ts_t  message);
+/// The subject reader is NULL for P2P messages.
+void cy_on_message(cy_t* const                      cy,
+                   const cy_p2p_context_t           p2p_context,
+                   const uint64_t                   remote_id,
+                   const cy_subject_reader_t* const subject_reader,
+                   const cy_message_ts_t            message);
 
 #ifdef __cplusplus
 }
