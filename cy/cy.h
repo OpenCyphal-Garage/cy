@@ -25,7 +25,7 @@ extern "C"
 /// which only has 13-bit subject-IDs. Cyphal v1.1 will never allocate non-pinned topics in this subject-ID range.
 /// For pinned topics, hash<=CY_PINNED_SUBJECT_ID_MAX. The probability of a random hash falling into the pinned
 /// range is ~4.44e-16, or about one in two quadrillion, which is not practically possible.
-#define CY_PINNED_SUBJECT_ID_MAX 0x1FFFU
+#define CY_PINNED_SUBJECT_ID_MAX 0x1FFFUL
 
 #define CY_OK 0
 // error code 1 is omitted intentionally

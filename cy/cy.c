@@ -942,7 +942,8 @@ static uint32_t topic_subject_id_impl(const cy_t* const cy, const uint64_t hash,
            (uint32_t)((hash + (evictions * evictions)) % cy->platform->subject_id_modulus);
 #else
     (void)hash;
-    return (uint32_t)((CY_CONFIG_PREFERRED_SUBJECT_OVERRIDE + (evictions * evictions)) % cy->subject_id_modulus);
+    return (uint32_t)((CY_CONFIG_PREFERRED_SUBJECT_OVERRIDE + (evictions * evictions)) %
+                      cy->platform->subject_id_modulus);
 #endif
 }
 
@@ -1568,12 +1569,13 @@ cy_publisher_t* cy_advertise_client(cy_t* const cy, const wkv_str_t name, const 
             cy->p2p_extent = response_extent_with_header;
             cy->platform->vtable->p2p_extent(cy, cy->p2p_extent);
         }
+    } else {
+        mem_free(cy, pub);
     }
     CY_TRACE(cy,
-             "✨ %s topic_count=%zu pub_count=%zu p2p_extent=%zu res=%d",
+             "✨ %s topic_count=%zu p2p_extent=%zu res=%d",
              (res == CY_OK) ? topic_repr(pub->topic).str : "(failed)",
              cavl_count(cy->topics_by_hash),
-             pub->topic->pub_count,
              cy->p2p_extent,
              res);
     return (res == CY_OK) ? pub : NULL;
@@ -2816,7 +2818,7 @@ void cy_on_message(cy_t* const            cy,
 
         case header_msg_be:
         case header_msg_rel: {
-            assert(subject_id < (CY_PINNED_SUBJECT_ID_MAX + cy->platform->subject_id_modulus)); // platform must ensure
+            assert(subject_id <= (CY_PINNED_SUBJECT_ID_MAX + cy->platform->subject_id_modulus)); // platform must ensure
             const uint64_t    tag      = deserialize_u56(&header[1]);
             const uint64_t    hash     = deserialize_u64(&header[8]);
             cy_topic_t* const topic    = cy_topic_find_by_hash(cy, hash);

@@ -31,9 +31,11 @@
 #endif
 
 /// See the subject_id_modulus for details.
-#define CY_SUBJECT_ID_MODULUS_17bit 122869ULL     // -1+8191=0x0001FFF3; (2**17-1)-0x0001FFF3=12 identifiers unused
-#define CY_SUBJECT_ID_MODULUS_23bit 8380417ULL    // -1+8191=0x007FFFFF; (2**23-1)-0x007FFFFF=0  identifiers unused
-#define CY_SUBJECT_ID_MODULUS_32bit 4294959083ULL // -1+8191=0xFFFFFFE9; (2**32-1)-0xFFFFFFE9=22 identifiers unused
+/// >>> import sympy as sp
+/// >>> sp.prevprime(2**17-8191)
+#define CY_SUBJECT_ID_MODULUS_17bit 122869ULL     // +8191=0x0001FFF4; 2**17-0x0001FFF4=12 identifiers unused
+#define CY_SUBJECT_ID_MODULUS_23bit 8380403ULL    // +8191=0x007FFFF2; 2**23-0x007FFFF2=14 identifiers unused
+#define CY_SUBJECT_ID_MODULUS_32bit 4294959083ULL // +8191=0xFFFFFFEA; 2**32-0xFFFFFFEA=22 identifiers unused
 
 #ifdef __cplusplus
 extern "C"
@@ -103,11 +105,11 @@ struct cy_platform_t
     /// All nodes in the network shall share the same value.
     /// If heterogeneously redundant transports are used, then the smallest modulus shall be used.
     ///
-    /// The full range of used subject-ID values is [0, CY_PINNED_SUBJECT_ID_MAX+modulus),
+    /// The full range of used subject-ID values is [0, CY_PINNED_SUBJECT_ID_MAX + 1 + modulus),
     /// where the values below or equal to CY_PINNED_SUBJECT_ID_MAX are used for pinned topics only.
     ///
     /// The modulus shall be a prime number because the subject-ID function uses a quadratic probing strategy:
-    ///     subject_id = CY_PINNED_SUBJECT_ID_MAX + (hash + evictions^2) mod modulus
+    ///     subject_id = CY_PINNED_SUBJECT_ID_MAX + 1 + (hash + evictions^2) mod modulus
     /// See https://en.wikipedia.org/wiki/Quadratic_probing
     /// See https://github.com/OpenCyphal-Garage/cy/issues/12#issuecomment-3577831960
     uint32_t subject_id_modulus;
