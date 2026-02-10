@@ -802,6 +802,9 @@ static int32_t cavl_comp_topic_subject_id(const void* const user, const cy_tree_
 
 static bool topic_has_subscribers(const cy_topic_t* const topic) { return topic->couplings != NULL; }
 
+/// Topics are never destroyed synchronously to avoid potential state loss in the platform layer if the application
+/// publishes and/or subscribes intermittently. Instead, once all publishers and subscribers are gone, the topic
+/// is demoted to implicit, and will be eventually retired in retire_expired_implicit_topics().
 static void topic_destroy(cy_topic_t* const topic)
 {
     (void)topic;
@@ -1927,7 +1930,7 @@ typedef struct
 static void reordering_eject(reordering_t* const self, reordering_slot_t* const slot)
 {
     assert(self->topic->cy == self->subscriber->root->cy);
-    cy_t* const cy = self->topic->cy;
+    const cy_t* const cy = self->topic->cy;
 
     // Remove the slot from the index.
     assert(cavl2_is_inserted(self->interned_by_lin_tag, &slot->index_lin_tag));
@@ -2703,8 +2706,7 @@ cy_topic_t* cy_topic_find_by_hash(const cy_t* const cy, const uint64_t hash)
     assert(cy != NULL);
     cy_topic_t* const topic = (cy_topic_t*)cavl2_find(cy->topics_by_hash, &hash, &cavl_comp_topic_hash);
     assert((topic == NULL) || (topic->hash == hash));
-    assert((topic == NULL) || cy_name_is_verbatim(cy_topic_name(topic)) ||
-           (topic->pub_count == 0)); // pub only verbatim
+    assert((topic == NULL) || cy_name_is_verbatim(cy_topic_name(topic))); // topic names can be only verbatim
     return topic;
 }
 
