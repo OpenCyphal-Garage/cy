@@ -976,7 +976,7 @@ static void topic_ensure_subscribed(cy_topic_t* const topic)
         const size_t extent = get_subscription_extent_with_overhead(topic);
         assert(extent >= HEADER_MAX_BYTES);
         const uint32_t subject_id = topic_subject_id(topic);
-        topic->sub_reader         = cy->platform->vtable->subject_reader(cy->platform, subject_id, extent);
+        topic->sub_reader         = cy->platform->vtable->subject_reader_new(cy->platform, subject_id, extent);
         CY_TRACE(topic->cy,
                  "🗞️ %s extent=%zu subject_id=%08x result=%p",
                  topic_repr(topic).str,
@@ -1023,11 +1023,11 @@ static void topic_allocate(cy_topic_t* const topic, const uint64_t new_evictions
     // The subject writer is recovered lazily, when the application tries to publish again.
     if (topic->sub_reader != NULL) {
         assert(topic->couplings != NULL);
-        topic->sub_reader->vtable->destroy(topic->sub_reader);
+        cy->platform->vtable->subject_reader_destroy(cy->platform, topic->sub_reader);
         topic->sub_reader = NULL;
     }
     if (topic->pub_writer != NULL) {
-        topic->pub_writer->vtable->destroy(topic->pub_writer);
+        cy->platform->vtable->subject_writer_destroy(cy->platform, topic->pub_writer);
         topic->pub_writer = NULL;
     }
 
@@ -1572,7 +1572,7 @@ cy_publisher_t* cy_advertise_client(cy_t* const cy, const wkv_str_t name, const 
             // of each to a power of 2 and keep a count of how many publishers are at each power-of-2 level (capped
             // 2**32): size_t publisher_counts_by_extent_pow2[32];
             cy->p2p_extent = response_extent_with_header;
-            cy->platform->vtable->p2p_extent(cy->platform, cy->p2p_extent);
+            cy->platform->vtable->p2p_extent_set(cy->platform, cy->p2p_extent);
         }
     } else {
         mem_free(cy, pub);
@@ -1609,12 +1609,19 @@ cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t deadline, const cy_
     // The subject writer is a very lightweight entity that is super cheap to construct (constant complexity expected)
     // so this is not expected to be a problem.
     if (topic->pub_writer == NULL) {
-        topic->pub_writer = cy->platform->vtable->subject_writer(cy->platform, topic_subject_id(topic));
+        const uint32_t subject_id = topic_subject_id(topic);
+        topic->pub_writer         = cy->platform->vtable->subject_writer_new(cy->platform, subject_id);
         if (topic->pub_writer == NULL) {
             return CY_ERR_MEMORY;
         }
+        topic->pub_writer->subject_id = subject_id;
     }
-    return topic->pub_writer->vtable->send(topic->pub_writer, deadline, pub->priority, headed_message);
+    assert(topic_subject_id(topic) == topic->pub_writer->subject_id);
+    return cy->platform->vtable->subject_writer_send(cy->platform, //
+                                                     topic->pub_writer,
+                                                     deadline,
+                                                     pub->priority,
+                                                     headed_message);
 }
 
 cy_prio_t cy_priority(const cy_publisher_t* const pub) { return (pub != NULL) ? pub->priority : cy_prio_nominal; }
@@ -2289,7 +2296,7 @@ static void* wkv_cb_couple_new_subscription(const wkv_event_t evt)
     if (res == CY_OK) {
         if ((topic->sub_reader != NULL) && (get_subscription_extent_with_overhead(topic) > extent_old)) {
             CY_TRACE(cy, "🚧 %s subject reader refresh", topic_repr(topic).str);
-            topic->sub_reader->vtable->destroy(topic->sub_reader);
+            cy->platform->vtable->subject_reader_destroy(cy->platform, topic->sub_reader);
             topic->sub_reader = NULL;
         }
         topic_ensure_subscribed(topic);
@@ -2458,8 +2465,11 @@ static cy_err_t do_respond(cy_breadcrumb_t* const breadcrumb, const cy_us_t dead
     const cy_bytes_t headed_message = { .size = sizeof(header), .data = header, .next = &message };
 
     // Send the P2P response.
-    return breadcrumb->cy->platform->vtable->p2p(
-      breadcrumb->cy->platform, &breadcrumb->p2p_context, deadline, breadcrumb->remote_id, headed_message);
+    return breadcrumb->cy->platform->vtable->p2p_send(breadcrumb->cy->platform, //
+                                                      &breadcrumb->p2p_context,
+                                                      deadline,
+                                                      breadcrumb->remote_id,
+                                                      headed_message);
 }
 
 cy_err_t cy_respond(cy_breadcrumb_t* const breadcrumb, const cy_us_t deadline, const cy_bytes_t message)
@@ -2541,7 +2551,7 @@ cy_t* cy_new(cy_platform_t* const platform)
     cy->response_futures_by_tag = NULL;
 
     cy->p2p_extent = HEADER_MAX_BYTES + 1024U; // Arbitrary initial size; will be refined when publishers are created.
-    cy->platform->vtable->p2p_extent(platform, cy->p2p_extent);
+    cy->platform->vtable->p2p_extent_set(platform, cy->p2p_extent);
 
     cy->ts_started             = platform->vtable->now(platform);
     cy->implicit_topic_timeout = IMPLICIT_TOPIC_DEFAULT_TIMEOUT_us;
@@ -2767,8 +2777,11 @@ static void send_message_ack(cy_t* const            cy,
 {
     byte_t header[16];
     (void)serialize_u64(serialize_u64(header, (tag << 8U) | (uint64_t)header_msg_ack), topic_hash);
-    const cy_err_t err = cy->platform->vtable->p2p(
-      cy->platform, &p2p_context, deadline, remote_id, (cy_bytes_t){ .size = sizeof(header), .data = header });
+    const cy_err_t err = cy->platform->vtable->p2p_send(cy->platform, //
+                                                        &p2p_context,
+                                                        deadline,
+                                                        remote_id,
+                                                        (cy_bytes_t){ .size = sizeof(header), .data = header });
     if (err != CY_OK) {
         CY_TRACE(cy,
                  "⚠️ Failed to send message ACK to %016llx for tag %016llx on topic %016llx: %d",
@@ -2792,8 +2805,11 @@ static void send_response_ack(cy_t* const            cy,
     const header_type_t header_type = positive ? header_rsp_ack : header_rsp_nack;
     (void)serialize_u64(serialize_u64(header, (message_tag << 56U) | (uint64_t)header_type),
                         seqno | ((uint64_t)tag << 48U));
-    const cy_err_t err = cy->platform->vtable->p2p(
-      cy->platform, &p2p_context, deadline, remote_id, (cy_bytes_t){ .size = sizeof(header), .data = header });
+    const cy_err_t err = cy->platform->vtable->p2p_send(cy->platform, //
+                                                        &p2p_context,
+                                                        deadline,
+                                                        remote_id,
+                                                        (cy_bytes_t){ .size = sizeof(header), .data = header });
     if (err != CY_OK) {
         CY_TRACE(cy,
                  "⚠️ Failed to send response %s to %016llx for seqno %016llx: %d",
@@ -2844,6 +2860,7 @@ void cy_on_message(cy_platform_t* const             platform,
                              (unsigned long long)subject_id);
                     schedule_gossip_urgent(topic);
                 }
+                assert((topic->sub_reader == NULL) || (topic_subject_id(topic) == topic->sub_reader->subject_id));
                 const bool accepted = on_message(cy, p2p_context, remote_id, topic, tag, message, reliable);
                 if (reliable && accepted) {
                     send_message_ack(cy, // This is either new or retransmit, must ack either way.

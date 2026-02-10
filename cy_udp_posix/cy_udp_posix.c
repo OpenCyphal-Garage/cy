@@ -145,7 +145,8 @@ static udpard_bytes_scattered_t cy_bytes_to_udpard_bytes(const cy_bytes_t messag
                                        .next  = (const udpard_bytes_scattered_t*)message.next };
 }
 
-// ----------------------------------------  MESSAGE BUFFER  ----------------------------------------
+// ---------------------------------------------------------------------------------------------------------------------
+// MESSAGE BUFFER
 
 typedef struct
 {
@@ -219,25 +220,61 @@ static cy_message_t* make_message(cy_udp_posix_t* const owner, const size_t size
     return (cy_message_t*)msg;
 }
 
-// ---------------------------------------- SUBJECT WRITER ----------------------------------------
+// ---------------------------------------------------------------------------------------------------------------------
+// SUBJECT WRITER
 
 /// NB: Once constructed, Cy will keep writers alive as long as possible even if the application doesn't need one to
 /// avoid losing the transfer-ID state.
 struct subject_writer_t
 {
     cy_subject_writer_t base;
-    cy_udp_posix_t*     owner;
     uint64_t            next_transfer_id; ///< Random-initialized at the time of creation.
     udpard_udpip_ep_t   endpoints[UDPARD_IFACE_COUNT_MAX];
 };
 
-static cy_err_t v_subject_writer_send(cy_subject_writer_t* const base,
+static cy_subject_writer_t* v_subject_writer_new(cy_platform_t* const base, const uint32_t subject_id)
+{
+    assert(subject_id <= UDPARD_IPv4_SUBJECT_ID_MAX);
+    cy_udp_posix_t* const owner = (cy_udp_posix_t*)base;
+    assert(subject_id <= (CY_PINNED_SUBJECT_ID_MAX + 1 + owner->base.subject_id_modulus));
+    subject_writer_t* const self = mem_alloc_zero(owner, sizeof(subject_writer_t));
+    if (self != NULL) {
+        self->next_transfer_id = prng64(&owner->prng_state, owner->udpard_tx.local_uid);
+        for (size_t i = 0; i < UDPARD_IFACE_COUNT_MAX; i++) {
+            if ((owner->iface_bitmap & (1U << i)) != 0) {
+                self->endpoints[i] = udpard_make_subject_endpoint(subject_id);
+            } else {
+                self->endpoints[i] = (udpard_udpip_ep_t){ 0 };
+            }
+        }
+        owner->stats.subject_writer_count++;
+    }
+    CY_TRACE(owner->base.cy,
+             "🔊 n_writers=%zu subject_id=%08x ptr=%p",
+             owner->stats.subject_writer_count,
+             subject_id,
+             (void*)self);
+    return (cy_subject_writer_t*)self;
+}
+
+static void v_subject_writer_destroy(cy_platform_t* const platform, cy_subject_writer_t* const base)
+{
+    cy_udp_posix_t* const   owner = (cy_udp_posix_t*)platform;
+    subject_writer_t* const self  = (subject_writer_t*)base;
+    assert(owner->stats.subject_writer_count > 0);
+    owner->stats.subject_writer_count--;
+    CY_TRACE(owner->base.cy, "🔇 n_writers=%zu ptr=%p", owner->stats.subject_writer_count, (void*)self);
+    mem_free(owner, sizeof(subject_writer_t), self);
+}
+
+static cy_err_t v_subject_writer_send(cy_platform_t* const       platform,
+                                      cy_subject_writer_t* const base,
                                       const cy_us_t              deadline,
                                       const cy_prio_t            priority,
                                       const cy_bytes_t           message)
 {
+    cy_udp_posix_t*         owner = (cy_udp_posix_t*)platform;
     subject_writer_t* const self  = (subject_writer_t*)base;
-    cy_udp_posix_t* const   owner = self->owner;
     // We may need better error reporting in libudpard, this is a little unwieldy.
     const uint64_t e_oom      = owner->udpard_tx.errors_oom;
     const uint64_t e_capacity = owner->udpard_tx.errors_capacity;
@@ -263,50 +300,12 @@ static cy_err_t v_subject_writer_send(cy_subject_writer_t* const base,
     return CY_ERR_ARGUMENT;
 }
 
-static void v_destroy(cy_subject_writer_t* const base)
-{
-    subject_writer_t* const self  = (subject_writer_t*)base;
-    cy_udp_posix_t* const   owner = self->owner;
-    assert(owner->stats.subject_writer_count > 0);
-    owner->stats.subject_writer_count--;
-    CY_TRACE(owner->base.cy, "🔇 n_writers=%zu ptr=%p", owner->stats.subject_writer_count, (void*)self);
-    mem_free(owner, sizeof(subject_writer_t), self);
-}
-
-static cy_subject_writer_t* v_subject_writer(cy_platform_t* const base, const uint32_t subject_id)
-{
-    assert(subject_id <= UDPARD_IPv4_SUBJECT_ID_MAX);
-    cy_udp_posix_t* const owner = (cy_udp_posix_t*)base;
-    assert(subject_id <= (CY_PINNED_SUBJECT_ID_MAX + 1 + owner->base.subject_id_modulus));
-    subject_writer_t* const self = mem_alloc_zero(owner, sizeof(subject_writer_t));
-    if (self != NULL) {
-        static const cy_subject_writer_vtable_t vtable = { .send = v_subject_writer_send, .destroy = v_destroy };
-        self->base.vtable                              = &vtable;
-        self->owner                                    = owner;
-        self->next_transfer_id                         = prng64(&owner->prng_state, owner->udpard_tx.local_uid);
-        for (size_t i = 0; i < UDPARD_IFACE_COUNT_MAX; i++) {
-            if ((owner->iface_bitmap & (1U << i)) != 0) {
-                self->endpoints[i] = udpard_make_subject_endpoint(subject_id);
-            } else {
-                self->endpoints[i] = (udpard_udpip_ep_t){ 0 };
-            }
-        }
-        owner->stats.subject_writer_count++;
-    }
-    CY_TRACE(owner->base.cy,
-             "🔊 n_writers=%zu subject_id=%08x ptr=%p",
-             owner->stats.subject_writer_count,
-             subject_id,
-             (void*)self);
-    return (cy_subject_writer_t*)self;
-}
-
-// ---------------------------------------- SUBJECT READER ----------------------------------------
+// ---------------------------------------------------------------------------------------------------------------------
+// SUBJECT READER
 
 struct subject_reader_t
 {
     cy_subject_reader_t base;
-    cy_udp_posix_t*     owner;
     bool                tombstone;
 
     udpard_rx_port_t port;
@@ -390,67 +389,16 @@ static void v_on_msg_stateless(udpard_rx_t* const rx, udpard_rx_port_t* const po
     }
 }
 
-static void subject_reader_destroy(subject_reader_t* const self)
-{
-    cy_udp_posix_t* const owner = self->owner;
-    assert(self->port.user == self);
-    assert(self->tombstone);
-
-    // Delist.
-    if (self->prev != NULL) {
-        self->prev->next = self->next;
-    }
-    if (self->next != NULL) {
-        self->next->prev = self->prev;
-    }
-    if (owner->reader_head == self) {
-        owner->reader_head = self->next;
-    }
-    if (owner->reader_tail == self) {
-        owner->reader_tail = self->prev;
-    }
-    self->prev = NULL;
-    self->next = NULL;
-    assert((owner->reader_head != NULL) == (owner->reader_tail != NULL));
-
-    // Cleanup the libudpard port and the sockets.
-    udpard_rx_port_free(&owner->udpard_rx, &self->port);
-    for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
-        udp_wrapper_close(&self->sock[i]); // closing a non-open socket is a safe noop.
-    }
-
-    // Free the memory and update the stats.
-    assert(owner->stats.subject_reader_count > 0);
-    owner->stats.subject_reader_count--;
-    CY_TRACE(owner->base.cy, "🔕 n_readers=%zu ptr=%p", owner->stats.subject_reader_count, (void*)self);
-    mem_free(owner, sizeof(subject_reader_t), self);
-}
-
-static void v_subject_reader_tombstone(cy_subject_reader_t* const base)
-{
-    subject_reader_t* const self  = (subject_reader_t*)base;
-    cy_udp_posix_t* const   owner = self->owner;
-    assert(self->port.user == self);
-    assert(!self->tombstone);
-    self->tombstone = true;
-    // Close sockets now to stop further reads while we defer the final teardown.
-    for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
-        udp_wrapper_close(&self->sock[i]);
-    }
-    CY_TRACE(owner->base.cy, "⚰️ n_readers=%zu ptr=%p deferred", owner->stats.subject_reader_count, (void*)self);
-}
-
-static cy_subject_reader_t* v_subject_reader(cy_platform_t* const base, const uint32_t subject_id, const size_t extent)
+static cy_subject_reader_t* v_subject_reader_new(cy_platform_t* const base,
+                                                 const uint32_t       subject_id,
+                                                 const size_t         extent)
 {
     assert(subject_id <= UDPARD_IPv4_SUBJECT_ID_MAX);
     cy_udp_posix_t* const owner = (cy_udp_posix_t*)base;
     assert(subject_id <= (CY_PINNED_SUBJECT_ID_MAX + 1 + owner->base.subject_id_modulus));
     subject_reader_t* self = mem_alloc_zero(owner, sizeof(subject_reader_t));
     if (self != NULL) {
-        static const cy_subject_reader_vtable_t reader_vtable = { .destroy = v_subject_reader_tombstone };
-        self->base.subject_id                                 = subject_id;
-        self->base.vtable                                     = &reader_vtable;
-        self->owner                                           = owner;
+        self->base.subject_id = subject_id;
 
         // We special-case the heartbeat topic to have STATELESS reassembly strategy to conserve CPU and RAM.
         // It is useful for the network stack because the heartbeat topic is a bottleneck to be aware of -- every
@@ -515,36 +463,63 @@ reject:
     return (cy_subject_reader_t*)self;
 }
 
-// ----------------------------------------  PLATFORM  ----------------------------------------
-
-static cy_us_t v_now(cy_platform_t* const base)
+static void subject_reader_destroy(cy_udp_posix_t* const owner, subject_reader_t* const self)
 {
-    (void)base;
-    return cy_udp_posix_now();
-}
+    assert(self->port.user == self);
+    assert(self->tombstone);
 
-static void* v_realloc(cy_platform_t* const base, void* const ptr, const size_t new_size)
-{
-    (void)base;
-    // TODO: currently we do not track the memory usage by Cy, but it would be useful to do so.
-    if (new_size > 0) {
-        return realloc(ptr, new_size);
+    // Delist.
+    if (self->prev != NULL) {
+        self->prev->next = self->next;
     }
-    free(ptr);
-    return NULL;
+    if (self->next != NULL) {
+        self->next->prev = self->prev;
+    }
+    if (owner->reader_head == self) {
+        owner->reader_head = self->next;
+    }
+    if (owner->reader_tail == self) {
+        owner->reader_tail = self->prev;
+    }
+    self->prev = NULL;
+    self->next = NULL;
+    assert((owner->reader_head != NULL) == (owner->reader_tail != NULL));
+
+    // Cleanup the libudpard port and the sockets.
+    udpard_rx_port_free(&owner->udpard_rx, &self->port);
+    for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
+        udp_wrapper_close(&self->sock[i]); // closing a non-open socket is a safe noop.
+    }
+
+    // Free the memory and update the stats.
+    assert(owner->stats.subject_reader_count > 0);
+    owner->stats.subject_reader_count--;
+    CY_TRACE(owner->base.cy, "🔕 n_readers=%zu ptr=%p", owner->stats.subject_reader_count, (void*)self);
+    mem_free(owner, sizeof(subject_reader_t), self);
 }
 
-static uint64_t v_random(cy_platform_t* const base)
+static void v_subject_reader_tombstone(cy_platform_t* const platform, cy_subject_reader_t* const base)
 {
-    return prng64(&((cy_udp_posix_t*)base)->prng_state, ((cy_udp_posix_t*)base)->udpard_tx.local_uid);
+    cy_udp_posix_t* const   owner = (cy_udp_posix_t*)platform;
+    subject_reader_t* const self  = (subject_reader_t*)base;
+    assert(self->port.user == self);
+    assert(!self->tombstone);
+    self->tombstone = true;
+    // Close sockets now to stop further reads while we defer the final teardown.
+    for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
+        udp_wrapper_close(&self->sock[i]);
+    }
+    CY_TRACE(owner->base.cy, "⚰️ n_readers=%zu ptr=%p deferred", owner->stats.subject_reader_count, (void*)self);
 }
 
-/// Invoked by Cy when the application desires to respond to a message received earlier.
-static cy_err_t v_p2p(cy_platform_t* const          base,
-                      const cy_p2p_context_t* const p2p_context,
-                      const cy_us_t                 deadline,
-                      const uint64_t                remote_id,
-                      const cy_bytes_t              message)
+// ---------------------------------------------------------------------------------------------------------------------
+// P2P
+
+static cy_err_t v_p2p_send(cy_platform_t* const          base,
+                           const cy_p2p_context_t* const p2p_context,
+                           const cy_us_t                 deadline,
+                           const uint64_t                remote_id,
+                           const cy_bytes_t              message)
 {
     cy_udp_posix_t* const owner = (cy_udp_posix_t*)base;
 
@@ -586,7 +561,7 @@ static cy_err_t v_p2p(cy_platform_t* const          base,
     return CY_ERR_ARGUMENT;
 }
 
-static void v_p2p_extent(cy_platform_t* const base, const size_t extent)
+static void v_p2p_extent_set(cy_platform_t* const base, const size_t extent)
 {
     cy_udp_posix_t* const owner = (cy_udp_posix_t*)base;
     // In this transport, the P2P extent is trivial to change -- just update a variable; no dependent states to update.
@@ -599,36 +574,8 @@ static void v_p2p_extent(cy_platform_t* const base, const size_t extent)
     }
 }
 
-static void v_on_async_error(cy_platform_t* const base, cy_topic_t* const topic, const uint16_t line_number)
-{
-    (void)topic;
-    cy_udp_posix_t* const owner = (cy_udp_posix_t*)base;
-    CY_TRACE(
-      owner->base.cy, "⚠️ Error at cy.c:%u topic='%s'", line_number, topic != NULL ? cy_topic_name(topic).str : "");
-    // Find either a free slot or a slot with the matching line number.
-    struct cy_udp_posix_stats_cy_async_err_t* slot = NULL;
-    for (size_t i = 0; i < CY_UDP_POSIX_ASYNC_ERROR_SLOTS; i++) {
-        const uint16_t ln = owner->stats.cy_async_errors[i].line_number;
-        if ((ln == 0) || (ln == line_number)) {
-            slot = &owner->stats.cy_async_errors[i];
-            if (ln == line_number) {
-                break;
-            }
-        }
-    }
-    if (slot == NULL) { // All slots taken, replace the oldest. This should never happen, we have enough slots.
-        slot = &owner->stats.cy_async_errors[0];
-        for (size_t i = 1; i < CY_UDP_POSIX_ASYNC_ERROR_SLOTS; i++) {
-            if (owner->stats.cy_async_errors[i].last_at < slot->last_at) {
-                slot = &owner->stats.cy_async_errors[i];
-            }
-        }
-        slot->count = 0;
-    }
-    slot->line_number = line_number;
-    slot->count++;
-    slot->last_at = cy_udp_posix_now();
-}
+// ---------------------------------------------------------------------------------------------------------------------
+// EVENT LOOP
 
 // Here we could add logic to mitigate transient interface failure, like temporary closure/reopening of the sockets.
 static void read_socket(cy_udp_posix_t* const   self,
@@ -725,7 +672,7 @@ static cy_err_t spin_once_until(cy_udp_posix_t* const self, const cy_us_t deadli
     for (subject_reader_t* rd_iter = self->reader_head; rd_iter != NULL;) {
         subject_reader_t* const next = rd_iter->next;
         if (rd_iter->tombstone) {
-            subject_reader_destroy(rd_iter);
+            subject_reader_destroy(self, rd_iter);
         } else {
             for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
                 if (udp_wrapper_is_open(&rd_iter->sock[i])) {
@@ -787,17 +734,84 @@ static cy_err_t v_spin(cy_platform_t* const base, const cy_us_t deadline)
     return res;
 }
 
-static const cy_platform_vtable_t platform_vtable = { .now            = v_now,
-                                                      .realloc        = v_realloc,
-                                                      .random         = v_random,
-                                                      .subject_writer = v_subject_writer,
-                                                      .subject_reader = v_subject_reader,
-                                                      .p2p            = v_p2p,
-                                                      .p2p_extent     = v_p2p_extent,
-                                                      .on_async_error = v_on_async_error,
-                                                      .spin           = v_spin };
+// ---------------------------------------------------------------------------------------------------------------------
+// MISC
 
-// ----------------------------------------  PUBLIC API  ----------------------------------------
+static cy_us_t v_now(cy_platform_t* const base)
+{
+    (void)base;
+    return cy_udp_posix_now();
+}
+
+static void* v_realloc(cy_platform_t* const base, void* const ptr, const size_t new_size)
+{
+    (void)base;
+    // TODO: currently we do not track the memory usage by Cy, but it would be useful to do so.
+    if (new_size > 0) {
+        return realloc(ptr, new_size);
+    }
+    free(ptr);
+    return NULL;
+}
+
+static uint64_t v_random(cy_platform_t* const base)
+{
+    return prng64(&((cy_udp_posix_t*)base)->prng_state, ((cy_udp_posix_t*)base)->udpard_tx.local_uid);
+}
+
+static void v_on_async_error(cy_platform_t* const base, cy_topic_t* const topic, const uint16_t line_number)
+{
+    (void)topic;
+    cy_udp_posix_t* const owner = (cy_udp_posix_t*)base;
+    CY_TRACE(
+      owner->base.cy, "⚠️ Error at cy.c:%u topic='%s'", line_number, topic != NULL ? cy_topic_name(topic).str : "");
+    // Find either a free slot or a slot with the matching line number.
+    struct cy_udp_posix_stats_cy_async_err_t* slot = NULL;
+    for (size_t i = 0; i < CY_UDP_POSIX_ASYNC_ERROR_SLOTS; i++) {
+        const uint16_t ln = owner->stats.cy_async_errors[i].line_number;
+        if ((ln == 0) || (ln == line_number)) {
+            slot = &owner->stats.cy_async_errors[i];
+            if (ln == line_number) {
+                break;
+            }
+        }
+    }
+    if (slot == NULL) { // All slots taken, replace the oldest. This should never happen, we have enough slots.
+        slot = &owner->stats.cy_async_errors[0];
+        for (size_t i = 1; i < CY_UDP_POSIX_ASYNC_ERROR_SLOTS; i++) {
+            if (owner->stats.cy_async_errors[i].last_at < slot->last_at) {
+                slot = &owner->stats.cy_async_errors[i];
+            }
+        }
+        slot->count = 0;
+    }
+    slot->line_number = line_number;
+    slot->count++;
+    slot->last_at = cy_udp_posix_now();
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// PUBLIC API
+
+static const cy_platform_vtable_t platform_vtable = {
+    // SUBJECT WRITER
+    .subject_writer_new     = v_subject_writer_new,
+    .subject_writer_destroy = v_subject_writer_destroy,
+    .subject_writer_send    = v_subject_writer_send,
+    // SUBJECT READER
+    .subject_reader_new     = v_subject_reader_new,
+    .subject_reader_destroy = v_subject_reader_tombstone,
+    // P2P
+    .p2p_send       = v_p2p_send,
+    .p2p_extent_set = v_p2p_extent_set,
+    // EVENT LOOP
+    .spin = v_spin,
+    // MISC
+    .now            = v_now,
+    .realloc        = v_realloc,
+    .random         = v_random,
+    .on_async_error = v_on_async_error,
+};
 
 static bool v_tx_eject_p2p(udpard_tx_t* const tx, udpard_tx_ejection_t* const ej, const udpard_udpip_ep_t destination)
 {
@@ -987,7 +1001,7 @@ void cy_udp_posix_destroy(cy_platform_t* const base)
         for (subject_reader_t* rd_iter = self->reader_head; rd_iter != NULL;) {
             subject_reader_t* const next = rd_iter->next;
             if (rd_iter->tombstone) {
-                subject_reader_destroy(rd_iter);
+                subject_reader_destroy(self, rd_iter);
             }
             rd_iter = next;
         }

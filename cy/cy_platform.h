@@ -74,31 +74,16 @@ typedef struct cy_message_vtable_t
 /// Cy guarantees that there will be at most one subject writer per subject-ID.
 typedef struct cy_subject_writer_t
 {
-    const struct cy_subject_writer_vtable_t* vtable;
+    uint32_t subject_id;
 } cy_subject_writer_t;
-
-typedef struct cy_subject_writer_vtable_t
-{
-    /// Instructs the underlying transport layer to non-blockingly publish a new message on the subject.
-    /// Message lifetime ends upon return from this function. Returns CY_OK on success, or an error code on failure.
-    cy_err_t (*send)(cy_subject_writer_t*, cy_us_t deadline, cy_prio_t priority, cy_bytes_t message);
-
-    void (*destroy)(cy_subject_writer_t*);
-} cy_subject_writer_vtable_t;
 
 /// A subject reader is created when the higher layer requires data from the specified subject-ID.
 /// The transport layer must report all received messages via cy_on_message().
 /// Cy guarantees that there will be at most one subject reader per subject-ID.
 typedef struct cy_subject_reader_t
 {
-    uint32_t                                 subject_id;
-    const struct cy_subject_reader_vtable_t* vtable;
+    uint32_t subject_id;
 } cy_subject_reader_t;
-
-typedef struct cy_subject_reader_vtable_t
-{
-    void (*destroy)(cy_subject_reader_t*);
-} cy_subject_reader_vtable_t;
 
 /// Abstracts away the specifics of the transport (UDP, serial, CAN, etc) and the platform where Cy is running
 /// (POSIX, baremetal MCU, RTOS, etc).
@@ -124,8 +109,55 @@ struct cy_platform_t
     const struct cy_platform_vtable_t* vtable;
 };
 
+/// Most of the platform API is defined by this large vtable.
+/// All functions are non-blocking except for spin(), which may or may not be blocking.
 typedef struct cy_platform_vtable_t
 {
+    // === SUBJECT WRITER ===
+
+    /// The factory returns NULL on OOM.
+    /// The write method non-blockingly publishes a new message on the subject; the message lifetime ends upon return
+    /// from this function.
+    cy_subject_writer_t* (*subject_writer_new)(cy_platform_t*, uint32_t subject_id);
+    void (*subject_writer_destroy)(cy_platform_t*, cy_subject_writer_t*);
+    cy_err_t (*subject_writer_send)(cy_platform_t*, //
+                                    cy_subject_writer_t*,
+                                    cy_us_t    deadline,
+                                    cy_prio_t  priority,
+                                    cy_bytes_t message);
+
+    // === SUBJECT READER ===
+
+    /// The factory returns NULL on OOM.
+    cy_subject_reader_t* (*subject_reader_new)(cy_platform_t*, uint32_t subject_id, size_t extent);
+    void (*subject_reader_destroy)(cy_platform_t*, cy_subject_reader_t*);
+
+    // === P2P ===
+
+    /// Instructs the underlying transport layer to send a peer-to-peer transfer to the specified remote node.
+    /// The message lifetime ends upon return from this function.
+    /// If the transport layer needs any additional metadata to send a P2P message (e.g., destination address/port),
+    /// it must be stored inside the responder context prior to cy_on_message() invocation.
+    cy_err_t (*p2p_send)(cy_platform_t*,
+                         const cy_p2p_context_t*, // Never NULL
+                         cy_us_t    deadline,
+                         uint64_t   remote_id,
+                         cy_bytes_t message);
+
+    /// Sets/updates the maximum extent of incoming P2P transfers. Messages larger than this may be truncated.
+    /// The initial value prior to the first invocation is transport-defined.
+    void (*p2p_extent_set)(cy_platform_t*, size_t);
+
+    // === EVENT LOOP ===
+
+    /// Runs the event loop until the specified deadline, or until the first error. Early exit is allowed.
+    /// If the deadline is in the past, update the event loop once without blocking and return.
+    /// The cy_on_message() callback will be invoked from this function.
+    /// This is the only platform function that is allowed to block.
+    cy_err_t (*spin)(cy_platform_t*, cy_us_t deadline);
+
+    // === MISC ===
+
     /// Returns the current monotonic time in microseconds. The initial time shall be non-negative.
     cy_us_t (*now)(cy_platform_t*);
 
@@ -136,8 +168,8 @@ typedef struct cy_platform_vtable_t
     void* (*realloc)(cy_platform_t*, void*, size_t);
 
     /// Returns a random 64-bit unsigned integer.
-    /// A TRNG is preferred; if not available, a PRNG will suffice, but its initial state should be distinct across
-    /// reboots, and it should be hashed with the node's unique identifier.
+    /// A TRNG is preferred; if not available, a PRNG will suffice, but its initial state MUST be distinct across
+    /// reboots in quick succession, and it should be hashed with the node's unique identifier.
     ///
     /// A simple compliant solution that can be implemented in an embedded system without TRNG is:
     ///
@@ -147,28 +179,13 @@ typedef struct cy_platform_vtable_t
     ///     return rapidhash_withSeed(seed, sizeof(seed), local_uid);
     ///
     /// It is desirable to save the PRNG state in a battery-backed memory, if available; otherwise, in small MCUs one
-    /// could hash the entire RAM contents at startup to scavenge as much entropy as possible, or use ADC or clock
+    /// could also hash the entire RAM contents at startup to scavenge as much entropy as possible, or use ADC or clock
     /// noise. If an RTC is available, then the following is sufficient (extra entropy can be added via the seed array):
     ///
     ///     static uint_fast16_t g_counter = 0;
-    ///     const uint64_t seed[] = { ((uint64_t)rtc_get_time() << 16U) + ++g_counter };
+    ///     const uint64_t seed[] = { ((uint64_t)rtc_get_time() << 16U) + ++g_counter };  // Add ADC noise etc.
     ///     return rapidhash_withSeed(seed, sizeof(seed), local_uid);
     uint64_t (*random)(cy_platform_t*);
-
-    /// The destruction is managed through their own vtables.
-    /// The factories return NULL on OOM.
-    cy_subject_writer_t* (*subject_writer)(cy_platform_t*, uint32_t subject_id);
-    cy_subject_reader_t* (*subject_reader)(cy_platform_t*, uint32_t subject_id, size_t extent);
-
-    /// Instructs the underlying transport layer to send a peer-to-peer transfer to the specified remote node.
-    /// The message lifetime ends upon return from this function.
-    /// If the transport layer needs any additional metadata to send a P2P message (e.g., destination address/port),
-    /// it must be stored inside the responder context prior to cy_on_message() invocation.
-    cy_err_t (*p2p)(cy_platform_t*, const cy_p2p_context_t*, cy_us_t deadline, uint64_t remote_id, cy_bytes_t message);
-
-    /// Sets/updates the maximum extent of incoming P2P transfers. Messages larger than this may be truncated.
-    /// The initial value prior to the first invocation is transport-defined.
-    void (*p2p_extent)(cy_platform_t*, size_t);
 
     /// This handler is used to report asynchronous errors occurring in Cy. In particular, it is used for topic
     /// resubscription errors occurring in response to consensus updates, and also in cases where Cy is unable to
@@ -181,11 +198,6 @@ typedef struct cy_platform_vtable_t
     /// Since Cy is a single-file library, the line number uniquely identifies the error site.
     /// The topic pointer is NULL if the error prevented the creation of a new topic instance.
     void (*on_async_error)(cy_platform_t*, cy_topic_t*, uint16_t line_number);
-
-    /// Runs the event loop until the specified deadline, or until the first error. Early exit is allowed.
-    /// If the deadline is in the past, update the event loop once without blocking and return.
-    /// The cy_on_message() callback will be invoked from this function.
-    cy_err_t (*spin)(cy_platform_t*, cy_us_t deadline);
 } cy_platform_vtable_t;
 
 /// New message received on a topic or P2P. The data ownership is taken by this function.
