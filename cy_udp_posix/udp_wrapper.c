@@ -75,12 +75,16 @@ int16_t udp_wrapper_open_unicast(udp_wrapper_t* const self,
     int16_t res = -EINVAL;
     if ((self != NULL) && (local_iface_address > 0)) {
         memset(self, 0, sizeof(*self));
-        const int one                 = 1;
-        self->iface_index             = get_local_iface_index(local_iface_address);
+        const int one     = 1;
+        self->iface_index = get_local_iface_index(local_iface_address);
+        if (self->iface_index == 0) {
+            self->fd = -1;
+            return -ENODEV;
+        }
         self->fd                      = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
         const uint32_t local_iface_be = htonl(local_iface_address);
         const int      ttl            = OVERRIDE_TTL;
-        bool           ok             = (self->fd >= 0) && (self->iface_index > 0);
+        bool           ok             = self->fd >= 0;
         //
         ok = ok && bind(self->fd,
                         (struct sockaddr*)&(struct sockaddr_in){
@@ -104,7 +108,7 @@ int16_t udp_wrapper_open_unicast(udp_wrapper_t* const self,
         if (ok) {
             res = 0;
         } else {
-            res = (int16_t)-errno;
+            res = (int16_t)-((errno != 0) ? errno : EIO);
             (void)close(self->fd);
             self->fd = -1;
         }
@@ -123,8 +127,12 @@ int16_t udp_wrapper_open_multicast(udp_wrapper_t* const self,
         memset(self, 0, sizeof(*self));
         const int one     = 1;
         self->iface_index = get_local_iface_index(local_iface_address);
-        self->fd          = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-        bool ok           = (self->fd >= 0) && (self->iface_index > 0);
+        if (self->iface_index == 0) {
+            self->fd = -1;
+            return -ENODEV;
+        }
+        self->fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        bool ok  = self->fd >= 0;
         // Set non-blocking mode.
         ok = ok && (fcntl(self->fd, F_SETFL, O_NONBLOCK) == 0);
         // Allow other applications to use the same Cyphal port as well. This must be done before binding.
@@ -157,7 +165,7 @@ int16_t udp_wrapper_open_multicast(udp_wrapper_t* const self,
         if (ok) {
             res = 0;
         } else {
-            res = (int16_t)-errno;
+            res = (int16_t)-((errno != 0) ? errno : EIO);
             (void)close(self->fd);
             self->fd = -1;
         }
@@ -337,11 +345,13 @@ int16_t udp_wrapper_get_default_ifaces(const size_t iface_max, uint32_t out_ifac
     struct sockaddr_in dst = { .sin_family = AF_INET, .sin_port = htons(80) };
     inet_pton(AF_INET, "1.1.1.1", &dst.sin_addr);
     if (connect(fd, (struct sockaddr*)&dst, sizeof(dst)) != 0) {
+        (void)close(fd);
         return -ENETUNREACH;
     }
     struct sockaddr_in src;
     socklen_t          len = sizeof(src);
     if (getsockname(fd, (struct sockaddr*)&src, &len) != 0) {
+        (void)close(fd);
         return -EIO;
     }
     close(fd);
