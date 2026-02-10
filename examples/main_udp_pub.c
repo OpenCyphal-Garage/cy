@@ -73,6 +73,8 @@ static struct config_t load_config(const int argc, const char* const argv[])
     return cfg;
 }
 
+#if 0 // NOLINT(readability-avoid-unconditional-preprocessor-if)
+
 static void on_result(cy_future_t* const future)
 {
     const cy_topic_t* const topic      = cy_future_context(future).ptr[0];
@@ -103,6 +105,8 @@ static void on_result(cy_future_t* const future)
         cy_future_destroy(future);
     }
 }
+
+#endif
 
 int main(const int argc, const char* const argv[])
 {
@@ -151,6 +155,7 @@ int main(const int argc, const char* const argv[])
                               "Hello from %016llx! The current time is %lld us.",
                               (unsigned long long)cfg.local_uid,
                               (long long)now);
+#if 0 // NOLINT(readability-avoid-unconditional-preprocessor-if)
                 cy_future_t* const future = cy_request(publishers[i], //
                                                        now + (MEGA * 2),
                                                        now + (MEGA * 10),
@@ -161,6 +166,15 @@ int main(const int argc, const char* const argv[])
                 }
                 cy_future_context_set(future, (cy_user_context_t){ { (void*)cy_publisher_topic(publishers[i]) } });
                 cy_future_callback_set(future, on_result);
+#else
+                const cy_err_t err_pub = cy_publish(publishers[i], //
+                                                    now + (MEGA * 2),
+                                                    (cy_bytes_t){ .size = strlen(msg), .data = msg });
+                if (err_pub != CY_OK) {
+                    (void)fprintf(stderr, "cy_publish: %d\n", err_pub);
+                    break;
+                }
+#endif
             }
             next_publish_at += 5 * MEGA;
         }

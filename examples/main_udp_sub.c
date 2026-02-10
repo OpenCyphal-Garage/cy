@@ -84,7 +84,7 @@ static void on_message(cy_subscriber_t* const subscriber, cy_arrival_t arrival)
     const size_t  payload_size = cy_message_size(arrival.message.content);
     unsigned char payload_copy[payload_size];
     cy_message_read(arrival.message.content, 0, payload_size, payload_copy);
-    char* const dump = hexdump(payload_size, payload_copy, 32);
+    const char* const dump = hexdump(payload_size, payload_copy, 32);
     (void)fprintf(stderr,
                   "💬 ts=%09llu sz=%06zu sbt=%zu topic='%s'\n%s\n",
                   (unsigned long long)arrival.message.timestamp,

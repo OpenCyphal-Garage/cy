@@ -28,8 +28,9 @@ static inline arg_kv_t arg_kv_next(const int argc, const char* const argv[])
                       argv[0]);
         exit(1);
     }
-    static size_t index = 1;
-    arg_kv_t      out   = { .index = index++, .key = NULL, .key_hash = 0, .value = NULL };
+    static size_t index = 0;
+    index++;
+    arg_kv_t out = { .index = index, .key = NULL, .key_hash = 0, .value = NULL };
     if (((int)out.index) < argc) {
         out.key       = argv[out.index];
         char* const q = strchr(out.key, '=');
