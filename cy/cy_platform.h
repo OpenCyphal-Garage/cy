@@ -72,6 +72,7 @@ typedef struct cy_message_vtable_t
 
 /// A subject writer is used to send messages on the subject specified at the time of its construction.
 /// There is at most one subject writer per subject.
+/// Cy guarantees that there will be at most one subject writer per subject-ID.
 typedef struct cy_subject_writer_t
 {
     const struct cy_subject_writer_vtable_t* vtable;
@@ -88,6 +89,7 @@ typedef struct cy_subject_writer_vtable_t
 
 /// A subject reader is created when the higher layer requires data from the specified subject-ID.
 /// The transport layer must report all received messages via cy_on_message().
+/// Cy guarantees that there will be at most one subject reader per subject-ID.
 typedef struct cy_subject_reader_t
 {
     uint32_t                                 subject_id;
@@ -179,6 +181,7 @@ typedef struct cy_platform_vtable_t
 
     /// Runs the event loop until the specified deadline, or until the first error. Early exit is allowed.
     /// If the deadline is in the past, update the event loop once without blocking and return.
+    /// The cy_on_message() callback will be invoked from this function.
     cy_err_t (*spin)(cy_t*, cy_us_t deadline);
 } cy_platform_vtable_t;
 

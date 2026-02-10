@@ -23,6 +23,16 @@ extern "C"
 
 #define CY_UDP_POSIX_ASYNC_ERROR_SLOTS 4
 
+/// Dedicated socket IO error counts per redundant interface.
+/// There is a single TX socket per redundant interface. All RX sockets are pooled together per interface.
+typedef struct cy_udp_posix_stats_socket_t
+{
+    uint64_t error_count[CY_UDP_POSIX_IFACE_COUNT_MAX];
+    cy_us_t  last_error_at;
+} cy_udp_posix_stats_socket_t;
+
+/// Statistics exposed for diagnostics and monitoring purposes.
+/// The application is not expected to do anything specific with these.
 typedef struct cy_udp_posix_stats_t
 {
     size_t subject_writer_count;
@@ -35,18 +45,14 @@ typedef struct cy_udp_posix_stats_t
         uint64_t oom_count;
     } mem;
 
-    struct cy_udp_posix_stats_tx_t
-    {
-        uint64_t socket_errors[CY_UDP_POSIX_IFACE_COUNT_MAX];
-        cy_us_t  last_error_at;
-    } tx;
+    cy_udp_posix_stats_socket_t tx;
+    cy_udp_posix_stats_socket_t rx;
 
-    struct cy_udp_posix_stats_rx_t
-    {
-        uint64_t socket_errors[CY_UDP_POSIX_IFACE_COUNT_MAX];
-        cy_us_t  last_error_at;
-    } rx;
-
+    /// Errors that occur in Cy asynchronously with API invocations.
+    /// This is purely informative and does not require intervention from the application, exposed only for diagnostics.
+    /// For example, automatic pattern subscription errors, OOM, or topic reallocation errors.
+    /// CY_UDP_POSIX_ASYNC_ERROR_SLOTS is chosen to fit all distinct line numbers where asynchronous errors can occur
+    /// in cy.c; shall the number be insufficient, the oldest seen error will be overwritten.
     struct cy_udp_posix_stats_cy_async_err_t
     {
         uint16_t line_number; ///< Zero if unused, otherwise contains the line number in cy.c.

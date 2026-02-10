@@ -41,6 +41,9 @@
 #define CY_UDP_SOCKET_READ_BUFFER_SIZE 2000
 #endif
 
+typedef struct subject_writer_t subject_writer_t;
+typedef struct subject_reader_t subject_reader_t;
+
 typedef struct cy_udp_posix_t
 {
     cy_platform_t base;
@@ -58,6 +61,10 @@ typedef struct cy_udp_posix_t
     uint64_t prng_state;
 
     cy_udp_posix_stats_t stats;
+
+    /// Doubly-linked unordered list of all live subject readers.
+    subject_reader_t* reader_head;
+    subject_reader_t* reader_tail;
 } cy_udp_posix_t;
 
 static size_t  smaller(const size_t a, const size_t b) { return (a < b) ? a : b; }
@@ -233,13 +240,13 @@ static cy_message_t* make_message(cy_udp_posix_t* const owner, const size_t size
 
 /// NB: Once constructed, Cy will keep writers alive as long as possible even if the application doesn't need one to
 /// avoid losing the transfer-ID state.
-typedef struct
+struct subject_writer_t
 {
     cy_subject_writer_t base;
     cy_t*               cy;
     uint64_t            next_transfer_id; ///< Random-initialized at the time of creation.
     udpard_udpip_ep_t   endpoints[UDPARD_IFACE_COUNT_MAX];
-} subject_writer_t;
+};
 
 static cy_err_t v_subject_writer_send(cy_subject_writer_t* const base,
                                       const cy_us_t              deadline,
@@ -309,7 +316,7 @@ static cy_subject_writer_t* v_subject_writer(cy_t* const cy, const uint32_t subj
 
 // ---------------------------------------- SUBJECT READER ----------------------------------------
 
-typedef struct
+struct subject_reader_t
 {
     cy_subject_reader_t base;
     cy_t*               cy;
@@ -321,7 +328,12 @@ typedef struct
     /// It is essentially optional, but it is expected to save quite a bit of processing on busy topics,
     /// in particular in the heartbeat topic when used in a large network with redundant interfaces.
     uint64_t history[2];
-} subject_reader_t;
+
+    /// All readers are kept in a list.
+    /// Currently we need this for the poll() call; but perhaps we should switch to epoll()?
+    subject_reader_t* prev;
+    subject_reader_t* next;
+};
 
 typedef struct
 {
@@ -383,10 +395,31 @@ static void v_subject_reader_destroy(cy_subject_reader_t* const base)
     subject_reader_t* const self  = (subject_reader_t*)base;
     cy_udp_posix_t* const   owner = (cy_udp_posix_t*)cy_platform(self->cy);
     assert(self->port.user == self);
+
+    // Delist the reader first so that no future polling cycle may observe a half-destroyed instance.
+    if (self->prev != NULL) {
+        self->prev->next = self->next;
+    }
+    if (self->next != NULL) {
+        self->next->prev = self->prev;
+    }
+    if (owner->reader_head == self) {
+        owner->reader_head = self->next;
+    }
+    if (owner->reader_tail == self) {
+        owner->reader_tail = self->prev;
+    }
+    self->prev = NULL;
+    self->next = NULL;
+    assert((owner->reader_head != NULL) == (owner->reader_tail != NULL));
+
+    // Cleanup the libudpard port and the sockets.
     udpard_rx_port_free(&owner->udpard_rx, &self->port);
     for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
         udp_wrapper_close(&self->sock[i]); // closing a non-open socket is a safe noop.
     }
+
+    // Free the memory and update the stats.
     CY_TRACE(self->cy, "🔕 n_readers=%zu ptr=%p", owner->stats.subject_reader_count, (void*)self);
     mem_free(owner, sizeof(subject_reader_t), self);
     assert(owner->stats.subject_reader_count > 0);
@@ -447,6 +480,17 @@ static cy_subject_reader_t* v_subject_reader(cy_t* const cy, const uint32_t subj
             goto reject;
         }
         owner->stats.subject_reader_count++;
+
+        // Insert into the doubly-linked list of active readers.
+        self->prev = NULL;
+        self->next = owner->reader_head;
+        if (owner->reader_head != NULL) {
+            owner->reader_head->prev = self;
+        } else {
+            owner->reader_tail = self;
+        }
+        owner->reader_head = self;
+        assert((owner->reader_head != NULL) == (owner->reader_tail != NULL));
     }
 reject:
     CY_TRACE(cy, "🔔 n_readers=%zu subject_id=%08x ptr=%p", owner->stats.subject_reader_count, subject_id, (void*)self);
@@ -567,9 +611,155 @@ static void v_on_async_error(cy_t* const cy, cy_topic_t* const topic, const uint
     slot->last_at = cy_udp_posix_now();
 }
 
-static cy_err_t v_spin(cy_t*, cy_us_t deadline)
+// Here we could add logic to mitigate transient interface failure, like temporary closure/reopening of the sockets.
+static void read_socket(cy_udp_posix_t* const   self,
+                        const cy_us_t           ts,
+                        subject_reader_t* const reader,
+                        udp_wrapper_t* const    sock,
+                        const uint_fast8_t      iface_index)
 {
-    //
+    assert((self->iface_bitmap & (1U << iface_index)) != 0);
+    assert(iface_index <= CY_UDP_POSIX_IFACE_COUNT_MAX);
+    assert(is_valid_ip(self->local_ip[iface_index]));
+    assert(udp_wrapper_is_open(sock));
+    assert((self->stats.subject_reader_count == 0) == (self->reader_head == NULL));
+    assert((self->stats.subject_reader_count == 0) == (self->reader_tail == NULL));
+
+    // Allocate memory that we will read the data into. The ownership of this memory will be transferred
+    // to LibUDPard, which will free it when it is no longer needed.
+    // A deeply embedded system may be able to transfer this memory directly from the NIC driver to eliminate copy.
+    udpard_bytes_mut_t dgram = { .size = CY_UDP_SOCKET_READ_BUFFER_SIZE,
+                                 .data = self->mem.vtable->alloc(self->mem.context, CY_UDP_SOCKET_READ_BUFFER_SIZE) };
+    if (NULL == dgram.data) { // ReSharper disable once CppRedundantDereferencingAndTakingAddress
+        self->stats.mem.oom_count++;
+        self->stats.rx.error_count[iface_index]++;
+        self->stats.rx.last_error_at = ts;
+        return;
+    }
+
+    // Read the data from the socket into the buffer we just allocated.
+    udpard_udpip_ep_t remote_ep = { 0 };
+    const int16_t     rx_result = udp_wrapper_receive(sock, &dgram.size, dgram.data, &remote_ep.ip, &remote_ep.port);
+    if (rx_result < 0) {
+        // We end up here if the socket was closed while processing another datagram.
+        // This happens if a subscriber chose to unsubscribe dynamically or caused the node-ID to be changed.
+        self->mem.vtable->base.free(self->mem.context, CY_UDP_SOCKET_READ_BUFFER_SIZE, dgram.data);
+        self->stats.rx.error_count[iface_index]++;
+        self->stats.rx.last_error_at = ts;
+        return;
+    }
+    if (rx_result == 0) { // Nothing to read OR dgram dropped by filters.
+        self->mem.vtable->base.free(self->mem.context, CY_UDP_SOCKET_READ_BUFFER_SIZE, dgram.data);
+        return;
+    }
+    // Ignore packets we sent ourselves. This can happen with multicast depending on the socket implementation.
+    if ((remote_ep.ip == self->local_ip[iface_index]) && (remote_ep.port == self->local_tx_port[iface_index])) {
+        self->mem.vtable->base.free(self->mem.context, CY_UDP_SOCKET_READ_BUFFER_SIZE, dgram.data);
+        return;
+    }
+
+    // Realloc the buffer to fit the actual size of the datagram to avoid inner fragmentation.
+    void* const dgram_realloc = realloc(dgram.data, dgram.size);
+    if (dgram_realloc != NULL) { // Sensible realloc implementations always succeed when shrinking.
+        dgram.data = dgram_realloc;
+        self->stats.mem.allocated_bytes -= (CY_UDP_SOCKET_READ_BUFFER_SIZE - dgram.size);
+    }
+
+    // Pass the data buffer into LibUDPard then into Cy for further processing. It takes ownership of the buffer.
+    assert(!reader->port.is_p2p);
+    const bool pushok = udpard_rx_port_push(&self->udpard_rx,
+                                            (reader != NULL) ? &reader->port : &self->p2p_port,
+                                            ts,
+                                            remote_ep,
+                                            dgram,
+                                            udpard_make_deleter(self->mem),
+                                            iface_index);
+    assert(pushok); // Push can only fail on invalid arguments, which we validate, so it must never fail.
+    (void)pushok;
+}
+
+static cy_err_t spin_once_until(cy_udp_posix_t* const self, const cy_us_t deadline)
+{
+    // Free up space in the TX queues and ensure all TX sockets are blocked before waiting.
+    // This may invoke writes on sockets that are not really writeable but this is totally fine.
+    udpard_tx_poll(&self->udpard_tx, cy_udp_posix_now(), self->iface_bitmap);
+
+    // Fill out the TX awaitable array. May be empty if there's nothing to transmit at the moment.
+    size_t         tx_count                               = 0;
+    udp_wrapper_t* tx_await[CY_UDP_POSIX_IFACE_COUNT_MAX] = { 0 };
+    const uint16_t tx_pending_iface_bitmap                = udpard_tx_pending_ifaces(&self->udpard_tx);
+    for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
+        if ((tx_pending_iface_bitmap & (1U << i)) != 0) {
+            assert((self->iface_bitmap & (1U << i)) != 0);
+            tx_await[tx_count] = &self->sock[i];
+            tx_count++;
+        }
+    }
+    // Fill out the RX awaitable array. The total number of RX sockets is the interface count times the number of
+    // subject readers plus P2P RX sockets (exactly one per iface).
+    // This is a rather cumbersome operation as we need to traverse subject readers; perhaps we should switch to epoll?
+    const size_t      max_rx_count = CY_UDP_POSIX_IFACE_COUNT_MAX * (self->stats.subject_reader_count + 1);
+    size_t            rx_count     = 0;
+    udp_wrapper_t*    rx_await[max_rx_count]; // Initialization is not possible and is very wasteful anyway.
+    subject_reader_t* rx_readers[max_rx_count];
+    uint_fast8_t      rx_iface_indexes[max_rx_count];
+    for (subject_reader_t* rd_iter = self->reader_head; rd_iter != NULL; rd_iter = rd_iter->next) {
+        for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
+            if (udp_wrapper_is_open(&rd_iter->sock[i])) {
+                assert(rx_count < max_rx_count);
+                rx_await[rx_count]         = &rd_iter->sock[i];
+                rx_readers[rx_count]       = rd_iter;
+                rx_iface_indexes[rx_count] = i;
+                rx_count++;
+            }
+        }
+    }
+    // Note that we may add the same socket both for reading and writing, which is fine.
+    for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
+        if (udp_wrapper_is_open(&self->sock[i])) {
+            assert(rx_count < max_rx_count);
+            rx_await[rx_count]         = &self->sock[i];
+            rx_readers[rx_count]       = NULL; // A P2P socket has no associated topic.
+            rx_iface_indexes[rx_count] = i;
+            rx_count++;
+        }
+    }
+
+    // Do a blocking wait using the descriptors we have just prepared.
+    const cy_us_t wait_timeout = deadline - min_i64(cy_udp_posix_now(), deadline);
+    cy_err_t      res = err_from_udp_wrapper(udp_wrapper_wait(wait_timeout, tx_count, tx_await, rx_count, rx_await));
+    if (res == CY_OK) {
+        const cy_us_t now = cy_udp_posix_now(); // after unblocking
+        for (size_t i = 0; i < rx_count; i++) {
+            if (rx_await[i] != NULL) {
+                read_socket(self, now, rx_readers[i], rx_await[i], rx_iface_indexes[i]);
+            }
+        }
+        assert(res == CY_OK);
+        // While handling the events, we could have generated additional TX items, so we need to process them again.
+        // We do it even in case of failure such that transient errors do not stall the TX queue.
+        // We blindly attempt to transmit on all sockets disregarding their writeability state; if this becomes
+        // a performance concern, we should consult with the wait results.
+        udpard_tx_poll(&self->udpard_tx, now, self->iface_bitmap);
+    }
+    return res;
+}
+
+static cy_err_t v_spin(cy_t* const cy, cy_us_t deadline)
+{
+    cy_udp_posix_t* const self = (cy_udp_posix_t*)cy_platform(cy);
+    cy_err_t              res  = CY_OK;
+    cy_us_t               now  = 0;
+    while (res == CY_OK) {
+        res = spin_once_until(self, deadline);
+        now = cy_udp_posix_now();
+        if (deadline <= now) {
+            break;
+        }
+    }
+    // Update expiration and reordering timers only once. No need to do it more often.
+    udpard_rx_poll(&self->udpard_rx, now);
+    return res;
 }
 
 static const cy_platform_vtable_t platform_vtable = { .now            = v_now,
@@ -600,28 +790,29 @@ static void v_on_p2p_msg(udpard_rx_t* const rx, udpard_rx_port_t* const port, co
     (void)port;
     const cy_message_ts_t msg = { .timestamp = tr.timestamp,
                                   .content   = make_message(cy, tr.payload_size_stored, tr.payload) };
+    cy_on_message();
     cy_on_p2p(&cy->base, tr.remote.uid, msg);
 }
 
 static bool v_tx_eject_p2p(udpard_tx_t* const tx, udpard_tx_ejection_t* const ej, const udpard_udpip_ep_t destination)
 {
-    cy_udp_posix_t* const cy = (cy_udp_posix_t*)tx->user;
-    assert(cy != NULL);
-    assert((cy->iface_bitmap & (1U << ej->iface_index)) != 0); // the caller must ensure this
+    cy_udp_posix_t* const self = (cy_udp_posix_t*)tx->user;
+    assert(self != NULL);
+    assert((self->iface_bitmap & (1U << ej->iface_index)) != 0); // the caller must ensure this
     assert(ej->now <= ej->deadline);
     // The libudpard TX API provides us with an opportunity to retain the ownership of the datagram payload
     // via reference counting. This is useful in kernel space or in embedded systems with low-level NIC drivers,
     // but the Berkeley socket API does not allow us to take advantage of that -- the data will be copied into the
     // kernel space anyway. Therefore, we simply send it with copying and do not bother with reference counting.
-    const int16_t res = udp_wrapper_send(&cy->sock[ej->iface_index], //
+    const int16_t res = udp_wrapper_send(&self->sock[ej->iface_index], //
                                          destination.ip,
                                          destination.port,
                                          ej->dscp,
                                          ej->datagram.size,
                                          ej->datagram.data);
     if (res < 0) {
-        assert(cy->tx_sock_err_handler != NULL);
-        cy->tx_sock_err_handler(cy, ej->iface_index, (uint32_t)-res);
+        self->stats.tx.error_count[ej->iface_index]++;
+        self->stats.tx.last_error_at = ej->now;
     }
     return res != 0; // either transmitted successfully or dropped due to error
 }
@@ -741,155 +932,6 @@ cy_err_t cy_udp_posix_new_simple(cy_udp_posix_t* const cy)
     }
 #endif
     return out;
-}
-
-static void read_socket(cy_udp_posix_t* const       cy,
-                        const cy_us_t               ts,
-                        cy_udp_posix_topic_t* const topic,
-                        udp_wrapper_t* const        sock,
-                        const uint_fast8_t          iface_index)
-{
-    assert((cy->iface_bitmap & (1U << iface_index)) != 0);
-    assert(is_valid_ip(cy->local_ip[iface_index]));
-    assert(udp_wrapper_is_open(sock));
-
-    // Allocate memory that we will read the data into. The ownership of this memory will be transferred
-    // to LibUDPard, which will free it when it is no longer needed.
-    // A deeply embedded system may be able to transfer this memory directly from the NIC driver to eliminate copy.
-    udpard_bytes_mut_t dgram = { .size = CY_UDP_SOCKET_READ_BUFFER_SIZE,
-                                 .data = cy->mem.vtable->alloc(cy->mem.context, CY_UDP_SOCKET_READ_BUFFER_SIZE) };
-    if (NULL == dgram.data) { // ReSharper disable once CppRedundantDereferencingAndTakingAddress
-        ((topic != NULL) ? topic->rx_sock_err_handler : cy->rx_sock_err_handler)(cy, topic, iface_index, ENOMEM);
-        return;
-    }
-
-    // Read the data from the socket into the buffer we just allocated.
-    udpard_udpip_ep_t remote_ep = { 0 };
-    const int16_t     rx_result = udp_wrapper_receive(sock, &dgram.size, dgram.data, &remote_ep.ip, &remote_ep.port);
-    if (rx_result < 0) {
-        // We end up here if the socket was closed while processing another datagram.
-        // This happens if a subscriber chose to unsubscribe dynamically or caused the node-ID to be changed.
-        cy->mem.vtable->base.free(cy->mem.context, CY_UDP_SOCKET_READ_BUFFER_SIZE, dgram.data);
-        ((topic != NULL) ? topic->rx_sock_err_handler
-                         : cy->rx_sock_err_handler)(cy, topic, iface_index, (uint32_t)-rx_result);
-        return;
-    }
-    if (rx_result == 0) { // Nothing to read OR dgram dropped by filters.
-        cy->mem.vtable->base.free(cy->mem.context, CY_UDP_SOCKET_READ_BUFFER_SIZE, dgram.data);
-        return;
-    }
-    // Ignore packets we sent ourselves. This can happen with multicast depending on the socket implementation.
-    if ((remote_ep.ip == cy->local_ip[iface_index]) && (remote_ep.port == cy->local_tx_port[iface_index])) {
-        cy->mem.vtable->base.free(cy->mem.context, CY_UDP_SOCKET_READ_BUFFER_SIZE, dgram.data);
-        return;
-    }
-
-    // Realloc the buffer to fit the actual size of the datagram to avoid inner fragmentation.
-    void* const dgram_realloc = realloc(dgram.data, dgram.size);
-    if (dgram_realloc != NULL) { // Sensible realloc implementations always succeed when shrinking.
-        dgram.data = dgram_realloc;
-        cy->mem_allocated_bytes -= (CY_UDP_SOCKET_READ_BUFFER_SIZE - dgram.size);
-    }
-
-    // Pass the data buffer into LibUDPard then into Cy for further processing. It takes ownership of the buffer.
-    const bool pushok = udpard_rx_port_push(&cy->udpard_rx,
-                                            (topic != NULL) ? &topic->rx_port : &cy->p2p_port,
-                                            ts,
-                                            remote_ep,
-                                            dgram,
-                                            udpard_make_deleter(cy->mem),
-                                            iface_index);
-    assert(pushok); // Push can only fail on invalid arguments, which we validate, so it must never fail.
-    (void)pushok;
-}
-
-static cy_err_t spin_once_until(cy_udp_posix_t* const cy, const cy_us_t deadline)
-{
-    // Free up space in the TX queues and ensure all TX sockets are blocked before waiting.
-    // This may invoke writes on sockets that are not really writeable but this is totally fine.
-    udpard_tx_poll(&cy->udpard_tx, cy_udp_posix_now(), cy->iface_bitmap);
-
-    // Fill out the TX awaitable array. May be empty if there's nothing to transmit at the moment.
-    size_t         tx_count                               = 0;
-    udp_wrapper_t* tx_await[CY_UDP_POSIX_IFACE_COUNT_MAX] = { 0 };
-    const uint16_t tx_pending_iface_bitmap                = udpard_tx_pending_ifaces(&cy->udpard_tx);
-    for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
-        if ((tx_pending_iface_bitmap & (1U << i)) != 0) {
-            assert((cy->iface_bitmap & (1U << i)) != 0);
-            tx_await[tx_count] = &cy->sock[i];
-            tx_count++;
-        }
-    }
-    // Fill out the RX awaitable array. The total number of RX sockets is the interface count times the number of topics
-    // we are subscribed to plus P2P RX sockets (exactly one per iface). Currently, we don't have a simple value that
-    // says how many topics we are subscribed to, so we simply use the total number of topics.
-    // This is a rather cumbersome operation as we need to traverse the topic tree; perhaps we should switch to epoll?
-    const size_t          max_rx_count = CY_UDP_POSIX_IFACE_COUNT_MAX * (cy->n_topics + 1);
-    size_t                rx_count     = 0;
-    udp_wrapper_t*        rx_await[max_rx_count]; // Initialization is not possible and is very wasteful anyway.
-    cy_udp_posix_topic_t* rx_topics[max_rx_count];
-    uint_fast8_t          rx_iface_indexes[max_rx_count];
-    for (cy_udp_posix_topic_t* topic = (cy_udp_posix_topic_t*)cy_topic_iter_first(&cy->base); topic != NULL;
-         topic                       = (cy_udp_posix_topic_t*)cy_topic_iter_next(&topic->base)) {
-        if (cy_topic_has_subscribers(&topic->base)) {
-            for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
-                if (udp_wrapper_is_open(&topic->rx_sock[i])) {
-                    assert(rx_count < max_rx_count);
-                    rx_await[rx_count]         = &topic->rx_sock[i];
-                    rx_topics[rx_count]        = topic;
-                    rx_iface_indexes[rx_count] = i;
-                    rx_count++;
-                }
-            }
-        }
-    }
-    // Note that we may add the same socket both for reading and writing, which is fine.
-    for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
-        if (udp_wrapper_is_open(&cy->sock[i])) {
-            assert(rx_count < max_rx_count);
-            rx_await[rx_count]         = &cy->sock[i];
-            rx_topics[rx_count]        = NULL; // A P2P socket has no associated topic.
-            rx_iface_indexes[rx_count] = i;
-            rx_count++;
-        }
-    }
-
-    // Do a blocking wait using the descriptors we have just prepared.
-    const cy_us_t wait_timeout = deadline - min_i64(cy_udp_posix_now(), deadline);
-    cy_err_t      res = err_from_udp_wrapper(udp_wrapper_wait(wait_timeout, tx_count, tx_await, rx_count, rx_await));
-    if (res == CY_OK) {
-        const cy_us_t now = cy_udp_posix_now(); // after unblocking
-        for (size_t i = 0; i < rx_count; i++) {
-            if (rx_await[i] != NULL) {
-                read_socket(cy, now, rx_topics[i], rx_await[i], rx_iface_indexes[i]);
-            }
-        }
-        // Remember that we need to periodically poll cy_update() even if no traffic is received.
-        // The update should be invoked after all incoming transfers are handled in this cycle, not before.
-        assert(res == CY_OK);
-        res = cy_update(&cy->base);
-        // While handling the events, we could have generated additional TX items, so we need to process them again.
-        // We do it even in case of failure such that transient errors do not stall the TX queue.
-        // We blindly attempt to transmit on all sockets disregarding their writeability state; if this becomes
-        // a performance concern, we should consult with the wait results.
-        udpard_tx_poll(&cy->udpard_tx, now, cy->iface_bitmap);
-        // Update expiration and reordering timers once.
-        udpard_rx_poll(&cy->udpard_rx, now);
-    }
-    return res;
-}
-
-cy_err_t cy_udp_posix_spin_until(cy_udp_posix_t* const cy, const cy_us_t deadline)
-{
-    cy_err_t res = CY_OK;
-    while (res == CY_OK) {
-        const cy_us_t dl = min_i64_3(deadline, cy->base.heartbeat_next, cy->base.heartbeat_next_urgent);
-        res              = spin_once_until(cy, dl);
-        if (deadline <= cy_udp_posix_now()) {
-            break;
-        }
-    }
-    return res;
 }
 
 void cy_udp_posix_destroy(cy_udp_posix_t* const cy)

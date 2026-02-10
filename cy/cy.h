@@ -419,7 +419,10 @@ cy_future_t* cy_respond_reliable(cy_breadcrumb_t* const breadcrumb, const cy_us_
 
 /// The new instance will be heap-allocated via the platform layer API.
 cy_t* cy_new(cy_platform_t* const platform);
-void  cy_destroy(cy_t* const cy);
+
+/// Cy will clean up all resources obtained from the platform, such as memory and readers/writers, but will not
+/// destroy the platform instance itself; the application is responsible for that.
+void cy_destroy(cy_t* const cy);
 
 /// See cy_name_... for name resolution details. The provided names will be validated and normalized.
 /// The home should be unique in the network; one way to ensure this is to default it to the node's unique ID.
