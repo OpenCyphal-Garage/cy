@@ -453,6 +453,11 @@ cy_err_t cy_remap(cy_t* const cy, const wkv_str_t from, const wkv_str_t to);
 /// TODO not implemented
 cy_err_t cy_remap_parse(cy_t* const cy, const wkv_str_t spec_string);
 
+/// Invokes cy_name_resolve_raw() using the home and the namespace of the node, then applies remapping, if any.
+/// The result is a fully resolved topic name.
+/// On failure, the output string has length SIZE_MAX and NULL data pointer.
+wkv_str_t cy_resolve(const cy_t* const cy, const wkv_str_t name, const size_t dest_size, char* dest);
+
 // TODO: add a way to dump/restore topic configuration for instant initialization. This may be platform-specific.
 
 /// Complexity is logarithmic in the number of topics. NULL if not found.
@@ -529,7 +534,7 @@ wkv_str_t cy_name_join(const wkv_str_t left, const wkv_str_t right, const size_t
 /// The destination is not NUL-terminated.
 wkv_str_t cy_name_expand_home(wkv_str_t name, const wkv_str_t home, const size_t dest_size, char* const dest);
 
-/// Constructs the full normalized name as exchanged over the wire: homeful names are expanded,
+/// Constructs the full normalized name as exchanged over the wire prior to remapping: homeful names are expanded,
 /// relative names are prefixed with the namespace, and absolute names are left as-is.
 /// The namespace may be homeful and will be expanded accordingly. Examples:
 ///
@@ -541,11 +546,11 @@ wkv_str_t cy_name_expand_home(wkv_str_t name, const wkv_str_t home, const size_t
 /// The dest points to a buffer at least dest_size bytes long.
 /// On failure, the output string has length SIZE_MAX and NULL data pointer.
 /// The destination is not NUL-terminated.
-wkv_str_t cy_name_resolve(const wkv_str_t name,
-                          wkv_str_t       name_space,
-                          const wkv_str_t home,
-                          const size_t    dest_size,
-                          char*           dest);
+wkv_str_t cy_name_resolve_raw(const wkv_str_t name,
+                              wkv_str_t       name_space,
+                              const wkv_str_t home,
+                              const size_t    dest_size,
+                              char*           dest);
 
 // =====================================================================================================================
 //                                                  MONITORING & DIAGNOSTICS
