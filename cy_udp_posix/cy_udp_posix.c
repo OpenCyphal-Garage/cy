@@ -29,7 +29,6 @@
 #include <time.h>
 #include <errno.h>
 #include <stdio.h>
-#include <limits.h>
 
 #if (CY_UDP_POSIX_IFACE_COUNT_MAX) != (UDPARD_IFACE_COUNT_MAX)
 #error "CY_UDP_POSIX_IFACE_COUNT_MAX != UDPARD_IFACE_COUNT_MAX"
@@ -48,6 +47,7 @@ typedef struct cy_udp_posix_t
 {
     cy_platform_t base;
     udpard_mem_t  mem;
+    uint64_t      prng_state;
 
     udpard_tx_t      udpard_tx;
     udpard_rx_t      udpard_rx;
@@ -58,8 +58,6 @@ typedef struct cy_udp_posix_t
     uint16_t      local_tx_port[CY_UDP_POSIX_IFACE_COUNT_MAX];
     uint16_t      iface_bitmap; ///< Bitmap of valid interfaces based on local_ip[].
 
-    uint64_t prng_state;
-
     cy_udp_posix_stats_t stats;
 
     /// Doubly-linked unordered list of all live subject readers.
@@ -69,7 +67,6 @@ typedef struct cy_udp_posix_t
 
 static size_t  smaller(const size_t a, const size_t b) { return (a < b) ? a : b; }
 static int64_t min_i64(const int64_t a, const int64_t b) { return (a < b) ? a : b; }
-static int64_t min_i64_3(const int64_t a, const int64_t b, const int64_t c) { return min_i64(a, min_i64(b, c)); }
 
 /// A simple hash for two u64 arguments based on the SplitMix64 finalizer.
 /// Much better than a simple xor while not being too heavy.
@@ -243,7 +240,7 @@ static cy_message_t* make_message(cy_udp_posix_t* const owner, const size_t size
 struct subject_writer_t
 {
     cy_subject_writer_t base;
-    cy_t*               cy;
+    cy_udp_posix_t*     owner;
     uint64_t            next_transfer_id; ///< Random-initialized at the time of creation.
     udpard_udpip_ep_t   endpoints[UDPARD_IFACE_COUNT_MAX];
 };
@@ -254,7 +251,7 @@ static cy_err_t v_subject_writer_send(cy_subject_writer_t* const base,
                                       const cy_bytes_t           message)
 {
     subject_writer_t* const self  = (subject_writer_t*)base;
-    cy_udp_posix_t* const   owner = (cy_udp_posix_t*)cy_platform(self->cy);
+    cy_udp_posix_t* const   owner = self->owner;
     // We may need better error reporting in libudpard, this is a little unwieldy.
     const uint64_t e_oom      = owner->udpard_tx.errors_oom;
     const uint64_t e_capacity = owner->udpard_tx.errors_capacity;
@@ -283,23 +280,23 @@ static cy_err_t v_subject_writer_send(cy_subject_writer_t* const base,
 static void v_destroy(cy_subject_writer_t* const base)
 {
     subject_writer_t* const self  = (subject_writer_t*)base;
-    cy_udp_posix_t* const   owner = (cy_udp_posix_t*)cy_platform(self->cy);
+    cy_udp_posix_t* const   owner = self->owner;
     assert(owner->stats.subject_writer_count > 0);
     owner->stats.subject_writer_count--;
-    CY_TRACE(self->cy, "🔇 n_writers=%zu ptr=%p", owner->stats.subject_writer_count, (void*)self);
+    CY_TRACE(owner->base.cy, "🔇 n_writers=%zu ptr=%p", owner->stats.subject_writer_count, (void*)self);
     mem_free(owner, sizeof(subject_writer_t), self);
 }
 
-static cy_subject_writer_t* v_subject_writer(cy_t* const cy, const uint32_t subject_id)
+static cy_subject_writer_t* v_subject_writer(cy_platform_t* const base, const uint32_t subject_id)
 {
     assert(subject_id <= UDPARD_IPv4_SUBJECT_ID_MAX);
-    cy_udp_posix_t* const owner = (cy_udp_posix_t*)cy_platform(cy);
+    cy_udp_posix_t* const owner = (cy_udp_posix_t*)base;
     assert(subject_id <= (CY_PINNED_SUBJECT_ID_MAX + 1 + owner->base.subject_id_modulus));
     subject_writer_t* const self = mem_alloc_zero(owner, sizeof(subject_writer_t));
     if (self != NULL) {
         static const cy_subject_writer_vtable_t vtable = { .send = v_subject_writer_send, .destroy = v_destroy };
         self->base.vtable                              = &vtable;
-        self->cy                                       = cy;
+        self->owner                                    = owner;
         self->next_transfer_id                         = prng64(&owner->prng_state, owner->udpard_tx.local_uid);
         for (size_t i = 0; i < UDPARD_IFACE_COUNT_MAX; i++) {
             if ((owner->iface_bitmap & (1U << i)) != 0) {
@@ -310,7 +307,11 @@ static cy_subject_writer_t* v_subject_writer(cy_t* const cy, const uint32_t subj
         }
         owner->stats.subject_writer_count++;
     }
-    CY_TRACE(cy, "🔊 n_writers=%zu subject_id=%08x ptr=%p", owner->stats.subject_writer_count, subject_id, (void*)self);
+    CY_TRACE(owner->base.cy,
+             "🔊 n_writers=%zu subject_id=%08x ptr=%p",
+             owner->stats.subject_writer_count,
+             subject_id,
+             (void*)self);
     return (cy_subject_writer_t*)self;
 }
 
@@ -319,7 +320,7 @@ static cy_subject_writer_t* v_subject_writer(cy_t* const cy, const uint32_t subj
 struct subject_reader_t
 {
     cy_subject_reader_t base;
-    cy_t*               cy;
+    cy_udp_posix_t*     owner;
 
     udpard_rx_port_t port;
     udp_wrapper_t    sock[CY_UDP_POSIX_IFACE_COUNT_MAX];
@@ -341,25 +342,37 @@ typedef struct
     udpard_prio_t     priority;
 } p2p_ctx_t;
 
-static void v_on_msg(udpard_rx_t* const rx, udpard_rx_port_t* const port, const udpard_rx_transfer_t tr)
+static cy_p2p_context_t box_p2p_ctx(const udpard_prio_t     priority,
+                                    const udpard_udpip_ep_t endpoints[UDPARD_IFACE_COUNT_MAX])
 {
-    cy_udp_posix_t* const   owner       = rx->user;
-    subject_reader_t* const self        = port->user;
-    cy_p2p_context_t        p2p_context = { { 0 } };
+    cy_p2p_context_t p2p_context = { { 0 } };
     {
-        p2p_ctx_t inner = { .priority = tr.priority };
+        p2p_ctx_t inner = { .priority = priority };
         for (size_t i = 0; i < UDPARD_IFACE_COUNT_MAX; i++) {
-            inner.endpoints[i] = tr.remote.endpoints[i];
+            inner.endpoints[i] = endpoints[i];
         }
         static_assert(sizeof(inner) <= sizeof(p2p_context), "");
         memcpy(&p2p_context, &inner, sizeof(inner));
     }
-    const cy_message_ts_t msg = { .timestamp = tr.timestamp,
-                                  .content   = make_message(owner, tr.payload_size_stored, tr.payload) };
+    return p2p_context;
+}
+
+/// We use the same handler for both subject messages and P2P messages, since they both use the same ingestion callback.
+/// The difference here is that P2P messages have no associated reader instance.
+static void v_on_msg(udpard_rx_t* const rx, udpard_rx_port_t* const port, const udpard_rx_transfer_t tr)
+{
+    cy_udp_posix_t* const owner = rx->user;
+    const cy_message_ts_t msg   = { .timestamp = tr.timestamp,
+                                    .content   = make_message(owner, tr.payload_size_stored, tr.payload) };
     if (msg.content != NULL) {
-        cy_on_message(self->cy, p2p_context, tr.remote.uid, &self->base, msg);
+        cy_on_message(&owner->base,
+                      box_p2p_ctx(tr.priority, tr.remote.endpoints),
+                      tr.remote.uid,
+                      (cy_subject_reader_t*)port->user, // NULL for P2P
+                      msg);
     } else {
         udpard_fragment_free_all(tr.payload, udpard_make_deleter(owner->mem));
+        owner->stats.message_loss_count++;
     }
 }
 
@@ -380,7 +393,7 @@ static void v_on_msg_stateless(udpard_rx_t* const rx, udpard_rx_port_t* const po
         self->history[0] = msg_fingerprint;
         v_on_msg(rx, port, tr);
     } else {
-        CY_TRACE(self->cy,
+        CY_TRACE(owner->base.cy,
                  "🍒️ S%08llx #%016llx N%016llx 👆%016llx duplicate dropped",
                  (unsigned long long)self->base.subject_id,
                  (unsigned long long)tr.transfer_id,
@@ -393,7 +406,7 @@ static void v_on_msg_stateless(udpard_rx_t* const rx, udpard_rx_port_t* const po
 static void v_subject_reader_destroy(cy_subject_reader_t* const base)
 {
     subject_reader_t* const self  = (subject_reader_t*)base;
-    cy_udp_posix_t* const   owner = (cy_udp_posix_t*)cy_platform(self->cy);
+    cy_udp_posix_t* const   owner = self->owner;
     assert(self->port.user == self);
 
     // Delist the reader first so that no future polling cycle may observe a half-destroyed instance.
@@ -420,23 +433,23 @@ static void v_subject_reader_destroy(cy_subject_reader_t* const base)
     }
 
     // Free the memory and update the stats.
-    CY_TRACE(self->cy, "🔕 n_readers=%zu ptr=%p", owner->stats.subject_reader_count, (void*)self);
+    CY_TRACE(owner->base.cy, "🔕 n_readers=%zu ptr=%p", owner->stats.subject_reader_count, (void*)self);
     mem_free(owner, sizeof(subject_reader_t), self);
     assert(owner->stats.subject_reader_count > 0);
     owner->stats.subject_reader_count--;
 }
 
-static cy_subject_reader_t* v_subject_reader(cy_t* const cy, const uint32_t subject_id, const size_t extent)
+static cy_subject_reader_t* v_subject_reader(cy_platform_t* const base, const uint32_t subject_id, const size_t extent)
 {
     assert(subject_id <= UDPARD_IPv4_SUBJECT_ID_MAX);
-    cy_udp_posix_t* const owner = (cy_udp_posix_t*)cy_platform(cy);
+    cy_udp_posix_t* const owner = (cy_udp_posix_t*)base;
     assert(subject_id <= (CY_PINNED_SUBJECT_ID_MAX + 1 + owner->base.subject_id_modulus));
     subject_reader_t* self = mem_alloc_zero(owner, sizeof(subject_reader_t));
     if (self != NULL) {
         static const cy_subject_reader_vtable_t reader_vtable = { .destroy = v_subject_reader_destroy };
         self->base.subject_id                                 = subject_id;
         self->base.vtable                                     = &reader_vtable;
-        self->cy                                              = cy;
+        self->owner                                           = owner;
 
         // We special-case the heartbeat topic to have STATELESS reassembly strategy to conserve CPU and RAM.
         // It is useful for the network stack because the heartbeat topic is a bottleneck to be aware of -- every
@@ -493,7 +506,11 @@ static cy_subject_reader_t* v_subject_reader(cy_t* const cy, const uint32_t subj
         assert((owner->reader_head != NULL) == (owner->reader_tail != NULL));
     }
 reject:
-    CY_TRACE(cy, "🔔 n_readers=%zu subject_id=%08x ptr=%p", owner->stats.subject_reader_count, subject_id, (void*)self);
+    CY_TRACE(owner->base.cy,
+             "🔔 n_readers=%zu subject_id=%08x ptr=%p",
+             owner->stats.subject_reader_count,
+             subject_id,
+             (void*)self);
     return (cy_subject_reader_t*)self;
 }
 
@@ -522,13 +539,13 @@ static uint64_t v_random(cy_platform_t* const base)
 }
 
 /// Invoked by Cy when the application desires to respond to a message received earlier.
-static cy_err_t v_p2p(cy_t* const                   cy,
+static cy_err_t v_p2p(cy_platform_t* const          base,
                       const cy_p2p_context_t* const p2p_context,
                       const cy_us_t                 deadline,
                       const uint64_t                remote_id,
                       const cy_bytes_t              message)
 {
-    cy_udp_posix_t* const owner = (cy_udp_posix_t*)cy_platform(cy);
+    cy_udp_posix_t* const owner = (cy_udp_posix_t*)base;
 
     // Unbox the P2P context.
     p2p_ctx_t inner;
@@ -555,7 +572,7 @@ static cy_err_t v_p2p(cy_t* const                   cy,
                                        NULL);
 
     // Report the result.
-    CY_TRACE(cy, "💬 N%016llx res=%u", (unsigned long long)remote.uid, ok);
+    CY_TRACE(owner->base.cy, "💬 N%016llx res=%u", (unsigned long long)remote.uid, ok);
     if (ok) {
         return CY_OK;
     }
@@ -568,24 +585,25 @@ static cy_err_t v_p2p(cy_t* const                   cy,
     return CY_ERR_ARGUMENT;
 }
 
-static void v_p2p_extent(cy_t* const cy, const size_t extent)
+static void v_p2p_extent(cy_platform_t* const base, const size_t extent)
 {
-    cy_udp_posix_t* const owner = (cy_udp_posix_t*)cy_platform(cy);
+    cy_udp_posix_t* const owner = (cy_udp_posix_t*)base;
     // In this transport, the P2P extent is trivial to change -- just update a variable; no dependent states to update.
     // We are aware that changing the extent may sometimes, under very specific circumstances involving out-of-order
     // frame arrival, cause some in-progress transfers to be lost, but it's exceedingly unlikely and we normally use
     // reliable delivery for P2P. To minimize the impact, we liberally increase the size at every update.
     if (extent > owner->p2p_port.extent) {
         owner->p2p_port.extent = extent * 2; // increase to minimize disturbance
-        CY_TRACE(cy, "📏 P2P response extent increased to %zu bytes", cy->p2p_port.extent);
+        CY_TRACE(owner->base.cy, "📏 P2P response extent increased to %zu bytes", cy->p2p_port.extent);
     }
 }
 
-static void v_on_async_error(cy_t* const cy, cy_topic_t* const topic, const uint16_t line_number)
+static void v_on_async_error(cy_platform_t* const base, cy_topic_t* const topic, const uint16_t line_number)
 {
     (void)topic;
-    cy_udp_posix_t* const owner = (cy_udp_posix_t*)cy_platform(cy);
-    CY_TRACE(cy, "⚠️ Error at cy.c:%u topic='%s'", line_number, topic != NULL ? cy_topic_name(topic).str : "");
+    cy_udp_posix_t* const owner = (cy_udp_posix_t*)base;
+    CY_TRACE(
+      owner->base.cy, "⚠️ Error at cy.c:%u topic='%s'", line_number, topic != NULL ? cy_topic_name(topic).str : "");
     // Find either a free slot or a slot with the matching line number.
     struct cy_udp_posix_stats_cy_async_err_t* slot = NULL;
     for (size_t i = 0; i < CY_UDP_POSIX_ASYNC_ERROR_SLOTS; i++) {
@@ -632,8 +650,8 @@ static void read_socket(cy_udp_posix_t* const   self,
                                  .data = self->mem.vtable->alloc(self->mem.context, CY_UDP_SOCKET_READ_BUFFER_SIZE) };
     if (NULL == dgram.data) { // ReSharper disable once CppRedundantDereferencingAndTakingAddress
         self->stats.mem.oom_count++;
-        self->stats.rx.error_count[iface_index]++;
-        self->stats.rx.last_error_at = ts;
+        self->stats.sock_rx.error_count[iface_index]++;
+        self->stats.sock_rx.last_error_at = ts;
         return;
     }
 
@@ -644,8 +662,8 @@ static void read_socket(cy_udp_posix_t* const   self,
         // We end up here if the socket was closed while processing another datagram.
         // This happens if a subscriber chose to unsubscribe dynamically or caused the node-ID to be changed.
         self->mem.vtable->base.free(self->mem.context, CY_UDP_SOCKET_READ_BUFFER_SIZE, dgram.data);
-        self->stats.rx.error_count[iface_index]++;
-        self->stats.rx.last_error_at = ts;
+        self->stats.sock_rx.error_count[iface_index]++;
+        self->stats.sock_rx.last_error_at = ts;
         return;
     }
     if (rx_result == 0) { // Nothing to read OR dgram dropped by filters.
@@ -666,7 +684,7 @@ static void read_socket(cy_udp_posix_t* const   self,
     }
 
     // Pass the data buffer into LibUDPard then into Cy for further processing. It takes ownership of the buffer.
-    assert(!reader->port.is_p2p);
+    assert((reader == NULL) || !reader->port.is_p2p);
     const bool pushok = udpard_rx_port_push(&self->udpard_rx,
                                             (reader != NULL) ? &reader->port : &self->p2p_port,
                                             ts,
@@ -745,9 +763,9 @@ static cy_err_t spin_once_until(cy_udp_posix_t* const self, const cy_us_t deadli
     return res;
 }
 
-static cy_err_t v_spin(cy_t* const cy, cy_us_t deadline)
+static cy_err_t v_spin(cy_platform_t* const base, const cy_us_t deadline)
 {
-    cy_udp_posix_t* const self = (cy_udp_posix_t*)cy_platform(cy);
+    cy_udp_posix_t* const self = (cy_udp_posix_t*)base;
     cy_err_t              res  = CY_OK;
     cy_us_t               now  = 0;
     while (res == CY_OK) {
@@ -772,27 +790,7 @@ static const cy_platform_vtable_t platform_vtable = { .now            = v_now,
                                                       .on_async_error = v_on_async_error,
                                                       .spin           = v_spin };
 
-// ----------------------------------------  END OF PLATFORM INTERFACE  ----------------------------------------
-
-cy_us_t cy_udp_posix_now(void)
-{
-    struct timespec ts;
-    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) { // NOLINT(*-include-cleaner)
-        abort();
-    }
-    return (ts.tv_sec * 1000000) + (ts.tv_nsec / 1000);
-}
-
-static void v_on_p2p_msg(udpard_rx_t* const rx, udpard_rx_port_t* const port, const udpard_rx_transfer_t tr)
-{
-    cy_udp_posix_t* const cy = rx->user;
-    assert((cy != NULL) && (port == &cy->p2p_port));
-    (void)port;
-    const cy_message_ts_t msg = { .timestamp = tr.timestamp,
-                                  .content   = make_message(cy, tr.payload_size_stored, tr.payload) };
-    cy_on_message();
-    cy_on_p2p(&cy->base, tr.remote.uid, msg);
-}
+// ----------------------------------------  PUBLIC API  ----------------------------------------
 
 static bool v_tx_eject_p2p(udpard_tx_t* const tx, udpard_tx_ejection_t* const ej, const udpard_udpip_ep_t destination)
 {
@@ -811,8 +809,8 @@ static bool v_tx_eject_p2p(udpard_tx_t* const tx, udpard_tx_ejection_t* const ej
                                          ej->datagram.size,
                                          ej->datagram.data);
     if (res < 0) {
-        self->stats.tx.error_count[ej->iface_index]++;
-        self->stats.tx.last_error_at = ej->now;
+        self->stats.sock_tx.error_count[ej->iface_index]++;
+        self->stats.sock_tx.last_error_at = ej->now;
     }
     return res != 0; // either transmitted successfully or dropped due to error
 }
@@ -825,16 +823,18 @@ static bool v_tx_eject_subject(udpard_tx_t* const tx, udpard_tx_ejection_t* cons
 
 static const udpard_tx_vtable_t tx_vtable = { .eject_subject = v_tx_eject_subject, .eject_p2p = v_tx_eject_p2p };
 
-cy_err_t cy_udp_posix_new(cy_udp_posix_t* const cy,
-                          const uint64_t        uid,
-                          const wkv_str_t       home,
-                          const wkv_str_t       namespace_,
-                          const uint32_t        local_iface_address[CY_UDP_POSIX_IFACE_COUNT_MAX],
-                          const size_t          tx_queue_capacity)
+cy_platform_t* cy_udp_posix_new(const uint64_t uid,
+                                const uint32_t local_iface_address[CY_UDP_POSIX_IFACE_COUNT_MAX],
+                                const size_t   tx_queue_capacity)
 {
-    assert(cy != NULL);
-    memset(cy, 0, sizeof(*cy));
-    cy->n_topics = 0;
+    cy_udp_posix_t* const self = calloc(1, sizeof(cy_udp_posix_t));
+    if (self == NULL) {
+        return NULL;
+    }
+    self->base.cy                 = NULL;
+    self->base.subject_id_modulus = CY_SUBJECT_ID_MODULUS_23bit; ///< Maximum for IPv4, limited by MAC layer multicast
+    self->base.vtable             = &platform_vtable;
+
     // We could use block pool allocators here if preferred.
     // Also, in the spirit of the PX4 UAVCAN driver, we could use a high-watermark allocator, where we graft memory
     // blocks from an ordinary heap (doesn't have to be constant-complexity even), and return them into
@@ -843,85 +843,95 @@ cy_err_t cy_udp_posix_new(cy_udp_posix_t* const cy,
     // Libudpard has a natural cap for the maximum memory usage based on the number of interfaces and queue sizes,
     // which helps avoiding heap exhaustion in this scenario; also, if exhaustion does occur, we can shrink the
     // least used pools on-the-fly.
-    cy->mem                     = (udpard_mem_t){ .vtable = &mem_vtable, .context = cy };
-    cy->iface_bitmap            = 0;
-    cy->rx_sock_err_handler     = default_rx_sock_err_handler;
-    cy->tx_sock_err_handler     = default_tx_sock_err_handler;
-    cy->mem_allocated_fragments = 0;
-    cy->mem_oom_count           = 0;
+    self->mem = (udpard_mem_t){ .vtable = &mem_vtable, .context = self };
 
     // This PRNG state seed is only valid if a true RTC is available. Otherwise, use other sources of entropy.
     // Refer to cy_platform.h docs for some hints on how to make it work on an MCU without a TRNG nor RTC.
-    cy->prng_state = (uint64_t)time(NULL);
+    self->prng_state = (uint64_t)time(NULL);
 
     // Set up the TX and RX pipelines.
-    const udpard_rx_mem_resources_t rx_mem = { .fragment = cy->mem, .session = cy->mem };
-    udpard_tx_mem_resources_t       tx_mem = { .transfer = cy->mem };
+    self->iface_bitmap               = 0;
+    udpard_tx_mem_resources_t tx_mem = { .transfer = self->mem };
     for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
-        cy->sock[i] = udp_wrapper_new();
+        self->sock[i] = udp_wrapper_new();
         if (is_valid_ip(local_iface_address[i])) {
-            cy->local_ip[i] = local_iface_address[i];
-            cy->iface_bitmap |= 1U << i;
+            self->local_ip[i] = local_iface_address[i];
+            self->iface_bitmap |= 1U << i;
         } else {
-            cy->local_ip[i] = 0;
+            self->local_ip[i] = 0;
         }
-        tx_mem.payload[i] = cy->mem;
+        tx_mem.payload[i] = self->mem;
     }
-    if (cy->iface_bitmap == 0) {
-        return CY_ERR_ARGUMENT;
+    if (self->iface_bitmap == 0) { // No interfaces specified.
+        free(self);
+        return NULL;
     }
-    if (!udpard_tx_new(&cy->udpard_tx, uid, prng64(&cy->prng_state, uid), tx_queue_capacity, tx_mem, &tx_vtable)) {
-        return CY_ERR_ARGUMENT; // Cleanup not required -- no resources allocated yet.
+    if (!udpard_tx_new(&self->udpard_tx, uid, prng64(&self->prng_state, uid), tx_queue_capacity, tx_mem, &tx_vtable)) {
+        free(self);
+        return NULL;
     }
-    udpard_rx_new(&cy->udpard_rx, &cy->udpard_tx); // infallible
-    cy->udpard_tx.user = cy;
-    cy->udpard_rx.user = cy;
+    udpard_rx_new(&self->udpard_rx, &self->udpard_tx); // infallible
+    self->udpard_tx.user = self;
+    self->udpard_rx.user = self;
 
     // Initialize the udpard P2P RX port.
     // We start with an arbitrarily chosen sensible initial extent, which will be increased later as needed.
     const size_t                         initial_extent = UDPARD_MTU_DEFAULT;
-    static const udpard_rx_port_vtable_t rx_p2p_vtable  = { .on_message = v_on_p2p_msg, .on_collision = NULL };
-    if (!udpard_rx_port_new(&cy->p2p_port, uid, initial_extent, udpard_rx_unordered, 0, rx_mem, &rx_p2p_vtable)) {
-        return CY_ERR_ARGUMENT; // Cleanup not required -- no resources allocated yet.
+    static const udpard_rx_port_vtable_t rx_p2p_vtable  = { .on_message = v_on_msg };
+    if (!udpard_rx_port_new(&self->p2p_port, initial_extent, make_udpard_rx_mem_resources(self), &rx_p2p_vtable)) {
+        free(self);
+        return NULL;
     }
 
     // Initialize the sockets.
     cy_err_t res = CY_OK;
     for (uint_fast8_t i = 0; (i < CY_UDP_POSIX_IFACE_COUNT_MAX) && (res == CY_OK); i++) {
-        if ((cy->iface_bitmap & (1U << i)) != 0) {
-            res = err_from_udp_wrapper(udp_wrapper_open_unicast(&cy->sock[i], cy->local_ip[i], &cy->local_tx_port[i]));
+        if ((self->iface_bitmap & (1U << i)) != 0) {
+            res = err_from_udp_wrapper(udp_wrapper_open_unicast(&self->sock[i], //
+                                                                self->local_ip[i],
+                                                                &self->local_tx_port[i]));
         }
     }
 
     // Cleanup on error.
     if (res != CY_OK) {
-        udpard_rx_port_free(&cy->udpard_rx, &cy->p2p_port);
-        udpard_tx_free(&cy->udpard_tx);
+        udpard_rx_port_free(&self->udpard_rx, &self->p2p_port);
+        udpard_tx_free(&self->udpard_tx);
         for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
-            udp_wrapper_close(&cy->sock[i]); // The handle may be invalid, but we don't care.
+            udp_wrapper_close(&self->sock[i]); // The handle may be invalid, but we don't care.
         }
+        free(self);
+        return NULL;
     }
-    return res;
+
+    // Finish.
+    self->stats       = (cy_udp_posix_stats_t){ 0 };
+    self->reader_head = NULL;
+    self->reader_tail = NULL;
+    return &self->base;
 }
 
-cy_err_t cy_udp_posix_new_simple(cy_udp_posix_t* const cy)
+cy_platform_t* cy_udp_posix_new_auto(void)
 {
     const uint64_t uid = eui64_semirandom();
     if (uid == 0) {
-        return CY_ERR_MEDIA;
+        return NULL;
     }
     uint32_t      ifaces[CY_UDP_POSIX_IFACE_COUNT_MAX] = { 0 };
     const int16_t n_if = udp_wrapper_get_default_ifaces(CY_UDP_POSIX_IFACE_COUNT_MAX, ifaces);
     if (n_if < 0) {
-        return err_from_udp_wrapper(n_if);
+        return NULL; // return err_from_udp_wrapper(n_if);
     }
     assert(n_if > 0);
-    const cy_err_t out = cy_udp_posix_new(cy, uid, wkv_key(""), wkv_key(""), ifaces, 50000);
+    cy_udp_posix_t* const self = (cy_udp_posix_t*)cy_udp_posix_new(uid, ifaces, 50000);
+    if (self == NULL) {
+        return NULL;
+    }
 #if CY_CONFIG_TRACE
-    CY_TRACE(&cy->base, "🏷 Semirandom EUI-64 %016llx", (unsigned long long)uid);
+    CY_TRACE(self->base.cy, "🏷 Semirandom EUI-64 %016llx", (unsigned long long)uid);
     for (int16_t i = 0; i < n_if; i++) {
         const uint32_t f = ifaces[i];
-        CY_TRACE(&cy->base,
+        CY_TRACE(self->base.cy,
                  "🔌 Autodetected default iface #%d of %d: %u.%u.%u.%u",
                  i,
                  n_if,
@@ -931,17 +941,57 @@ cy_err_t cy_udp_posix_new_simple(cy_udp_posix_t* const cy)
                  f & 0xFFU);
     }
 #endif
-    return out;
+    return (cy_platform_t*)self;
 }
 
-void cy_udp_posix_destroy(cy_udp_posix_t* const cy)
+cy_err_t cy_udp_posix_set_default_names(const cy_platform_t* base)
 {
-    if (cy != NULL) {
-        assert(cy->n_topics == 0);
-        udpard_rx_port_free(&cy->udpard_rx, &cy->p2p_port);
-        udpard_tx_free(&cy->udpard_tx);
-        for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
-            udp_wrapper_close(&cy->sock[i]); // The handle may be invalid, but we don't care.
+    cy_udp_posix_t* const self     = (cy_udp_posix_t*)base;
+    char                  home[17] = { 0 };
+    (void)snprintf(home, sizeof(home), "%016llx", (unsigned long long)self->udpard_tx.local_uid);
+    assert(home[16] == 0);
+    cy_err_t err = cy_home_set(base->cy, wkv_key(home));
+    CY_TRACE(base->cy, "🏠 Home set to '%s' res=%d", home, err);
+    if (err == CY_OK) {
+        const char* const namespace = getenv("CYPHAL_NAMESPACE");
+        if (namespace != NULL) {
+            err = cy_namespace_set(base->cy, wkv_key(namespace));
+            CY_TRACE(base->cy, "🌌 Namespace set to '%s' res=%d", namespace, err);
         }
     }
+    return err;
+}
+
+cy_udp_posix_stats_t cy_udp_posix_stats(const cy_platform_t* base)
+{
+    if (base != NULL) {
+        const cy_udp_posix_t* const self = (const cy_udp_posix_t*)base;
+        return self->stats;
+    }
+    return (cy_udp_posix_stats_t){ 0 };
+}
+
+void cy_udp_posix_destroy(cy_platform_t* const base)
+{
+    if (base != NULL) {
+        cy_udp_posix_t* const self = (cy_udp_posix_t*)base;
+        assert(self->stats.subject_reader_count == 0);
+        assert(self->stats.subject_writer_count == 0);
+        assert(self->base.cy == NULL); // must be unlinked beforehand
+        udpard_rx_port_free(&self->udpard_rx, &self->p2p_port);
+        udpard_tx_free(&self->udpard_tx);
+        for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
+            udp_wrapper_close(&self->sock[i]); // The handle may be invalid, but we don't care.
+        }
+        free(base);
+    }
+}
+
+cy_us_t cy_udp_posix_now(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) { // NOLINT(*-include-cleaner)
+        abort();
+    }
+    return (ts.tv_sec * 1000000) + (ts.tv_nsec / 1000);
 }

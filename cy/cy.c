@@ -2459,7 +2459,7 @@ static cy_err_t do_respond(cy_breadcrumb_t* const breadcrumb, const cy_us_t dead
 
     // Send the P2P response.
     return breadcrumb->cy->platform->vtable->p2p(
-      breadcrumb->cy, &breadcrumb->p2p_context, deadline, breadcrumb->remote_id, headed_message);
+      breadcrumb->cy->platform, &breadcrumb->p2p_context, deadline, breadcrumb->remote_id, headed_message);
 }
 
 cy_err_t cy_respond(cy_breadcrumb_t* const breadcrumb, const cy_us_t deadline, const cy_bytes_t message)
@@ -2491,7 +2491,7 @@ static cy_us_t olga_now(olga_t* const sched) { return cy_now((cy_t*)sched->user)
 
 cy_t* cy_new(cy_platform_t* const platform)
 {
-    if ((platform == NULL) || (platform->vtable == NULL) ||
+    if ((platform == NULL) || (platform->vtable == NULL) || (platform->cy != NULL) ||
         (platform->subject_id_modulus < CY_SUBJECT_ID_MODULUS_17bit) || !is_prime_u32(platform->subject_id_modulus)) {
         return NULL;
     }
@@ -2500,6 +2500,7 @@ cy_t* cy_new(cy_platform_t* const platform)
         return NULL;
     }
     memset(cy, 0, sizeof(*cy));
+    platform->cy = cy;
     cy->platform = platform;
     olga_init(&cy->olga, cy, olga_now);
     {
@@ -2541,7 +2542,7 @@ cy_t* cy_new(cy_platform_t* const platform)
     cy->response_futures_by_tag = NULL;
 
     cy->p2p_extent = HEADER_MAX_BYTES + 1024U; // Arbitrary initial size; will be refined when publishers are created.
-    cy->platform->vtable->p2p_extent(cy, cy->p2p_extent);
+    cy->platform->vtable->p2p_extent(platform, cy->p2p_extent);
 
     cy->ts_started             = platform->vtable->now(platform);
     cy->implicit_topic_timeout = IMPLICIT_TOPIC_DEFAULT_TIMEOUT_us;
@@ -2575,7 +2576,11 @@ cy_t* cy_new(cy_platform_t* const platform)
     return cy;
 }
 
-void cy_destroy(cy_t* const cy) { (void)cy; }
+void cy_destroy(cy_t* const cy)
+{
+    cy->platform->cy = NULL; // Unlink the platform in case it needs to be reused.
+    // TODO implement
+}
 
 wkv_str_t cy_home(const cy_t* const cy) { return (cy != NULL) ? cy->home : str_invalid; }
 wkv_str_t cy_namespace(const cy_t* const cy) { return (cy != NULL) ? cy->ns : str_invalid; }
@@ -2650,7 +2655,7 @@ cy_err_t cy_spin_until(cy_t* const cy, const cy_us_t deadline)
     cy_err_t err = CY_OK;
     do {
         const cy_us_t wait_deadline = min_i64(deadline, min_i64(cy->heartbeat_next_urgent, cy->heartbeat_next));
-        err                         = cy->platform->vtable->spin(cy, wait_deadline);
+        err                         = cy->platform->vtable->spin(cy->platform, wait_deadline);
         if (err == CY_OK) {
             err = poll(cy, &now);
         }
@@ -2801,7 +2806,7 @@ static void send_response_ack(cy_t* const            cy,
     }
 }
 
-void cy_on_message(cy_t* const                      cy,
+void cy_on_message(cy_platform_t* const             platform,
                    const cy_p2p_context_t           p2p_context,
                    const uint64_t                   remote_id,
                    const cy_subject_reader_t* const subject_reader,

@@ -71,7 +71,6 @@ typedef struct cy_message_vtable_t
 } cy_message_vtable_t;
 
 /// A subject writer is used to send messages on the subject specified at the time of its construction.
-/// There is at most one subject writer per subject.
 /// Cy guarantees that there will be at most one subject writer per subject-ID.
 typedef struct cy_subject_writer_t
 {
@@ -105,6 +104,10 @@ typedef struct cy_subject_reader_vtable_t
 /// (POSIX, baremetal MCU, RTOS, etc).
 struct cy_platform_t
 {
+    /// The instance of Cy currently tied to this platform instance.
+    /// It is assigned automatically in cy_new() and should not be altered by any other code.
+    cy_t* cy;
+
     /// The subject-ID modulus depends on the width of the subject-ID field in the transport protocol.
     /// All nodes in the network shall share the same value.
     /// If heterogeneously redundant transports are used, then the smallest modulus shall be used.
@@ -154,18 +157,18 @@ typedef struct cy_platform_vtable_t
 
     /// The destruction is managed through their own vtables.
     /// The factories return NULL on OOM.
-    cy_subject_writer_t* (*subject_writer)(cy_t*, uint32_t subject_id);
-    cy_subject_reader_t* (*subject_reader)(cy_t*, uint32_t subject_id, size_t extent);
+    cy_subject_writer_t* (*subject_writer)(cy_platform_t*, uint32_t subject_id);
+    cy_subject_reader_t* (*subject_reader)(cy_platform_t*, uint32_t subject_id, size_t extent);
 
     /// Instructs the underlying transport layer to send a peer-to-peer transfer to the specified remote node.
     /// The message lifetime ends upon return from this function.
     /// If the transport layer needs any additional metadata to send a P2P message (e.g., destination address/port),
     /// it must be stored inside the responder context prior to cy_on_message() invocation.
-    cy_err_t (*p2p)(cy_t*, const cy_p2p_context_t*, cy_us_t deadline, uint64_t remote_id, cy_bytes_t message);
+    cy_err_t (*p2p)(cy_platform_t*, const cy_p2p_context_t*, cy_us_t deadline, uint64_t remote_id, cy_bytes_t message);
 
     /// Sets/updates the maximum extent of incoming P2P transfers. Messages larger than this may be truncated.
     /// The initial value prior to the first invocation is transport-defined.
-    void (*p2p_extent)(cy_t*, size_t);
+    void (*p2p_extent)(cy_platform_t*, size_t);
 
     /// This handler is used to report asynchronous errors occurring in Cy. In particular, it is used for topic
     /// resubscription errors occurring in response to consensus updates, and also in cases where Cy is unable to
@@ -177,20 +180,17 @@ typedef struct cy_platform_vtable_t
     ///
     /// Since Cy is a single-file library, the line number uniquely identifies the error site.
     /// The topic pointer is NULL if the error prevented the creation of a new topic instance.
-    void (*on_async_error)(cy_t*, cy_topic_t*, uint16_t line_number);
+    void (*on_async_error)(cy_platform_t*, cy_topic_t*, uint16_t line_number);
 
     /// Runs the event loop until the specified deadline, or until the first error. Early exit is allowed.
     /// If the deadline is in the past, update the event loop once without blocking and return.
     /// The cy_on_message() callback will be invoked from this function.
-    cy_err_t (*spin)(cy_t*, cy_us_t deadline);
+    cy_err_t (*spin)(cy_platform_t*, cy_us_t deadline);
 } cy_platform_vtable_t;
-
-/// Returns the platform instance associated with the given Cy instance.
-cy_platform_t* cy_platform(cy_t* const cy);
 
 /// New message received on a topic or P2P. The data ownership is taken by this function.
 /// The subject reader is NULL for P2P messages.
-void cy_on_message(cy_t* const                      cy,
+void cy_on_message(cy_platform_t* const             platform,
                    const cy_p2p_context_t           p2p_context,
                    const uint64_t                   remote_id,
                    const cy_subject_reader_t* const subject_reader,
