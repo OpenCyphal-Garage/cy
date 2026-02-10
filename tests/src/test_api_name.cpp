@@ -88,12 +88,15 @@ void test_name_is_verbatim_simple()
 
 void test_name_is_verbatim_patterns()
 {
-    // '?' matches single segment, '*' matches zero or more segments.
-    TEST_ASSERT_FALSE(cy_name_is_verbatim(wkv_key("foo/?/bar")));
-    TEST_ASSERT_FALSE(cy_name_is_verbatim(wkv_key("*/bar")));
+    // '*' matches a single segment, '>' matches zero or more trailing segments.
+    TEST_ASSERT_FALSE(cy_name_is_verbatim(wkv_key("foo/*/bar")));
+    TEST_ASSERT_FALSE(cy_name_is_verbatim(wkv_key("foo/>")));
     TEST_ASSERT_FALSE(cy_name_is_verbatim(wkv_key("foo/*")));
-    TEST_ASSERT_FALSE(cy_name_is_verbatim(wkv_key("?")));
     TEST_ASSERT_FALSE(cy_name_is_verbatim(wkv_key("*")));
+    TEST_ASSERT_FALSE(cy_name_is_verbatim(wkv_key(">")));
+    // '?' is a regular character and does not denote substitution.
+    TEST_ASSERT_TRUE(cy_name_is_verbatim(wkv_key("foo/?/bar")));
+    TEST_ASSERT_TRUE(cy_name_is_verbatim(wkv_key("?")));
 }
 
 void test_name_is_verbatim_wildcards_inside_segment()
@@ -287,7 +290,8 @@ void test_name_resolve_relative_with_namespace()
 {
     // name="foo/bar" namespace="ns1" home="me" => "ns1/foo/bar"
     std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
-    const wkv_str_t result = cy_name_resolve(wkv_key("foo/bar"), wkv_key("ns1"), wkv_key("me"), buf.size(), buf.data());
+    const wkv_str_t                         result =
+      cy_name_resolve_raw(wkv_key("foo/bar"), wkv_key("ns1"), wkv_key("me"), buf.size(), buf.data());
     TEST_ASSERT_EQUAL_size_t(11, result.len);
     TEST_ASSERT_EQUAL_STRING_LEN("ns1/foo/bar", result.str, result.len);
 }
@@ -297,7 +301,7 @@ void test_name_resolve_homeful_name()
     // name="~//foo/bar" namespace="ns1" home="me" => "me/foo/bar"
     std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
     const wkv_str_t                         result =
-      cy_name_resolve(wkv_key("~//foo/bar"), wkv_key("ns1"), wkv_key("me"), buf.size(), buf.data());
+      cy_name_resolve_raw(wkv_key("~//foo/bar"), wkv_key("ns1"), wkv_key("me"), buf.size(), buf.data());
     TEST_ASSERT_EQUAL_size_t(10, result.len);
     TEST_ASSERT_EQUAL_STRING_LEN("me/foo/bar", result.str, result.len);
 }
@@ -307,7 +311,7 @@ void test_name_resolve_absolute_name()
     // name="/foo//bar/" namespace="ns1" home="me" => "foo/bar"
     std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
     const wkv_str_t                         result =
-      cy_name_resolve(wkv_key("/foo//bar/"), wkv_key("ns1"), wkv_key("me"), buf.size(), buf.data());
+      cy_name_resolve_raw(wkv_key("/foo//bar/"), wkv_key("ns1"), wkv_key("me"), buf.size(), buf.data());
     TEST_ASSERT_EQUAL_size_t(7, result.len);
     TEST_ASSERT_EQUAL_STRING_LEN("foo/bar", result.str, result.len);
 }
@@ -317,14 +321,14 @@ void test_name_resolve_homeful_namespace()
     // name="foo/bar/" namespace="~//ns1" home="me" => "me/ns1/foo/bar"
     std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
     const wkv_str_t                         result =
-      cy_name_resolve(wkv_key("foo/bar/"), wkv_key("~//ns1"), wkv_key("me"), buf.size(), buf.data());
+      cy_name_resolve_raw(wkv_key("foo/bar/"), wkv_key("~//ns1"), wkv_key("me"), buf.size(), buf.data());
     TEST_ASSERT_EQUAL_size_t(14, result.len);
     TEST_ASSERT_EQUAL_STRING_LEN("me/ns1/foo/bar", result.str, result.len);
 }
 
 void test_name_resolve_null_dest()
 {
-    const wkv_str_t result = cy_name_resolve(wkv_key("foo"), wkv_key("ns"), wkv_key("me"), 100, nullptr);
+    const wkv_str_t result = cy_name_resolve_raw(wkv_key("foo"), wkv_key("ns"), wkv_key("me"), 100, nullptr);
     TEST_ASSERT_EQUAL_size_t(SIZE_MAX, result.len);
     TEST_ASSERT_NULL(result.str);
 }
@@ -333,7 +337,8 @@ void test_name_resolve_empty_namespace()
 {
     // Relative name with empty namespace should just normalize the name.
     std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
-    const wkv_str_t result = cy_name_resolve(wkv_key("foo/bar"), wkv_key(""), wkv_key("me"), buf.size(), buf.data());
+    const wkv_str_t                         result =
+      cy_name_resolve_raw(wkv_key("foo/bar"), wkv_key(""), wkv_key("me"), buf.size(), buf.data());
     TEST_ASSERT_EQUAL_size_t(7, result.len);
     TEST_ASSERT_EQUAL_STRING_LEN("foo/bar", result.str, result.len);
 }
@@ -342,7 +347,7 @@ void test_name_resolve_empty_name_with_namespace()
 {
     // Empty name with namespace should just give the namespace.
     std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
-    const wkv_str_t result = cy_name_resolve(wkv_key(""), wkv_key("ns"), wkv_key("me"), buf.size(), buf.data());
+    const wkv_str_t result = cy_name_resolve_raw(wkv_key(""), wkv_key("ns"), wkv_key("me"), buf.size(), buf.data());
     // Empty name is not absolute and not homeful, so namespace is joined with empty name.
     TEST_ASSERT_EQUAL_size_t(2, result.len);
     TEST_ASSERT_EQUAL_STRING_LEN("ns", result.str, result.len);
@@ -351,7 +356,8 @@ void test_name_resolve_empty_name_with_namespace()
 void test_name_resolve_buffer_too_small()
 {
     std::array<char, 3> buf{};
-    const wkv_str_t result = cy_name_resolve(wkv_key("foo/bar"), wkv_key("ns"), wkv_key("me"), buf.size(), buf.data());
+    const wkv_str_t     result =
+      cy_name_resolve_raw(wkv_key("foo/bar"), wkv_key("ns"), wkv_key("me"), buf.size(), buf.data());
     TEST_ASSERT_EQUAL_size_t(SIZE_MAX, result.len);
     TEST_ASSERT_NULL(result.str);
 }
@@ -361,7 +367,7 @@ void test_name_resolve_homeful_namespace_expand_fails()
     // Homeful namespace expansion exceeds buffer; should fail.
     std::array<char, 5> buf{};
     const wkv_str_t     result =
-      cy_name_resolve(wkv_key("x"), wkv_key("~/longns"), wkv_key("verylonghome"), buf.size(), buf.data());
+      cy_name_resolve_raw(wkv_key("x"), wkv_key("~/longns"), wkv_key("verylonghome"), buf.size(), buf.data());
     TEST_ASSERT_EQUAL_size_t(SIZE_MAX, result.len);
     TEST_ASSERT_NULL(result.str);
 }
@@ -383,22 +389,22 @@ void test_name_resolve_docstring_examples()
     wkv_str_t                               result{};
 
     // name="foo/bar"      namespace="ns1"     home="me"   => "ns1/foo/bar"
-    result = cy_name_resolve(wkv_key("foo/bar"), wkv_key("ns1"), wkv_key("me"), buf.size(), buf.data());
+    result = cy_name_resolve_raw(wkv_key("foo/bar"), wkv_key("ns1"), wkv_key("me"), buf.size(), buf.data());
     TEST_ASSERT_EQUAL_size_t(11, result.len);
     TEST_ASSERT_EQUAL_STRING_LEN("ns1/foo/bar", result.str, result.len);
 
     // name="~//foo/bar"   namespace="ns1"     home="me"   => "me/foo/bar"
-    result = cy_name_resolve(wkv_key("~//foo/bar"), wkv_key("ns1"), wkv_key("me"), buf.size(), buf.data());
+    result = cy_name_resolve_raw(wkv_key("~//foo/bar"), wkv_key("ns1"), wkv_key("me"), buf.size(), buf.data());
     TEST_ASSERT_EQUAL_size_t(10, result.len);
     TEST_ASSERT_EQUAL_STRING_LEN("me/foo/bar", result.str, result.len);
 
     // name="/foo//bar/"   namespace="ns1"     home="me"   => "foo/bar"
-    result = cy_name_resolve(wkv_key("/foo//bar/"), wkv_key("ns1"), wkv_key("me"), buf.size(), buf.data());
+    result = cy_name_resolve_raw(wkv_key("/foo//bar/"), wkv_key("ns1"), wkv_key("me"), buf.size(), buf.data());
     TEST_ASSERT_EQUAL_size_t(7, result.len);
     TEST_ASSERT_EQUAL_STRING_LEN("foo/bar", result.str, result.len);
 
     // name="foo/bar/"     namespace="~//ns1"  home="me"   => "me/ns1/foo/bar"
-    result = cy_name_resolve(wkv_key("foo/bar/"), wkv_key("~//ns1"), wkv_key("me"), buf.size(), buf.data());
+    result = cy_name_resolve_raw(wkv_key("foo/bar/"), wkv_key("~//ns1"), wkv_key("me"), buf.size(), buf.data());
     TEST_ASSERT_EQUAL_size_t(14, result.len);
     TEST_ASSERT_EQUAL_STRING_LEN("me/ns1/foo/bar", result.str, result.len);
 }
@@ -433,7 +439,7 @@ void test_name_resolve_absolute_ignores_namespace_and_home()
 {
     // Absolute names ignore both namespace and home.
     std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
-    const wkv_str_t                         result = cy_name_resolve(
+    const wkv_str_t                         result = cy_name_resolve_raw(
       wkv_key("/absolute/path"), wkv_key("ignored_ns"), wkv_key("ignored_home"), buf.size(), buf.data());
     TEST_ASSERT_EQUAL_size_t(13, result.len);
     TEST_ASSERT_EQUAL_STRING_LEN("absolute/path", result.str, result.len);
@@ -485,8 +491,6 @@ void test_name_constants()
     TEST_ASSERT_EQUAL_CHAR('/', cy_name_sep);
     TEST_ASSERT_EQUAL_CHAR('~', cy_name_home);
 }
-
-void test_name_namespace_max() { TEST_ASSERT_EQUAL_INT(CY_TOPIC_NAME_MAX - 2, CY_NAMESPACE_NAME_MAX); }
 
 } // namespace
 
@@ -563,7 +567,6 @@ int main()
 
     // Constants and limits
     RUN_TEST(test_name_constants);
-    RUN_TEST(test_name_namespace_max);
 
     return UNITY_END();
 }

@@ -14,116 +14,166 @@ constexpr std::uint8_t HeaderMsgAck        = 2U;
 
 struct arrival_capture_t
 {
-    std::size_t                   count{ 0 };
+    std::size_t                   count{ 0U };
     std::array<std::uint64_t, 16> tags{};
     std::array<unsigned char, 16> first_payload_byte{};
 };
 
-struct test_platform_t final : cy_t
+struct test_subject_writer_t
 {
-    cy_vtable_t    vtable{};
-    guarded_heap_t core_heap{};
-    guarded_heap_t message_heap{};
+    cy_subject_writer_t base{};
+};
+
+struct test_subject_reader_t
+{
+    cy_subject_reader_t base{};
+    std::size_t         extent{ 0U };
+};
+
+struct test_platform_t final
+{
+    cy_platform_t        platform{};
+    cy_platform_vtable_t vtable{};
+    guarded_heap_t       core_heap{};
+    guarded_heap_t       message_heap{};
+
+    cy_t* cy{ nullptr };
 
     cy_us_t       now{ 0 };
     std::uint64_t random_state{ 1U };
 
-    std::size_t                   p2p_count{ 0 };
+    std::size_t                   p2p_count{ 0U };
     std::array<unsigned char, 16> last_p2p{};
-    std::size_t                   p2p_extent{ 0 };
+    std::size_t                   p2p_extent{ 0U };
 
-    std::size_t subscription_error_count{ 0 };
-    cy_err_t    last_subscription_error{ CY_OK };
+    std::size_t   async_error_count{ 0U };
+    std::uint16_t last_async_error_line{ 0U };
 };
 
-test_platform_t* platform_from(cy_t* const cy) { return static_cast<test_platform_t*>(cy); }
-
-const test_platform_t* platform_from_const(const cy_t* const cy) { return static_cast<const test_platform_t*>(cy); }
-
-extern "C" cy_us_t platform_now(const cy_t* const cy) { return platform_from_const(cy)->now; }
-
-extern "C" void* platform_realloc(cy_t* const cy, void* const ptr, const size_t size)
+test_platform_t* platform_from(cy_platform_t* const platform)
 {
-    test_platform_t* const self = platform_from(cy);
-    return guarded_heap_realloc(&self->core_heap, ptr, size);
+    return reinterpret_cast<test_platform_t*>(platform); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
 }
 
-extern "C" std::uint64_t platform_random(cy_t* const cy)
+const test_platform_t* platform_from_const(const cy_platform_t* const platform)
 {
-    test_platform_t* const self = platform_from(cy);
-    self->random_state          = (self->random_state * 6364136223846793005ULL) + 1ULL;
-    return self->random_state;
+    return reinterpret_cast<const test_platform_t*>(platform); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
 }
 
-extern "C" cy_topic_t* platform_new_topic(cy_t* const cy)
+extern "C" cy_subject_writer_t* platform_subject_writer_new(cy_platform_t* const platform,
+                                                            const std::uint32_t  subject_id)
 {
-    test_platform_t* const self = platform_from(cy);
-    return static_cast<cy_topic_t*>(guarded_heap_alloc(&self->core_heap, sizeof(cy_topic_t)));
+    test_platform_t* const self = platform_from(platform);
+    auto* const            writer =
+      static_cast<test_subject_writer_t*>(guarded_heap_alloc(&self->core_heap, sizeof(test_subject_writer_t)));
+    if (writer != nullptr) {
+        writer->base.subject_id = subject_id;
+    }
+    return (writer != nullptr) ? &writer->base : nullptr;
 }
 
-extern "C" cy_err_t platform_publish(cy_topic_t* const topic,
-                                     const cy_us_t     deadline,
-                                     const cy_prio_t   priority,
-                                     const cy_bytes_t  message)
+extern "C" void platform_subject_writer_destroy(cy_platform_t* const platform, cy_subject_writer_t* const writer)
 {
-    (void)topic;
+    test_platform_t* const self = platform_from(platform);
+    guarded_heap_free(&self->core_heap, writer);
+}
+
+extern "C" cy_err_t platform_subject_writer_send(cy_platform_t* const       platform,
+                                                 cy_subject_writer_t* const writer,
+                                                 const cy_us_t              deadline,
+                                                 const cy_prio_t            priority,
+                                                 const cy_bytes_t           message)
+{
+    (void)platform;
+    (void)writer;
     (void)deadline;
     (void)priority;
     (void)message;
     return CY_OK;
 }
 
-extern "C" cy_err_t platform_subscribe(cy_topic_t* const topic, const size_t extent)
+extern "C" cy_subject_reader_t* platform_subject_reader_new(cy_platform_t* const platform,
+                                                            const std::uint32_t  subject_id,
+                                                            const std::size_t    extent)
 {
-    (void)topic;
-    (void)extent;
-    return CY_OK;
-}
-
-extern "C" void platform_unsubscribe(cy_topic_t* const topic) { (void)topic; }
-
-extern "C" void platform_topic_destroy(cy_topic_t* const topic)
-{
-    if (topic != nullptr) {
-        test_platform_t* const self = platform_from(topic->cy);
-        guarded_heap_free(&self->core_heap, topic);
+    test_platform_t* const self = platform_from(platform);
+    auto* const            reader =
+      static_cast<test_subject_reader_t*>(guarded_heap_alloc(&self->core_heap, sizeof(test_subject_reader_t)));
+    if (reader != nullptr) {
+        reader->base.subject_id = subject_id;
+        reader->extent          = extent;
     }
+    return (reader != nullptr) ? &reader->base : nullptr;
 }
 
-extern "C" void platform_p2p_extent(cy_t* const cy, const size_t extent) { platform_from(cy)->p2p_extent = extent; }
+extern "C" void platform_subject_reader_destroy(cy_platform_t* const platform, cy_subject_reader_t* const reader)
+{
+    test_platform_t* const self = platform_from(platform);
+    guarded_heap_free(&self->core_heap, reader);
+}
 
-extern "C" cy_err_t platform_p2p(cy_t* const                   cy,
-                                 const cy_p2p_context_t* const p2p_context,
-                                 const cy_us_t                 deadline,
-                                 const std::uint64_t           remote_id,
-                                 const cy_bytes_t              message)
+extern "C" cy_err_t platform_p2p_send(cy_platform_t* const          platform,
+                                      const cy_p2p_context_t* const p2p_context,
+                                      const cy_us_t                 deadline,
+                                      const std::uint64_t           remote_id,
+                                      const cy_bytes_t              message)
 {
     (void)p2p_context;
     (void)deadline;
     (void)remote_id;
-    test_platform_t* const self = platform_from(cy);
+
+    test_platform_t* const self = platform_from(platform);
     self->p2p_count++;
     self->last_p2p.fill(0U);
 
-    std::size_t copied = 0;
+    std::size_t copied = 0U;
     for (const cy_bytes_t* frag = &message; (frag != nullptr) && (copied < self->last_p2p.size()); frag = frag->next) {
         if ((frag->size == 0U) || (frag->data == nullptr)) {
             continue;
         }
         const std::size_t to_copy =
-          (self->last_p2p.size() - copied < frag->size) ? (self->last_p2p.size() - copied) : frag->size;
+          ((self->last_p2p.size() - copied) < frag->size) ? (self->last_p2p.size() - copied) : frag->size;
         std::memcpy(self->last_p2p.data() + copied, frag->data, to_copy);
         copied += to_copy;
     }
     return CY_OK;
 }
 
-extern "C" void platform_on_subscription_error(cy_t* const cy, cy_topic_t* const topic, const cy_err_t err)
+extern "C" void platform_p2p_extent_set(cy_platform_t* const platform, const std::size_t extent)
+{
+    platform_from(platform)->p2p_extent = extent;
+}
+
+extern "C" cy_err_t platform_spin(cy_platform_t* const platform, const cy_us_t deadline)
+{
+    (void)platform;
+    (void)deadline;
+    return CY_OK;
+}
+
+extern "C" cy_us_t platform_now(cy_platform_t* const platform) { return platform_from(platform)->now; }
+
+extern "C" void* platform_realloc(cy_platform_t* const platform, void* const ptr, const std::size_t size)
+{
+    test_platform_t* const self = platform_from(platform);
+    return guarded_heap_realloc(&self->core_heap, ptr, size);
+}
+
+extern "C" std::uint64_t platform_random(cy_platform_t* const platform)
+{
+    test_platform_t* const self = platform_from(platform);
+    self->random_state          = (self->random_state * 6364136223846793005ULL) + 1ULL;
+    return self->random_state;
+}
+
+extern "C" void platform_on_async_error(cy_platform_t* const platform,
+                                        cy_topic_t* const    topic,
+                                        const std::uint16_t  line_number)
 {
     (void)topic;
-    test_platform_t* const self = platform_from(cy);
-    self->subscription_error_count++;
-    self->last_subscription_error = err;
+    test_platform_t* const self = platform_from(platform);
+    self->async_error_count++;
+    self->last_async_error_line = line_number;
 }
 
 extern "C" void on_arrival_capture(cy_subscriber_t* const sub, const cy_arrival_t arrival)
@@ -144,23 +194,41 @@ extern "C" void on_arrival_capture(cy_subscriber_t* const sub, const cy_arrival_
 void platform_init(test_platform_t* const self)
 {
     *self = test_platform_t{};
+
     guarded_heap_init(&self->core_heap, UINT64_C(0xFACEB00C12345678));
     guarded_heap_init(&self->message_heap, UINT64_C(0xDEC0DE1234567890));
-    self->vtable.now                   = platform_now;
-    self->vtable.realloc               = platform_realloc;
-    self->vtable.random                = platform_random;
-    self->vtable.new_topic             = platform_new_topic;
-    self->vtable.publish               = platform_publish;
-    self->vtable.subscribe             = platform_subscribe;
-    self->vtable.unsubscribe           = platform_unsubscribe;
-    self->vtable.topic_destroy         = platform_topic_destroy;
-    self->vtable.p2p_extent            = platform_p2p_extent;
-    self->vtable.p2p                   = platform_p2p;
-    self->vtable.on_subscription_error = platform_on_subscription_error;
 
-    const cy_err_t err =
-      cy_new(static_cast<cy_t*>(self), &self->vtable, wkv_key(""), wkv_key(""), CY_SUBJECT_ID_MODULUS_17bit);
-    TEST_ASSERT_EQUAL_UINT8(CY_OK, err);
+    self->vtable.subject_writer_new     = platform_subject_writer_new;
+    self->vtable.subject_writer_destroy = platform_subject_writer_destroy;
+    self->vtable.subject_writer_send    = platform_subject_writer_send;
+
+    self->vtable.subject_reader_new     = platform_subject_reader_new;
+    self->vtable.subject_reader_destroy = platform_subject_reader_destroy;
+
+    self->vtable.p2p_send       = platform_p2p_send;
+    self->vtable.p2p_extent_set = platform_p2p_extent_set;
+
+    self->vtable.spin    = platform_spin;
+    self->vtable.now     = platform_now;
+    self->vtable.realloc = platform_realloc;
+    self->vtable.random  = platform_random;
+
+    self->vtable.on_async_error = platform_on_async_error;
+
+    self->platform.cy                 = nullptr;
+    self->platform.subject_id_modulus = static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit);
+    self->platform.vtable             = &self->vtable;
+
+    self->cy = cy_new(&self->platform);
+    TEST_ASSERT_NOT_NULL(self->cy);
+}
+
+void platform_deinit(test_platform_t* const self)
+{
+    if (self->cy != nullptr) {
+        cy_destroy(self->cy);
+        self->cy = nullptr;
+    }
 }
 
 void dispatch_message(test_platform_t* const  self,
@@ -177,53 +245,54 @@ void dispatch_message(test_platform_t* const  self,
     cy_message_t* const msg = cy_test_message_make(&self->message_heap, wire.data(), wire.size());
     TEST_ASSERT_NOT_NULL(msg);
 
-    cy_message_ts_t message;
+    cy_message_ts_t message{};
     message.timestamp = timestamp;
     message.content   = msg;
 
     const cy_p2p_context_t p2p = { { 0 } };
-    cy_on_message(static_cast<cy_t*>(self), p2p, cy_topic_subject_id(topic), remote_id, message);
+    cy_on_message(&self->platform, p2p, remote_id, nullptr, message);
 }
 
 void test_api_malformed_header_drops_message()
 {
-    test_platform_t platform;
+    test_platform_t platform{};
     platform_init(&platform);
 
     const std::array<unsigned char, 3> wire = { 0x01U, 0x02U, 0x03U };
     cy_message_t* const                msg  = cy_test_message_make(&platform.message_heap, wire.data(), wire.size());
     TEST_ASSERT_NOT_NULL(msg);
-    cy_message_ts_t mts;
+
+    cy_message_ts_t mts{};
     mts.timestamp              = 10;
     mts.content                = msg;
     const cy_p2p_context_t p2p = { { 0 } };
 
-    cy_on_message(static_cast<cy_t*>(&platform), p2p, 0U, 1234U, mts);
+    cy_on_message(&platform.platform, p2p, 1234U, nullptr, mts);
     TEST_ASSERT_EQUAL_size_t(1, cy_test_message_destroy_count());
     TEST_ASSERT_EQUAL_size_t(0, cy_test_message_live_count());
     TEST_ASSERT_EQUAL_size_t(0, platform.p2p_count);
 
-    cy_destroy(static_cast<cy_t*>(&platform));
+    platform_deinit(&platform);
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&platform.message_heap));
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&platform.message_heap));
 }
 
 void test_api_reliable_duplicate_acked_once_to_application()
 {
-    test_platform_t platform;
+    test_platform_t platform{};
     platform_init(&platform);
     cy_test_message_reset_counters();
 
     arrival_capture_t      capture{};
-    cy_subscriber_t* const sub = cy_subscribe(static_cast<cy_t*>(&platform), wkv_key("rx/dup"), 256U);
+    cy_subscriber_t* const sub = cy_subscribe(platform.cy, wkv_key("rx/dup"), 256U);
     TEST_ASSERT_NOT_NULL(sub);
 
-    auto context   = CY_USER_CONTEXT_EMPTY;
-    context.ptr[0] = &capture;
+    cy_user_context_t context = CY_USER_CONTEXT_EMPTY;
+    context.ptr[0]            = &capture;
     cy_subscriber_context_set(sub, context);
     cy_subscriber_callback_set(sub, on_arrival_capture);
 
-    const cy_topic_t* const topic = cy_topic_find_by_name(static_cast<cy_t*>(&platform), wkv_key("rx/dup"));
+    const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, wkv_key("rx/dup"));
     TEST_ASSERT_NOT_NULL(topic);
 
     dispatch_message(&platform, topic, HeaderMsgReliable, 0x1234U, 0xAAU, 100, 0x11U);
@@ -232,30 +301,30 @@ void test_api_reliable_duplicate_acked_once_to_application()
     TEST_ASSERT_EQUAL_size_t(1, capture.count);
     TEST_ASSERT_EQUAL_UINT64(0x1234U, capture.tags[0]);
     TEST_ASSERT_EQUAL_size_t(2, platform.p2p_count);
-    TEST_ASSERT_EQUAL_UINT8(HeaderMsgAck, static_cast<uint8_t>(platform.last_p2p[0] & 31U));
+    TEST_ASSERT_EQUAL_UINT8(HeaderMsgAck, static_cast<std::uint8_t>(platform.last_p2p[0] & 31U));
     TEST_ASSERT_EQUAL_size_t(0, cy_test_message_live_count());
 
-    cy_destroy(static_cast<cy_t*>(&platform));
+    platform_deinit(&platform);
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&platform.message_heap));
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&platform.message_heap));
 }
 
 void test_api_ordered_subscriber_timeout_flush()
 {
-    test_platform_t platform;
+    test_platform_t platform{};
     platform_init(&platform);
     cy_test_message_reset_counters();
 
     arrival_capture_t      capture{};
-    cy_subscriber_t* const sub = cy_subscribe_ordered(static_cast<cy_t*>(&platform), wkv_key("rx/ord"), 256U, 10);
+    cy_subscriber_t* const sub = cy_subscribe_ordered(platform.cy, wkv_key("rx/ord"), 256U, 10);
     TEST_ASSERT_NOT_NULL(sub);
 
-    auto context   = CY_USER_CONTEXT_EMPTY;
-    context.ptr[0] = &capture;
+    cy_user_context_t context = CY_USER_CONTEXT_EMPTY;
+    context.ptr[0]            = &capture;
     cy_subscriber_context_set(sub, context);
     cy_subscriber_callback_set(sub, on_arrival_capture);
 
-    const cy_topic_t* const topic = cy_topic_find_by_name(static_cast<cy_t*>(&platform), wkv_key("rx/ord"));
+    const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, wkv_key("rx/ord"));
     TEST_ASSERT_NOT_NULL(topic);
 
     dispatch_message(&platform, topic, HeaderMsgBestEffort, 8U, 0xBBU, 100, 0x41U);
@@ -264,13 +333,13 @@ void test_api_ordered_subscriber_timeout_flush()
     TEST_ASSERT_EQUAL_size_t(0, platform.p2p_count);
 
     platform.now = 1000;
-    TEST_ASSERT_EQUAL_UINT8(CY_OK, cy_update(static_cast<cy_t*>(&platform)));
+    TEST_ASSERT_EQUAL_UINT8(CY_OK, cy_spin_once(platform.cy));
     TEST_ASSERT_EQUAL_size_t(2, capture.count);
     TEST_ASSERT_EQUAL_UINT64(8U, capture.tags[0]);
     TEST_ASSERT_EQUAL_UINT64(9U, capture.tags[1]);
     TEST_ASSERT_EQUAL_size_t(0, cy_test_message_live_count());
 
-    cy_destroy(static_cast<cy_t*>(&platform));
+    platform_deinit(&platform);
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&platform.message_heap));
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&platform.message_heap));
 }

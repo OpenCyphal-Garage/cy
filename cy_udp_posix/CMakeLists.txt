@@ -10,6 +10,14 @@ include_directories(SYSTEM "${CMAKE_SOURCE_DIR}/lib")
 add_library(udpard STATIC "${CMAKE_SOURCE_DIR}/lib/libudpard/libudpard/udpard.c")
 target_compile_options(udpard PRIVATE -Wno-cast-align -Wno-error)
 target_include_directories(udpard SYSTEM INTERFACE ${CMAKE_SOURCE_DIR}/lib/libudpard/libudpard)
+set_target_properties(
+        udpard
+        PROPERTIES
+        C_CLANG_TIDY ""
+        CXX_CLANG_TIDY ""
+        C_CPPCHECK ""
+        CXX_CPPCHECK ""
+)
 
 # Cy UDP POSIX static library.
 add_library(cy_udp_posix STATIC "${CMAKE_CURRENT_SOURCE_DIR}/cy_udp_posix.c" "${CMAKE_CURRENT_SOURCE_DIR}/udp_wrapper.c")

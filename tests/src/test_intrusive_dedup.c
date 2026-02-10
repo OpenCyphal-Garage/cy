@@ -5,31 +5,35 @@
 
 typedef struct
 {
-    cy_t           cy;
-    cy_vtable_t    vtable;
-    guarded_heap_t heap;
-    cy_us_t        now;
-    bool           oom; ///< When true, fixture_realloc returns NULL for new allocations.
+    cy_platform_t        platform;
+    cy_platform_vtable_t vtable;
+    cy_t                 cy;
+    guarded_heap_t       heap;
+    cy_us_t              now;
+    bool                 oom; ///< When true, fixture_realloc returns NULL for new allocations.
 } dedup_fixture_t;
 
-static void* fixture_realloc(cy_t* const cy, void* const ptr, const size_t size)
+static void* fixture_realloc(cy_platform_t* const platform, void* const ptr, const size_t size)
 {
-    dedup_fixture_t* const self = (dedup_fixture_t*)cy;
+    dedup_fixture_t* const self = (dedup_fixture_t*)platform;
     if (self->oom && (ptr == NULL) && (size > 0)) {
         return NULL;
     }
     return guarded_heap_realloc(&self->heap, ptr, size);
 }
 
-static cy_us_t fixture_now(const cy_t* const cy) { return ((const dedup_fixture_t*)cy)->now; }
+static cy_us_t fixture_now(cy_platform_t* const platform) { return ((dedup_fixture_t*)platform)->now; }
 
 static void dedup_fixture_init(dedup_fixture_t* const self)
 {
     memset(self, 0, sizeof(*self));
     guarded_heap_init(&self->heap, UINT64_C(0xDED0A110C0FFEE01));
-    self->vtable.now     = fixture_now;
-    self->vtable.realloc = fixture_realloc;
-    self->cy.vtable      = &self->vtable;
+    self->platform.vtable             = &self->vtable;
+    self->platform.subject_id_modulus = (uint32_t)CY_SUBJECT_ID_MODULUS_17bit;
+    self->platform.cy                 = &self->cy;
+    self->vtable.now                  = fixture_now;
+    self->vtable.realloc              = fixture_realloc;
+    self->cy.platform                 = &self->platform;
 }
 
 static void dedup_owner_init(cy_topic_t* const owner, dedup_fixture_t* const fixture)

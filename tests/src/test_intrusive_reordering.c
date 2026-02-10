@@ -6,11 +6,11 @@
 
 typedef struct
 {
-    cy_t           cy;
-    cy_vtable_t    vtable;
-    guarded_heap_t heap;
-    olga_t         olga;
-    cy_us_t        now;
+    cy_platform_t        platform;
+    cy_platform_vtable_t vtable;
+    cy_t                 cy;
+    guarded_heap_t       heap;
+    cy_us_t              now;
 } reorder_fixture_t;
 
 typedef struct
@@ -29,13 +29,13 @@ typedef struct
     arrival_capture_t capture;
 } reorder_env_t;
 
-static void* fixture_realloc(cy_t* const cy, void* const ptr, const size_t size)
+static void* fixture_realloc(cy_platform_t* const platform, void* const ptr, const size_t size)
 {
-    reorder_fixture_t* const self = (reorder_fixture_t*)cy;
+    reorder_fixture_t* const self = (reorder_fixture_t*)platform;
     return guarded_heap_realloc(&self->heap, ptr, size);
 }
 
-static cy_us_t fixture_now(const cy_t* const cy) { return ((const reorder_fixture_t*)cy)->now; }
+static cy_us_t fixture_now(cy_platform_t* const platform) { return ((reorder_fixture_t*)platform)->now; }
 
 static void on_arrival(cy_subscriber_t* const sub, const cy_arrival_t arrival)
 {
@@ -50,17 +50,19 @@ static void reorder_env_init(reorder_env_t* const self)
     memset(self, 0, sizeof(*self));
 
     guarded_heap_init(&self->fixture.heap, UINT64_C(0xA110CA7E5EED1234));
-    self->fixture.vtable.now     = fixture_now;
-    self->fixture.vtable.realloc = fixture_realloc;
-    self->fixture.cy.vtable      = &self->fixture.vtable;
-    self->fixture.cy.olga        = &self->fixture.olga;
-    self->fixture.now            = 0;
-    olga_init(&self->fixture.olga, &self->fixture.cy, olga_now);
+    self->fixture.platform.vtable             = &self->fixture.vtable;
+    self->fixture.platform.subject_id_modulus = (uint32_t)CY_SUBJECT_ID_MODULUS_17bit;
+    self->fixture.platform.cy                 = &self->fixture.cy;
+    self->fixture.vtable.now                  = fixture_now;
+    self->fixture.vtable.realloc              = fixture_realloc;
+    self->fixture.cy.platform                 = &self->fixture.platform;
+    self->fixture.now                         = 0;
+    olga_init(&self->fixture.cy.olga, &self->fixture.cy, olga_now);
 
     self->root.cy = &self->fixture.cy;
 
     self->sub.root                          = &self->root;
-    self->sub.params.extent                 = 0;
+    self->sub.params.extent_pure            = 0;
     self->sub.params.reordering_window      = 20;
     self->sub.params.reordering_capacity    = 8;
     self->sub.index_reordering_by_remote_id = NULL;
@@ -86,7 +88,7 @@ static void reorder_env_init(reorder_env_t* const self)
 static void reorder_env_cleanup(reorder_env_t* const self)
 {
     reordering_eject_all(&self->rr);
-    olga_cancel(self->fixture.cy.olga, &self->rr.timeout);
+    olga_cancel(&self->fixture.cy.olga, &self->rr.timeout);
 }
 
 static bool push_message(reorder_env_t* const self, const uint64_t tag, const cy_us_t ts, const unsigned char payload)
@@ -102,7 +104,7 @@ static bool push_message(reorder_env_t* const self, const uint64_t tag, const cy
 static void spin_to(reorder_env_t* const self, const cy_us_t now)
 {
     self->fixture.now = now;
-    (void)olga_spin(self->fixture.cy.olga);
+    (void)olga_spin(&self->fixture.cy.olga);
 }
 
 static void test_reordering_duplicate_interned_message_is_idempotent(void)
@@ -178,7 +180,7 @@ static void test_reordering_timeout_forces_ejection(void)
     TEST_ASSERT_TRUE(push_message(&env, 8U, 100, 0x01U));
     TEST_ASSERT_TRUE(push_message(&env, 9U, 101, 0x02U));
     TEST_ASSERT_EQUAL_size_t(0, env.capture.count);
-    TEST_ASSERT_TRUE(olga_is_pending(env.fixture.cy.olga, &env.rr.timeout));
+    TEST_ASSERT_TRUE(olga_is_pending(&env.fixture.cy.olga, &env.rr.timeout));
 
     spin_to(&env, 1000);
     TEST_ASSERT_EQUAL_size_t(2, env.capture.count);
@@ -231,7 +233,7 @@ static void test_reordering_reverse_3_2_1(void)
     TEST_ASSERT_TRUE(push_message(&env, 7U, 10, 0xCCU));
     TEST_ASSERT_EQUAL_size_t(1, env.rr.interned_count);
     TEST_ASSERT_EQUAL_size_t(0, env.capture.count);
-    TEST_ASSERT_TRUE(olga_is_pending(env.fixture.cy.olga, &env.rr.timeout));
+    TEST_ASSERT_TRUE(olga_is_pending(&env.fixture.cy.olga, &env.rr.timeout));
 
     // tag=6, lin_tag=2 => gap (expected lin=1), interned
     TEST_ASSERT_TRUE(push_message(&env, 6U, 11, 0xBBU));
@@ -263,7 +265,7 @@ static void test_reordering_first_arrival_delay_for_older(void)
     TEST_ASSERT_TRUE(push_message(&env, 7U, 100, 0x70U));
     TEST_ASSERT_EQUAL_size_t(0, env.capture.count);
     TEST_ASSERT_EQUAL_size_t(1, env.rr.interned_count);
-    TEST_ASSERT_TRUE(olga_is_pending(env.fixture.cy.olga, &env.rr.timeout));
+    TEST_ASSERT_TRUE(olga_is_pending(&env.fixture.cy.olga, &env.rr.timeout));
 
     // Shortly after, the "older" message tag=6 arrives (lin_tag=2). Still waiting for tag=5.
     TEST_ASSERT_TRUE(push_message(&env, 6U, 102, 0x60U));
@@ -369,7 +371,7 @@ static void test_reordering_capacity_overflow_resequence(void)
     TEST_ASSERT_TRUE(push_message(&env, 50000U, 100, 0xAAU));
     TEST_ASSERT_EQUAL_size_t(1, env.capture.count); // Still only the initial tag=5 was delivered.
     TEST_ASSERT_EQUAL_size_t(1, env.rr.interned_count);
-    TEST_ASSERT_TRUE(olga_is_pending(env.fixture.cy.olga, &env.rr.timeout));
+    TEST_ASSERT_TRUE(olga_is_pending(&env.fixture.cy.olga, &env.rr.timeout));
 
     // An older sibling 49999 arrives (lin_tag=3). Also interned (gap at lin_tag 1 and 2).
     TEST_ASSERT_TRUE(push_message(&env, 49999U, 101, 0xBBU));
