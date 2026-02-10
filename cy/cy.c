@@ -2500,7 +2500,6 @@ cy_t* cy_new(cy_platform_t* const platform)
         return NULL;
     }
     memset(cy, 0, sizeof(*cy));
-    platform->cy = cy;
     cy->platform = platform;
     olga_init(&cy->olga, cy, olga_now);
     {
@@ -2569,6 +2568,7 @@ cy_t* cy_new(cy_platform_t* const platform)
     cy_subscriber_callback_set(cy->heartbeat_sub, &on_heartbeat);
 
     cy->topic_iter = NULL;
+    platform->cy   = cy;
     CY_TRACE(cy,
              "🚀 ts_started=%llu subject_id_modulus=%lu",
              (unsigned long long)cy->ts_started,
@@ -2709,8 +2709,6 @@ cy_user_context_t* cy_topic_user_context(cy_topic_t* const topic)
 // =====================================================================================================================
 //                                              PLATFORM LAYER INTERFACE
 // =====================================================================================================================
-
-cy_platform_t* cy_platform(cy_t* const cy) { return (cy != NULL) ? cy->platform : NULL; }
 
 #if 0 // NOLINT(readability-avoid-unconditional-preprocessor-if)
 static void on_response(cy_t* const             cy,

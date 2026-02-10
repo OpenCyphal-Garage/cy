@@ -594,7 +594,7 @@ static void v_p2p_extent(cy_platform_t* const base, const size_t extent)
     // reliable delivery for P2P. To minimize the impact, we liberally increase the size at every update.
     if (extent > owner->p2p_port.extent) {
         owner->p2p_port.extent = extent * 2; // increase to minimize disturbance
-        CY_TRACE(owner->base.cy, "📏 P2P response extent increased to %zu bytes", cy->p2p_port.extent);
+        CY_TRACE(owner->base.cy, "📏 P2P response extent increased to %zu bytes", owner->p2p_port.extent);
     }
 }
 
@@ -649,7 +649,6 @@ static void read_socket(cy_udp_posix_t* const   self,
     udpard_bytes_mut_t dgram = { .size = CY_UDP_SOCKET_READ_BUFFER_SIZE,
                                  .data = self->mem.vtable->alloc(self->mem.context, CY_UDP_SOCKET_READ_BUFFER_SIZE) };
     if (NULL == dgram.data) { // ReSharper disable once CppRedundantDereferencingAndTakingAddress
-        self->stats.mem.oom_count++;
         self->stats.sock_rx.error_count[iface_index]++;
         self->stats.sock_rx.last_error_at = ts;
         return;
@@ -993,5 +992,5 @@ cy_us_t cy_udp_posix_now(void)
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) { // NOLINT(*-include-cleaner)
         abort();
     }
-    return (ts.tv_sec * 1000000) + (ts.tv_nsec / 1000);
+    return (ts.tv_sec * 1000000LL) + (ts.tv_nsec / 1000L);
 }
