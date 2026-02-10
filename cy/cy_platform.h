@@ -21,15 +21,6 @@
 #define CY_HEARTBEAT_TOPIC_NAME "/#1d55"
 #define CY_HEARTBEAT_TOPIC_HASH 0x1D55U
 
-/// Only for testing and debugging purposes.
-/// Makes all non-pinned topics prefer the same subject-ID that equals the value of this macro,
-/// which maximizes topic allocation collisions. Pinned topics are unaffected.
-/// This can be used to stress-test the consensus algorithm.
-/// This value shall be identical for all nodes in the network; otherwise, divergent allocations will occur.
-#ifndef CY_CONFIG_PREFERRED_SUBJECT_OVERRIDE
-// Never define in production use.
-#endif
-
 /// See the subject_id_modulus for details.
 /// >>> import sympy as sp
 /// >>> sp.prevprime(2**17-8191)

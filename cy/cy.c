@@ -943,14 +943,11 @@ static uint32_t topic_subject_id_impl(const cy_t* const cy, const uint64_t hash,
     if (is_pinned(hash)) {
         return (uint32_t)hash;
     }
-#ifndef CY_CONFIG_PREFERRED_SUBJECT_OVERRIDE
-    return CY_PINNED_SUBJECT_ID_MAX + 1U +
-           (uint32_t)((hash + (evictions * evictions)) % cy->platform->subject_id_modulus);
-#else
-    (void)hash;
-    return (uint32_t)((CY_CONFIG_PREFERRED_SUBJECT_OVERRIDE + (evictions * evictions)) %
-                      cy->platform->subject_id_modulus);
-#endif
+    assert(cy->platform->subject_id_modulus > 0);
+    const uint64_t subject_id =
+      CY_PINNED_SUBJECT_ID_MAX + 1ULL + ((hash + (evictions * evictions)) % cy->platform->subject_id_modulus);
+    assert(subject_id <= UINT32_MAX);
+    return (uint32_t)subject_id;
 }
 
 static uint32_t topic_subject_id(const cy_topic_t* const topic)

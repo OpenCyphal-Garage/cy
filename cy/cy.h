@@ -465,7 +465,7 @@ wkv_str_t cy_resolve(const cy_t* const cy, const wkv_str_t name, const size_t de
 cy_topic_t* cy_topic_find_by_hash(const cy_t* const cy, const uint64_t hash);
 cy_topic_t* cy_topic_find_by_name(const cy_t* const cy, const wkv_str_t name);
 
-/// Iterate over all topics in an unspecified order except that pinned topic are listed first.
+/// Iterate over all topics in an unspecified order.
 /// This is useful when handling IO multiplexing (building the list of descriptors to read) and for introspection.
 /// The iteration stops when the returned topic is NULL.
 /// The set of topics SHALL NOT be mutated while iterating over it (a restart will be needed otherwise).
