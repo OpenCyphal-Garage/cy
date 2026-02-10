@@ -307,6 +307,7 @@ struct subject_reader_t
 {
     cy_subject_reader_t base;
     cy_udp_posix_t*     owner;
+    bool                tombstone;
 
     udpard_rx_port_t port;
     udp_wrapper_t    sock[CY_UDP_POSIX_IFACE_COUNT_MAX];
@@ -389,13 +390,13 @@ static void v_on_msg_stateless(udpard_rx_t* const rx, udpard_rx_port_t* const po
     }
 }
 
-static void v_subject_reader_destroy(cy_subject_reader_t* const base)
+static void subject_reader_destroy(subject_reader_t* const self)
 {
-    subject_reader_t* const self  = (subject_reader_t*)base;
-    cy_udp_posix_t* const   owner = self->owner;
+    cy_udp_posix_t* const owner = self->owner;
     assert(self->port.user == self);
+    assert(self->tombstone);
 
-    // Delist the reader first so that no future polling cycle may observe a half-destroyed instance.
+    // Delist.
     if (self->prev != NULL) {
         self->prev->next = self->next;
     }
@@ -419,10 +420,24 @@ static void v_subject_reader_destroy(cy_subject_reader_t* const base)
     }
 
     // Free the memory and update the stats.
-    CY_TRACE(owner->base.cy, "🔕 n_readers=%zu ptr=%p", owner->stats.subject_reader_count, (void*)self);
-    mem_free(owner, sizeof(subject_reader_t), self);
     assert(owner->stats.subject_reader_count > 0);
     owner->stats.subject_reader_count--;
+    CY_TRACE(owner->base.cy, "🔕 n_readers=%zu ptr=%p", owner->stats.subject_reader_count, (void*)self);
+    mem_free(owner, sizeof(subject_reader_t), self);
+}
+
+static void v_subject_reader_tombstone(cy_subject_reader_t* const base)
+{
+    subject_reader_t* const self  = (subject_reader_t*)base;
+    cy_udp_posix_t* const   owner = self->owner;
+    assert(self->port.user == self);
+    assert(!self->tombstone);
+    self->tombstone = true;
+    // Close sockets now to stop further reads while we defer the final teardown.
+    for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
+        udp_wrapper_close(&self->sock[i]);
+    }
+    CY_TRACE(owner->base.cy, "⚰️ n_readers=%zu ptr=%p deferred", owner->stats.subject_reader_count, (void*)self);
 }
 
 static cy_subject_reader_t* v_subject_reader(cy_platform_t* const base, const uint32_t subject_id, const size_t extent)
@@ -432,7 +447,7 @@ static cy_subject_reader_t* v_subject_reader(cy_platform_t* const base, const ui
     assert(subject_id <= (CY_PINNED_SUBJECT_ID_MAX + 1 + owner->base.subject_id_modulus));
     subject_reader_t* self = mem_alloc_zero(owner, sizeof(subject_reader_t));
     if (self != NULL) {
-        static const cy_subject_reader_vtable_t reader_vtable = { .destroy = v_subject_reader_destroy };
+        static const cy_subject_reader_vtable_t reader_vtable = { .destroy = v_subject_reader_tombstone };
         self->base.subject_id                                 = subject_id;
         self->base.vtable                                     = &reader_vtable;
         self->owner                                           = owner;
@@ -628,6 +643,7 @@ static void read_socket(cy_udp_posix_t* const   self,
     assert(udp_wrapper_is_open(sock));
     assert((self->stats.subject_reader_count == 0) == (self->reader_head == NULL));
     assert((self->stats.subject_reader_count == 0) == (self->reader_tail == NULL));
+    assert((reader == NULL) || !reader->tombstone);
 
     // Allocate memory that we will read the data into. The ownership of this memory will be transferred
     // to LibUDPard, which will free it when it is no longer needed.
@@ -706,16 +722,22 @@ static cy_err_t spin_once_until(cy_udp_posix_t* const self, const cy_us_t deadli
     udp_wrapper_t*    rx_await[max_rx_count]; // Initialization is not possible and is very wasteful anyway.
     subject_reader_t* rx_readers[max_rx_count];
     uint_fast8_t      rx_iface_indexes[max_rx_count];
-    for (subject_reader_t* rd_iter = self->reader_head; rd_iter != NULL; rd_iter = rd_iter->next) {
-        for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
-            if (udp_wrapper_is_open(&rd_iter->sock[i])) {
-                assert(rx_count < max_rx_count);
-                rx_await[rx_count]         = &rd_iter->sock[i];
-                rx_readers[rx_count]       = rd_iter;
-                rx_iface_indexes[rx_count] = i;
-                rx_count++;
+    for (subject_reader_t* rd_iter = self->reader_head; rd_iter != NULL;) {
+        subject_reader_t* const next = rd_iter->next;
+        if (rd_iter->tombstone) {
+            subject_reader_destroy(rd_iter);
+        } else {
+            for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
+                if (udp_wrapper_is_open(&rd_iter->sock[i])) {
+                    assert(rx_count < max_rx_count);
+                    rx_await[rx_count]         = &rd_iter->sock[i];
+                    rx_readers[rx_count]       = rd_iter;
+                    rx_iface_indexes[rx_count] = i;
+                    rx_count++;
+                }
             }
         }
+        rd_iter = next;
     }
     // Note that we may add the same socket both for reading and writing, which is fine.
     for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
@@ -734,7 +756,7 @@ static cy_err_t spin_once_until(cy_udp_posix_t* const self, const cy_us_t deadli
     if (res == CY_OK) {
         const cy_us_t now = cy_udp_posix_now(); // after unblocking
         for (size_t i = 0; i < rx_count; i++) {
-            if (rx_await[i] != NULL) {
+            if ((rx_await[i] != NULL) && ((rx_readers[i] == NULL) || !rx_readers[i]->tombstone)) {
                 read_socket(self, now, rx_readers[i], rx_await[i], rx_iface_indexes[i]);
             }
         }
@@ -961,6 +983,14 @@ void cy_udp_posix_destroy(cy_platform_t* const base)
 {
     if (base != NULL) {
         cy_udp_posix_t* const self = (cy_udp_posix_t*)base;
+        // If no further spin cycle happened after reader tombstoning, reclaim them here.
+        for (subject_reader_t* rd_iter = self->reader_head; rd_iter != NULL;) {
+            subject_reader_t* const next = rd_iter->next;
+            if (rd_iter->tombstone) {
+                subject_reader_destroy(rd_iter);
+            }
+            rd_iter = next;
+        }
         assert(self->stats.subject_reader_count == 0);
         assert(self->stats.subject_writer_count == 0);
         assert(self->base.cy == NULL); // must be unlinked beforehand
