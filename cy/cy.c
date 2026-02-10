@@ -217,7 +217,7 @@ struct cy_t
     cy_topic_t* topic_iter;
 };
 
-#define ON_ASYNC_ERROR(cy, topic) cy->platform->vtable->on_async_error(cy, topic, __LINE__)
+#define ON_ASYNC_ERROR(cy, topic) (cy)->platform->vtable->on_async_error((cy)->platform, topic, __LINE__)
 
 /// The maximum header size is needed to calculate the extent correctly.
 /// It is added to the serialized message size.
@@ -976,7 +976,7 @@ static void topic_ensure_subscribed(cy_topic_t* const topic)
         const size_t extent = get_subscription_extent_with_overhead(topic);
         assert(extent >= HEADER_MAX_BYTES);
         const uint32_t subject_id = topic_subject_id(topic);
-        topic->sub_reader         = cy->platform->vtable->subject_reader(cy, subject_id, extent);
+        topic->sub_reader         = cy->platform->vtable->subject_reader(cy->platform, subject_id, extent);
         CY_TRACE(topic->cy,
                  "🗞️ %s extent=%zu subject_id=%08x result=%p",
                  topic_repr(topic).str,
@@ -1572,7 +1572,7 @@ cy_publisher_t* cy_advertise_client(cy_t* const cy, const wkv_str_t name, const 
             // of each to a power of 2 and keep a count of how many publishers are at each power-of-2 level (capped
             // 2**32): size_t publisher_counts_by_extent_pow2[32];
             cy->p2p_extent = response_extent_with_header;
-            cy->platform->vtable->p2p_extent(cy, cy->p2p_extent);
+            cy->platform->vtable->p2p_extent(cy->platform, cy->p2p_extent);
         }
     } else {
         mem_free(cy, pub);
@@ -1609,7 +1609,7 @@ cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t deadline, const cy_
     // The subject writer is a very lightweight entity that is super cheap to construct (constant complexity expected)
     // so this is not expected to be a problem.
     if (topic->pub_writer == NULL) {
-        topic->pub_writer = cy->platform->vtable->subject_writer(cy, topic_subject_id(topic));
+        topic->pub_writer = cy->platform->vtable->subject_writer(cy->platform, topic_subject_id(topic));
         if (topic->pub_writer == NULL) {
             return CY_ERR_MEMORY;
         }
@@ -2770,7 +2770,7 @@ static void send_message_ack(cy_t* const            cy,
     byte_t header[16];
     (void)serialize_u64(serialize_u64(header, (tag << 8U) | (uint64_t)header_msg_ack), topic_hash);
     const cy_err_t err = cy->platform->vtable->p2p(
-      cy, &p2p_context, deadline, remote_id, (cy_bytes_t){ .size = sizeof(header), .data = header });
+      cy->platform, &p2p_context, deadline, remote_id, (cy_bytes_t){ .size = sizeof(header), .data = header });
     if (err != CY_OK) {
         CY_TRACE(cy,
                  "⚠️ Failed to send message ACK to %016llx for tag %016llx on topic %016llx: %d",
@@ -2795,7 +2795,7 @@ static void send_response_ack(cy_t* const            cy,
     (void)serialize_u64(serialize_u64(header, (message_tag << 56U) | (uint64_t)header_type),
                         seqno | ((uint64_t)tag << 48U));
     const cy_err_t err = cy->platform->vtable->p2p(
-      cy, &p2p_context, deadline, remote_id, (cy_bytes_t){ .size = sizeof(header), .data = header });
+      cy->platform, &p2p_context, deadline, remote_id, (cy_bytes_t){ .size = sizeof(header), .data = header });
     if (err != CY_OK) {
         CY_TRACE(cy,
                  "⚠️ Failed to send response %s to %016llx for seqno %016llx: %d",
@@ -2812,6 +2812,7 @@ void cy_on_message(cy_platform_t* const             platform,
                    const cy_subject_reader_t* const subject_reader,
                    const cy_message_ts_t            message)
 {
+    cy_t* const cy = platform->cy;
     assert((cy != NULL) && (message.timestamp >= 0));
     assert(message.content->refcount == 1);
     byte_t header[HEADER_MAX_BYTES];
@@ -2833,7 +2834,7 @@ void cy_on_message(cy_platform_t* const             platform,
             cy_topic_t* const topic    = cy_topic_find_by_hash(cy, hash);
             const bool        reliable = type == header_msg_rel;
             if (topic != NULL) {
-                if (topic_subject_id(topic) != subject_id) {
+                if ((subject_reader != NULL) && (topic_subject_id(topic) != subject_reader->subject_id)) {
                     // We happen to be subscribed to both of the divergent subject-IDs, so we can process the message
                     // despite the divergence.
                     CY_TRACE(cy,
@@ -2855,7 +2856,8 @@ void cy_on_message(cy_platform_t* const             platform,
                                      message.timestamp + ACK_TX_TIMEOUT);
                 }
             } else {
-                cy_topic_t* const other_topic = topic_find_by_subject_id(cy, (uint32_t)subject_id);
+                cy_topic_t* const other_topic =
+                  (subject_reader != NULL) ? topic_find_by_subject_id(cy, subject_reader->subject_id) : NULL;
                 if (other_topic != NULL) {
                     assert(other_topic->hash != hash);
                     // Gossip to either update the remotes or solicit a newer allocation state from them.
