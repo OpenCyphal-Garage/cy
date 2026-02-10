@@ -2857,7 +2857,7 @@ void cy_on_message(cy_platform_t* const             platform,
                              (unsigned long long)remote_id,
                              (unsigned long long)hash,
                              (unsigned long)topic_subject_id(topic),
-                             (unsigned long long)subject_id);
+                             (unsigned long long)subject_reader->subject_id);
                     schedule_gossip_urgent(topic);
                 }
                 assert((topic->sub_reader == NULL) || (topic_subject_id(topic) == topic->sub_reader->subject_id));
@@ -2888,7 +2888,7 @@ void cy_on_message(cy_platform_t* const             platform,
                              "⚠️ Unsolicited message from %016llx on topic %016llx subject %08x: unknown topic&subject",
                              (unsigned long long)remote_id,
                              (unsigned long long)hash,
-                             (unsigned)subject_id);
+                             (unsigned)((subject_reader != NULL) ? subject_reader->subject_id : UINT32_MAX));
                 }
             }
             break;

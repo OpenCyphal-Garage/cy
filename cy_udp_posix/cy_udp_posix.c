@@ -899,7 +899,7 @@ cy_platform_t* cy_udp_posix_new(const uint64_t uid,
     // We start with an arbitrarily chosen sensible initial extent, which will be increased later as needed.
     const size_t                         initial_extent = UDPARD_MTU_DEFAULT;
     static const udpard_rx_port_vtable_t rx_p2p_vtable  = { .on_message = v_on_msg };
-    if (!udpard_rx_port_new(&self->p2p_port, initial_extent, make_udpard_rx_mem_resources(self), &rx_p2p_vtable)) {
+    if (!udpard_rx_port_new_p2p(&self->p2p_port, initial_extent, make_udpard_rx_mem_resources(self), &rx_p2p_vtable)) {
         udpard_tx_free(&self->udpard_tx);
         free(self);
         return NULL;
@@ -927,6 +927,7 @@ cy_platform_t* cy_udp_posix_new(const uint64_t uid,
     }
 
     // Finish.
+    assert(self->p2p_port.is_p2p);
     self->stats       = (cy_udp_posix_stats_t){ 0 };
     self->reader_head = NULL;
     self->reader_tail = NULL;
