@@ -878,6 +878,7 @@ cy_platform_t* cy_udp_posix_new(const uint64_t uid,
     const size_t                         initial_extent = UDPARD_MTU_DEFAULT;
     static const udpard_rx_port_vtable_t rx_p2p_vtable  = { .on_message = v_on_msg };
     if (!udpard_rx_port_new(&self->p2p_port, initial_extent, make_udpard_rx_mem_resources(self), &rx_p2p_vtable)) {
+        udpard_tx_free(&self->udpard_tx);
         free(self);
         return NULL;
     }
