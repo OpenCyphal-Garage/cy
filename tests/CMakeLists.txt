@@ -108,7 +108,7 @@ cy_gen_test_arch_matrix(test_api_rx 11 "CY_CONFIG_TRACE=1"
         platform_stubs/guarded_heap.c
         platform_stubs/message.c
 )
-cy_gen_test_arch_matrix(test_api_name 11 ""
+cy_gen_test_arch_matrix(test_api_name 11 "CY_CONFIG_TRACE=1"
         src/test_api_name.cpp
         ${CMAKE_SOURCE_DIR}/cy/cy.c
 )

@@ -6,15 +6,14 @@
 #include <stdarg.h>
 #include <string.h>
 
-void cy_trace(cy_t* const         cy,
+void cy_trace(cy_t* const         cy, // cppcheck-suppress constParameterPointer
               const char* const   file,
               const uint_fast16_t line,
               const char* const   func,
               const char* const   format,
               ...)
 {
-    // Capture the uptime timestamp ASAP.
-    const cy_us_t uptime_us = cy_now(cy) - cy->ts_started;
+    const cy_us_t uptime_us = cy_uptime(cy);
 
     // Get the current wall time and format it.
     struct timespec ts;

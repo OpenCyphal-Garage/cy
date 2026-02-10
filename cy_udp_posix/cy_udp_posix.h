@@ -63,7 +63,7 @@ typedef struct cy_udp_posix_stats_t
     } cy_async_errors[CY_UDP_POSIX_ASYNC_ERROR_SLOTS];
 } cy_udp_posix_stats_t;
 
-/// Unused interfaces should have zero addresses; to parse IP address strings see udp_wrapper_parse_iface_address().
+/// Unused interfaces should have zero addresses; to parse IP address strings see cy_udp_parse_iface_address().
 /// Returns NULL on error.
 cy_platform_t* cy_udp_posix_new(const uint64_t uid,
                                 const uint32_t local_iface_address[CY_UDP_POSIX_IFACE_COUNT_MAX],
@@ -88,6 +88,10 @@ void cy_udp_posix_destroy(cy_platform_t* const base);
 /// The same time base is used for all Cy instances tied to this platform layer.
 /// This is simply the count of microseconds sampled via clock_gettime(CLOCK_MONOTONIC).
 cy_us_t cy_udp_posix_now(void);
+
+/// Convert an interface address from string to binary representation; e.g., "127.0.0.1" --> 0x7F000001.
+/// Returns zero if the input is not valid.
+uint32_t cy_udp_parse_iface_address(const char* const address);
 
 #ifdef __cplusplus
 }

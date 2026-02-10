@@ -2680,6 +2680,8 @@ cy_us_t cy_now(const cy_t* const cy)
     return out;
 }
 
+cy_us_t cy_uptime(const cy_t* const cy) { return cy_now(cy) - cy->ts_started; }
+
 wkv_str_t cy_resolve(const cy_t* const cy, const wkv_str_t name, const size_t dest_size, char* dest)
 {
     const wkv_str_t result = cy_name_resolve_raw(name, cy_namespace(cy), cy_home(cy), dest_size, dest);

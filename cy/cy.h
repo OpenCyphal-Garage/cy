@@ -441,8 +441,11 @@ cy_err_t  cy_namespace_set(cy_t* const cy, const wkv_str_t name_space);
 cy_err_t               cy_spin_until(cy_t* const cy, const cy_us_t deadline);
 static inline cy_err_t cy_spin_once(cy_t* const cy) { return cy_spin_until(cy, 0); }
 
-/// Returns the current time in microseconds. Always non-negative.
+/// The current time in microseconds sourced from the platform layer as-is. Always non-negative.
 cy_us_t cy_now(const cy_t* const cy);
+
+/// The time since cy_new() in microseconds.
+cy_us_t cy_uptime(const cy_t* const cy);
 
 /// TODO not implemented
 cy_err_t cy_remap(cy_t* const cy, const wkv_str_t from, const wkv_str_t to);

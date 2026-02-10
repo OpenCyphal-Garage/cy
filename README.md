@@ -51,13 +51,15 @@ Here is an example for Cyphal/UDP on POSIX systems:
 
 int main(void)
 {
-    // Set up the local Cyphal node. This is done using the platform- and transport-specific glue layer.
-    // The rest of the application uses the generic Cyphal API only, except for the event loop spinning part.
-    cy_udp_posix_t cy_udp;
-    cy_err_t       err = cy_udp_posix_new_simple(&cy_udp);
-    if (err != CY_OK) { ... }
-    cy_t* cy = &cy_udp.base;  // Get a pointer to the Cy instance for convenience.
+    // Set up the platform layer that connects Cy to the underlying transport and OS.
+    cy_platform_t* platform = cy_udp_posix_new_auto();
+    if (platform == NULL) { ... }
 
+    // Set up the local Cyphal node instance.
+    cy_t* cy = cy_new(platform);
+    if (cy == NULL) { ... }
+
+    cy_err_t err = CY_OK; // Used by the snippets below.
     // ... to be continued ...
 }
 ```
@@ -166,19 +168,19 @@ name segments; e.g., `sensor*/eng>` will be treated as a literal topic name.
 The message arrival callback looks like this for all subscribers (ordered, unordered, verbatim, pattern):
 
 ```c++
-void on_message(cy_subscriber_t* subscriber, cy_arrival_t* arrival) 
+void on_message(cy_subscriber_t* subscriber, cy_arrival_t arrival)
 {
     cy_user_context_t ctx = cy_subscriber_context(subscriber);  // retrieve the context if needed
     // You can see the name substitutions that had to be made to match the topic name pattern, if one used,
-    // by inspecting arrival->substitutions; in verbatim subscriptions the substitutions list is empty.
-    // The exact name of the matched topic is available as cy_topic_name(arrival->topic).
-    size_t  size = cy_message_size(arrival->message.content);
+    // by inspecting arrival.substitutions; in verbatim subscriptions the substitutions list is empty.
+    // The exact name of the matched topic is available as cy_topic_name(arrival.topic).
+    size_t  size = cy_message_size(arrival.message.content);
     unsigned char data[size];
-    cy_message_read(&arrival->message.content, 0, size, data);  // feel free to read only the parts of interest
+    cy_message_read(arrival.message.content, 0, size, data);  // feel free to read only the parts of interest
     char* dump = hexdump(size, data, 32);
-    printf("Received message on topic %s:\n%s\n", cy_topic_name(arrival->topic).str, dump);
+    printf("Received message on topic %s:\n%s\n", cy_topic_name(arrival.topic).str, dump);
     // If relevant, one can optionally send a response back to the publisher here using cy_respond():
-    cy_err_t err = cy_respond(arrival->breadcrumb, deadline, response_data);
+    cy_err_t err = cy_respond(&arrival.breadcrumb, deadline, response_data);
 }
 ```
 
@@ -208,7 +210,7 @@ void on_response(cy_future_t* future)
         cy_us_t response_arrival_timestamp = result->response.message.timestamp;
         const size_t  size = cy_message_size(result->response.message.content);
         unsigned char data[size];
-        cy_message_read(&result->response.message.content, 0, size, data);
+        cy_message_read(result->response.message.content, 0, size, data);
         // Process the response data!
         
         // We can destroy the future if we don't expect any further responses;
@@ -238,12 +240,12 @@ failure; normally, one should explicitly request the server to stop sending data
 ### ⚙ Event loop
 
 Finally, spin the event loop to keep the stack making progress and processing incoming/outgoing messages.
-Depending on the platform- and transport-specific glue layer used, the event loop spinning part may look like this:
+The event loop API is transport-agnostic and delegates to the platform layer internally:
 
 ```c++
 while (true)
 {
-    err = cy_udp_posix_spin_until(&cy_udp, cy_now(cy) + 10000);  // spin for 0.01 seconds
+    err = cy_spin_until(cy, cy_now(cy) + 10000);  // spin for 0.01 seconds
     if (err != CY_OK) { ... }
     // do some other stuff here periodically
 }

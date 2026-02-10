@@ -1,5 +1,6 @@
-#include "cy_udp_posix.h"
-#include "eui64.h"
+#include <cy.h>
+#include <cy_udp_posix.h>
+#include <eui64.h>
 #include "arg_kv.h"
 #include "hexdump.h"
 #include <time.h>
@@ -28,7 +29,7 @@ struct config_t
     struct config_subscription_t* subs;
 };
 
-static struct config_t load_config(const int argc, char* argv[])
+static struct config_t load_config(const int argc, const char* const argv[])
 {
     struct config_t cfg = {
         .local_uid         = eui64_semirandom(),
@@ -41,7 +42,7 @@ static struct config_t load_config(const int argc, char* argv[])
     while ((arg = arg_kv_next(argc, argv)).key_hash != 0) {
         assert(arg.value != NULL);
         if ((arg_kv_hash("iface") == arg.key_hash) && (iface_count < CY_UDP_POSIX_IFACE_COUNT_MAX)) {
-            cfg.iface_address[iface_count++] = udp_wrapper_parse_iface_address(arg.value);
+            cfg.iface_address[iface_count++] = cy_udp_parse_iface_address(arg.value);
         } else if (arg_kv_hash("uid") == arg.key_hash) {
             cfg.local_uid = strtoull(arg.value, NULL, 0);
         } else if (arg_kv_hash("txq") == arg.key_hash) {
@@ -77,27 +78,26 @@ static struct config_t load_config(const int argc, char* argv[])
 }
 
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
-static void on_message(cy_subscriber_t* const subscriber, cy_arrival_t* const arrival)
+static void on_message(cy_subscriber_t* const subscriber, cy_arrival_t arrival)
 {
     (void)subscriber;
-    const size_t  payload_size = cy_message_size(arrival->message.content);
+    const size_t  payload_size = cy_message_size(arrival.message.content);
     unsigned char payload_copy[payload_size];
-    cy_message_read(&arrival->message.content, 0, payload_size, payload_copy);
+    cy_message_read(arrival.message.content, 0, payload_size, payload_copy);
     char* const dump = hexdump(payload_size, payload_copy, 32);
     (void)fprintf(stderr,
-                  "💬 ts=%09llu sid=%04x sz=%06zu sbt=%zu topic='%s'\n%s\n",
-                  (unsigned long long)arrival->message.timestamp,
-                  cy_topic_subject_id(arrival->topic),
+                  "💬 ts=%09llu sz=%06zu sbt=%zu topic='%s'\n%s\n",
+                  (unsigned long long)arrival.message.timestamp,
                   payload_size,
-                  arrival->substitutions.count,
-                  cy_topic_name(arrival->topic).str,
+                  arrival.substitutions.count,
+                  cy_topic_name(arrival.topic).str,
                   dump);
     // Optionally, send a response to the publisher of this message.
     // The stack knows the identity of the publisher and can deliver a response directly to it.
     // It is possible to stream multiple responses for a single message (the breadcrumb can be copied).
     if ((rand() % 2) == 0) {
-        const cy_err_t err = cy_respond(arrival->breadcrumb, // Using best-effort delivery in this example.
-                                        arrival->message.timestamp + MEGA,
+        const cy_err_t err = cy_respond(&arrival.breadcrumb, // Using best-effort delivery in this example.
+                                        arrival.message.timestamp + MEGA,
                                         (cy_bytes_t){ .size = 2, .data = ":3" });
         if (err != CY_OK) {
             (void)fprintf(stderr, "cy_respond: %d\n", err);
@@ -105,25 +105,25 @@ static void on_message(cy_subscriber_t* const subscriber, cy_arrival_t* const ar
     }
 }
 
-int main(const int argc, char* argv[])
+int main(const int argc, const char* const argv[])
 {
     srand((unsigned)time(NULL));
     const struct config_t cfg = load_config(argc, argv);
 
-    // Set up the node instance.
-    cy_udp_posix_t cy_udp_posix;
-    const cy_err_t res = cy_udp_posix_new(&cy_udp_posix, //
-                                          cfg.local_uid,
-                                          wkv_key(""),
-                                          wkv_key(""),
-                                          cfg.iface_address,
-                                          cfg.tx_queue_capacity);
-    if (res != CY_OK) {
-        (void)fprintf(stderr, "cy_udp_posix_new: %d\n", res);
+    // Set up the platform layer that connects Cy to the underlying transport and OS.
+    // This is the only part of the code that is platform-specific; the rest is all portable Cy API usage.
+    cy_platform_t* const platform = cy_udp_posix_new(cfg.local_uid, cfg.iface_address, cfg.tx_queue_capacity);
+    if (platform == NULL) {
+        (void)fprintf(stderr, "cy_udp_posix_new\n");
         return 1;
     }
-    cy_t* const cy             = &cy_udp_posix.base;
-    cy->implicit_topic_timeout = 10 * MEGA; // This is just for debugging purposes.
+
+    // Set up the node instance.
+    cy_t* const cy = cy_new(platform);
+    if (cy == NULL) {
+        (void)fprintf(stderr, "cy_new\n");
+        return 1;
+    }
 
     // Create subscribers.
     cy_subscriber_t* subscribers[cfg.sub_count];
@@ -141,7 +141,7 @@ int main(const int argc, char* argv[])
 
     // Spin the event loop.
     while (true) {
-        const cy_err_t err_spin = cy_udp_posix_spin_once(&cy_udp_posix);
+        const cy_err_t err_spin = cy_spin_until(cy, cy_now(cy) + MEGA);
         if (err_spin != CY_OK) {
             (void)fprintf(stderr, "cy_udp_posix_spin_once: %d\n", err_spin);
             break;

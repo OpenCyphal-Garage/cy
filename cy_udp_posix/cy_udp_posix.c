@@ -31,7 +31,7 @@
 #include <stdio.h>
 
 #if (CY_UDP_POSIX_IFACE_COUNT_MAX) != (UDPARD_IFACE_COUNT_MAX)
-#error "CY_UDP_POSIX_IFACE_COUNT_MAX != UDPARD_IFACE_COUNT_MAX"
+#error CY_UDP_POSIX_IFACE_COUNT_MAX != UDPARD_IFACE_COUNT_MAX
 #endif
 
 /// Maximum expected incoming datagram size. If larger jumbo frames are expected, this value should be increased.
@@ -1026,3 +1026,5 @@ cy_us_t cy_udp_posix_now(void)
     }
     return (ts.tv_sec * 1000000LL) + (ts.tv_nsec / 1000L);
 }
+
+uint32_t cy_udp_parse_iface_address(const char* const address) { return udp_wrapper_parse_iface_address(address); }

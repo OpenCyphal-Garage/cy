@@ -32,6 +32,7 @@ if (NOT NO_STATIC_ANALYSIS)
             --suppress=badBitmaskCheck
             --suppress=constParameterCallback
             --suppress=duplInheritedMember
+            --suppress=preprocessorErrorDirective
             --inline-suppr
     )
     set(CMAKE_C_CPPCHECK ${cppcheck};--language=c;--std=c11;${cppcheck_options})
@@ -94,6 +95,6 @@ if (COVERAGE)
 endif ()
 
 # SUBDIRECTORIES
-add_subdirectory(cy_udp_posix) # TODO: temporarily disabled until the refactoring is complete
-#add_subdirectory(examples)     # TODO: temporarily disabled until the refactoring is complete
+add_subdirectory(cy_udp_posix)
+add_subdirectory(examples)
 add_subdirectory(tests)
