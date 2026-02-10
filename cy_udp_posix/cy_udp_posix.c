@@ -68,20 +68,6 @@ typedef struct cy_udp_posix_t
 static size_t  smaller(const size_t a, const size_t b) { return (a < b) ? a : b; }
 static int64_t min_i64(const int64_t a, const int64_t b) { return (a < b) ? a : b; }
 
-/// A simple hash for two u64 arguments based on the SplitMix64 finalizer.
-/// Much better than a simple xor while not being too heavy.
-static uint64_t hash2_u64(const uint64_t a, const uint64_t b)
-{
-    uint64_t x = a ^ (b + 0x9e3779b97f4a7c15ULL);
-    x ^= (a >> 32U) ^ (b << 32U);
-    x ^= x >> 30U;
-    x *= 0xbf58476d1ce4e5b9ULL;
-    x ^= x >> 27U;
-    x *= 0x94d049bb133111ebULL;
-    x ^= x >> 31U;
-    return x;
-}
-
 static bool is_valid_ip(const uint32_t ip) { return (ip > 0) && (ip < UINT32_MAX); }
 
 static void* mem_alloc(void* const user, const size_t size)
@@ -386,7 +372,7 @@ static void v_on_msg_stateless(udpard_rx_t* const rx, udpard_rx_port_t* const po
     // CPU cycles because each message requires some log-time index lookups.
     // We can mitigate this by applying a very simple filter that is cheap and computationally negligible.
     // It doesn't have to remove all duplicates -- removing the most obvious ones is sufficient to be useful.
-    const uint64_t msg_fingerprint = hash2_u64(tr.transfer_id, tr.remote.uid);
+    const uint64_t msg_fingerprint = tr.transfer_id ^ tr.remote.uid;
     const bool     dup             = (self->history[0] == msg_fingerprint) || (self->history[1] == msg_fingerprint);
     if (!dup) {
         self->history[1] = self->history[0];
