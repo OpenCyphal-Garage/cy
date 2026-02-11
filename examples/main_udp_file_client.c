@@ -55,7 +55,7 @@ int main(const int argc, char* argv[])
     cy_t* const cy = &cy_udp.base;
 
     // SET UP THE FILE READ PUBLISHER.
-    cy_publisher_t* const pub_file_read = cy_advertise_client(cy, wkv_key("file/read"), sizeof(file_read_response_t));
+    cy_publisher_t* const pub_file_read = cy_advertise_client(cy, cy_str("file/read"), sizeof(file_read_response_t));
     if (pub_file_read == NULL) {
         errx(0, "cy_advertise_client");
     }

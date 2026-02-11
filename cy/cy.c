@@ -143,7 +143,7 @@ struct cy_tree_t
 
 #define TREE_NULL ((cy_tree_t){ NULL, { NULL, NULL }, 0 })
 
-static const wkv_str_t str_invalid = { .len = SIZE_MAX, .str = NULL };
+static const cy_str_t str_invalid = { .len = SIZE_MAX, .str = NULL };
 
 typedef unsigned char byte_t;
 
@@ -169,8 +169,8 @@ struct cy_t
     /// Local node name is prefixed to the topic name if it starts with `~/`.
     /// The final resolved topic name exchanged on the wire has the leading/trailing/duplicate separators removed.
     /// Both strings are stored in the same heap block pointed to by `home`. Both are NUL-terminated.
-    wkv_str_t home;
-    wkv_str_t ns;
+    cy_str_t home;
+    cy_str_t ns;
 
     /// Topics are indexed in multiple ways for various lookups.
     /// Remember that pinned topics have small hash ≤8184, hence they are always on the left of the hash tree,
@@ -240,9 +240,9 @@ typedef enum
 
 #define TAG56_MASK ((1ULL << 56U) - 1ULL)
 
-static uint32_t  topic_subject_id(const cy_topic_t* const topic);
-static wkv_str_t name_normalize(const size_t in_size, const char* in, const size_t dest_size, char* const dest);
-static cy_err_t  name_assign(cy_t* const cy, wkv_str_t* const assignee, const wkv_str_t name);
+static uint32_t topic_subject_id(const cy_topic_t* const topic);
+static cy_str_t name_normalize(const size_t in_size, const char* in, const size_t dest_size, char* const dest);
+static cy_err_t name_assign(cy_t* const cy, cy_str_t* const assignee, const cy_str_t name);
 
 /// The number of increments to a needed to reach a==b.
 static inline uint64_t tag56_forward_distance(uint64_t a, uint64_t b)
@@ -334,7 +334,7 @@ static size_t cavl_count(cy_tree_t* const root)
 
 /// Converts `bit_width` least significant bits rounded up to the nearest nibble to hexadecimal.
 /// The output string must be at least ceil(bit_width/4)+1 chars long. It will be left-zero-padded and NUL-terminated.
-static wkv_str_t to_hex(uint64_t value, const size_t bit_width, char* const out)
+static cy_str_t to_hex(uint64_t value, const size_t bit_width, char* const out)
 {
     if (out == NULL) {
         return str_invalid;
@@ -345,7 +345,7 @@ static wkv_str_t to_hex(uint64_t value, const size_t bit_width, char* const out)
         value >>= 4U;
     }
     out[len] = '\0';
-    return (wkv_str_t){ .len = len, .str = out };
+    return (cy_str_t){ .len = len, .str = out };
 }
 
 #endif
@@ -736,8 +736,8 @@ static topic_repr_t topic_repr(const cy_topic_t* const topic)
     ptr += to_hex(topic->hash, 64, ptr).len;
     *ptr++ = '@';
     ptr += to_hex(topic_subject_id(topic), 32, ptr).len;
-    *ptr++               = '\'';
-    const wkv_str_t name = cy_topic_name(topic);
+    *ptr++              = '\'';
+    const cy_str_t name = cy_topic_name(topic);
     memcpy(ptr, name.str, name.len);
     ptr += name.len;
     *ptr++ = '\'';
@@ -907,7 +907,7 @@ static void schedule_gossip(cy_topic_t* const topic)
 }
 
 /// Parses the hexadecimal hash override suffix if present and valid. Example: "sensors/temperature#1a2b".
-static bool parse_hash_override(const wkv_str_t s, uint64_t* const out)
+static bool parse_hash_override(const cy_str_t s, uint64_t* const out)
 {
     *out                  = 0;
     const char* const end = s.str + s.len;
@@ -929,7 +929,7 @@ static bool parse_hash_override(const wkv_str_t s, uint64_t* const out)
     return false;
 }
 
-static uint64_t topic_hash(const wkv_str_t name)
+static uint64_t topic_hash(const cy_str_t name)
 {
     uint64_t hash = 0;
     if (!parse_hash_override(name, &hash)) {
@@ -1106,7 +1106,7 @@ static void topic_allocate(cy_topic_t* const topic, const uint64_t new_evictions
 /// where the lage is taken from the gossip message.
 static cy_err_t topic_new(cy_t* const        cy,
                           cy_topic_t** const out_topic,
-                          const wkv_str_t    resolved_name,
+                          const cy_str_t     resolved_name,
                           const uint64_t     hash,
                           const uint64_t     evictions,
                           const int_fast8_t  lage)
@@ -1188,7 +1188,7 @@ oom: // TODO correct deinitialization
     return CY_ERR_NAME;
 }
 
-static cy_err_t topic_ensure(cy_t* const cy, cy_topic_t** const out_topic, const wkv_str_t resolved_name)
+static cy_err_t topic_ensure(cy_t* const cy, cy_topic_t** const out_topic, const cy_str_t resolved_name)
 {
     cy_topic_t* const topic = cy_topic_find_by_name(cy, resolved_name);
     if (topic != NULL) {
@@ -1253,7 +1253,7 @@ static void* wkv_cb_couple_new_topic(const wkv_event_t evt)
 /// If there is a pattern subscriber matching the name of this topic, attempt to create a new subscription.
 /// If a new subscription is created, the new topic will be returned.
 static cy_topic_t* topic_subscribe_if_matching(cy_t* const       cy,
-                                               const wkv_str_t   resolved_name,
+                                               const cy_str_t    resolved_name,
                                                const uint64_t    hash,
                                                const uint64_t    evictions,
                                                const int_fast8_t lage)
@@ -1299,7 +1299,7 @@ static cy_err_t publish_heartbeat(const cy_t* const cy,
                                   const uint64_t    topic_hash,
                                   const uint64_t    topic_evictions,
                                   const int8_t      topic_lage,
-                                  const wkv_str_t   topic_name)
+                                  const cy_str_t    topic_name)
 {
     assert(topic_name.len <= CY_TOPIC_NAME_MAX);
     byte_t           buf[HEARTBEAT_SIZE_MAX];
@@ -1338,7 +1338,7 @@ static cy_err_t publish_heartbeat_scout(cy_t* const cy, subscriber_root_t* const
     char name[CY_TOPIC_NAME_MAX + 1];
     wkv_get_key(&cy->subscribers_by_name, subr->index_name, name);
     const cy_err_t res =
-      publish_heartbeat(cy, now, 0, 0, LAGE_SCOUT, (wkv_str_t){ .len = subr->index_name->key_len, .str = name });
+      publish_heartbeat(cy, now, 0, 0, LAGE_SCOUT, (cy_str_t){ .len = subr->index_name->key_len, .str = name });
     CY_TRACE(cy, "📢'%s' result=%d", name, res);
     if (res == CY_OK) {
         delist(&cy->list_scout_pending, &subr->list_scout_pending);
@@ -1377,7 +1377,7 @@ typedef struct
     uint64_t    topic_hash;
     uint64_t    topic_evictions;
     int_fast8_t topic_lage;
-    wkv_str_t   topic_name;
+    cy_str_t    topic_name;
 } hb_t;
 
 /// The name buffer shall be at least CY_TOPIC_NAME_MAX+1 bytes long.
@@ -1538,15 +1538,15 @@ struct cy_publisher_t
     cy_us_t     ack_baseline_timeout;
 };
 
-cy_publisher_t* cy_advertise(cy_t* const cy, const wkv_str_t name) { return cy_advertise_client(cy, name, 0); }
+cy_publisher_t* cy_advertise(cy_t* const cy, const cy_str_t name) { return cy_advertise_client(cy, name, 0); }
 
-cy_publisher_t* cy_advertise_client(cy_t* const cy, const wkv_str_t name, const size_t response_extent)
+cy_publisher_t* cy_advertise_client(cy_t* const cy, const cy_str_t name, const size_t response_extent)
 {
     if (cy == NULL) {
         return NULL;
     }
-    char            name_buf[CY_TOPIC_NAME_MAX];
-    const wkv_str_t resolved = cy_resolve(cy, name, sizeof(name_buf), name_buf);
+    char           name_buf[CY_TOPIC_NAME_MAX];
+    const cy_str_t resolved = cy_resolve(cy, name, sizeof(name_buf), name_buf);
     if (resolved.len > CY_TOPIC_NAME_MAX) {
         return NULL;
     }
@@ -2307,9 +2307,7 @@ static void* wkv_cb_couple_new_subscription(const wkv_event_t evt)
 /// Either finds an existing subscriber root or creates a new one. NULL if OOM.
 /// A subscriber root corresponds to a unique subscription name (with possible wildcards), hosting at least one
 /// live subscriber.
-static cy_err_t ensure_subscriber_root(cy_t* const               cy,
-                                       const wkv_str_t           resolved_name,
-                                       subscriber_root_t** const out_root)
+static cy_err_t ensure_subscriber_root(cy_t* const cy, const cy_str_t resolved_name, subscriber_root_t** const out_root)
 {
     assert((cy != NULL) && (resolved_name.str != NULL) && (resolved_name.len > 0U) && (out_root != NULL));
 
@@ -2365,11 +2363,11 @@ static void subscriber_callback_default(cy_subscriber_t* const sub, const cy_arr
     (void)arrival;
 }
 
-static cy_subscriber_t* subscribe(cy_t* const cy, const wkv_str_t name, subscriber_params_t params)
+static cy_subscriber_t* subscribe(cy_t* const cy, const cy_str_t name, subscriber_params_t params)
 {
     assert((cy != NULL) && (params.reordering_window >= -1));
-    char            name_buf[CY_TOPIC_NAME_MAX + 1U];
-    const wkv_str_t resolved = cy_resolve(cy, name, sizeof(name_buf), name_buf);
+    char           name_buf[CY_TOPIC_NAME_MAX + 1U];
+    const cy_str_t resolved = cy_resolve(cy, name, sizeof(name_buf), name_buf);
     if (resolved.len > CY_TOPIC_NAME_MAX) {
         return NULL;
     }
@@ -2400,7 +2398,7 @@ static cy_subscriber_t* subscribe(cy_t* const cy, const wkv_str_t name, subscrib
     return sub;
 }
 
-cy_subscriber_t* cy_subscribe(cy_t* const cy, const wkv_str_t name, const size_t extent)
+cy_subscriber_t* cy_subscribe(cy_t* const cy, const cy_str_t name, const size_t extent)
 {
     if (cy != NULL) {
         const subscriber_params_t params = { .extent_pure = extent, .reordering_window = -1, .reordering_capacity = 0 };
@@ -2409,10 +2407,10 @@ cy_subscriber_t* cy_subscribe(cy_t* const cy, const wkv_str_t name, const size_t
     return NULL;
 }
 
-cy_subscriber_t* cy_subscribe_ordered(cy_t* const     cy,
-                                      const wkv_str_t name,
-                                      const size_t    extent,
-                                      const cy_us_t   reordering_window)
+cy_subscriber_t* cy_subscribe_ordered(cy_t* const    cy,
+                                      const cy_str_t name,
+                                      const size_t   extent,
+                                      const cy_us_t  reordering_window)
 {
     if ((cy != NULL) && (reordering_window >= 0)) {
         const subscriber_params_t params = {
@@ -2513,12 +2511,12 @@ cy_t* cy_new(cy_platform_t* const platform)
     cy->platform = platform;
     olga_init(&cy->olga, cy, olga_now);
     {
-        const cy_err_t err = name_assign(cy, &cy->home, wkv_key(""));
+        const cy_err_t err = name_assign(cy, &cy->home, cy_str(""));
         assert(err == CY_OK); // infallible by design
         (void)err;
     }
     {
-        const cy_err_t err = name_assign(cy, &cy->ns, wkv_key(""));
+        const cy_err_t err = name_assign(cy, &cy->ns, cy_str(""));
         assert(err == CY_OK); // infallible by design
         (void)err;
     }
@@ -2562,7 +2560,7 @@ cy_t* cy_new(cy_platform_t* const platform)
     cy->heartbeat_next        = HEAT_DEATH;
     cy->heartbeat_next_urgent = HEAT_DEATH;
     cy->heartbeat_period      = 3 * MEGA; // May be made configurable at some point if necessary.
-    const wkv_str_t hb_name   = wkv_key(CY_HEARTBEAT_TOPIC_NAME);
+    const cy_str_t hb_name    = cy_str(CY_HEARTBEAT_TOPIC_NAME);
     cy->heartbeat_pub         = cy_advertise(cy, hb_name);
     if (cy->heartbeat_pub == NULL) {
         mem_free(cy, cy);
@@ -2592,15 +2590,15 @@ void cy_destroy(cy_t* const cy)
     // TODO implement
 }
 
-wkv_str_t cy_home(const cy_t* const cy) { return (cy != NULL) ? cy->home : str_invalid; }
-wkv_str_t cy_namespace(const cy_t* const cy) { return (cy != NULL) ? cy->ns : str_invalid; }
+cy_str_t cy_home(const cy_t* const cy) { return (cy != NULL) ? cy->home : str_invalid; }
+cy_str_t cy_namespace(const cy_t* const cy) { return (cy != NULL) ? cy->ns : str_invalid; }
 
-cy_err_t cy_home_set(cy_t* const cy, const wkv_str_t home)
+cy_err_t cy_home_set(cy_t* const cy, const cy_str_t home)
 {
     return (!cy_name_is_homeful(home)) ? name_assign(cy, &cy->home, home) : CY_ERR_ARGUMENT;
 }
 
-cy_err_t cy_namespace_set(cy_t* const cy, const wkv_str_t name_space)
+cy_err_t cy_namespace_set(cy_t* const cy, const cy_str_t name_space)
 {
     return (!cy_name_is_homeful(name_space)) ? name_assign(cy, &cy->ns, name_space) : CY_ERR_ARGUMENT;
 }
@@ -2682,9 +2680,9 @@ cy_us_t cy_now(const cy_t* const cy)
 
 cy_us_t cy_uptime(const cy_t* const cy) { return cy_now(cy) - cy->ts_started; }
 
-wkv_str_t cy_resolve(const cy_t* const cy, const wkv_str_t name, const size_t dest_size, char* dest)
+cy_str_t cy_resolve(const cy_t* const cy, const cy_str_t name, const size_t dest_size, char* dest)
 {
-    const wkv_str_t result = cy_name_resolve(name, cy_namespace(cy), cy_home(cy), dest_size, dest);
+    const cy_str_t result = cy_name_resolve(name, cy_namespace(cy), cy_home(cy), dest_size, dest);
     if (result.len <= CY_TOPIC_NAME_MAX) {
         // TODO: remapping!
         (void)0;
@@ -2692,7 +2690,7 @@ wkv_str_t cy_resolve(const cy_t* const cy, const wkv_str_t name, const size_t de
     return result;
 }
 
-cy_topic_t* cy_topic_find_by_name(const cy_t* const cy, const wkv_str_t name)
+cy_topic_t* cy_topic_find_by_name(const cy_t* const cy, const cy_str_t name)
 {
     const wkv_node_t* const node  = wkv_get(&cy->topics_by_name, name);
     cy_topic_t* const       topic = (node != NULL) ? (cy_topic_t*)node->value : NULL;
@@ -2712,12 +2710,12 @@ cy_topic_t* cy_topic_find_by_hash(const cy_t* const cy, const uint64_t hash)
 cy_topic_t* cy_topic_iter_first(const cy_t* const cy) { return (cy_topic_t*)cavl2_min(cy->topics_by_hash); }
 cy_topic_t* cy_topic_iter_next(cy_topic_t* const topic) { return (cy_topic_t*)cavl2_next_greater(&topic->index_hash); }
 
-wkv_str_t cy_topic_name(const cy_topic_t* const topic)
+cy_str_t cy_topic_name(const cy_topic_t* const topic)
 {
     if (topic != NULL) {
-        return (wkv_str_t){ .len = topic->index_name->key_len, .str = topic->name };
+        return (cy_str_t){ .len = topic->index_name->key_len, .str = topic->name };
     }
-    return (wkv_str_t){ .len = 0, .str = "" };
+    return (cy_str_t){ .len = 0, .str = "" };
 }
 uint64_t cy_topic_hash(const cy_topic_t* const topic) { return (topic != NULL) ? topic->hash : UINT64_MAX; }
 cy_t*    cy_topic_owner(const cy_topic_t* const topic) { return (topic != NULL) ? topic->cy : NULL; }
@@ -2996,12 +2994,12 @@ static bool is_valid_char(const char c) { return (c >= 33) && (c <= 126); }
 
 /// Normalizes the name and copies it into a heap-allocated storage.
 /// On OOM failure, the original is left unchanged.
-static cy_err_t name_assign(cy_t* const cy, wkv_str_t* const assignee, const wkv_str_t name)
+static cy_err_t name_assign(cy_t* const cy, cy_str_t* const assignee, const cy_str_t name)
 {
     assert(assignee != NULL);
     if (cy != NULL) {
-        char            normalized[CY_TOPIC_NAME_MAX + 1U];
-        const wkv_str_t str = name_normalize(name.len, name.str, sizeof(normalized), normalized);
+        char           normalized[CY_TOPIC_NAME_MAX + 1U];
+        const cy_str_t str = name_normalize(name.len, name.str, sizeof(normalized), normalized);
         if (str.len <= CY_TOPIC_NAME_MAX) {
             char* const alloc = mem_alloc_zero(cy, str.len + 1U);
             if ((alloc == NULL) && (str.len > 0U)) {
@@ -3012,14 +3010,14 @@ static cy_err_t name_assign(cy_t* const cy, wkv_str_t* const assignee, const wkv
                 alloc[str.len] = '\0';
             }
             mem_free(cy, (void*)assignee->str);
-            *assignee = (wkv_str_t){ .len = str.len, .str = alloc };
+            *assignee = (cy_str_t){ .len = str.len, .str = alloc };
             return CY_OK;
         }
     }
     return CY_ERR_ARGUMENT;
 }
 
-bool cy_name_is_valid(const wkv_str_t name)
+bool cy_name_is_valid(const cy_str_t name)
 {
     if ((name.len == 0) || (name.len > CY_TOPIC_NAME_MAX) || (name.str == NULL)) {
         return false;
@@ -3033,7 +3031,7 @@ bool cy_name_is_valid(const wkv_str_t name)
     return true;
 }
 
-bool cy_name_is_verbatim(const wkv_str_t name)
+bool cy_name_is_verbatim(const cy_str_t name)
 {
     wkv_t kv;
     wkv_init(&kv, &wkv_realloc);
@@ -3042,18 +3040,18 @@ bool cy_name_is_verbatim(const wkv_str_t name)
     return !wkv_has_substitution_tokens(&kv, name);
 }
 
-bool cy_name_is_homeful(const wkv_str_t name)
+bool cy_name_is_homeful(const cy_str_t name)
 {
     return (name.len >= 1) && (name.str[0] == cy_name_home) && ((name.len == 1) || (name.str[1] == cy_name_sep));
 }
 
-bool cy_name_is_absolute(const wkv_str_t name) { return (name.len >= 1) && (name.str[0] == cy_name_sep); }
+bool cy_name_is_absolute(const cy_str_t name) { return (name.len >= 1) && (name.str[0] == cy_name_sep); }
 
 /// Writes the normalized and validated version of `name` into `dest`, which must be at least `dest_size` bytes long.
 /// Normalization at least removes duplicate, leading, and trailing name separators.
 /// The input string length must not include NUL terminator; the output string is also not NUL-terminated.
 /// In case of failure, the destination buffer may be partially written.
-static wkv_str_t name_normalize(const size_t in_size, const char* in, const size_t dest_size, char* const dest)
+static cy_str_t name_normalize(const size_t in_size, const char* in, const size_t dest_size, char* const dest)
 {
     if ((in == NULL) || (dest == NULL)) {
         return str_invalid;
@@ -3083,10 +3081,10 @@ static wkv_str_t name_normalize(const size_t in_size, const char* in, const size
         *out++ = c;
     }
     assert(out <= out_end);
-    return (wkv_str_t){ .len = (size_t)(out - dest), .str = dest };
+    return (cy_str_t){ .len = (size_t)(out - dest), .str = dest };
 }
 
-wkv_str_t cy_name_join(const wkv_str_t left, const wkv_str_t right, const size_t dest_size, char* const dest)
+cy_str_t cy_name_join(const cy_str_t left, const cy_str_t right, const size_t dest_size, char* const dest)
 {
     if (dest == NULL) {
         return str_invalid;
@@ -3107,10 +3105,10 @@ wkv_str_t cy_name_join(const wkv_str_t left, const wkv_str_t right, const size_t
     if ((right_len == 0) && (len > 0)) {
         len--;
     }
-    return (wkv_str_t){ .len = len + right_len, .str = dest };
+    return (cy_str_t){ .len = len + right_len, .str = dest };
 }
 
-wkv_str_t cy_name_expand_home(wkv_str_t name, const wkv_str_t home, const size_t dest_size, char* const dest)
+cy_str_t cy_name_expand_home(cy_str_t name, const cy_str_t home, const size_t dest_size, char* const dest)
 {
     if (dest == NULL) {
         return str_invalid;
@@ -3124,11 +3122,11 @@ wkv_str_t cy_name_expand_home(wkv_str_t name, const wkv_str_t home, const size_t
     return cy_name_join(home, name, dest_size, dest);
 }
 
-wkv_str_t cy_name_resolve(const wkv_str_t name,
-                          wkv_str_t       name_space,
-                          const wkv_str_t home,
-                          const size_t    dest_size,
-                          char*           dest)
+cy_str_t cy_name_resolve(const cy_str_t name,
+                         cy_str_t       name_space,
+                         const cy_str_t home,
+                         const size_t   dest_size,
+                         char*          dest)
 {
     if (dest == NULL) {
         return str_invalid;

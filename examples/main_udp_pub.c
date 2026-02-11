@@ -78,7 +78,7 @@ static struct config_t load_config(const int argc, const char* const argv[])
 static void on_result(cy_future_t* const future)
 {
     const cy_topic_t* const topic      = cy_future_context(future).ptr[0];
-    const wkv_str_t         topic_name = cy_topic_name(topic); // The returned topic name is NUL-terminated in this case
+    const cy_str_t         topic_name = cy_topic_name(topic); // The returned topic name is NUL-terminated in this case
     const cy_future_status_t status    = cy_future_status(future);
     // cy_t* const cy = cy_topic_owner(topic);  // Sometimes it's needed.
     if (status == cy_future_pending) { // Future not complete yet, this is an intermediate progress update.
@@ -131,7 +131,7 @@ int main(const int argc, const char* const argv[])
     // Create publishers.
     cy_publisher_t* publishers[cfg.pub_count];
     for (size_t i = 0; i < cfg.pub_count; i++) {
-        publishers[i] = cy_advertise_client(cy, wkv_key(cfg.pubs[i].name), MEGA);
+        publishers[i] = cy_advertise_client(cy, cy_str(cfg.pubs[i].name), MEGA);
         if (publishers[i] == NULL) {
             (void)fprintf(stderr, "cy_advertise_client: NULL\n");
             return 1;

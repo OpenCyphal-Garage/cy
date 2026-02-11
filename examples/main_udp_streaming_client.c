@@ -91,7 +91,7 @@ int main(const int argc, char* argv[])
     cy_t* const cy = &cy_udp.base;
 
     // Create the publisher that will issue the request.
-    cy_publisher_t* const pub = cy_advertise_client(cy, wkv_key(TOPIC_NAME), RESPONSE_MAX);
+    cy_publisher_t* const pub = cy_advertise_client(cy, cy_str(TOPIC_NAME), RESPONSE_MAX);
     if (pub == NULL) {
         (void)fprintf(stderr, "cy_advertise_client: NULL\n");
         return 1;

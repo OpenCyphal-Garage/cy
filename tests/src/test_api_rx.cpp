@@ -284,7 +284,7 @@ void test_api_reliable_duplicate_acked_once_to_application()
     cy_test_message_reset_counters();
 
     arrival_capture_t      capture{};
-    cy_subscriber_t* const sub = cy_subscribe(platform.cy, wkv_key("rx/dup"), 256U);
+    cy_subscriber_t* const sub = cy_subscribe(platform.cy, cy_str("rx/dup"), 256U);
     TEST_ASSERT_NOT_NULL(sub);
 
     cy_user_context_t context = CY_USER_CONTEXT_EMPTY;
@@ -292,7 +292,7 @@ void test_api_reliable_duplicate_acked_once_to_application()
     cy_subscriber_context_set(sub, context);
     cy_subscriber_callback_set(sub, on_arrival_capture);
 
-    const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, wkv_key("rx/dup"));
+    const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("rx/dup"));
     TEST_ASSERT_NOT_NULL(topic);
 
     dispatch_message(&platform, topic, HeaderMsgReliable, 0x1234U, 0xAAU, 100, 0x11U);
@@ -316,7 +316,7 @@ void test_api_ordered_subscriber_timeout_flush()
     cy_test_message_reset_counters();
 
     arrival_capture_t      capture{};
-    cy_subscriber_t* const sub = cy_subscribe_ordered(platform.cy, wkv_key("rx/ord"), 256U, 10);
+    cy_subscriber_t* const sub = cy_subscribe_ordered(platform.cy, cy_str("rx/ord"), 256U, 10);
     TEST_ASSERT_NOT_NULL(sub);
 
     cy_user_context_t context = CY_USER_CONTEXT_EMPTY;
@@ -324,7 +324,7 @@ void test_api_ordered_subscriber_timeout_flush()
     cy_subscriber_context_set(sub, context);
     cy_subscriber_callback_set(sub, on_arrival_capture);
 
-    const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, wkv_key("rx/ord"));
+    const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("rx/ord"));
     TEST_ASSERT_NOT_NULL(topic);
 
     dispatch_message(&platform, topic, HeaderMsgBestEffort, 8U, 0xBBU, 100, 0x41U);

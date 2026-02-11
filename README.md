@@ -59,19 +59,18 @@ int main(void)
     cy_t* cy = cy_new(platform);
     if (cy == NULL) { ... }
 
-    cy_err_t err = CY_OK; // Used by the snippets below.
     // ... to be continued ...
 }
 ```
 
-The library uses Pascal strings represented as `wkv_str_t` throughout;
+The library uses Pascal strings represented as `cy_str_t` throughout;
 these strings are normally not nul-terminated, unless specifically noted otherwise.
-Use `wkv_key(const char*)` to create such strings from ordinary C strings.
+Use `cy_str(const char*)` to create such strings from ordinary C strings.
 
 ### 📢 Publish messages
 
 ```c++
-cy_publisher_t* my_pub = cy_advertise(cy, wkv_key("my/topic"));
+cy_publisher_t* my_pub = cy_advertise(cy, cy_str("my/topic"));
 if (my_pub == NULL) { ... }  // handle error
 ```
 
@@ -79,7 +78,7 @@ Publish a message asynchronously (non-blocking) using best-effort delivery:
 
 ```c++
 cy_us_t deadline = cy_now(cy) + 100_000; // the message must be sent within 0.1 seconds from now
-err = cy_publish(my_pub, deadline, (cy_bytes_t){.size = 13, .data = "Hello Cyphal!"});
+cy_err_t err = cy_publish(my_pub, deadline, (cy_bytes_t){.size = 13, .data = "Hello Cyphal!"});
 if (err != CY_OK) { ... }
 ```
 
@@ -143,7 +142,7 @@ cy_future_callback_set(future, cy_future_destroy);  // Will destroy itself when 
 
 ```c++
 size_t extent = 1024 * 100;  // max message size in bytes; excess truncated
-cy_subscriber_t* my_sub = cy_subscribe(cy, wkv_key("my/topic"), extent); // See also cy_subscribe_ordered()
+cy_subscriber_t* my_sub = cy_subscribe(cy, cy_str("my/topic"), extent);
 if (my_sub == NULL) { ... }  // handle error
 cy_subscriber_context_set(my_sub, (cy_user_context_t){ { "🐱", NULL } }); // optional context
 cy_subscriber_callback_set(my_sub, on_message); // callback invoked upon message arrival

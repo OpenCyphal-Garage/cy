@@ -129,7 +129,7 @@ int main(const int argc, const char* const argv[])
     cy_subscriber_t* subscribers[cfg.sub_count];
     bool             response_delivery_flags[cfg.sub_count];
     for (size_t i = 0; i < cfg.sub_count; i++) {
-        subscribers[i] = cy_subscribe(cy, wkv_key(cfg.subs[i].name), MEGA);
+        subscribers[i] = cy_subscribe(cy, cy_str(cfg.subs[i].name), MEGA);
         if (subscribers[i] == NULL) {
             (void)fprintf(stderr, "cy_subscribe: NULL\n");
             return 1;

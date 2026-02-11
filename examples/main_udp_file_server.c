@@ -81,7 +81,7 @@ int main(void)
     }
     cy_t* const cy = &cy_udp.base;
 
-    cy_subscriber_t* const sub_file_read = cy_subscribe(cy, wkv_key("file/read"), 1024);
+    cy_subscriber_t* const sub_file_read = cy_subscribe(cy, cy_str("file/read"), 1024);
     if (sub_file_read == NULL) {
         errx(res, "cy_subscribe");
     }

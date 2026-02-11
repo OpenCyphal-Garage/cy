@@ -161,7 +161,7 @@ int main(void)
     cy_t* const cy = &cy_udp.base;
 
     // Subscribe to the request topic.
-    cy_subscriber_t* const sub = cy_subscribe(cy, wkv_key(TOPIC_NAME), RESPONSE_MAX);
+    cy_subscriber_t* const sub = cy_subscribe(cy, cy_str(TOPIC_NAME), RESPONSE_MAX);
     if (sub == NULL) {
         (void)fprintf(stderr, "cy_subscribe: NULL\n");
         return 1;

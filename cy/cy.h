@@ -42,6 +42,9 @@ typedef struct cy_t          cy_t;
 typedef struct cy_topic_t    cy_topic_t;
 typedef struct cy_platform_t cy_platform_t;
 
+typedef wkv_str_t      cy_str_t;
+static inline cy_str_t cy_str(const char* const s) { return wkv_key(s); }
+
 typedef enum cy_prio_t
 {
     cy_prio_exceptional = 0,
@@ -173,13 +176,13 @@ typedef struct cy_publisher_t cy_publisher_t;
 /// The response_extent is the extent (maximum size) of the response data if the publisher expects responses.
 /// TODO: currently, responses may arrive out-of-order; this can be easily changed in the future if/when needed
 ///       by adding a reordering window parameter here and implementing a simple reordering buffer in Cy.
-cy_publisher_t* cy_advertise(cy_t* const cy, const wkv_str_t name);
-cy_publisher_t* cy_advertise_client(cy_t* const cy, const wkv_str_t name, const size_t response_extent);
+cy_publisher_t* cy_advertise(cy_t* const cy, const cy_str_t name);
+cy_publisher_t* cy_advertise_client(cy_t* const cy, const cy_str_t name, const size_t response_extent);
 
 /// Create a new publisher that ensures that there is at most one, the most recent, message pending for transmission.
 /// If a new message is published while another one is still pending, the previous one is cancelled.
 /// TODO not implemented; very simple idea -- store last cancellation token in the topic and cancel it on new publish.
-cy_publisher_t* cy_advertise_sample(cy_t* const cy, const wkv_str_t name);
+cy_publisher_t* cy_advertise_sample(cy_t* const cy, const cy_str_t name);
 
 /// Publish a best-effort (non-reliable) one-way message without expecting a response.
 cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t deadline, const cy_bytes_t message);
@@ -296,8 +299,8 @@ typedef struct cy_breadcrumb_t
 
 typedef struct cy_substitution_t
 {
-    wkv_str_t str;     ///< The substring that matched the substitution token in the pattern. Not NUL-terminated.
-    size_t    ordinal; ///< Zero-based index of the substitution token as occurred in the pattern.
+    cy_str_t str;     ///< The substring that matched the substitution token in the pattern. Not NUL-terminated.
+    size_t   ordinal; ///< Zero-based index of the substitution token as occurred in the pattern.
 } cy_substitution_t;
 
 /// When a name pattern match occurs, Cy will store the string substitutions that had to be made to
@@ -353,13 +356,13 @@ typedef void (*cy_subscriber_callback_t)(cy_subscriber_t*, cy_arrival_t);
 /// There may be more than one subscriber with the same name (pattern). The library will only keep one
 /// reference-counted topic; upon message arrival, all matching subscribers will be invoked in an unspecified order.
 /// Each subscriber may use distinct parameters (extent, reordering, etc).
-cy_subscriber_t* cy_subscribe(cy_t* const cy, const wkv_str_t name, const size_t extent);
+cy_subscriber_t* cy_subscribe(cy_t* const cy, const cy_str_t name, const size_t extent);
 
 /// The reordering window must be non-negative.
-cy_subscriber_t* cy_subscribe_ordered(cy_t* const     cy,
-                                      const wkv_str_t name,
-                                      const size_t    extent,
-                                      const cy_us_t   reordering_window);
+cy_subscriber_t* cy_subscribe_ordered(cy_t* const    cy,
+                                      const cy_str_t name,
+                                      const size_t   extent,
+                                      const cy_us_t  reordering_window);
 
 cy_user_context_t cy_subscriber_context(const cy_subscriber_t* const self);
 void              cy_subscriber_context_set(cy_subscriber_t* const self, const cy_user_context_t context);
@@ -429,10 +432,10 @@ void cy_destroy(cy_t* const cy);
 /// The returned strings are NUL-terminated. The lifetime is bound to the Cy instance.
 /// Mutators fail if the supplied string is invalid.
 /// The default home and namespace are empty. They can be changed only before the first topic is created.
-wkv_str_t cy_home(const cy_t* const cy);
-wkv_str_t cy_namespace(const cy_t* const cy);
-cy_err_t  cy_home_set(cy_t* const cy, const wkv_str_t home);
-cy_err_t  cy_namespace_set(cy_t* const cy, const wkv_str_t name_space);
+cy_str_t cy_home(const cy_t* const cy);
+cy_str_t cy_namespace(const cy_t* const cy);
+cy_err_t cy_home_set(cy_t* const cy, const cy_str_t home);
+cy_err_t cy_namespace_set(cy_t* const cy, const cy_str_t name_space);
 
 /// This function must be invoked periodically to ensure liveness.
 /// The returned value indicates the success of the heartbeat publication, if any took place, or zero.
@@ -447,26 +450,32 @@ cy_us_t cy_now(const cy_t* const cy);
 /// The time since cy_new() in microseconds.
 cy_us_t cy_uptime(const cy_t* const cy);
 
+/// The strings will be copied into an internal storage, so they don't have to survive after this call.
+/// The effect is incremental. If a remapping for the same "from" already exists, it will be replaced with the new "to".
+/// On error, the node remap configuration is left unchanged.
 /// TODO not implemented
-cy_err_t cy_remap(cy_t* const cy, const wkv_str_t from, const wkv_str_t to);
+cy_err_t cy_remap(cy_t* const cy, const cy_str_t from, const cy_str_t to);
 
 /// Like cy_remap(), but the remappings are read from a string of the form "from1=to1 from2=to2 "...
-/// The from/to are separated with `=` (equals sign), and the remapping pairs are separated with ASCII whitespace.
+/// and applied sequentially via cy_remap(). The effect of multiple invocations is incremental.
+/// The from/to are separated with `=` (equals), and the pairs are separated with ASCII whitespaces " \t\n\r\x0b\x0c".
 /// This is designed to support single-string configuration parameters storing all remappings in one place.
+/// Invalid pairs are ignored. The string does not have to survive after this call.
+/// On error, the node remap configuration may be left in an inconsistent state.
 /// TODO not implemented
-cy_err_t cy_remap_parse(cy_t* const cy, const wkv_str_t spec_string);
+cy_err_t cy_remap_parse(cy_t* const cy, const cy_str_t spec_string);
 
 /// Invokes cy_name_resolve() using the home and the namespace of the node, then applies remapping, if any.
 /// The result is a fully resolved topic name.
 /// On failure, the output string has length SIZE_MAX and NULL data pointer.
-wkv_str_t cy_resolve(const cy_t* const cy, const wkv_str_t name, const size_t dest_size, char* dest);
+cy_str_t cy_resolve(const cy_t* const cy, const cy_str_t name, const size_t dest_size, char* dest);
 
 // TODO: add a way to dump/restore topic configuration for instant initialization. This may be platform-specific.
 
 /// Complexity is logarithmic in the number of topics. NULL if not found.
 /// In practical terms, these queries are very fast and efficient.
 cy_topic_t* cy_topic_find_by_hash(const cy_t* const cy, const uint64_t hash);
-cy_topic_t* cy_topic_find_by_name(const cy_t* const cy, const wkv_str_t name);
+cy_topic_t* cy_topic_find_by_name(const cy_t* const cy, const cy_str_t name);
 
 /// Iterate over all topics in an unspecified order.
 /// This is useful when handling IO multiplexing (building the list of descriptors to read) and for introspection.
@@ -480,9 +489,9 @@ cy_topic_t* cy_topic_iter_first(const cy_t* const cy);
 cy_topic_t* cy_topic_iter_next(cy_topic_t* const topic);
 
 /// The name pointer lifetime is bound to the topic. The name is NUL-terminated.
-wkv_str_t cy_topic_name(const cy_topic_t* const topic);
-uint64_t  cy_topic_hash(const cy_topic_t* const topic);
-cy_t*     cy_topic_owner(const cy_topic_t* const topic);
+cy_str_t cy_topic_name(const cy_topic_t* const topic);
+uint64_t cy_topic_hash(const cy_topic_t* const topic);
+cy_t*    cy_topic_owner(const cy_topic_t* const topic);
 
 /// Provides access to the application-specific context associated per topic.
 /// By default it is set to CY_USER_CONTEXT_EMPTY when the topic is created.
@@ -509,7 +518,7 @@ extern const char cy_name_one;  ///< `*` -- matches any single name component: "
 extern const char cy_name_any;  ///< `>` -- matches zero or more components: "abc/>" => "abc", "abc/def", "abc/def/ghi".
 
 /// True iff the given name is valid according to the Cy naming rules. An empty name is not a valid name.
-bool cy_name_is_valid(const wkv_str_t name);
+bool cy_name_is_valid(const cy_str_t name);
 
 /// Returns true iff the name can only match a single topic, which is called a verbatim name;
 /// conversely, returns false for patterns that can match more than one topic.
@@ -518,24 +527,24 @@ bool cy_name_is_valid(const wkv_str_t name);
 /// There may be at most one zero-or-more substitution token used, and if used, it must be the last token of the name.
 /// Otherwise, the behavior is currently unstable; it is well-defined internally but may change between minor versions
 /// and result in wire compatibility issues.
-bool cy_name_is_verbatim(const wkv_str_t name);
+bool cy_name_is_verbatim(const cy_str_t name);
 
 /// Whether the name is relative to the home namespace ~ or is absolute.
-bool cy_name_is_homeful(const wkv_str_t name);
-bool cy_name_is_absolute(const wkv_str_t name);
+bool cy_name_is_homeful(const cy_str_t name);
+bool cy_name_is_absolute(const cy_str_t name);
 
 /// Joins two (potentially empty) names with cy_name_sep, normalizing both parts, such that the result is
 /// a normalized name. Either part may be empty, in which case it behaves like normalization of the other part.
 /// On failure, the output string has length SIZE_MAX and NULL data pointer.
 /// The destination is not NUL-terminated.
-wkv_str_t cy_name_join(const wkv_str_t left, const wkv_str_t right, const size_t dest_size, char* const dest);
+cy_str_t cy_name_join(const cy_str_t left, const cy_str_t right, const size_t dest_size, char* const dest);
 
 /// If cy_name_is_homeful(name), expands the home prefix using the provided home string;
 /// otherwise, returns the normalized name.
 /// The result is normalized and written into dest, which must be at least dest_size bytes long.
 /// On failure, the output string has length SIZE_MAX and NULL data pointer.
 /// The destination is not NUL-terminated.
-wkv_str_t cy_name_expand_home(wkv_str_t name, const wkv_str_t home, const size_t dest_size, char* const dest);
+cy_str_t cy_name_expand_home(cy_str_t name, const cy_str_t home, const size_t dest_size, char* const dest);
 
 /// Constructs the full normalized name as exchanged over the wire prior to remapping: homeful names are expanded,
 /// relative names are prefixed with the namespace, and absolute names are left as-is.
@@ -551,11 +560,11 @@ wkv_str_t cy_name_expand_home(wkv_str_t name, const wkv_str_t home, const size_t
 /// The destination is not NUL-terminated.
 ///
 /// TODO: add remapping set.
-wkv_str_t cy_name_resolve(const wkv_str_t name,
-                          wkv_str_t       name_space,
-                          const wkv_str_t home,
-                          const size_t    dest_size,
-                          char*           dest);
+cy_str_t cy_name_resolve(const cy_str_t name,
+                         cy_str_t       name_space,
+                         const cy_str_t home,
+                         const size_t   dest_size,
+                         char*          dest);
 
 // =====================================================================================================================
 //                                                  MONITORING & DIAGNOSTICS
