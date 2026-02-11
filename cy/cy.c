@@ -2684,7 +2684,7 @@ cy_us_t cy_uptime(const cy_t* const cy) { return cy_now(cy) - cy->ts_started; }
 
 wkv_str_t cy_resolve(const cy_t* const cy, const wkv_str_t name, const size_t dest_size, char* dest)
 {
-    const wkv_str_t result = cy_name_resolve_raw(name, cy_namespace(cy), cy_home(cy), dest_size, dest);
+    const wkv_str_t result = cy_name_resolve(name, cy_namespace(cy), cy_home(cy), dest_size, dest);
     if (result.len <= CY_TOPIC_NAME_MAX) {
         // TODO: remapping!
         (void)0;
@@ -3124,11 +3124,11 @@ wkv_str_t cy_name_expand_home(wkv_str_t name, const wkv_str_t home, const size_t
     return cy_name_join(home, name, dest_size, dest);
 }
 
-wkv_str_t cy_name_resolve_raw(const wkv_str_t name,
-                              wkv_str_t       name_space,
-                              const wkv_str_t home,
-                              const size_t    dest_size,
-                              char*           dest)
+wkv_str_t cy_name_resolve(const wkv_str_t name,
+                          wkv_str_t       name_space,
+                          const wkv_str_t home,
+                          const size_t    dest_size,
+                          char*           dest)
 {
     if (dest == NULL) {
         return str_invalid;
