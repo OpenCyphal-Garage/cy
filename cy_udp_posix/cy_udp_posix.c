@@ -282,9 +282,9 @@ static cy_err_t v_subject_writer_send(cy_platform_t* const       platform,
                                    owner->iface_bitmap,
                                    (udpard_prio_t)priority,
                                    self->next_transfer_id++,
+                                   udpard_make_subject_endpoint(base->subject_id),
                                    cy_bytes_to_udpard_bytes(message),
-                                   NULL,
-                                   (udpard_user_context_t){ .ptr = { base } });
+                                   NULL);
     if (ok) {
         return CY_OK;
     }
@@ -515,15 +515,16 @@ static cy_err_t v_p2p_send(cy_platform_t* const          base,
                            const uint64_t                remote_id,
                            const cy_bytes_t              message)
 {
+    (void)remote_id; // we only need the remote endpoints, which are stored in the P2P context.
     cy_udp_posix_t* const owner = (cy_udp_posix_t*)base;
 
     // Unbox the P2P context.
     p2p_ctx_t inner;
     static_assert(sizeof(inner) <= sizeof(cy_p2p_context_t), "");
     memcpy(&inner, p2p_context, sizeof(inner));
-    udpard_remote_t remote = { .uid = remote_id };
+    udpard_udpip_ep_t endpoints[UDPARD_IFACE_COUNT_MAX] = { 0 };
     for (size_t i = 0; i < UDPARD_IFACE_COUNT_MAX; i++) {
-        remote.endpoints[i] = inner.endpoints[i];
+        endpoints[i] = inner.endpoints[i];
     }
 
     // Push the message.
@@ -535,14 +536,12 @@ static cy_err_t v_p2p_send(cy_platform_t* const          base,
                                        cy_udp_posix_now(),
                                        deadline,
                                        inner.priority,
-                                       remote,
+                                       endpoints,
                                        cy_bytes_to_udpard_bytes(message),
-                                       NULL,
-                                       UDPARD_USER_CONTEXT_NULL,
                                        NULL);
 
     // Report the result.
-    CY_TRACE(owner->base.cy, "💬 N%016llx res=%u", (unsigned long long)remote.uid, ok);
+    CY_TRACE(owner->base.cy, "💬 N%016llx res=%u", (unsigned long long)remote_id, ok);
     if (ok) {
         return CY_OK;
     }
@@ -775,7 +774,7 @@ static const cy_platform_vtable_t platform_vtable = {
     .random  = v_random,
 };
 
-static bool v_tx_eject_p2p(udpard_tx_t* const tx, udpard_tx_ejection_t* const ej, const udpard_udpip_ep_t destination)
+static bool v_tx_eject(udpard_tx_t* const tx, udpard_tx_ejection_t* const ej)
 {
     cy_udp_posix_t* const self = (cy_udp_posix_t*)tx->user;
     assert(self != NULL);
@@ -786,8 +785,8 @@ static bool v_tx_eject_p2p(udpard_tx_t* const tx, udpard_tx_ejection_t* const ej
     // but the Berkeley socket API does not allow us to take advantage of that -- the data will be copied into the
     // kernel space anyway. Therefore, we simply send it with copying and do not bother with reference counting.
     const int16_t res = udp_wrapper_send(&self->sock[ej->iface_index], //
-                                         destination.ip,
-                                         destination.port,
+                                         ej->destination.ip,
+                                         ej->destination.port,
                                          ej->dscp,
                                          ej->datagram.size,
                                          ej->datagram.data);
@@ -797,14 +796,6 @@ static bool v_tx_eject_p2p(udpard_tx_t* const tx, udpard_tx_ejection_t* const ej
     }
     return res != 0; // either transmitted successfully or dropped due to error
 }
-
-static bool v_tx_eject_subject(udpard_tx_t* const tx, udpard_tx_ejection_t* const ej)
-{
-    const subject_writer_t* const writer = ej->user.ptr[0];
-    return v_tx_eject_p2p(tx, ej, writer->endpoints[0]); // TODO FIXME this is incorrect; supply endpoint at TX time!
-}
-
-static const udpard_tx_vtable_t tx_vtable = { .eject_subject = v_tx_eject_subject, .eject_p2p = v_tx_eject_p2p };
 
 cy_platform_t* cy_udp_posix_new(const uint64_t uid,
                                 const uint32_t local_iface_address[CY_UDP_POSIX_IFACE_COUNT_MAX],
@@ -849,11 +840,12 @@ cy_platform_t* cy_udp_posix_new(const uint64_t uid,
         free(self);
         return NULL;
     }
+    static const udpard_tx_vtable_t tx_vtable = { .eject = v_tx_eject };
     if (!udpard_tx_new(&self->udpard_tx, uid, prng64(&self->prng_state, uid), tx_queue_capacity, tx_mem, &tx_vtable)) {
         free(self);
         return NULL;
     }
-    udpard_rx_new(&self->udpard_rx, &self->udpard_tx); // infallible
+    udpard_rx_new(&self->udpard_rx); // infallible
     self->udpard_tx.user = self;
     self->udpard_rx.user = self;
 
