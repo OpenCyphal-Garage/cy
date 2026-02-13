@@ -215,9 +215,11 @@ struct cy_t
 
     /// Slow topic iteration state. Updated every cy_update(); when NULL, restart from scratch.
     cy_topic_t* topic_iter;
+
+    cy_async_error_handler_t async_error_handler;
 };
 
-#define ON_ASYNC_ERROR(cy, topic) (cy)->platform->vtable->on_async_error((cy)->platform, topic, __LINE__)
+#define ON_ASYNC_ERROR(cy, topic, error) (cy)->async_error_handler((cy), (topic), (error), __LINE__)
 
 /// The maximum header size is needed to calculate the extent correctly.
 /// It is added to the serialized message size.
@@ -984,7 +986,7 @@ static void topic_ensure_subscribed(cy_topic_t* const topic)
                  subject_id,
                  (void*)topic->sub_reader);
         if (topic->sub_reader == NULL) {
-            ON_ASYNC_ERROR(cy, topic);
+            ON_ASYNC_ERROR(cy, topic, CY_ERR_MEMORY);
         } else {
             topic->sub_reader->subject_id = subject_id;
         }
@@ -1271,7 +1273,7 @@ static cy_topic_t* topic_subscribe_if_matching(cy_t* const       cy,
     {
         const cy_err_t res = topic_new(cy, &topic, resolved_name, hash, evictions, lage);
         if (res != CY_OK) {
-            ON_ASYNC_ERROR(cy, NULL);
+            ON_ASYNC_ERROR(cy, NULL, res);
             return NULL;
         }
     }
@@ -1279,7 +1281,7 @@ static cy_topic_t* topic_subscribe_if_matching(cy_t* const       cy,
     // Using the resolved_name here would be deadly since it is stack-allocated.
     if (NULL != wkv_route(&cy->subscribers_by_pattern, cy_topic_name(topic), topic, wkv_cb_couple_new_topic)) {
         // TODO discard the topic!
-        ON_ASYNC_ERROR(cy, NULL);
+        ON_ASYNC_ERROR(cy, NULL, CY_ERR_MEMORY);
         return NULL;
     }
     // Create the transport subscription once at the end, considering the parameters from all subscribers.
@@ -2497,6 +2499,22 @@ static bool is_prime_u32(const uint32_t n)
 
 static cy_us_t olga_now(olga_t* const sched) { return cy_now((cy_t*)sched->user); }
 
+static void default_async_error_handler(cy_t* const       cy,
+                                        cy_topic_t* const topic,
+                                        const cy_err_t    error,
+                                        const uint16_t    line_number)
+{
+    CY_TRACE(cy,
+             "❌💥⚠️ %s error=%d at cy.c:%u",
+             (topic != NULL) ? topic_repr(topic).str : "<no-topic>",
+             (int)error,
+             (unsigned)line_number);
+    (void)cy;
+    (void)topic;
+    (void)error;
+    (void)line_number;
+}
+
 cy_t* cy_new(cy_platform_t* const platform)
 {
     if ((platform == NULL) || (platform->vtable == NULL) || (platform->cy != NULL) ||
@@ -2575,8 +2593,9 @@ cy_t* cy_new(cy_platform_t* const platform)
     }
     cy_subscriber_callback_set(cy->heartbeat_sub, &on_heartbeat);
 
-    cy->topic_iter = NULL;
-    platform->cy   = cy;
+    cy->async_error_handler = default_async_error_handler;
+    cy->topic_iter          = NULL;
+    platform->cy            = cy;
     CY_TRACE(cy,
              "🚀 ts_started=%llu subject_id_modulus=%lu",
              (unsigned long long)cy->ts_started,
@@ -2588,6 +2607,13 @@ void cy_destroy(cy_t* const cy)
 {
     cy->platform->cy = NULL; // Unlink the platform in case it needs to be reused.
     // TODO implement
+}
+
+void cy_async_error_handler_set(cy_t* const cy, const cy_async_error_handler_t handler)
+{
+    if (cy != NULL) {
+        cy->async_error_handler = (handler != NULL) ? handler : default_async_error_handler;
+    }
 }
 
 cy_str_t cy_home(const cy_t* const cy) { return (cy != NULL) ? cy->home : str_invalid; }

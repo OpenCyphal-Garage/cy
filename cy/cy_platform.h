@@ -177,18 +177,6 @@ typedef struct cy_platform_vtable_t
     ///     const uint64_t seed[] = { ((uint64_t)rtc_get_time() << 16U) + ++g_counter };  // Add ADC noise etc.
     ///     return rapidhash_withSeed(seed, sizeof(seed), local_uid);
     uint64_t (*random)(cy_platform_t*);
-
-    /// This handler is used to report asynchronous errors occurring in Cy. In particular, it is used for topic
-    /// resubscription errors occurring in response to consensus updates, and also in cases where Cy is unable to
-    /// create an implicit subscription on pattern match due to lack of memory.
-    ///
-    /// Normally, the error handler does not need to do anything specific aside from perhaps logging/reporting the
-    /// error. Cy will keep attempting to repeat the failing operation continuously until it succeeds or the condition
-    /// requiring the operation is lifted.
-    ///
-    /// Since Cy is a single-file library, the line number uniquely identifies the error site.
-    /// The topic pointer is NULL if the error prevented the creation of a new topic instance.
-    void (*on_async_error)(cy_platform_t*, cy_topic_t*, uint16_t line_number);
 } cy_platform_vtable_t;
 
 /// New message received on a topic or P2P. The data ownership is taken by this function.

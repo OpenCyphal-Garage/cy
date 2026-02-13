@@ -759,37 +759,6 @@ static uint64_t v_random(cy_platform_t* const base)
     return prng64(&((cy_udp_posix_t*)base)->prng_state, ((cy_udp_posix_t*)base)->udpard_tx.local_uid);
 }
 
-static void v_on_async_error(cy_platform_t* const base, cy_topic_t* const topic, const uint16_t line_number)
-{
-    (void)topic;
-    cy_udp_posix_t* const owner = (cy_udp_posix_t*)base;
-    CY_TRACE(
-      owner->base.cy, "⚠️ Error at cy.c:%u topic='%s'", line_number, topic != NULL ? cy_topic_name(topic).str : "");
-    // Find either a free slot or a slot with the matching line number.
-    struct cy_udp_posix_stats_cy_async_err_t* slot = NULL;
-    for (size_t i = 0; i < CY_UDP_POSIX_ASYNC_ERROR_SLOTS; i++) {
-        const uint16_t ln = owner->stats.cy_async_errors[i].line_number;
-        if ((ln == 0) || (ln == line_number)) {
-            slot = &owner->stats.cy_async_errors[i];
-            if (ln == line_number) {
-                break;
-            }
-        }
-    }
-    if (slot == NULL) { // All slots taken, replace the oldest. This should never happen, we have enough slots.
-        slot = &owner->stats.cy_async_errors[0];
-        for (size_t i = 1; i < CY_UDP_POSIX_ASYNC_ERROR_SLOTS; i++) {
-            if (owner->stats.cy_async_errors[i].last_at < slot->last_at) {
-                slot = &owner->stats.cy_async_errors[i];
-            }
-        }
-        slot->count = 0;
-    }
-    slot->line_number = line_number;
-    slot->count++;
-    slot->last_at = cy_udp_posix_now();
-}
-
 // ---------------------------------------------------------------------------------------------------------------------
 // PUBLIC API
 
@@ -807,10 +776,9 @@ static const cy_platform_vtable_t platform_vtable = {
     // EVENT LOOP
     .spin = v_spin,
     // MISC
-    .now            = v_now,
-    .realloc        = v_realloc,
-    .random         = v_random,
-    .on_async_error = v_on_async_error,
+    .now     = v_now,
+    .realloc = v_realloc,
+    .random  = v_random,
 };
 
 static bool v_tx_eject_p2p(udpard_tx_t* const tx, udpard_tx_ejection_t* const ej, const udpard_udpip_ep_t destination)

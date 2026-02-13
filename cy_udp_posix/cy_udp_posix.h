@@ -49,18 +49,6 @@ typedef struct cy_udp_posix_stats_t
 
     cy_udp_posix_stats_socket_t sock_tx;
     cy_udp_posix_stats_socket_t sock_rx;
-
-    /// Errors that occur in Cy asynchronously with API invocations.
-    /// This is purely informative and does not require intervention from the application, exposed only for diagnostics.
-    /// For example, automatic pattern subscription errors, OOM, or topic reallocation errors.
-    /// CY_UDP_POSIX_ASYNC_ERROR_SLOTS is chosen to fit all distinct line numbers where asynchronous errors can occur
-    /// in cy.c; shall the number be insufficient, the oldest seen error will be overwritten.
-    struct cy_udp_posix_stats_cy_async_err_t
-    {
-        uint16_t line_number; ///< Zero if unused, otherwise contains the line number in cy.c.
-        uint64_t count;
-        cy_us_t  last_at;
-    } cy_async_errors[CY_UDP_POSIX_ASYNC_ERROR_SLOTS];
 } cy_udp_posix_stats_t;
 
 /// Unused interfaces should have zero addresses; to parse IP address strings see cy_udp_parse_iface_address().
