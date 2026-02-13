@@ -45,9 +45,6 @@ struct test_platform_t final
     std::size_t                   p2p_count{ 0U };
     std::array<unsigned char, 16> last_p2p{};
     std::size_t                   p2p_extent{ 0U };
-
-    std::size_t   async_error_count{ 0U };
-    std::uint16_t last_async_error_line{ 0U };
 };
 
 test_platform_t* platform_from(cy_platform_t* const platform)
@@ -166,14 +163,16 @@ extern "C" std::uint64_t platform_random(cy_platform_t* const platform)
     return self->random_state;
 }
 
-extern "C" void platform_on_async_error(cy_platform_t* const platform,
-                                        cy_topic_t* const    topic,
-                                        const std::uint16_t  line_number)
+extern "C" void platform_on_async_error(cy_t* const         cy,
+                                        cy_topic_t* const   topic,
+                                        const cy_err_t      error,
+                                        const std::uint16_t line_number)
 {
+    (void)cy;
     (void)topic;
-    test_platform_t* const self = platform_from(platform);
-    self->async_error_count++;
-    self->last_async_error_line = line_number;
+    (void)error;       // Reported separately by the failing assertion below.
+    (void)line_number; // Reported separately by the failing assertion below.
+    TEST_FAIL_MESSAGE("Unexpected async error callback invocation");
 }
 
 extern "C" void on_arrival_capture(cy_subscriber_t* const sub, const cy_arrival_t arrival)
@@ -213,14 +212,13 @@ void platform_init(test_platform_t* const self)
     self->vtable.realloc = platform_realloc;
     self->vtable.random  = platform_random;
 
-    self->vtable.on_async_error = platform_on_async_error;
-
     self->platform.cy                 = nullptr;
     self->platform.subject_id_modulus = static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit);
     self->platform.vtable             = &self->vtable;
 
     self->cy = cy_new(&self->platform);
     TEST_ASSERT_NOT_NULL(self->cy);
+    cy_async_error_handler_set(self->cy, platform_on_async_error);
 }
 
 void platform_deinit(test_platform_t* const self)
