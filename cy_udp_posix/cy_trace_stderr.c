@@ -13,6 +13,7 @@ void cy_trace(cy_t* const         cy, // cppcheck-suppress constParameterPointer
               const char* const   format,
               ...)
 {
+    assert(cy != NULL);
     const cy_us_t uptime_us = cy_uptime(cy);
 
     // Get the current wall time and format it.

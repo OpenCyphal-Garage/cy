@@ -737,6 +737,7 @@ static topic_repr_t topic_repr(const cy_topic_t* const topic)
     *ptr++           = 'T';
     ptr += to_hex(topic->hash, 64, ptr).len;
     *ptr++ = '@';
+    *ptr++ = 'S';
     ptr += to_hex(topic_subject_id(topic), 32, ptr).len;
     *ptr++              = '\'';
     const cy_str_t name = cy_topic_name(topic);
@@ -968,22 +969,22 @@ static cy_topic_t* topic_find_by_subject_id(const cy_t* const cy, const uint32_t
     return topic;
 }
 
-static size_t get_subscription_extent_with_overhead(const cy_topic_t* const topic);
+static size_t subscription_extent_w_overhead(const cy_topic_t* const topic);
 
 /// If a subscription is needed but there is no subject reader, this function will attempt to create one.
 static void topic_ensure_subscribed(cy_topic_t* const topic)
 {
     cy_t* const cy = topic->cy;
     if ((topic->couplings != NULL) && (topic->sub_reader == NULL)) { // A subject reader is needed but missing!
-        const size_t extent = get_subscription_extent_with_overhead(topic);
+        const size_t extent = subscription_extent_w_overhead(topic);
         assert(extent >= HEADER_MAX_BYTES);
         const uint32_t subject_id = topic_subject_id(topic);
         topic->sub_reader         = cy->platform->vtable->subject_reader_new(cy->platform, subject_id, extent);
         CY_TRACE(topic->cy,
-                 "🗞️ %s extent=%zu subject_id=%08x result=%p",
+                 "🗞️ %s S%08x extent=%zu result=%p",
                  topic_repr(topic).str,
-                 extent,
                  subject_id,
+                 extent,
                  (void*)topic->sub_reader);
         if (topic->sub_reader == NULL) {
             ON_ASYNC_ERROR(cy, topic, CY_ERR_MEMORY);
@@ -2257,7 +2258,7 @@ static bool on_message(cy_t* const            cy,
 
 /// This is linear complexity but we expect to have few subscribers per topic, so it is acceptable.
 /// The returned value is at least HEADER_MAX_BYTES large.
-static size_t get_subscription_extent_with_overhead(const cy_topic_t* const topic)
+static size_t subscription_extent_w_overhead(const cy_topic_t* const topic)
 {
     size_t total = 0;
     // Go over all couplings and all subscribers in each coupling.
@@ -2293,10 +2294,10 @@ static void* wkv_cb_couple_new_subscription(const wkv_event_t evt)
     cy_topic_t* const            topic = (cy_topic_t*)evt.node->value;
     cy_t* const                  cy    = topic->cy;
     // Sample the old parameters before the new coupling is created to decide if we need to refresh the subject reader.
-    const size_t   extent_old = (topic->sub_reader != NULL) ? get_subscription_extent_with_overhead(topic) : 0;
+    const size_t   extent_old = (topic->sub_reader != NULL) ? subscription_extent_w_overhead(topic) : 0;
     const cy_err_t res        = topic_couple(topic, sub->root, evt.substitution_count, evt.substitutions);
     if (res == CY_OK) {
-        if ((topic->sub_reader != NULL) && (get_subscription_extent_with_overhead(topic) > extent_old)) {
+        if ((topic->sub_reader != NULL) && (subscription_extent_w_overhead(topic) > extent_old)) {
             CY_TRACE(cy, "🚧 %s subject reader refresh", topic_repr(topic).str);
             cy->platform->vtable->subject_reader_destroy(cy->platform, topic->sub_reader);
             topic->sub_reader = NULL;
@@ -2527,6 +2528,7 @@ cy_t* cy_new(cy_platform_t* const platform)
     }
     memset(cy, 0, sizeof(*cy));
     cy->platform = platform;
+    platform->cy = cy;
     olga_init(&cy->olga, cy, olga_now);
     {
         const cy_err_t err = name_assign(cy, &cy->home, cy_str(""));
@@ -2582,6 +2584,7 @@ cy_t* cy_new(cy_platform_t* const platform)
     cy->heartbeat_pub         = cy_advertise(cy, hb_name);
     if (cy->heartbeat_pub == NULL) {
         mem_free(cy, cy);
+        platform->cy = NULL;
         return NULL;
     }
     assert(cy->heartbeat_pub->topic->hash == CY_HEARTBEAT_TOPIC_HASH);
@@ -2589,13 +2592,13 @@ cy_t* cy_new(cy_platform_t* const platform)
     if (cy->heartbeat_sub == NULL) {
         cy_unadvertise(cy->heartbeat_pub);
         mem_free(cy, cy);
+        platform->cy = NULL;
         return NULL;
     }
     cy_subscriber_callback_set(cy->heartbeat_sub, &on_heartbeat);
 
     cy->async_error_handler = default_async_error_handler;
     cy->topic_iter          = NULL;
-    platform->cy            = cy;
     CY_TRACE(cy,
              "🚀 ts_started=%llu subject_id_modulus=%lu",
              (unsigned long long)cy->ts_started,

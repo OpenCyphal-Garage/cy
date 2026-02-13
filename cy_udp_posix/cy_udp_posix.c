@@ -249,11 +249,8 @@ static cy_subject_writer_t* v_subject_writer_new(cy_platform_t* const base, cons
         }
         owner->stats.subject_writer_count++;
     }
-    CY_TRACE(owner->base.cy,
-             "🔊 n_writers=%zu subject_id=%08x ptr=%p",
-             owner->stats.subject_writer_count,
-             subject_id,
-             (void*)self);
+    CY_TRACE(
+      owner->base.cy, "🔊 n_writers=%zu S%08x ptr=%p", owner->stats.subject_writer_count, subject_id, (void*)self);
     return (cy_subject_writer_t*)self;
 }
 
@@ -455,11 +452,8 @@ static cy_subject_reader_t* v_subject_reader_new(cy_platform_t* const base,
         assert((owner->reader_head != NULL) == (owner->reader_tail != NULL));
     }
 reject:
-    CY_TRACE(owner->base.cy,
-             "🔔 n_readers=%zu subject_id=%08x ptr=%p",
-             owner->stats.subject_reader_count,
-             subject_id,
-             (void*)self);
+    CY_TRACE(
+      owner->base.cy, "🔔 n_readers=%zu S%08x ptr=%p", owner->stats.subject_reader_count, subject_id, (void*)self);
     return (cy_subject_reader_t*)self;
 }
 
