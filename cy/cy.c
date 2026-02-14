@@ -706,7 +706,7 @@ struct cy_topic_t
     /// from the subject-ID index tree!
     uint64_t evictions;
 
-    /// hash=rapidhash(topic_name); except for a pinned topic, hash=subject_id<=CY_PINNED_SUBJECT_ID_MAX.
+    /// hash=rapidhash(topic_name); except for a pinned topic, hash=subject_id<=CY_SUBJECT_ID_PINNED_MAX.
     uint64_t hash;
 
     /// Event timestamps used for state management.
@@ -847,7 +847,7 @@ static void topic_merge_lage(cy_topic_t* const topic, const cy_us_t now, const i
     topic->ts_origin = min_i64(topic->ts_origin, now - (pow2us(r_lage) * MEGA));
 }
 
-static bool is_pinned(const uint64_t hash) { return hash <= CY_PINNED_SUBJECT_ID_MAX; }
+static bool is_pinned(const uint64_t hash) { return hash <= CY_SUBJECT_ID_PINNED_MAX; }
 
 /// This comparator is only applicable on subject-ID allocation conflicts. As such, hashes must be different.
 static bool left_wins(const cy_topic_t* const left, const cy_us_t now, const int_fast8_t r_lage, const uint64_t r_hash)
@@ -962,14 +962,16 @@ static uint64_t topic_hash(const cy_str_t name)
     return hash;
 }
 
-static uint32_t topic_subject_id_impl(const cy_t* const cy, const uint64_t hash, const uint64_t evictions)
+static uint32_t topic_subject_id_impl(const uint64_t hash, const uint64_t evictions, const uint32_t subject_id_modulus)
 {
     if (is_pinned(hash)) {
         return (uint32_t)hash;
     }
-    assert(cy->platform->subject_id_modulus > 0);
+    assert(subject_id_modulus > 0);
+    assert(evictions <= UINT32_MAX); // otherwise we'd have to use long-form mul_mod algorithm
     const uint64_t subject_id =
-      CY_PINNED_SUBJECT_ID_MAX + 1ULL + ((hash + (evictions * evictions)) % cy->platform->subject_id_modulus);
+      CY_SUBJECT_ID_PINNED_MAX + 1ULL + ((hash + (evictions * evictions)) % subject_id_modulus);
+    assert((subject_id > CY_SUBJECT_ID_PINNED_MAX) && (subject_id <= CY_SUBJECT_ID_MAX(subject_id_modulus)));
     assert(subject_id <= UINT32_MAX);
     return (uint32_t)subject_id;
 }
@@ -985,11 +987,11 @@ static uint32_t topic_evictions_from_subject_id(const uint64_t hash,
 {
     const uint32_t p = subject_id_modulus;
     assert((p > 3) && ((p & 3U) == 3U)); // Method below requires p&3=3, i.e. p%4=3
-    if (subject_id <= CY_PINNED_SUBJECT_ID_MAX) {
+    if (subject_id <= CY_SUBJECT_ID_PINNED_MAX) {
         return 0; // Pinned subjects are collision-free, assume zero evictions.
     }
 
-    const uint32_t base = subject_id - (CY_PINNED_SUBJECT_ID_MAX + 1U);
+    const uint32_t base = subject_id - (CY_SUBJECT_ID_PINNED_MAX + 1U);
     if (base >= p) {
         return UINT32_MAX; // The subject-ID was calculated using distinct parameters.
     }
@@ -1019,7 +1021,7 @@ static uint32_t topic_evictions_from_subject_id(const uint64_t hash,
 static uint32_t topic_subject_id(const cy_topic_t* const topic)
 {
     assert(topic != NULL);
-    return topic_subject_id_impl(topic->cy, topic->hash, topic->evictions);
+    return topic_subject_id_impl(topic->hash, topic->evictions, topic->cy->platform->subject_id_modulus);
 }
 
 /// This will only search through topics that have auto-assigned subject-IDs;
@@ -1105,7 +1107,7 @@ static void topic_allocate(cy_topic_t* const topic, const uint64_t new_evictions
     // This mirrors the formal specification of AllocateTopic(t, topics) given in Core.tla.
     // Note that it is possible that subject_id(hash,old_evictions) == subject_id(hash,new_evictions),
     // meaning that we stay with the same subject-ID. No special case is required to handle this.
-    const uint32_t    new_sid = topic_subject_id_impl(cy, topic->hash, new_evictions);
+    const uint32_t    new_sid = topic_subject_id_impl(topic->hash, new_evictions, cy->platform->subject_id_modulus);
     cy_topic_t* const that    = CAVL2_TO_OWNER(
       cavl2_find(cy->topics_by_subject_id, &new_sid, &cavl_comp_topic_subject_id), cy_topic_t, index_subject_id);
     assert((that == NULL) || (topic->hash != that->hash)); // This would mean that we inserted the same topic twice
@@ -1515,7 +1517,7 @@ static void on_heartbeat(cy_subscriber_t* const sub, const cy_arrival_t arrival)
                          mine_lage,
                          win ? "❌" : "✅",
                          (unsigned long long)mine->hash,
-                         topic_subject_id_impl(cy, hb.topic_hash, hb.topic_evictions),
+                         topic_subject_id_impl(hb.topic_hash, hb.topic_evictions, cy->platform->subject_id_modulus),
                          (unsigned long long)hb.topic_evictions,
                          hb.topic_lage);
                 if (win) {
@@ -1542,11 +1544,13 @@ static void on_heartbeat(cy_subscriber_t* const sub, const cy_arrival_t arrival)
             }
             topic_merge_lage(mine, ts, hb.topic_lage);
         } else { // We don't know this topic; check for a subject-ID collision and do auto-subscription.
-            mine = topic_find_by_subject_id(cy, topic_subject_id_impl(cy, hb.topic_hash, hb.topic_evictions));
+            mine = topic_find_by_subject_id(
+              cy, topic_subject_id_impl(hb.topic_hash, hb.topic_evictions, cy->platform->subject_id_modulus));
             if (mine == NULL) {
                 return; // We are not using this subject-ID, no collision.
             }
-            assert(topic_subject_id(mine) == topic_subject_id_impl(cy, hb.topic_hash, hb.topic_evictions));
+            assert(topic_subject_id(mine) ==
+                   topic_subject_id_impl(hb.topic_hash, hb.topic_evictions, cy->platform->subject_id_modulus));
             const bool win = left_wins(mine, ts, hb.topic_lage, hb.topic_hash);
             CY_TRACE(cy,
                      "💥 Collision on @%08x:\n"
@@ -1561,7 +1565,7 @@ static void on_heartbeat(cy_subscriber_t* const sub, const cy_arrival_t arrival)
                      mine->name,
                      win ? "❌" : "✅",
                      (unsigned long long)hb.topic_hash,
-                     topic_subject_id_impl(cy, hb.topic_hash, hb.topic_evictions),
+                     topic_subject_id_impl(hb.topic_hash, hb.topic_evictions, cy->platform->subject_id_modulus),
                      (unsigned long long)hb.topic_evictions,
                      hb.topic_lage,
                      hb.topic_name.str);

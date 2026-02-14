@@ -236,7 +236,7 @@ static cy_subject_writer_t* v_subject_writer_new(cy_platform_t* const base, cons
 {
     assert(subject_id <= UDPARD_IPv4_SUBJECT_ID_MAX);
     cy_udp_posix_t* const owner = (cy_udp_posix_t*)base;
-    assert(subject_id <= (CY_PINNED_SUBJECT_ID_MAX + 1 + owner->base.subject_id_modulus));
+    assert(subject_id <= CY_SUBJECT_ID_MAX(owner->base.subject_id_modulus));
     subject_writer_t* const self = mem_alloc_zero(owner, sizeof(subject_writer_t));
     if (self != NULL) {
         self->next_transfer_id = prng64(&owner->prng_state, owner->udpard_tx.local_uid);
@@ -392,7 +392,7 @@ static cy_subject_reader_t* v_subject_reader_new(cy_platform_t* const base,
 {
     assert(subject_id <= UDPARD_IPv4_SUBJECT_ID_MAX);
     cy_udp_posix_t* const owner = (cy_udp_posix_t*)base;
-    assert(subject_id <= (CY_PINNED_SUBJECT_ID_MAX + 1 + owner->base.subject_id_modulus));
+    assert(subject_id <= CY_SUBJECT_ID_MAX(owner->base.subject_id_modulus));
     subject_reader_t* self = mem_alloc_zero(owner, sizeof(subject_reader_t));
     if (self != NULL) {
         self->base.subject_id = subject_id;

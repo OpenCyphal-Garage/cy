@@ -20,20 +20,16 @@ static void bitset_set(unsigned char* const bits, const uint32_t index)
 /// exhaustively test injectivity and inversion at any single non-pinned hash. We sample one random hash per run.
 static void check_subject_id_math(const uint32_t modulus)
 {
-    cy_t          cy       = { 0 };
-    cy_platform_t platform = { .subject_id_modulus = modulus };
-    cy.platform            = &platform;
-
     const uint64_t hash = prng();
-    TEST_ASSERT(hash > CY_PINNED_SUBJECT_ID_MAX); // Otherwise it's just very bad luck!
-    const size_t         bitset_bytes = (CY_PINNED_SUBJECT_ID_MAX + modulus + 7U) / 8U;
+    TEST_ASSERT(hash > CY_SUBJECT_ID_PINNED_MAX); // Otherwise it's just very bad luck!
+    const size_t         bitset_bytes = (CY_SUBJECT_ID_PINNED_MAX + modulus + 8U) / 8U;
     unsigned char* const seen_sid     = (unsigned char*)calloc(bitset_bytes, 1U);
     TEST_ASSERT_NOT_NULL(seen_sid);
 
     for (uint32_t evictions = 0U; evictions <= (modulus / 2U); evictions++) {
-        const uint32_t subject_id = topic_subject_id_impl(&cy, hash, evictions);
-        TEST_ASSERT(subject_id > CY_PINNED_SUBJECT_ID_MAX);
-        TEST_ASSERT(subject_id <= CY_PINNED_SUBJECT_ID_MAX + modulus);
+        const uint32_t subject_id = topic_subject_id_impl(hash, evictions, modulus);
+        TEST_ASSERT(subject_id > CY_SUBJECT_ID_PINNED_MAX);
+        TEST_ASSERT(subject_id <= CY_SUBJECT_ID_MAX(modulus));
         TEST_ASSERT(!bitset_get(seen_sid, subject_id));
         bitset_set(seen_sid, subject_id);
         TEST_ASSERT(evictions == topic_evictions_from_subject_id(hash, subject_id, modulus));
