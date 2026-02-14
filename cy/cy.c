@@ -2498,6 +2498,11 @@ static bool is_prime_u32(const uint32_t n)
     return true;
 }
 
+static bool is_valid_subject_id_modulus(const uint32_t modulus)
+{
+    return (modulus >= CY_SUBJECT_ID_MODULUS_17bit) && is_prime_u32(modulus) && (modulus % 4U == 3U);
+}
+
 static cy_us_t olga_now(olga_t* const sched) { return cy_now((cy_t*)sched->user); }
 
 static void default_async_error_handler(cy_t* const       cy,
@@ -2519,7 +2524,7 @@ static void default_async_error_handler(cy_t* const       cy,
 cy_t* cy_new(cy_platform_t* const platform)
 {
     if ((platform == NULL) || (platform->vtable == NULL) || (platform->cy != NULL) ||
-        (platform->subject_id_modulus < CY_SUBJECT_ID_MODULUS_17bit) || !is_prime_u32(platform->subject_id_modulus)) {
+        !is_valid_subject_id_modulus(platform->subject_id_modulus)) {
         return NULL;
     }
     cy_t* const cy = platform->vtable->realloc(platform, NULL, sizeof(cy_t));
