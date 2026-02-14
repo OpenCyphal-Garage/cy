@@ -279,6 +279,27 @@ static cy_us_t pow2us(const int_fast8_t exp)
     return 1LL << (uint_fast8_t)exp; // NOLINT(*-signed-bitwise)
 }
 
+/// a**e mod m
+static uint32_t pow_mod_u32(uint32_t a, uint32_t e, const uint32_t m)
+{
+    uint32_t r = 1 % m;
+    a %= m;
+    while (e) {
+        if (e & 1U) {
+            r = (uint32_t)(((uint64_t)r * (uint64_t)a) % m);
+        }
+        a = (uint32_t)(((uint64_t)a * (uint64_t)a) % m);
+        e >>= 1U;
+    }
+    return r;
+}
+
+/// Legendre symbol: a^((p-1)/2) mod p is 1 for residues, p-1 for non-residues, 0 for a==0.
+static bool is_quadratic_residue_prime(const uint32_t a, const uint32_t p)
+{
+    return (a == 0) || (pow_mod_u32(a, (p - 1U) / 2U, p) == 1U);
+}
+
 /// The limits are inclusive. Returns min unless min < max.
 static int64_t random_int(const cy_t* const cy, const int64_t min, const int64_t max)
 {
@@ -951,6 +972,48 @@ static uint32_t topic_subject_id_impl(const cy_t* const cy, const uint64_t hash,
       CY_PINNED_SUBJECT_ID_MAX + 1ULL + ((hash + (evictions * evictions)) % cy->platform->subject_id_modulus);
     assert(subject_id <= UINT32_MAX);
     return (uint32_t)subject_id;
+}
+
+/// Derives evictions from a non-pinned subject-ID. For pinned subject-ID returns zero unconditionally.
+/// Assumes subject_id_modulus is a prime with (subject_id_modulus % 4) == 3, which is checked at initialization.
+/// Returns UINT32_MAX if the subject-ID was obtained using distinct parameters/expression (no solutions).
+/// If evictions>floor(modulus/2), the subject-ID sequence repeats, leading to non-unique solutions.
+/// Complexity is O(1).
+static uint32_t topic_evictions_from_subject_id(const uint64_t hash,
+                                                const uint32_t subject_id,
+                                                const uint32_t subject_id_modulus)
+{
+    const uint32_t p = subject_id_modulus;
+    assert((p > 3) && ((p & 3U) == 3U)); // Method below requires p&3=3, i.e. p%4=3
+    if (subject_id <= CY_PINNED_SUBJECT_ID_MAX) {
+        return 0; // Pinned subjects are collision-free, assume zero evictions.
+    }
+
+    const uint32_t base = subject_id - (CY_PINNED_SUBJECT_ID_MAX + 1U);
+    if (base >= p) {
+        return UINT32_MAX; // The subject-ID was calculated using distinct parameters.
+    }
+
+    const uint32_t delta = (uint32_t)(((uint64_t)base + (uint64_t)p - (hash % p)) % p); // delta = (base - h) mod p
+    if (!is_quadratic_residue_prime(delta, p)) {
+        return UINT32_MAX; // The subject-ID was calculated using distinct parameters.
+    }
+
+    // sqrt(delta) mod p (since p % 4 == 3): r = delta^((p+1)/4) mod p
+    const uint32_t r1 = (delta == 0U) ? 0U : pow_mod_u32(delta, (p + 1U) / 4U, p);
+    const uint32_t r2 = (r1 == 0U) ? 0U : (p - r1);
+
+    uint32_t       best     = UINT32_MAX;
+    const uint32_t roots[2] = { r1, r2 };
+    for (unsigned i = 0; i < 2; i++) {
+        const uint64_t s = roots[i];
+        // We assume the eviction counter doesn't exceed half-modulus as that leads to ambiguity.
+        if ((s <= (p / 2U)) && (s < best)) {
+            assert(base == ((hash % p) + ((uint64_t)(s % p) * (uint64_t)(s % p)) % p) % p);
+            best = (uint32_t)s;
+        }
+    }
+    return best;
 }
 
 static uint32_t topic_subject_id(const cy_topic_t* const topic)
