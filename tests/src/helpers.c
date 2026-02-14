@@ -41,3 +41,15 @@ void cy_test_make_message_header(unsigned char  out[16],
     cy_test_serialize_u56(&out[1], tag56);
     cy_test_serialize_u64(&out[8], topic_hash);
 }
+
+uint64_t cy_test_prng_splitmix64_next(uint64_t* const state)
+{
+    *state += UINT64_C(0x9E3779B97F4A7C15);
+    uint64_t z = *state;
+    z ^= z >> 30U;
+    z *= UINT64_C(0xBF58476D1CE4E5B9);
+    z ^= z >> 27U;
+    z *= UINT64_C(0x94D049BB133111EB);
+    z ^= z >> 31U;
+    return z;
+}
