@@ -16,8 +16,9 @@ uint64_t cy_test_deserialize_u56(const unsigned char in[7]);
 uint64_t cy_test_deserialize_u64(const unsigned char in[8]);
 void     cy_test_make_message_header(unsigned char out[16], uint8_t type, uint64_t tag56, uint64_t topic_hash);
 
-/// SplitMix64 step function. Mutates the state and returns the next pseudorandom value.
-uint64_t cy_test_prng_splitmix64_next(uint64_t* state);
+/// The PRNG is seeded from the current time by default. If PRNG_SEED environment variable is set,
+/// it is used as the seed instead of the current time to make the sequence deterministic.
+uint64_t prng(void);
 
 /// A default trace sink for tests when CY_CONFIG_TRACE is enabled.
 void cy_trace(cy_t* const         cy,
