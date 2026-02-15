@@ -13,9 +13,9 @@
 /// The transport layer provides UNRELIABLE DEDUPLICATED (at most one) UNORDERED DELIVERY of messages either to;
 ///     - A GROUP OF SUBSCRIBERS on a given SUBJECT identified with a numerical subject-ID (IGMP group, CAN ID, etc).
 ///     - A specified REMOTE NODE direct PEER-TO-PEER.
-/// An exception is applied to the heartbeat topic: deduplication is not required on this topic to improve scalability;
-/// the library is prepared to deal with occasional message duplication on this topic. This exception is due to the
-/// fact that all nodes participate in the heartbeat traffic, which may put some strain on the smaller nodes.
+/// An exception is applied to the broadcast subject: deduplication is not required on it to improve scalability;
+/// the library is prepared to deal with occasional message duplication on this subject. This exception is due to the
+/// fact that all nodes participate in the broadcast subject, which may put some strain on the smaller nodes.
 ///
 /// The transport layer supports messages of arbitrary size, providing SEGMENTATION/REASSEMBLY transparently to the
 /// higher layers. The transport layer guarantees message integrity.
@@ -45,7 +45,8 @@
 /// accept a message, someone else might be able to. For P2P NACKs are well-defined since these interactions are
 /// always unicast.
 ///
-/// Messages carry the log-age of the topic to enable instant consensus update without waiting for the next heartbeat.
+/// Messages carry the log-age of the topic to enable instant consensus update without waiting for the next gossip.
+/// Essentially, every published message carries its own gossip!
 ///
 /// type = 0: Best-effort message.
 /// type = 1: Reliable message. Expects ack with the specified tag.
@@ -165,6 +166,7 @@ struct cy_tree_t
 #define TREE_NULL ((cy_tree_t){ NULL, { NULL, NULL }, 0 })
 
 static const cy_str_t str_invalid = { .len = SIZE_MAX, .str = NULL };
+static const cy_str_t str_empty   = { .len = 0, .str = "" };
 
 typedef unsigned char byte_t;
 
@@ -196,7 +198,7 @@ struct cy_t
     /// Topics are indexed in multiple ways for various lookups.
     /// Remember that pinned topics have small hash ≤8184, hence they are always on the left of the hash tree,
     /// and can be traversed quickly if needed.
-    wkv_t      topics_by_name;       // Contains ALL topics, never empty since we always have at least the heartbeat.
+    wkv_t      topics_by_name;       // Contains ALL topics, may be empty.
     cy_tree_t* topics_by_hash;       // ditto
     cy_tree_t* topics_by_subject_id; // All except pinned, since they do not collide. May be empty.
 
@@ -206,13 +208,13 @@ struct cy_t
     cy_list_t list_gossip;        ///< Normal-priority gossips. Newest at the head.
     cy_list_t list_scout_pending; ///< Lists subscriber_root_t that are due for gossiping.
 
-    /// When a heartbeat is received, its topic name will be compared against the patterns,
+    /// When a gossip is received, its topic name will be compared against the patterns,
     /// and if a match is found, a new subscription will be constructed automatically; if a new topic instance
     /// has to be created for that, such instance is called implicit. Implicit instances are retired automatically
     /// when there are no explicit counterparts left and there is no traffic on the topic for a while.
     /// The values of these tree nodes point to instances of subscriber_root_t.
     wkv_t subscribers_by_name;    ///< Both explicit and patterns.
-    wkv_t subscribers_by_pattern; ///< Only patterns for implicit subscriptions on heartbeat.
+    wkv_t subscribers_by_pattern; ///< Only patterns for implicit subscriptions on gossips.
 
     /// Pending network state indexes. Removal is guided by remote nodes and by deadline (via olga).
     /// We use separate indexes because messages use the same tag for ack and response correlation,
@@ -1459,6 +1461,7 @@ static void gossip_begin(cy_t* const cy)
 }
 
 /// Process incoming gossip message related to a known local topic (same hash).
+/// Check for subject-ID divergences.
 static void on_gossip_known_topic(cy_t* const       cy,
                                   const cy_us_t     ts,
                                   cy_topic_t* const mine,
@@ -1509,6 +1512,7 @@ static void on_gossip_known_topic(cy_t* const       cy,
     topic_merge_lage(mine, ts, lage);
 }
 
+/// We received a gossip message for a topic that is unknown to us. Check for subject-ID collisions.
 static void on_gossip_unknown_topic(cy_t* const    cy,
                                     const cy_us_t  ts,
                                     const uint64_t hash,
@@ -1554,17 +1558,23 @@ static void on_gossip_unknown_topic(cy_t* const    cy,
 }
 
 /// The central dispatch of incoming gossips.
+/// This process may spawn new topics, so when receiving messages, keep in mind that the topic set may be changed.
+/// The name may be empty when invoked from message-attached piggyback gossips (there's no name available).
+///
 /// We don't care how gossips are delivered -- broadcast, P2P, or by pigeon; the processing logic is always the same.
 /// This is in general true for the presentation layer design -- delivery method does not matter.
-static void on_gossip(cy_t* const       cy,
-                      const cy_us_t     ts,
-                      const cy_remote_t remote,
-                      const uint64_t    hash,
-                      const uint32_t    evictions,
-                      const int8_t      lage,
-                      const cy_str_t    name)
+///
+/// The out_topic, if not NULL, is updated with the local topic pointer if one is known or freshly created.
+static void on_gossip(cy_t* const        cy,
+                      const cy_us_t      ts,
+                      const cy_remote_t  remote,
+                      const uint64_t     hash,
+                      const uint32_t     evictions,
+                      const int8_t       lage,
+                      const cy_str_t     name,
+                      cy_topic_t** const out_topic)
 {
-    (void)remote;
+    (void)remote; // Currently unused; may be useful for immediate P2P consensus repair gossips.
     // Find the topic in our local database. Create if there is a pattern match.
     cy_topic_t* mine = cy_topic_find_by_hash(cy, hash);
     if ((mine == NULL) && (name.len > 0)) { // a name is required but maybe the publisher is non-compliant
@@ -1574,6 +1584,9 @@ static void on_gossip(cy_t* const       cy,
         on_gossip_known_topic(cy, ts, mine, evictions, lage);
     } else { // We don't know this topic; check for a subject-ID collision and do auto-subscription.
         on_gossip_unknown_topic(cy, ts, hash, evictions, lage);
+    }
+    if (out_topic != NULL) {
+        *out_topic = mine;
     }
 }
 
@@ -2600,12 +2613,12 @@ cy_t* cy_new(cy_platform_t* const platform)
     platform->cy = cy;
     olga_init(&cy->olga, cy, olga_now);
     {
-        const cy_err_t err = name_assign(cy, &cy->home, cy_str(""));
+        const cy_err_t err = name_assign(cy, &cy->home, str_empty);
         assert(err == CY_OK); // infallible by design
         (void)err;
     }
     {
-        const cy_err_t err = name_assign(cy, &cy->ns, cy_str(""));
+        const cy_err_t err = name_assign(cy, &cy->ns, str_empty);
         assert(err == CY_OK); // infallible by design
         (void)err;
     }
@@ -2944,8 +2957,7 @@ void cy_on_message(cy_platform_t* const             platform,
     byte_t       header[HEADER_MAX_BYTES] = { 0 };
     const size_t header_read              = cy_message_read(message.content, 0, HEADER_MAX_BYTES, header);
     if (header_read < 1) {
-        cy_message_refcount_dec(message.content);
-        return; // Malformed message; ignore.
+        goto bad_message;
     }
     const header_type_t type = header[0] & HEADER_TYPE_MASK;
 
@@ -2957,51 +2969,27 @@ void cy_on_message(cy_platform_t* const             platform,
         case header_msg_rel: {
             static const size_t header_size = 18;
             if (header_read < header_size) {
-                goto exit;
+                goto bad_message;
             }
             message_skip(message.content, header_size);
-            const int8_t      lage     = (int8_t)header[1];
-            const uint64_t    tag      = deserialize_u64(&header[2]);
-            const uint64_t    hash     = deserialize_u64(&header[10]);
-            cy_topic_t* const topic    = cy_topic_find_by_hash(cy, hash);
-            const bool        reliable = type == header_msg_rel;
+            const uint64_t hash  = deserialize_u64(&header[10]);
+            cy_topic_t*    topic = NULL; // Avoid double lookup, let on_gossip() do the lookup.
+            if (subject_reader != NULL) {
+                const int8_t   lage      = (int8_t)header[1];
+                const uint32_t evictions = topic_evictions_from_subject_id(hash, // reconstruct
+                                                                           subject_reader->subject_id,
+                                                                           cy->platform->subject_id_modulus);
+                on_gossip(cy, message.timestamp, remote, hash, evictions, lage, str_empty, &topic);
+            } else {
+                topic = cy_topic_find_by_hash(cy, hash);
+            }
             if (topic != NULL) {
-                if ((subject_reader != NULL) && (topic_subject_id(topic) != subject_reader->subject_id)) {
-                    // We happen to be subscribed to both of the divergent subject-IDs, so we can process the message
-                    // despite the divergence.
-                    CY_TRACE(cy,
-                             "⚠️ Subject-ID divergence on message from %016llx for topic %016llx: expected %lu got %llu"
-                             " Scheduling urgent gossip to repair consensus",
-                             (unsigned long long)remote_id,
-                             (unsigned long long)hash,
-                             (unsigned long)topic_subject_id(topic),
-                             (unsigned long long)subject_reader->subject_id);
-                    schedule_gossip_urgent(topic);
-                }
                 assert((topic->sub_reader == NULL) || (topic_subject_id(topic) == topic->sub_reader->subject_id));
-                const bool accepted = on_message(cy, remote, topic, tag, message, reliable);
+                const bool     reliable = type == header_msg_rel;
+                const uint64_t tag      = deserialize_u64(&header[2]);
+                const bool     accepted = on_message(cy, remote, topic, tag, message, reliable);
                 if (reliable && accepted) { // This is either new or retransmit, must ack either way.
                     send_message_ack(cy, remote, tag, hash, message.timestamp + ACK_TX_TIMEOUT);
-                }
-            } else {
-                cy_topic_t* const other_topic =
-                  (subject_reader != NULL) ? topic_find_by_subject_id(cy, subject_reader->subject_id) : NULL;
-                if (other_topic != NULL) {
-                    assert(other_topic->hash != hash);
-                    // Gossip to either update the remotes or solicit a newer allocation state from them.
-                    CY_TRACE(cy,
-                             "⚠️ Subject-ID collision on message from %016llx: topic %016llx vs %016llx"
-                             " Scheduling urgent gossip to repair consensus",
-                             (unsigned long long)remote_id,
-                             (unsigned long long)hash,
-                             (unsigned long long)other_topic->hash);
-                    schedule_gossip_urgent(other_topic);
-                } else {
-                    CY_TRACE(cy,
-                             "⚠️ Unsolicited message from %016llx on topic %016llx subject %08x: unknown topic&subject",
-                             (unsigned long long)remote_id,
-                             (unsigned long long)hash,
-                             (unsigned)((subject_reader != NULL) ? subject_reader->subject_id : UINT32_MAX));
                 }
             }
             break;
@@ -3081,7 +3069,7 @@ void cy_on_message(cy_platform_t* const             platform,
             CY_TRACE(cy, "⚠️ Unsupported message from %016llx: header type %02x", (unsigned long long)remote_id, type);
             break;
     }
-exit:
+bad_message:
     cy_message_refcount_dec(message.content);
 }
 
