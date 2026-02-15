@@ -1,8 +1,9 @@
 # Cyphal session layer design notes
 
-These notes are useful for understanding how the protocol is built but are not expected to be useful for the end-users (unless perhaps the curious kind). To use the implementation, please refer to the top-level `README.md` and also to the API documentation in [`cy.h`](./cy.h).
+These notes are useful for understanding how the protocol is built but are generally not useful for end-users -- they should
+ instead refer to the top-level `README.md` and also to the API documentation in [`cy.h`](./cy.h).
 
-The Cyphal session layer is a new addition in Cyphal v1.1. It provides higher-level protocol abstractions including named topics, new RPC semantics, optional reliable and ordered message delivery, and service discovery. The objective is to provide intentionally compact and highly robust publish-subscribe and request-response communication patterns that can be used in a variety of applications, including those with stringent real-time requirements. The solution is fully decentralized and is based on a simple CRDT consensus algorithm internally.
+The Cyphal session layer is a new addition in Cyphal v1.1. It provides higher-level protocol abstractions including named topics, new RPC semantics, optional reliable and ordered message delivery, and service discovery. The objective is to provide intentionally compact and highly robust publish-subscribe and request-response communication patterns that can be used in a variety of applications, including those with stringent real-time and reliability requirements. The solution is fully decentralized and is based on a simple CRDT consensus algorithm internally.
 
 The Cyphal transport layer is borrowed from Cyphal v1.0 with only minimal changes; crucially, the transport layer has seen no increase in complexity compared to the previous version, and Cyphal/CAN v1.0 remains compatible and interoperable with the new Cyphal v1.1.
 
@@ -15,7 +16,7 @@ The transport layer provides _unreliable_ _deduplicated_ (at most one) _unordere
 
 An exception is applied to the single _broadcast subject_ that takes the highest subject-ID: deduplication is not required on it to improve scalability; the session layer accepts occasional message duplication on this subject. This exception is due to the fact that all nodes participate in the broadcast subject, which may put strain on the smaller nodes.
 
-The transport layer supports messages of arbitrary size, providing _segmentation_/_reassembly_ transparently to the higher layers.
+The transport layer supports messages of arbitrary size, providing _segmentation_/_reassembly_ transparently to the higher layers. In high-reliability applications, redundant transport interfaces with transparent failover may be used.
 
 The transport layer guarantees message integrity; messages are either delivered intact or not delivered.
 
@@ -23,7 +24,7 @@ The transport layer _does not_ provide message ordering recovery or reliable del
 
 The transport layer provides network participant discovery as a side effect of joining the broadcast subject.
 
-These are very basic functions that result in a very clear transport interface contract that is easy to implement. The Cyphal specification predefines some transport layers, such as Cyphal/UDP or Cyphal/CAN; additional transport layers can be easily constructed ad-hoc as well.
+These are very basic functions that result in a very compact transport interface contract that is easy to implement. The Cyphal specification predefines some transport layers, such as Cyphal/UDP or Cyphal/CAN; additional transport layers can be easily constructed ad-hoc as well.
 
 ## Session layer
 
