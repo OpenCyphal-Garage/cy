@@ -10,12 +10,13 @@
 /// -------------------------------------------------------------------------------------------------------------------
 /// TRANSPORT LAYER REQUIREMENTS
 ///
-/// The transport layer provides UNRELIABLE DEDUPLICATED (at most one) UNORDERED DELIVERY of messages either to;
-///     - A GROUP OF SUBSCRIBERS on a given SUBJECT identified with a numerical subject-ID (IGMP group, CAN ID, etc).
-///     - A specified REMOTE NODE direct PEER-TO-PEER.
-/// An exception is applied to the broadcast subject: deduplication is not required on it to improve scalability;
-/// the library is prepared to deal with occasional message duplication on this subject. This exception is due to the
-/// fact that all nodes participate in the broadcast subject, which may put some strain on the smaller nodes.
+/// The transport layer provides UNRELIABLE DEDUPLICATED (at most one) UNORDERED DELIVERY of messages either to:
+/// - A GROUP OF SUBSCRIBERS on a given SUBJECT identified with a numerical subject-ID (IGMP group, CAN ID, etc).
+/// - A specified REMOTE NODE direct PEER-TO-PEER.
+/// An exception is applied to the single broadcast subject that takes the highest subject-ID: deduplication is not
+/// required on it to improve scalability; the session layer accepts occasional message duplication on this subject.
+/// This exception is due to the fact that all nodes participate in the broadcast subject, which may put strain
+/// on the smaller nodes.
 ///
 /// The transport layer supports messages of arbitrary size, providing SEGMENTATION/REASSEMBLY transparently to the
 /// higher layers. The transport layer guarantees message integrity.
@@ -38,15 +39,20 @@
 /// misattribution -- they are only needed for acknowledgement correlation and as such they are much narrower
 /// and there is no monotonicity requirement, the sender can choose values arbitrarily.
 ///
-/// The payload follows immediately after the header. The header fields are not naturally aligned to conserve space.
-/// The type field is always in the first byte of the header. Void fields are sent zero and ignored on reception.
+/// For messages and responses, the payload follows immediately after the header. The header fields are not naturally
+/// aligned to conserve space. The type field is always in the six least significant bits of the first byte of the
+/// header. Void fields are sent zero and ignored on reception.
 ///
 /// Message publications have no negative acknowledgements because they are inherently multicast: even if we can't
 /// accept a message, someone else might be able to. For P2P NACKs are well-defined since these interactions are
 /// always unicast.
 ///
 /// Messages carry the log-age of the topic to enable instant consensus update without waiting for the next gossip.
-/// Essentially, every published message carries its own gossip!
+/// Essentially, every published message is its own gossip.
+///
+/// All types, except where explicitly noted otherwise, are invariant over the method of delivery used: P2P (unicast),
+/// subject multicast, or broadcast. This simplifies the protocol and in a few cases allows the sender to choose which
+/// method to use ad-hoc, without involving the remote end into the decision making.
 ///
 /// type = 0: Best-effort message.
 /// type = 1: Reliable message. Expects ack with the specified tag.
@@ -151,7 +157,6 @@ struct cy_tree_t
 
 /// A topic created based on a pattern subscription will be deleted after it's been idle for this long.
 /// Here, "idle" means no messages received from this topic and no gossips seen on the network.
-/// Topics created explicitly by the application (without substitution tokens) are not affected by this timeout.
 #define IMPLICIT_TOPIC_DEFAULT_TIMEOUT_us (3600 * MEGA)
 
 /// Used to derive the actual ack timeout; see the publisher.

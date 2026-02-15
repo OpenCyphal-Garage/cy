@@ -235,9 +235,8 @@ struct subject_writer_t
 static cy_subject_writer_t* v_subject_writer_new(cy_platform_t* const base, const uint32_t subject_id)
 {
     assert(subject_id <= UDPARD_IPv4_SUBJECT_ID_MAX);
-    cy_udp_posix_t* const owner = (cy_udp_posix_t*)base;
-    assert(subject_id <= CY_SUBJECT_ID_MAX(owner->base.subject_id_modulus));
-    subject_writer_t* const self = mem_alloc_zero(owner, sizeof(subject_writer_t));
+    cy_udp_posix_t* const   owner = (cy_udp_posix_t*)base;
+    subject_writer_t* const self  = mem_alloc_zero(owner, sizeof(subject_writer_t));
     if (self != NULL) {
         self->next_transfer_id = prng64(&owner->prng_state, owner->udpard_tx.local_uid);
         for (size_t i = 0; i < UDPARD_IFACE_COUNT_MAX; i++) {
@@ -309,8 +308,7 @@ struct subject_reader_t
     udp_wrapper_t    sock[CY_UDP_POSIX_IFACE_COUNT_MAX];
 
     /// The history is only used with stateless subscriptions to reject the most obvious duplicates.
-    /// It is essentially optional, but it is expected to save quite a bit of processing on busy topics,
-    /// in particular in the heartbeat topic when used in a large network with redundant interfaces.
+    /// It is essentially optional, but it is expected to save quite a bit of processing on the broadcast subject.
     uint64_t history[2];
 
     /// All readers are kept in a list.
@@ -363,9 +361,9 @@ static void v_on_msg_stateless(udpard_rx_t* const rx, udpard_rx_port_t* const po
     cy_udp_posix_t* const   owner = rx->user;
     subject_reader_t* const self  = port->user;
     static_assert(sizeof(self->history) / sizeof(self->history[0]) == 2, "");
-    // In the stateless mode, libudpard does not bother deduplicating messages. The heartbeat subscriber does not
-    // care about duplicates, so we could just pass all messages as-is and it will work fine, but it would waste
-    // CPU cycles because each message requires some log-time index lookups.
+    // In the stateless mode, libudpard does not bother deduplicating messages. The broadcast subject is dup-tolerant,
+    // so we could just pass all messages as-is and it will work fine, but it would waste CPU cycles because each
+    // message requires some log-time index lookups.
     // We can mitigate this by applying a very simple filter that is cheap and computationally negligible.
     // It doesn't have to remove all duplicates -- removing the most obvious ones is sufficient to be useful.
     const uint64_t msg_fingerprint = tr.transfer_id ^ tr.remote.uid;
@@ -391,8 +389,7 @@ static cy_subject_reader_t* v_subject_reader_new(cy_platform_t* const base,
 {
     assert(subject_id <= UDPARD_IPv4_SUBJECT_ID_MAX);
     cy_udp_posix_t* const owner = (cy_udp_posix_t*)base;
-    assert(subject_id <= CY_SUBJECT_ID_MAX(owner->base.subject_id_modulus));
-    subject_reader_t* self = mem_alloc_zero(owner, sizeof(subject_reader_t));
+    subject_reader_t*     self  = mem_alloc_zero(owner, sizeof(subject_reader_t));
     if (self != NULL) {
         self->base.subject_id = subject_id;
 
