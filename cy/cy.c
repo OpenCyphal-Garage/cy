@@ -173,6 +173,9 @@ struct cy_tree_t
 static const cy_str_t str_invalid = { .len = SIZE_MAX, .str = NULL };
 static const cy_str_t str_empty   = { .len = 0, .str = "" };
 
+/// For printf-style formatting of cy_str_t.
+#define STRFMT_ARG(s) ((int)(s).len), (s).str
+
 typedef unsigned char byte_t;
 
 typedef struct cy_list_member_t cy_list_member_t;
@@ -1334,7 +1337,7 @@ static cy_topic_t* topic_subscribe_if_matching(cy_t* const       cy,
     if (NULL == wkv_route(&cy->subscribers_by_pattern, resolved_name, NULL, wkv_cb_first)) {
         return NULL; // No match.
     }
-    CY_TRACE(cy, "✨'%s'", resolved_name.str);
+    CY_TRACE(cy, "✨'%.*s'", STRFMT_ARG(resolved_name));
     // Create the new topic.
     cy_topic_t* topic = NULL;
     {
@@ -1460,10 +1463,10 @@ static void on_gossip_known_topic(cy_t* const       cy,
     if (mine->evictions != evictions) {
         const bool win = (mine_lage > lage) || ((mine_lage == lage) && (mine->evictions > evictions));
         CY_TRACE(cy,
-                 "🔀 Divergence on '%s':\n"
+                 "🔀 Divergence on '%.*s':\n"
                  "\t local  %s T%016llx@S%08x evict=%lu lage=%+d\n"
                  "\t remote %s T%016llx@S%08x evict=%lu lage=%+d",
-                 mine->name,
+                 STRFMT_ARG(cy_topic_name(mine)),
                  win ? "✅" : "❌",
                  (unsigned long long)mine->hash,
                  topic_subject_id(mine),
@@ -1514,7 +1517,7 @@ static void on_gossip_unknown_topic(cy_t* const    cy,
     const bool win = left_wins(mine, ts, lage, hash);
     CY_TRACE(cy,
              "💥 Collision on S%08x:\n"
-             "\t local  %s T%016llx@S%08x evict=%lu lage=%+d '%s'\n"
+             "\t local  %s T%016llx@S%08x evict=%lu lage=%+d '%.*s'\n"
              "\t remote %s T%016llx@S%08x evict=%lu lage=%+d",
              topic_subject_id(mine),
              win ? "✅" : "❌",
@@ -1522,7 +1525,7 @@ static void on_gossip_unknown_topic(cy_t* const    cy,
              topic_subject_id(mine),
              (unsigned long)mine->evictions,
              topic_lage(mine, ts),
-             mine->name,
+             STRFMT_ARG(cy_topic_name(mine)),
              win ? "❌" : "✅",
              (unsigned long long)hash,
              topic_subject_id_impl(hash, evictions, cy->platform->subject_id_modulus),
@@ -1599,7 +1602,7 @@ static void* wkv_cb_topic_scout_response(const wkv_event_t evt)
 static void on_scout(cy_t* const cy, const cy_us_t ts, cy_remote_t remote, const cy_str_t name)
 {
     (void)ts;
-    CY_TRACE(cy, "📢 '%s'", name.str);
+    CY_TRACE(cy, "📢 '%.*s'", STRFMT_ARG(name));
     (void)wkv_match(&cy->topics_by_name, name, &remote, wkv_cb_topic_scout_response);
 }
 
@@ -2391,7 +2394,7 @@ static cy_err_t ensure_subscriber_root(cy_t* const cy, const cy_str_t resolved_n
         *out_root = (subscriber_root_t*)node->value;
         return CY_OK;
     }
-    CY_TRACE(cy, "✨'%s'", resolved_name.str);
+    CY_TRACE(cy, "✨'%.*s'", STRFMT_ARG(resolved_name));
 
     // Otherwise, allocate a new root, if possible.
     node->value = mem_alloc_zero(cy, sizeof(subscriber_root_t));
@@ -2464,8 +2467,11 @@ static cy_subscriber_t* subscribe(cy_t* const cy, const cy_str_t name, subscribe
         cy_unsubscribe(sub);
         return NULL;
     }
-    CY_TRACE(
-      cy, "✨'%s' extent_pure=%zu rwin=%lld", resolved.str, params.extent_pure, (long long)params.reordering_window);
+    CY_TRACE(cy,
+             "✨'%.*s' extent_pure=%zu rwin=%lld",
+             STRFMT_ARG(resolved),
+             params.extent_pure,
+             (long long)params.reordering_window);
     return sub;
 }
 
