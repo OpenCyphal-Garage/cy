@@ -312,6 +312,43 @@ static void test_reordering_first_arrival_timeout_without_older(void)
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&env.fixture.heap));
 }
 
+/// If a newly interned message becomes head-of-line, the timeout must be re-armed to its own window.
+static void test_reordering_head_of_line_change_rearms_timeout(void)
+{
+    reorder_env_t env;
+    reorder_env_init(&env);
+
+    // First out-of-order arrival starts the timer at 100 + 20 = 120.
+    TEST_ASSERT_TRUE(push_message(&env, 7U, 100, 0x70U));
+    TEST_ASSERT_EQUAL_size_t(0, env.capture.count);
+    TEST_ASSERT_EQUAL_size_t(1, env.rr.interned_count);
+    TEST_ASSERT_TRUE(olga_is_pending(&env.fixture.cy.olga, &env.rr.timeout));
+
+    // A lower-tag message arrives much later and becomes the new head-of-line.
+    // Timeout must move from 120 to 119 + 20 = 139.
+    TEST_ASSERT_TRUE(push_message(&env, 6U, 119, 0x60U));
+    TEST_ASSERT_EQUAL_size_t(0, env.capture.count);
+    TEST_ASSERT_EQUAL_size_t(2, env.rr.interned_count);
+    TEST_ASSERT_TRUE(olga_is_pending(&env.fixture.cy.olga, &env.rr.timeout));
+
+    // Before the re-armed deadline, nothing should be force-ejected.
+    spin_to(&env, 120);
+    TEST_ASSERT_EQUAL_size_t(0, env.capture.count);
+    TEST_ASSERT_EQUAL_size_t(2, env.rr.interned_count);
+
+    // Gap filler arrives before the new deadline; all should flush in order.
+    TEST_ASSERT_TRUE(push_message(&env, 5U, 130, 0x50U));
+    TEST_ASSERT_EQUAL_size_t(3, env.capture.count);
+    TEST_ASSERT_EQUAL_UINT64(5U, env.capture.tags[0]);
+    TEST_ASSERT_EQUAL_UINT64(6U, env.capture.tags[1]);
+    TEST_ASSERT_EQUAL_UINT64(7U, env.capture.tags[2]);
+    TEST_ASSERT_EQUAL_size_t(0, env.rr.interned_count);
+
+    reorder_env_cleanup(&env);
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&env.fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&env.fixture.heap));
+}
+
 /// After the window expires and force-ejects, a late older message should be dropped.
 static void test_reordering_late_after_timeout(void)
 {
@@ -590,6 +627,7 @@ int main(void)
     RUN_TEST(test_reordering_reverse_3_2_1);
     RUN_TEST(test_reordering_first_arrival_delay_for_older);
     RUN_TEST(test_reordering_first_arrival_timeout_without_older);
+    RUN_TEST(test_reordering_head_of_line_change_rearms_timeout);
     RUN_TEST(test_reordering_late_after_timeout);
     RUN_TEST(test_reordering_capacity_overflow_resequence);
     RUN_TEST(test_reordering_partial_gap_closure);

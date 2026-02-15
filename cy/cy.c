@@ -2088,10 +2088,12 @@ static bool reordering_push(reordering_t* const   self,
     slot->message  = message;
     self->interned_count++;
     assert((self->interned_count == 1) || olga_is_pending(&cy->olga, &self->timeout));
-    if (!olga_is_pending(&cy->olga, &self->timeout)) {
-        const cy_us_t deadline = message.timestamp + self->subscriber->params.reordering_window;
-        olga_defer(&cy->olga, deadline, self, reordering_on_window_expiration, &self->timeout);
-    }
+    // Re-arm against the current head-of-line slot. A newly inserted lower lin_tag may need a later deadline.
+    reordering_slot_t* const first_slot =
+      CAVL2_TO_OWNER(cavl2_min(self->interned_by_lin_tag), reordering_slot_t, index_lin_tag);
+    assert(first_slot != NULL);
+    const cy_us_t deadline = first_slot->message.timestamp + self->subscriber->params.reordering_window;
+    olga_defer(&cy->olga, deadline, self, reordering_on_window_expiration, &self->timeout);
     return true; // Interned messages WILL eventually be ejected and seen by the application.
 }
 
