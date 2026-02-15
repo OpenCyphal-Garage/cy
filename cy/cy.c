@@ -58,6 +58,10 @@ struct cy_tree_t
 /// The log-age of a newly created topic.
 #define LAGE_MIN (-1)
 
+/// Log-age is the log2 of seconds; this ensures sane limits and avoids signed overflow in microsecond reconstruction.
+/// For reference, 2**35 seconds is a little over one millennium.
+#define LAGE_MAX 35
+
 /// A topic created based on a pattern subscription will be deleted after it's been idle for this long.
 /// Here, "idle" means no messages received from this topic and no gossips seen on the network.
 #define IMPLICIT_TOPIC_DEFAULT_TIMEOUT_us (3600 * MEGA)
@@ -760,8 +764,9 @@ static int_fast8_t topic_lage(const cy_topic_t* const topic, const cy_us_t now)
 }
 
 /// CRDT merge operator on the topic log-age. Shift ts_origin into the past if needed.
-static void topic_merge_lage(cy_topic_t* const topic, const cy_us_t now, const int_fast8_t r_lage)
+static void topic_merge_lage(cy_topic_t* const topic, const cy_us_t now, int_fast8_t r_lage)
 {
+    r_lage           = (r_lage < LAGE_MIN) ? LAGE_MIN : ((r_lage > LAGE_MAX) ? LAGE_MAX : r_lage);
     topic->ts_origin = min_i64(topic->ts_origin, now - (pow2us(r_lage) * MEGA));
 }
 
@@ -2430,7 +2435,7 @@ static cy_err_t do_respond(cy_breadcrumb_t* const breadcrumb, const cy_us_t dead
     gossip_begin(breadcrumb->cy);
 
     // Compose the header. The tag is zero since we don't expect any ack.
-    assert(breadcrumb->seqno < (SEQNO48_MASK - 1U));
+    assert(breadcrumb->seqno < (SEQNO48_MASK - 1U)); // Sanity check; this value is not practically reachable.
     byte_t header[17];
     header[0] = (byte_t)header_rsp_be;
     (void)serialize_u64(serialize_u64(&header[1], breadcrumb->message_tag), breadcrumb->seqno++);
@@ -2601,11 +2606,7 @@ cy_err_t cy_home_set(cy_t* const cy, const cy_str_t home)
 {
     return (!cy_name_is_homeful(home)) ? name_assign(cy, &cy->home, home) : CY_ERR_ARGUMENT;
 }
-
-cy_err_t cy_namespace_set(cy_t* const cy, const cy_str_t name_space)
-{
-    return (!cy_name_is_homeful(name_space)) ? name_assign(cy, &cy->ns, name_space) : CY_ERR_ARGUMENT;
-}
+cy_err_t cy_namespace_set(cy_t* const cy, const cy_str_t name_space) { return name_assign(cy, &cy->ns, name_space); }
 
 static cy_err_t gossip_poll(cy_t* const cy, const cy_us_t now)
 {
@@ -2867,6 +2868,10 @@ void cy_on_message(cy_platform_t* const             platform,
             const uint64_t hash  = deserialize_u64(&header[10]);
             cy_topic_t*    topic = NULL; // Avoid double lookup, let on_gossip() do the lookup.
             if (subject_reader != NULL) {
+                const int8_t lage = (int8_t)header[1];
+                if ((lage < LAGE_MIN) || (lage > LAGE_MAX)) {
+                    goto bad_message;
+                }
                 uint32_t evictions =
                   topic_evictions_from_subject_id(hash, subject_reader->subject_id, cy->platform->subject_id_modulus);
                 if (evictions == UINT32_MAX) {
@@ -2879,7 +2884,6 @@ void cy_on_message(cy_platform_t* const             platform,
                              (uintmax_t)remote.id,
                              (uintmax_t)cy->platform->subject_id_modulus);
                 }
-                const int8_t lage = (int8_t)header[1];
                 on_gossip(cy, message.timestamp, remote, hash, evictions, lage, str_empty, &topic);
             } else {
                 topic = cy_topic_find_by_hash(cy, hash);
@@ -2976,7 +2980,10 @@ void cy_on_message(cy_platform_t* const             platform,
                 (cy_message_read(message.content, 15, name.len, (byte_t*)name_buf) != name.len)) {
                 goto bad_message;
             }
-            const int8_t   lage      = (int8_t)header[1];
+            const int8_t lage = (int8_t)header[1];
+            if ((lage < LAGE_MIN) || (lage > LAGE_MAX)) {
+                goto bad_message;
+            }
             const uint64_t hash      = deserialize_u64(&header[2]);
             const uint32_t evictions = deserialize_u32(&header[10]);
             on_gossip(cy, message.timestamp, remote, hash, evictions, lage, name, NULL);

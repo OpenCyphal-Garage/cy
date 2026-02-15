@@ -21,8 +21,7 @@ Update docs/examples when public API behavior changes.
 ## Coding Style & Naming Conventions
 
 - Language targets: C99+ for Cy, C11 and C++20 for the test harness. Strict std only, compiler extensions not allowed.
-- Naming patterns: `cy_*` functions, `cy_*_t` types, `CY_*` macros. Internal definitions need no prefixing.
+- Naming patterns: `cy_*` functions, `cy_*_t` types, `CY_*` macros. Internal definitions need no prefixing. Enums and constants are `lower_snake_case`. Uppercase only for macros.
 - Keep code compact and add brief comments before non-obvious logic.
 - Treat warnings as errors and keep compatibility with strict warning flags.
-- Module entities are prefixed with the module name; e.g., `foo.h` contains `foo_bar`, `foo_baz_t`, `FOO_QUX`.
-  Module-local statics need no prefixing.
+- Module entities are prefixed with the module name; e.g., `foo.h` contains `foo_bar`, `foo_baz_t`, `FOO_QUX`. Module-local statics must not be prefixed to keep things brief.

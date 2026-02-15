@@ -452,7 +452,7 @@ void cy_async_error_handler_set(cy_t* const cy, const cy_async_error_handler_t h
 /// The home should be unique in the network; one way to ensure this is to default it to the node's unique ID.
 /// The returned strings are NUL-terminated. The lifetime is bound to the Cy instance.
 /// Mutators fail if the supplied string is invalid.
-/// The default home and namespace are empty. They can be changed only before the first topic is created.
+/// The default home and namespace are empty. They should not be changed after the first topic is created.
 cy_str_t cy_home(const cy_t* const cy);
 cy_str_t cy_namespace(const cy_t* const cy);
 cy_err_t cy_home_set(cy_t* const cy, const cy_str_t home);
