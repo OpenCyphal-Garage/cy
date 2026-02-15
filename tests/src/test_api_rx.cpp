@@ -109,15 +109,13 @@ extern "C" void platform_subject_reader_destroy(cy_platform_t* const platform, c
     guarded_heap_free(&self->core_heap, reader);
 }
 
-extern "C" cy_err_t platform_p2p_send(cy_platform_t* const          platform,
-                                      const cy_p2p_context_t* const p2p_context,
-                                      const cy_us_t                 deadline,
-                                      const std::uint64_t           remote_id,
-                                      const cy_bytes_t              message)
+extern "C" cy_err_t platform_p2p_send(cy_platform_t* const   platform,
+                                      const cy_lane_t* const lane,
+                                      const cy_us_t          deadline,
+                                      const cy_bytes_t       message)
 {
-    (void)p2p_context;
+    (void)lane;
     (void)deadline;
-    (void)remote_id;
 
     test_platform_t* const self = platform_from(platform);
     self->p2p_count++;
@@ -237,9 +235,9 @@ void dispatch_message(test_platform_t* const  self,
                       const cy_us_t           timestamp,
                       const unsigned char     payload_byte)
 {
-    std::array<unsigned char, 17> wire{};
+    std::array<unsigned char, 19> wire{};
     cy_test_make_message_header(wire.data(), type, tag, cy_topic_hash(topic));
-    wire[16]                = payload_byte;
+    wire[18]                = payload_byte;
     cy_message_t* const msg = cy_test_message_make(&self->message_heap, wire.data(), wire.size());
     TEST_ASSERT_NOT_NULL(msg);
 
@@ -247,8 +245,8 @@ void dispatch_message(test_platform_t* const  self,
     message.timestamp = timestamp;
     message.content   = msg;
 
-    const cy_p2p_context_t p2p = { { 0 } };
-    cy_on_message(&self->platform, p2p, remote_id, nullptr, message);
+    const cy_lane_t lane = { .id = remote_id, .p2p = { { 0 } }, .prio = cy_prio_nominal };
+    cy_on_message(&self->platform, lane, nullptr, message);
 }
 
 void test_api_malformed_header_drops_message()
@@ -261,11 +259,11 @@ void test_api_malformed_header_drops_message()
     TEST_ASSERT_NOT_NULL(msg);
 
     cy_message_ts_t mts{};
-    mts.timestamp              = 10;
-    mts.content                = msg;
-    const cy_p2p_context_t p2p = { { 0 } };
+    mts.timestamp        = 10;
+    mts.content          = msg;
+    const cy_lane_t lane = { .id = 1234U, .p2p = { { 0 } }, .prio = cy_prio_nominal };
 
-    cy_on_message(&platform.platform, p2p, 1234U, nullptr, mts);
+    cy_on_message(&platform.platform, lane, nullptr, mts);
     TEST_ASSERT_EQUAL_size_t(1, cy_test_message_destroy_count());
     TEST_ASSERT_EQUAL_size_t(0, cy_test_message_live_count());
     TEST_ASSERT_EQUAL_size_t(0, platform.p2p_count);

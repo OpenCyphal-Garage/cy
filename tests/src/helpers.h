@@ -14,7 +14,7 @@ void     cy_test_serialize_u56(unsigned char out[7], uint64_t value);
 void     cy_test_serialize_u64(unsigned char out[8], uint64_t value);
 uint64_t cy_test_deserialize_u56(const unsigned char in[7]);
 uint64_t cy_test_deserialize_u64(const unsigned char in[8]);
-void     cy_test_make_message_header(unsigned char out[16], uint8_t type, uint64_t tag56, uint64_t topic_hash);
+void     cy_test_make_message_header(unsigned char out[18], uint8_t type, uint64_t tag, uint64_t topic_hash);
 
 /// The PRNG is seeded from the current time by default. If PRNG_SEED environment variable is set,
 /// it is used as the seed instead of the current time to make the sequence deterministic.

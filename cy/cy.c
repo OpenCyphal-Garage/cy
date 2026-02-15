@@ -766,7 +766,7 @@ static int_fast8_t topic_lage(const cy_topic_t* const topic, const cy_us_t now)
 /// CRDT merge operator on the topic log-age. Shift ts_origin into the past if needed.
 static void topic_merge_lage(cy_topic_t* const topic, const cy_us_t now, int_fast8_t r_lage)
 {
-    r_lage           = (r_lage < LAGE_MIN) ? LAGE_MIN : ((r_lage > LAGE_MAX) ? LAGE_MAX : r_lage);
+    r_lage           = (int_fast8_t)((r_lage < LAGE_MIN) ? LAGE_MIN : ((r_lage > LAGE_MAX) ? LAGE_MAX : r_lage));
     topic->ts_origin = min_i64(topic->ts_origin, now - (pow2us(r_lage) * MEGA));
 }
 
@@ -2837,7 +2837,7 @@ static void send_response_ack(cy_t* const     cy,
     }
 }
 
-uint32_t cy_broadcast_subject_id(cy_platform_t* const platform)
+uint32_t cy_broadcast_subject_id(const cy_platform_t* const platform)
 {
     // Round up to the nearest power of two minus one. This is guaranteed to be outside of the normal subject-ID range.
     const uint32_t max = CY_SUBJECT_ID_MAX(platform->subject_id_modulus);

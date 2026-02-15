@@ -180,7 +180,7 @@ typedef struct cy_platform_vtable_t
 /// This works because the primality of the subject-ID modulus implies that a few of the subject-IDs above the
 /// CY_SUBJECT_ID_MAX(modulus) will be unused.
 /// Cy does not require deduplication on the broadcast subject for transport implementation simplicity.
-uint32_t cy_broadcast_subject_id(cy_platform_t* const platform);
+uint32_t cy_broadcast_subject_id(const cy_platform_t* const platform);
 
 /// New message received on a topic or P2P. The data ownership is taken by this function.
 /// The subject reader is NULL for P2P messages.
