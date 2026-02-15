@@ -4,36 +4,11 @@
 #include <stdlib.h>
 #include <time.h>
 
-void cy_test_serialize_u56(unsigned char out[7], uint64_t value)
-{
-    for (size_t i = 0; i < 7U; i++) {
-        out[i] = (unsigned char)((value >> (i * 8U)) & 0xFFU);
-    }
-}
-
-void cy_test_serialize_u64(unsigned char out[8], uint64_t value)
+static void serialize_u64(unsigned char out[8], const uint64_t value)
 {
     for (size_t i = 0; i < 8U; i++) {
         out[i] = (unsigned char)((value >> (i * 8U)) & 0xFFU);
     }
-}
-
-uint64_t cy_test_deserialize_u56(const unsigned char in[7])
-{
-    uint64_t out = 0;
-    for (size_t i = 0; i < 7U; i++) {
-        out |= ((uint64_t)in[i]) << (i * 8U);
-    }
-    return out;
-}
-
-uint64_t cy_test_deserialize_u64(const unsigned char in[8])
-{
-    uint64_t out = 0;
-    for (size_t i = 0; i < 8U; i++) {
-        out |= ((uint64_t)in[i]) << (i * 8U);
-    }
-    return out;
 }
 
 void cy_test_make_message_header(unsigned char  out[18],
@@ -43,8 +18,8 @@ void cy_test_make_message_header(unsigned char  out[18],
 {
     out[0] = (unsigned char)(type & 63U);
     out[1] = 0U;
-    cy_test_serialize_u64(&out[2], tag);
-    cy_test_serialize_u64(&out[10], topic_hash);
+    serialize_u64(&out[2], tag);
+    serialize_u64(&out[10], topic_hash);
 }
 
 static uint64_t prng_next(uint64_t* const state)

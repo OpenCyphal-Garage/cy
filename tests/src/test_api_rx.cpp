@@ -297,7 +297,7 @@ void test_api_reliable_duplicate_acked_once_to_application()
     TEST_ASSERT_EQUAL_size_t(1, capture.count);
     TEST_ASSERT_EQUAL_UINT64(0x1234U, capture.tags[0]);
     TEST_ASSERT_EQUAL_size_t(2, platform.p2p_count);
-    TEST_ASSERT_EQUAL_UINT8(HeaderMsgAck, static_cast<std::uint8_t>(platform.last_p2p[0] & 31U));
+    TEST_ASSERT_EQUAL_UINT8(HeaderMsgAck, static_cast<std::uint8_t>(platform.last_p2p[0] & 63U));
     TEST_ASSERT_EQUAL_size_t(0, cy_test_message_live_count());
 
     platform_deinit(&platform);
