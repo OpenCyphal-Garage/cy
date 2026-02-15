@@ -39,7 +39,7 @@ int main(const int argc, char* argv[])
     req.read_offset = 0;
     req.path_len    = (uint16_t)strlen(argv[1]);
     if (req.path_len > PATH_MAX) {
-        (void)fprintf(stderr, "File path length %u is too long\n", req.path_len);
+        (void)fprintf(stderr, "File path length %ju is too long\n", (uintmax_t)req.path_len);
         return 1;
     }
     memcpy(req.path, argv[1], req.path_len);
@@ -65,7 +65,7 @@ int main(const int argc, char* argv[])
         const cy_us_t now = cy_udp_posix_now();
 
         // Send the request.
-        (void)fprintf(stderr, "\nRequesting offset %llu...\n", (unsigned long long)req.read_offset);
+        (void)fprintf(stderr, "\nRequesting offset %ju...\n", (uintmax_t)req.read_offset);
         cy_future_t* const future = cy_request(pub_file_read,
                                                now + (RESPONSE_TIMEOUT / 2),
                                                now + RESPONSE_TIMEOUT,
@@ -95,7 +95,7 @@ int main(const int argc, char* argv[])
         cy_future_destroy(future); // This must be eventually done for every future.
 
         // Process the next chunk.
-        (void)fprintf(stderr, "Received response: offset %llu\n", (unsigned long long)req.read_offset);
+        (void)fprintf(stderr, "Received response: offset %ju\n", (uintmax_t)req.read_offset);
         file_read_response_t resp;
         const size_t         resp_size = cy_message_read(&message, 0, sizeof(resp), &resp);
         cy_message_destroy(&message); // release the memory asap
@@ -110,7 +110,7 @@ int main(const int argc, char* argv[])
             (void)fflush(stdout);
             req.read_offset += resp.data_len;
         } else {
-            (void)fprintf(stderr, "\nFinished transferring %llu bytes\n", (unsigned long long)req.read_offset);
+            (void)fprintf(stderr, "\nFinished transferring %ju bytes\n", (uintmax_t)req.read_offset);
             break;
         }
     }

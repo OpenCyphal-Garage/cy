@@ -54,11 +54,11 @@ static void on_file_read_msg(cy_subscriber_t* const subscriber, cy_arrival_t* co
 
     // Send the response back to the client using reliable delivery.
     (void)fprintf(stderr,
-                  "Responding: file='%s' offset=%llu size=%u error=%u\n",
+                  "Responding: file='%s' offset=%ju size=%ju error=%ju\n",
                   file_name,
-                  (unsigned long long)read_offset,
-                  response.data_len,
-                  response.error);
+                  (uintmax_t)read_offset,
+                  (uintmax_t)response.data_len,
+                  (uintmax_t)response.error);
     cy_future_t* const future =
       cy_respond_reliable(arv->breadcrumb,
                           arv->message.timestamp + (10 * MEGA),

@@ -104,8 +104,8 @@ static void test_dedup_wraparound(void)
     dedup_fixture_init(&fixture);
     dedup_owner_init(&owner, &fixture);
 
-    dedup_t* const dd = dedup_make_state(&owner, 9U, TAG56_MASK, 0);
-    TEST_ASSERT_FALSE(dedup_update(dd, &owner, TAG56_MASK, 0));
+    dedup_t* const dd = dedup_make_state(&owner, 9U, UINT64_MAX, 0);
+    TEST_ASSERT_FALSE(dedup_update(dd, &owner, UINT64_MAX, 0));
     TEST_ASSERT_FALSE(dedup_update(dd, &owner, 0U, 1));
     TEST_ASSERT_TRUE(dedup_update(dd, &owner, 0U, 2));
 

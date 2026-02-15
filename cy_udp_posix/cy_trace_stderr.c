@@ -39,14 +39,14 @@ void cy_trace(cy_t* const         cy, // cppcheck-suppress constParameterPointer
     // Print the header.
     static const int32_t mega = 1000000;
     (void)fprintf(stderr,
-                  "CY(%05lld.%06lld) %s.%03lld %*s:%04u:%*s: ",
-                  (long long)(uptime_us / mega),
-                  (long long)(uptime_us % mega),
+                  "CY(%05jd.%06jd) %s.%03jd %*s:%04ju:%*s: ",
+                  (intmax_t)(uptime_us / mega),
+                  (intmax_t)(uptime_us % mega),
                   hhmmss,
-                  (long long)ts.tv_nsec / mega,
+                  (intmax_t)ts.tv_nsec / mega,
                   longest_file_name,
                   file_name,
-                  (unsigned)line,
+                  (uintmax_t)line,
                   longest_func_name,
                   func);
 

@@ -45,6 +45,7 @@ Checks: >-
   -*macro-to-enum,
   -*-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
   -*-avoid-pragma-once,
+  -*-avoid-nested-conditional-operator,
   -*-static-cast-downcast,
   -*-prefer-static-over-anonymous-namespace,
   -*-avoid-unchecked-container-access,

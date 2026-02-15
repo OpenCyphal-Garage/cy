@@ -61,9 +61,9 @@ static struct config_t load_config(const int argc, const char* const argv[])
     // Print the actual configs we're using.
     (void)fprintf(stderr, "ifaces:");
     for (size_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
-        (void)fprintf(stderr, " 0x%08x", cfg.iface_address[i]);
+        (void)fprintf(stderr, " 0x%08jx", (uintmax_t)cfg.iface_address[i]);
     }
-    (void)fprintf(stderr, "\nuid: 0x%016llx\n", (unsigned long long)cfg.local_uid);
+    (void)fprintf(stderr, "\nuid: 0x%016jx\n", (uintmax_t)cfg.local_uid);
     (void)fprintf(stderr, "tx_queue_frames: %zu\n", cfg.tx_queue_capacity);
     (void)fprintf(stderr, "publications:\n");
     for (size_t i = 0; i < cfg.pub_count; i++) {
@@ -90,10 +90,10 @@ static void on_result(cy_future_t* const future)
         cy_message_read(result->response.message.content, 0, size, data);
         char* const dump = hexdump(size, data, 32); // just a simple visualization aid unrelated to the API
         (void)fprintf(stderr,
-                      "↩️ ts=%09llu remote=%016x seqno=%llu sz=%06zu topic='%s' response ✅\n%s\n",
-                      (unsigned long long)result->response.message.timestamp,
-                      (unsigned)result->response.remote_id,
-                      (unsigned long long)result->response.seqno,
+                      "↩️ ts=%09ju remote=%016jx seqno=%ju sz=%06zu topic='%s' response ✅\n%s\n",
+                      (uintmax_t)result->response.message.timestamp,
+                      (uintmax_t)result->response.remote_id,
+                      (uintmax_t)result->response.seqno,
                       size,
                       topic_name.str,
                       dump);
@@ -143,7 +143,7 @@ int main(const int argc, const char* const argv[])
     while (true) {
         const cy_err_t err_spin = cy_spin_until(cy, next_publish_at);
         if (err_spin != CY_OK) {
-            (void)fprintf(stderr, "cy_udp_posix_spin_once: %d\n", err_spin);
+            (void)fprintf(stderr, "cy_udp_posix_spin_once: %jd\n", (intmax_t)err_spin);
             break;
         }
         // Publish messages. This only involves the abstract Cy API.
@@ -151,10 +151,8 @@ int main(const int argc, const char* const argv[])
         if (now >= next_publish_at) {
             for (size_t i = 0; i < cfg.pub_count; i++) {
                 char msg[256];
-                (void)sprintf(msg,
-                              "Hello from %016llx! The current time is %lld us.",
-                              (unsigned long long)cfg.local_uid,
-                              (long long)now);
+                (void)sprintf(
+                  msg, "Hello from %016jx! The current time is %jd us.", (uintmax_t)cfg.local_uid, (intmax_t)now);
 #if 0 // NOLINT(readability-avoid-unconditional-preprocessor-if)
                 cy_future_t* const future = cy_request(publishers[i], //
                                                        now + (MEGA * 2),
@@ -171,7 +169,7 @@ int main(const int argc, const char* const argv[])
                                                     now + (MEGA * 2),
                                                     (cy_bytes_t){ .size = strlen(msg), .data = msg });
                 if (err_pub != CY_OK) {
-                    (void)fprintf(stderr, "cy_publish: %d\n", err_pub);
+                    (void)fprintf(stderr, "cy_publish: %jd\n", (intmax_t)err_pub);
                     break;
                 }
 #endif

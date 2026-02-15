@@ -36,14 +36,15 @@ uint64_t cy_test_deserialize_u64(const unsigned char in[8])
     return out;
 }
 
-void cy_test_make_message_header(unsigned char  out[16],
+void cy_test_make_message_header(unsigned char  out[18],
                                  const uint8_t  type,
-                                 const uint64_t tag56,
+                                 const uint64_t tag,
                                  const uint64_t topic_hash)
 {
-    out[0] = (unsigned char)(type & 31U);
-    cy_test_serialize_u56(&out[1], tag56);
-    cy_test_serialize_u64(&out[8], topic_hash);
+    out[0] = (unsigned char)(type & 63U);
+    out[1] = 0U;
+    cy_test_serialize_u64(&out[2], tag);
+    cy_test_serialize_u64(&out[10], topic_hash);
 }
 
 static uint64_t prng_next(uint64_t* const state)
@@ -59,7 +60,7 @@ static uint64_t get_prng_seed(void)
         return strtoull(env, NULL, 0);
     }
     const uint64_t seed = ((uint64_t)time(NULL) << 32U) ^ (uint64_t)clock();
-    printf("PRNG_SEED=%llu\n", (unsigned long long)seed);
+    printf("PRNG_SEED=%ju\n", (uintmax_t)seed);
     return seed;
 }
 

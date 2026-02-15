@@ -5,8 +5,10 @@
 ///                         `____/ .___/`___/_/ /_/`____/`__, / .___/_/ /_/`__,_/_/
 ///                             /_/                     /____/_/
 ///
-/// A lightweight real-time decentralized pub/sub for embedded systems and robotics. See the README.md for details.
+/// A robust lightweight real-time decentralized pub/sub for embedded systems and robotics.
+/// See the README.md for details.
 ///
+/// Source: https://github.com/OpenCyphal-Garage/cy
 /// Copyright (c) Pavel Kirienko <pavel@opencyphal.org>
 
 #pragma once
@@ -25,7 +27,10 @@ extern "C"
 /// which only has 13-bit subject-IDs. Cyphal v1.1 will never allocate non-pinned topics in this subject-ID range.
 /// For pinned topics, hash<=CY_SUBJECT_ID_PINNED_MAX. The probability of a random hash falling into the pinned
 /// range is ~4.44e-16, or about one in two quadrillion, which is not practically possible.
-#define CY_SUBJECT_ID_PINNED_MAX   0x1FFFU
+#define CY_SUBJECT_ID_PINNED_MAX 0x1FFFU
+
+/// This notably excludes the broadcast subject, which is always at the top, above this maximum.
+/// See cy_broadcast_subject_id().
 #define CY_SUBJECT_ID_MAX(modulus) (CY_SUBJECT_ID_PINNED_MAX + (modulus))
 
 #define CY_OK 0
@@ -255,12 +260,11 @@ void cy_unadvertise(cy_publisher_t* const pub);
 typedef struct cy_subscriber_t cy_subscriber_t;
 
 /// This ought to be enough for any reasonable transport-specific state.
-/// For example, IPv4 with 3 redundant transfers would need (4 bytes IP + 2 bytes port) * 3 + 1 byte priority = 19 bytes
-/// plus padding.
+/// For example, IPv4 with 3 redundant transfers would need (4 bytes IP + 2 bytes port) * 3 = 18 bytes plus padding.
 /// IPv6 would likely need north of 64 bytes, but at the moment we don't have any transport that would require that.
 /// It can be changed easily as the library makes no assumptions about the size of this state.
 #ifndef CY_RESPONSE_CONTEXT_BYTES
-#define CY_RESPONSE_CONTEXT_BYTES 32U
+#define CY_RESPONSE_CONTEXT_BYTES 24U
 #endif
 
 /// Received transfers are given this copyable instance to allow sending P2P response transfers back to the sender.
@@ -287,7 +291,8 @@ typedef struct cy_p2p_context_t
 ///
 typedef struct cy_breadcrumb_t
 {
-    cy_t* cy; ///< The owning Cy instance.
+    cy_t*     cy;       ///< The owning Cy instance.
+    cy_prio_t priority; ///< The response priority matches the priority of the original message.
 
     /// Stream identifier triplet. Can be hashed down to a single 64-bit value if needed.
     uint64_t remote_id;   ///< Uniquely identifies the source node within the network.
@@ -447,14 +452,14 @@ void cy_async_error_handler_set(cy_t* const cy, const cy_async_error_handler_t h
 /// The home should be unique in the network; one way to ensure this is to default it to the node's unique ID.
 /// The returned strings are NUL-terminated. The lifetime is bound to the Cy instance.
 /// Mutators fail if the supplied string is invalid.
-/// The default home and namespace are empty. They can be changed only before the first topic is created.
+/// The default home and namespace are empty. They should not be changed after the first topic is created.
 cy_str_t cy_home(const cy_t* const cy);
 cy_str_t cy_namespace(const cy_t* const cy);
 cy_err_t cy_home_set(cy_t* const cy, const cy_str_t home);
 cy_err_t cy_namespace_set(cy_t* const cy, const cy_str_t name_space);
 
 /// This function must be invoked periodically to ensure liveness.
-/// The returned value indicates the success of the heartbeat publication, if any took place, or zero.
+/// The returned value indicates the success of the gossip publication, if any took place, or zero.
 /// Transient failures normally should be logged & ignored.
 /// The function will return not later than the specified deadline. It may return early.
 cy_err_t               cy_spin_until(cy_t* const cy, const cy_us_t deadline);
@@ -520,7 +525,7 @@ cy_user_context_t* cy_topic_user_context(cy_topic_t* const topic);
 // =====================================================================================================================
 
 /// Shorter topic names reduce the gossip traffic overhead.
-/// In CAN FD networks, topic names should not exceed 39 characters to avoid multi-frame heartbeats.
+/// In CAN FD networks, normalized topic names should not exceed 48 characters to avoid multi-frame gossips.
 /// This limit is chosen rather arbitrarily, keeping in mind RTPS where the maximum is 255,
 /// and ROS2 where the maximum is 248. In practice, topics very rarely exceed ~100 characters.
 #define CY_TOPIC_NAME_MAX 200

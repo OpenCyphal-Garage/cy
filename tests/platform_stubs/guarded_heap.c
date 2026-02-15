@@ -15,7 +15,7 @@ typedef struct
 
 static void panic(const char* const message)
 {
-    (void)fprintf(stderr, "%s:%u: guarded heap panic: %s\n", __FILE__, (unsigned)__LINE__, message);
+    (void)fprintf(stderr, "%s:%d: guarded heap panic: %s\n", __FILE__, __LINE__, message);
     (void)fflush(stderr);
     abort();
 }

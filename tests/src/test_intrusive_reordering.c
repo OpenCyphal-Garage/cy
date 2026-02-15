@@ -96,7 +96,7 @@ static bool push_message(reorder_env_t* const self, const uint64_t tag, const cy
     cy_message_t* const msg = cy_test_message_make(&self->fixture.heap, &payload, 1);
     TEST_ASSERT_NOT_NULL(msg);
     const cy_message_ts_t mts = { .timestamp = ts, .content = msg };
-    const bool            out = reordering_push(&self->rr, tag, mts);
+    const bool            out = reordering_push(&self->rr, tag, cy_prio_nominal, mts);
     cy_message_refcount_dec(msg); // Simulate the caller dropping ownership after reordering_push().
     return out;
 }
