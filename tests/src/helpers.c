@@ -59,7 +59,7 @@ static uint64_t get_prng_seed(void)
         return strtoull(env, NULL, 0);
     }
     const uint64_t seed = ((uint64_t)time(NULL) << 32U) ^ (uint64_t)clock();
-    printf("PRNG_SEED=%llu\n", (unsigned long long)seed);
+    printf("PRNG_SEED=%ju\n", (uintmax_t)seed);
     return seed;
 }
 

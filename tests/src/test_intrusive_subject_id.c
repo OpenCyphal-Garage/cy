@@ -34,10 +34,10 @@ static void check_subject_id_math(const uint32_t modulus)
         bitset_set(seen_sid, subject_id);
         TEST_ASSERT(evictions == topic_evictions_from_subject_id(hash, subject_id, modulus));
         if (evictions < 10) { // JFYI
-            printf("hash=%llu evictions=%lu => subject_id=%lu\n",
-                   (unsigned long long)hash,
-                   (unsigned long)evictions,
-                   (unsigned long)subject_id);
+            printf("hash=%ju evictions=%ju => subject_id=%ju\n",
+                   (uintmax_t)hash,
+                   (uintmax_t)evictions,
+                   (uintmax_t)subject_id);
         }
     }
 

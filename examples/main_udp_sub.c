@@ -65,9 +65,9 @@ static struct config_t load_config(const int argc, const char* const argv[])
     // Print the actual configs we're using.
     (void)fprintf(stderr, "ifaces:");
     for (size_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
-        (void)fprintf(stderr, " 0x%08x", cfg.iface_address[i]);
+        (void)fprintf(stderr, " 0x%08jx", (uintmax_t)cfg.iface_address[i]);
     }
-    (void)fprintf(stderr, "\nuid: 0x%016llx\n", (unsigned long long)cfg.local_uid);
+    (void)fprintf(stderr, "\nuid: 0x%016jx\n", (uintmax_t)cfg.local_uid);
     (void)fprintf(stderr, "tx_queue_frames: %zu\n", cfg.tx_queue_capacity);
     (void)fprintf(stderr, "subscriptions:\n");
     for (size_t i = 0; i < cfg.sub_count; i++) {
@@ -86,8 +86,8 @@ static void on_message(cy_subscriber_t* const subscriber, cy_arrival_t arrival)
     cy_message_read(arrival.message.content, 0, payload_size, payload_copy);
     const char* const dump = hexdump(payload_size, payload_copy, 32);
     (void)fprintf(stderr,
-                  "💬 ts=%09llu sz=%06zu sbt=%zu topic='%s'\n%s\n",
-                  (unsigned long long)arrival.message.timestamp,
+                  "💬 ts=%09ju sz=%06zu sbt=%zu topic='%s'\n%s\n",
+                  (uintmax_t)arrival.message.timestamp,
                   payload_size,
                   arrival.substitutions.count,
                   cy_topic_name(arrival.topic).str,
@@ -100,7 +100,7 @@ static void on_message(cy_subscriber_t* const subscriber, cy_arrival_t arrival)
                                         arrival.message.timestamp + MEGA,
                                         (cy_bytes_t){ .size = 2, .data = ":3" });
         if (err != CY_OK) {
-            (void)fprintf(stderr, "cy_respond: %d\n", err);
+            (void)fprintf(stderr, "cy_respond: %jd\n", (intmax_t)err);
         }
     }
 }
@@ -143,7 +143,7 @@ int main(const int argc, const char* const argv[])
     while (true) {
         const cy_err_t err_spin = cy_spin_until(cy, cy_now(cy) + MEGA);
         if (err_spin != CY_OK) {
-            (void)fprintf(stderr, "cy_udp_posix_spin_once: %d\n", err_spin);
+            (void)fprintf(stderr, "cy_udp_posix_spin_once: %jd\n", (intmax_t)err_spin);
             break;
         }
     }

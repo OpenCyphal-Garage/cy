@@ -248,8 +248,11 @@ static cy_subject_writer_t* v_subject_writer_new(cy_platform_t* const base, cons
         }
         owner->stats.subject_writer_count++;
     }
-    CY_TRACE(
-      owner->base.cy, "🔊 n_writers=%zu S%08x ptr=%p", owner->stats.subject_writer_count, subject_id, (void*)self);
+    CY_TRACE(owner->base.cy,
+             "🔊 n_writers=%zu S%08jx ptr=%p",
+             owner->stats.subject_writer_count,
+             (uintmax_t)subject_id,
+             (void*)self);
     return (cy_subject_writer_t*)self;
 }
 
@@ -374,11 +377,11 @@ static void v_on_msg_stateless(udpard_rx_t* const rx, udpard_rx_port_t* const po
         v_on_msg(rx, port, tr);
     } else {
         CY_TRACE(owner->base.cy,
-                 "🍒️ S%08llx #%016llx N%016llx 👆%016llx duplicate dropped",
-                 (unsigned long long)self->base.subject_id,
-                 (unsigned long long)tr.transfer_id,
-                 (unsigned long long)tr.remote.uid,
-                 (unsigned long long)msg_fingerprint);
+                 "🍒️ S%08jx #%016jx N%016jx 👆%016jx duplicate dropped",
+                 (uintmax_t)self->base.subject_id,
+                 (uintmax_t)tr.transfer_id,
+                 (uintmax_t)tr.remote.uid,
+                 (uintmax_t)msg_fingerprint);
         udpard_fragment_free_all(tr.payload, udpard_make_deleter(owner->mem));
     }
 }
@@ -448,8 +451,11 @@ static cy_subject_reader_t* v_subject_reader_new(cy_platform_t* const base,
         assert((owner->reader_head != NULL) == (owner->reader_tail != NULL));
     }
 reject:
-    CY_TRACE(
-      owner->base.cy, "🔔 n_readers=%zu S%08x ptr=%p", owner->stats.subject_reader_count, subject_id, (void*)self);
+    CY_TRACE(owner->base.cy,
+             "🔔 n_readers=%zu S%08jx ptr=%p",
+             owner->stats.subject_reader_count,
+             (uintmax_t)subject_id,
+             (void*)self);
     return (cy_subject_reader_t*)self;
 }
 
@@ -535,7 +541,7 @@ static cy_err_t v_p2p_send(cy_platform_t* const     base,
                                        NULL);
 
     // Report the result.
-    CY_TRACE(owner->base.cy, "💬 N%016llx res=%u", (unsigned long long)remote_id, ok);
+    CY_TRACE(owner->base.cy, "💬 N%016jx res=%d", (uintmax_t)remote->id, ok);
     if (ok) {
         return CY_OK;
     }
@@ -899,17 +905,17 @@ cy_platform_t* cy_udp_posix_new_auto(void)
         return NULL;
     }
 #if CY_CONFIG_TRACE
-    CY_TRACE(self->base.cy, "🏷 Semirandom EUI-64 %016llx", (unsigned long long)uid);
+    CY_TRACE(self->base.cy, "🏷 Semirandom EUI-64 %016jx", (uintmax_t)uid);
     for (int16_t i = 0; i < n_if; i++) {
         const uint32_t f = ifaces[i];
         CY_TRACE(self->base.cy,
-                 "🔌 Autodetected default iface #%d of %d: %u.%u.%u.%u",
+                 "🔌 Autodetected default iface #%d of %d: %ju.%ju.%ju.%ju",
                  i,
                  n_if,
-                 (f >> 24U) & 0xFFU,
-                 (f >> 16U) & 0xFFU,
-                 (f >> 8U) & 0xFFU,
-                 f & 0xFFU);
+                 (uintmax_t)((f >> 24U) & 0xFFU),
+                 (uintmax_t)((f >> 16U) & 0xFFU),
+                 (uintmax_t)((f >> 8U) & 0xFFU),
+                 (uintmax_t)(f & 0xFFU));
     }
 #endif
     return (cy_platform_t*)self;
@@ -919,15 +925,15 @@ cy_err_t cy_udp_posix_set_default_names(const cy_platform_t* base)
 {
     cy_udp_posix_t* const self     = (cy_udp_posix_t*)base;
     char                  home[17] = { 0 };
-    (void)snprintf(home, sizeof(home), "%016llx", (unsigned long long)self->udpard_tx.local_uid);
+    (void)snprintf(home, sizeof(home), "%016jx", (uintmax_t)self->udpard_tx.local_uid);
     assert(home[16] == 0);
     cy_err_t err = cy_home_set(base->cy, wkv_key(home));
-    CY_TRACE(base->cy, "🏠 Home set to '%s' res=%d", home, err);
+    CY_TRACE(base->cy, "🏠 Home set to '%s' res=%jd", home, (intmax_t)err);
     if (err == CY_OK) {
         const char* const namespace = getenv("CYPHAL_NAMESPACE");
         if (namespace != NULL) {
             err = cy_namespace_set(base->cy, wkv_key(namespace));
-            CY_TRACE(base->cy, "🌌 Namespace set to '%s' res=%d", namespace, err);
+            CY_TRACE(base->cy, "🌌 Namespace set to '%s' res=%jd", namespace, (intmax_t)err);
         }
     }
     return err;

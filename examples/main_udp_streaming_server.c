@@ -88,20 +88,20 @@ static void on_response_future_update(cy_future_t* const future)
         s->remaining--;
         s->next_send_at = cy_now(s->breadcrumb.cy) + s->period_us;
         (void)fprintf(stderr,
-                      "stream response delivered: stream_id=%016llx seqno=%llu remaining=%u\n",
-                      (unsigned long long)s->stream_id,
-                      (unsigned long long)res->seqno,
-                      s->remaining);
+                      "stream response delivered: stream_id=%016jx seqno=%ju remaining=%ju\n",
+                      (uintmax_t)s->stream_id,
+                      (uintmax_t)res->seqno,
+                      (uintmax_t)s->remaining);
         if (s->remaining == 0) {
-            (void)fprintf(stderr, "stream completed: stream_id=%016llx\n", (unsigned long long)s->stream_id);
+            (void)fprintf(stderr, "stream completed: stream_id=%016jx\n", (uintmax_t)s->stream_id);
             reset_stream(s);
         }
     } else {
         (void)fprintf(stderr,
-                      "CLIENT UNREACHABLE, stopping stream_id=%016llx seqno=%llu remaining=%u\n",
-                      (unsigned long long)s->stream_id,
-                      (unsigned long long)res->seqno,
-                      s->remaining);
+                      "CLIENT UNREACHABLE, stopping stream_id=%016jx seqno=%ju remaining=%ju\n",
+                      (uintmax_t)s->stream_id,
+                      (uintmax_t)res->seqno,
+                      (uintmax_t)s->remaining);
         reset_stream(s);
     }
     cy_future_destroy(future);
@@ -141,13 +141,13 @@ static void on_stream_request(cy_subscriber_t* const sub, cy_arrival_t* const ar
     s->stream_id    = stream_id;
     s->breadcrumb   = *arv->breadcrumb; // breadcrumb copied by value
     (void)fprintf(stderr,
-                  "new stream: id=%016llx remote=%016llx topic=%016llx transfer=%016llx count=%u period_ms=%u\n",
-                  (unsigned long long)s->stream_id,
-                  (unsigned long long)s->breadcrumb.remote_id,
-                  (unsigned long long)s->breadcrumb.topic_hash,
-                  (unsigned long long)s->breadcrumb.transfer_id,
-                  req.count,
-                  req.period_ms);
+                  "new stream: id=%016jx remote=%016jx topic=%016jx transfer=%016jx count=%ju period_ms=%ju\n",
+                  (uintmax_t)s->stream_id,
+                  (uintmax_t)s->breadcrumb.remote_id,
+                  (uintmax_t)s->breadcrumb.topic_hash,
+                  (uintmax_t)s->breadcrumb.transfer_id,
+                  (uintmax_t)req.count,
+                  (uintmax_t)req.period_ms);
 }
 
 int main(void)
@@ -155,7 +155,7 @@ int main(void)
     cy_udp_posix_t cy_udp;
     const cy_err_t res = cy_udp_posix_new_simple(&cy_udp);
     if (res != CY_OK) {
-        (void)fprintf(stderr, "cy_udp_posix_new_simple: %d\n", res);
+        (void)fprintf(stderr, "cy_udp_posix_new_simple: %jd\n", (intmax_t)res);
         return 1;
     }
     cy_t* const cy = &cy_udp.base;
@@ -178,7 +178,7 @@ int main(void)
     while (true) {
         const cy_err_t err_spin = cy_udp_posix_spin_once(&cy_udp);
         if (err_spin != CY_OK) {
-            (void)fprintf(stderr, "cy_udp_posix_spin_once: %d\n", err_spin);
+            (void)fprintf(stderr, "cy_udp_posix_spin_once: %jd\n", (intmax_t)err_spin);
             return 1;
         }
 
@@ -195,11 +195,11 @@ int main(void)
             char           payload[RESPONSE_MAX];
             const int      len = snprintf(payload,
                                      sizeof(payload),
-                                     "stream=%016llx seq=%llu time_us=%lld left=%u",
-                                     (unsigned long long)s->stream_id,
-                                     (unsigned long long)seq,
-                                     (long long)now,
-                                     s->remaining);
+                                     "stream=%016jx seq=%ju time_us=%jd left=%ju",
+                                     (uintmax_t)s->stream_id,
+                                     (uintmax_t)seq,
+                                     (intmax_t)now,
+                                     (uintmax_t)s->remaining);
             assert(len > 0);
             const cy_bytes_t msg = { .size = (size_t)len, .data = payload };
 

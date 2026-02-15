@@ -1061,9 +1061,9 @@ static void topic_ensure_subscribed(cy_topic_t* const topic)
         const uint32_t subject_id = topic_subject_id(topic);
         topic->sub_reader         = cy->platform->vtable->subject_reader_new(cy->platform, subject_id, extent);
         CY_TRACE(topic->cy,
-                 "🗞️ %s S%08x extent=%zu result=%p",
+                 "🗞️ %s S%08jx extent=%zu result=%p",
                  topic_repr(topic).str,
-                 subject_id,
+                 (uintmax_t)subject_id,
                  extent,
                  (void*)topic->sub_reader);
         if (topic->sub_reader == NULL) {
@@ -1087,11 +1087,11 @@ static void topic_allocate(cy_topic_t* const topic, const uint32_t new_evictions
     cy_t* const cy = topic->cy;
 #if CY_CONFIG_TRACE
     CY_TRACE(cy,
-             "🔍 %s evict=%lu->%lu lage=%+d sub_reader=%p couplings=%p",
+             "🔍 %s evict=%ju->%ju lage=%+jd sub_reader=%p couplings=%p",
              topic_repr(topic).str,
-             (unsigned long)topic->evictions,
-             (unsigned long)new_evictions,
-             topic_lage(topic, now),
+             (uintmax_t)topic->evictions,
+             (uintmax_t)new_evictions,
+             (intmax_t)topic_lage(topic, now),
              (void*)topic->sub_reader,
              (void*)topic->couplings);
 #endif
@@ -1126,12 +1126,12 @@ static void topic_allocate(cy_topic_t* const topic, const uint32_t new_evictions
 #if CY_CONFIG_TRACE
     if (that != NULL) {
         CY_TRACE(cy,
-                 "🎲 T%016llx@S%08x %s T%016llx@S%08x",
-                 (unsigned long long)topic->hash,
-                 new_sid,
+                 "🎲 T%016jx@S%08jx %s T%016jx@S%08jx",
+                 (uintmax_t)topic->hash,
+                 (uintmax_t)new_sid,
                  victory ? "wins 👑 over" : "loses 💀 to",
-                 (that != NULL) ? (unsigned long long)that->hash : UINT64_MAX,
-                 (that != NULL) ? topic_subject_id(that) : UINT32_MAX);
+                 (that != NULL) ? (uintmax_t)that->hash : UINTMAX_MAX,
+                 (that != NULL) ? (uintmax_t)topic_subject_id(that) : (uintmax_t)UINT32_MAX);
     }
 #endif
 
@@ -1164,10 +1164,10 @@ static void topic_allocate(cy_topic_t* const topic, const uint32_t new_evictions
 
 #if CY_CONFIG_TRACE
     CY_TRACE(cy,
-             "🔎 %s evict=%llu lage=%+d sub_reader=%p",
+             "🔎 %s evict=%ju lage=%+jd sub_reader=%p",
              topic_repr(topic).str,
-             (unsigned long long)topic->evictions,
-             topic_lage(topic, now),
+             (uintmax_t)topic->evictions,
+             (intmax_t)topic_lage(topic, now),
              (void*)topic->sub_reader);
 #endif
 }
@@ -1427,7 +1427,7 @@ static cy_err_t scout_pattern(cy_t* const cy, subscriber_root_t* const subr, con
     char name[CY_TOPIC_NAME_MAX + 1];
     wkv_get_key(&cy->subscribers_by_name, subr->index_name, name);
     const cy_err_t res = do_send_scout(cy, now, (cy_str_t){ .len = subr->index_name->key_len, .str = name });
-    CY_TRACE(cy, "📢'%s' result=%d", name, res);
+    CY_TRACE(cy, "📢'%s' result=%jd", name, (intmax_t)res);
     if (res == CY_OK) {
         delist(&cy->list_scout_pending, &subr->list_scout_pending);
     }
@@ -1464,19 +1464,19 @@ static void on_gossip_known_topic(cy_t* const       cy,
         const bool win = (mine_lage > lage) || ((mine_lage == lage) && (mine->evictions > evictions));
         CY_TRACE(cy,
                  "🔀 Divergence on '%.*s':\n"
-                 "\t local  %s T%016llx@S%08x evict=%lu lage=%+d\n"
-                 "\t remote %s T%016llx@S%08x evict=%lu lage=%+d",
+                 "\t local  %s T%016jx@S%08jx evict=%ju lage=%+jd\n"
+                 "\t remote %s T%016jx@S%08jx evict=%ju lage=%+jd",
                  STRFMT_ARG(cy_topic_name(mine)),
                  win ? "✅" : "❌",
-                 (unsigned long long)mine->hash,
-                 topic_subject_id(mine),
-                 (unsigned long)mine->evictions,
-                 mine_lage,
+                 (uintmax_t)mine->hash,
+                 (uintmax_t)topic_subject_id(mine),
+                 (uintmax_t)mine->evictions,
+                 (intmax_t)mine_lage,
                  win ? "❌" : "✅",
-                 (unsigned long long)mine->hash,
-                 topic_subject_id_impl(mine->hash, evictions, cy->platform->subject_id_modulus),
-                 (unsigned long)evictions,
-                 lage);
+                 (uintmax_t)mine->hash,
+                 (uintmax_t)topic_subject_id_impl(mine->hash, evictions, cy->platform->subject_id_modulus),
+                 (uintmax_t)evictions,
+                 (intmax_t)lage);
         if (win) {
             // Critically, if we win, we ignore possible allocation collisions. Even if the remote sits on
             // a subject-ID that is currently used by another topic that we have, which could even lose
@@ -1516,21 +1516,21 @@ static void on_gossip_unknown_topic(cy_t* const    cy,
     assert(topic_subject_id(mine) == topic_subject_id_impl(hash, evictions, cy->platform->subject_id_modulus));
     const bool win = left_wins(mine, ts, lage, hash);
     CY_TRACE(cy,
-             "💥 Collision on S%08x:\n"
-             "\t local  %s T%016llx@S%08x evict=%lu lage=%+d '%.*s'\n"
-             "\t remote %s T%016llx@S%08x evict=%lu lage=%+d",
-             topic_subject_id(mine),
+             "💥 Collision on S%08jx:\n"
+             "\t local  %s T%016jx@S%08jx evict=%ju lage=%+jd '%.*s'\n"
+             "\t remote %s T%016jx@S%08jx evict=%ju lage=%+jd",
+             (uintmax_t)topic_subject_id(mine),
              win ? "✅" : "❌",
-             (unsigned long long)mine->hash,
-             topic_subject_id(mine),
-             (unsigned long)mine->evictions,
-             topic_lage(mine, ts),
+             (uintmax_t)mine->hash,
+             (uintmax_t)topic_subject_id(mine),
+             (uintmax_t)mine->evictions,
+             (intmax_t)topic_lage(mine, ts),
              STRFMT_ARG(cy_topic_name(mine)),
              win ? "❌" : "✅",
-             (unsigned long long)hash,
-             topic_subject_id_impl(hash, evictions, cy->platform->subject_id_modulus),
-             (unsigned long)evictions,
-             lage);
+             (uintmax_t)hash,
+             (uintmax_t)topic_subject_id_impl(hash, evictions, cy->platform->subject_id_modulus),
+             (uintmax_t)evictions,
+             (intmax_t)lage);
     // We don't need to do anything if we won, but we need to announce to the network (in particular to the
     // infringing node) that we are using this subject-ID, so that the loser knows that it has to move.
     // If we lost, we need to gossip this topic ASAP as well because every other participant on this topic
@@ -1658,11 +1658,11 @@ cy_publisher_t* cy_advertise_client(cy_t* const cy, const cy_str_t name, const s
         mem_free(cy, pub);
     }
     CY_TRACE(cy,
-             "✨ %s topic_count=%zu p2p_extent=%zu res=%d",
+             "✨ %s topic_count=%zu p2p_extent=%zu res=%jd",
              (res == CY_OK) ? topic_repr(pub->topic).str : "(failed)",
              cavl_count(cy->topics_by_hash),
              cy->p2p_extent,
-             res);
+             (intmax_t)res);
     return (res == CY_OK) ? pub : NULL;
 }
 
@@ -1898,7 +1898,7 @@ static void dedup_drop_stale(cy_topic_t* const owner, const cy_us_t now)
         if ((dd == NULL) || ((dd->last_active_at + SESSION_LIFETIME) >= now)) {
             break;
         }
-        CY_TRACE(owner->cy, "🧹 N%016llx tag=%016llx", (unsigned long long)dd->remote_id, (unsigned long long)dd->tag);
+        CY_TRACE(owner->cy, "🧹 N%016jx tag=%016jx", (uintmax_t)dd->remote_id, (uintmax_t)dd->tag);
         dedup_destroy(dd, owner);
     }
 }
@@ -1922,9 +1922,9 @@ static cy_tree_t* dedup_factory(void* const user)
         state->bitmap = 0;
     }
     CY_TRACE(ctx->owner->cy,
-             "🧹 N%016llx tag=%016llx: %s",
-             (unsigned long long)ctx->remote_id,
-             (unsigned long long)ctx->tag,
+             "🧹 N%016jx tag=%016jx: %s",
+             (uintmax_t)ctx->remote_id,
+             (uintmax_t)ctx->tag,
              (state != NULL) ? "ok" : "OUT OF MEMORY");
     return (state != NULL) ? &state->index_remote_id : NULL;
 }
@@ -2120,22 +2120,22 @@ static bool reordering_push(reordering_t* const self, const uint64_t tag, const 
     // Note that this check does not detect possible duplicates that are currently interned; this is checked below.
     if (lin_tag <= self->last_ejected_lin_tag) {
         CY_TRACE(cy,
-                 "🔢 LATE/DUP: N%016llx tag=%016llx lin_tag=%016llx last_ejected_lin_tag=%016llx",
-                 (unsigned long long)self->remote_id,
-                 (unsigned long long)tag,
-                 (unsigned long long)lin_tag,
-                 (unsigned long long)self->last_ejected_lin_tag);
+                 "🔢 LATE/DUP: N%016jx tag=%016jx lin_tag=%016jx last_ejected_lin_tag=%016jx",
+                 (uintmax_t)self->remote_id,
+                 (uintmax_t)tag,
+                 (uintmax_t)lin_tag,
+                 (uintmax_t)self->last_ejected_lin_tag);
         return false;
     }
 
     // Too far ahead meaning that the remote has restarted. Eject all interned messages, if any, and reset the state.
     if (lin_tag > (self->last_ejected_lin_tag + self->subscriber->params.reordering_capacity)) {
         CY_TRACE(cy,
-                 "🔢 RESEQUENCING: N%016llx tag=%016llx lin_tag=%016llx last_ejected_lin_tag=%016llx",
-                 (unsigned long long)self->remote_id,
-                 (unsigned long long)tag,
-                 (unsigned long long)lin_tag,
-                 (unsigned long long)self->last_ejected_lin_tag);
+                 "🔢 RESEQUENCING: N%016jx tag=%016jx lin_tag=%016jx last_ejected_lin_tag=%016jx",
+                 (uintmax_t)self->remote_id,
+                 (uintmax_t)tag,
+                 (uintmax_t)lin_tag,
+                 (uintmax_t)self->last_ejected_lin_tag);
         reordering_eject_all(self);
         reordering_resequence(self, tag);
         lin_tag = tag - self->tag_baseline;
@@ -2151,11 +2151,11 @@ static bool reordering_push(reordering_t* const self, const uint64_t tag, const 
     reordering_slot_t* const slot = mem_alloc_zero(cy, sizeof(reordering_slot_t));
     if (slot == NULL) {
         CY_TRACE(cy,
-                 "🔢 OUT OF MEMORY: N%016llx tag=%016llx lin_tag=%016llx last_ejected_lin_tag=%016llx",
-                 (unsigned long long)self->remote_id,
-                 (unsigned long long)tag,
-                 (unsigned long long)lin_tag,
-                 (unsigned long long)self->last_ejected_lin_tag);
+                 "🔢 OUT OF MEMORY: N%016jx tag=%016jx lin_tag=%016jx last_ejected_lin_tag=%016jx",
+                 (uintmax_t)self->remote_id,
+                 (uintmax_t)tag,
+                 (uintmax_t)lin_tag,
+                 (uintmax_t)self->last_ejected_lin_tag);
         return false;
     }
     const cy_tree_t* const slot_tree = cavl2_find_or_insert(
@@ -2163,11 +2163,11 @@ static bool reordering_push(reordering_t* const self, const uint64_t tag, const 
     if (slot_tree != &slot->index_lin_tag) {
         // There is already an interned message with the same tag, drop the duplicate.
         CY_TRACE(cy,
-                 "🔢 DUP: N%016llx tag=%016llx lin_tag=%016llx last_ejected_lin_tag=%016llx",
-                 (unsigned long long)self->remote_id,
-                 (unsigned long long)tag,
-                 (unsigned long long)lin_tag,
-                 (unsigned long long)self->last_ejected_lin_tag);
+                 "🔢 DUP: N%016jx tag=%016jx lin_tag=%016jx last_ejected_lin_tag=%016jx",
+                 (uintmax_t)self->remote_id,
+                 (uintmax_t)tag,
+                 (uintmax_t)lin_tag,
+                 (uintmax_t)self->last_ejected_lin_tag);
         mem_free(cy, slot);
         return true; // Duplicate accepted for reliability semantics; idempotent drop for the application.
     }
@@ -2199,10 +2199,7 @@ static void reordering_drop_stale(cy_subscriber_t* const owner, const cy_us_t no
         if ((rr == NULL) || ((rr->last_active_at + SESSION_LIFETIME) >= now)) {
             break;
         }
-        CY_TRACE(owner->root->cy,
-                 "🧹 N%016llx topic=%016llx",
-                 (unsigned long long)rr->remote_id,
-                 (unsigned long long)rr->topic->hash);
+        CY_TRACE(owner->root->cy, "🧹 N%016jx topic=%016jx", (uintmax_t)rr->remote_id, (uintmax_t)rr->topic->hash);
         reordering_destroy(rr);
     }
 }
@@ -2234,9 +2231,9 @@ static cy_tree_t* reordering_cavl_factory(void* const user)
         reordering_resequence(self, outer->tag);
     }
     CY_TRACE(outer->topic->cy,
-             "🔢 REORDERING: N%016llx tag=%016llx: %s",
-             (unsigned long long)outer->remote_id,
-             (unsigned long long)outer->tag,
+             "🔢 REORDERING: N%016jx tag=%016jx: %s",
+             (uintmax_t)outer->remote_id,
+             (uintmax_t)outer->tag,
              (self != NULL) ? "ok" : "OUT OF MEMORY");
     return (self != NULL) ? &self->index : NULL;
 }
@@ -2270,7 +2267,7 @@ static bool on_message(cy_t* const           cy,
         }
         assert(dedup->remote_id == remote.id);
         if (dedup_update(dedup, topic, tag, message.timestamp)) {
-            CY_TRACE(cy, "🍒 Dup N%016llx tag=%016llx", (unsigned long long)remote.id, (unsigned long long)tag);
+            CY_TRACE(cy, "🍒 Dup N%016jx tag=%016jx", (uintmax_t)remote.id, (uintmax_t)tag);
             return true; // Already received, ack but don't process.
         }
     }
@@ -2468,10 +2465,10 @@ static cy_subscriber_t* subscribe(cy_t* const cy, const cy_str_t name, subscribe
         return NULL;
     }
     CY_TRACE(cy,
-             "✨'%.*s' extent_pure=%zu rwin=%lld",
+             "✨'%.*s' extent_pure=%zu rwin=%jd",
              STRFMT_ARG(resolved),
              params.extent_pure,
-             (long long)params.reordering_window);
+             (intmax_t)params.reordering_window);
     return sub;
 }
 
@@ -2578,10 +2575,10 @@ static void default_async_error_handler(cy_t* const       cy,
                                         const uint16_t    line_number)
 {
     CY_TRACE(cy,
-             "❌💥⚠️ %s error=%d at cy.c:%u",
+             "❌💥⚠️ %s error=%jd at cy.c:%ju",
              (topic != NULL) ? topic_repr(topic).str : "<no-topic>",
-             (int)error,
-             (unsigned)line_number);
+             (intmax_t)error,
+             (uintmax_t)line_number);
     (void)cy;
     (void)topic;
     (void)error;
@@ -2672,9 +2669,9 @@ cy_t* cy_new(cy_platform_t* const platform)
     cy->async_error_handler = default_async_error_handler;
     cy->topic_iter          = NULL;
     CY_TRACE(cy,
-             "🚀 ts_started=%llu subject_id_modulus=%lu",
-             (unsigned long long)cy->ts_started,
-             (unsigned long)cy->platform->subject_id_modulus);
+             "🚀 ts_started=%ju subject_id_modulus=%ju",
+             (uintmax_t)cy->ts_started,
+             (uintmax_t)cy->platform->subject_id_modulus);
     return cy;
 }
 
@@ -2894,11 +2891,11 @@ static void send_message_ack(cy_t* const       cy,
                                                         (cy_bytes_t){ .size = sizeof(header), .data = header });
     if (err != CY_OK) {
         CY_TRACE(cy,
-                 "⚠️ Failed to send message ACK to %016llx for tag %016llx on topic %016llx: %d",
-                 (unsigned long long)remote.id,
-                 (unsigned long long)tag,
-                 (unsigned long long)topic_hash,
-                 (int)err);
+                 "⚠️ Failed to send message ACK to %016jx for tag %016jx on topic %016jx: %jd",
+                 (uintmax_t)remote.id,
+                 (uintmax_t)tag,
+                 (uintmax_t)topic_hash,
+                 (intmax_t)err);
     }
 }
 
@@ -2919,11 +2916,11 @@ static void send_response_ack(cy_t* const       cy,
                                                         (cy_bytes_t){ .size = sizeof(header), .data = header });
     if (err != CY_OK) {
         CY_TRACE(cy,
-                 "⚠️ Failed to send response %s to %016llx for seqno %016llx: %d",
+                 "⚠️ Failed to send response %s to %016jx for seqno %016jx: %jd",
                  positive ? "ACK" : "NACK",
-                 (unsigned long long)remote.id,
-                 (unsigned long long)seqno,
-                 (int)err);
+                 (uintmax_t)remote.id,
+                 (uintmax_t)seqno,
+                 (intmax_t)err);
     }
 }
 
@@ -2970,11 +2967,11 @@ void cy_on_message(cy_platform_t* const             platform,
                     evictions = 0; // default to zero to reduce arbitration prio
                     // TODO performance counters
                     CY_TRACE(cy,
-                             "⚠️ Could not deduce evictions: T%016llx@S%08lx N%016llx modulus=%08lx",
-                             (unsigned long long)hash,
-                             (unsigned long)subject_reader->subject_id,
-                             (unsigned long long)remote.id,
-                             (unsigned long)cy->platform->subject_id_modulus);
+                             "⚠️ Could not deduce evictions: T%016jx@S%08jx N%016jx modulus=%08jx",
+                             (uintmax_t)hash,
+                             (uintmax_t)subject_reader->subject_id,
+                             (uintmax_t)remote.id,
+                             (uintmax_t)cy->platform->subject_id_modulus);
                 }
                 const int8_t lage = (int8_t)header[1];
                 on_gossip(cy, message.timestamp, remote, hash, evictions, lage, str_empty, &topic);
@@ -3002,9 +2999,9 @@ void cy_on_message(cy_platform_t* const             platform,
                 on_message_ack(cy, future);
             } else {
                 CY_TRACE(cy,
-                         "⚠️ Orphan message ACK from %016llx for tag %016llx",
-                         (unsigned long long)remote_id,
-                         (unsigned long long)tag);
+                         "⚠️ Orphan message ACK from %016jx for tag %016jx",
+                         (uintmax_t)remote_id,
+                         (uintmax_t)tag);
             }
             break;
         }
@@ -3037,9 +3034,9 @@ void cy_on_message(cy_platform_t* const             platform,
                 on_response(cy, p2p_context, remote_id, future, seqno, tag, message);
             } else {
                 CY_TRACE(cy,
-                         "⚠️ Orphan response from %016llx for request tag %016llx",
-                         (unsigned long long)remote_id,
-                         (unsigned long long)message_tag);
+                         "⚠️ Orphan response from %016jx for request tag %016jx",
+                         (uintmax_t)remote_id,
+                         (uintmax_t)message_tag);
             }
             break;
         }
@@ -3055,10 +3052,10 @@ void cy_on_message(cy_platform_t* const             platform,
                 on_response_ack(cy, future, type == header_rsp_ack);
             } else {
                 CY_TRACE(cy,
-                         "⚠️ Orphan response %s from %016llx for key %016llx",
+                         "⚠️ Orphan response %s from %016jx for key %016jx",
                          (type == header_rsp_ack) ? "ACK" : "NACK",
-                         (unsigned long long)remote_id,
-                         (unsigned long long)key);
+                         (uintmax_t)remote_id,
+                         (uintmax_t)key);
             }
             break;
         }
@@ -3092,7 +3089,7 @@ void cy_on_message(cy_platform_t* const             platform,
         }
 
         default:
-            CY_TRACE(cy, "⚠️ Unsupported message from %016llx: header type %02x", (unsigned long long)remote.id, type);
+            CY_TRACE(cy, "⚠️ Unsupported message from %016jx: header type %02d", (uintmax_t)remote.id, type);
             break;
     }
 bad_message:

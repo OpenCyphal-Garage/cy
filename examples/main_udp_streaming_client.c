@@ -42,9 +42,9 @@ static void on_stream_response(cy_future_t* const future)
             const size_t               n = cy_message_read(&res->response.message.content, 0, RESPONSE_MAX - 1U, text);
             text[n]                      = '\0';
             (void)fprintf(stderr,
-                          "response seq=%llu remote=%016llx: %s\n",
-                          (unsigned long long)res->response.seqno,
-                          (unsigned long long)res->response.remote_id,
+                          "response seq=%ju remote=%016jx: %s\n",
+                          (uintmax_t)res->response.seqno,
+                          (uintmax_t)res->response.remote_id,
                           text);
             st->received++;
             if (st->received >= st->expected) {
@@ -85,7 +85,7 @@ int main(const int argc, char* argv[])
     cy_udp_posix_t cy_udp;
     const cy_err_t res = cy_udp_posix_new_simple(&cy_udp);
     if (res != CY_OK) {
-        (void)fprintf(stderr, "cy_udp_posix_new_simple: %d\n", res);
+        (void)fprintf(stderr, "cy_udp_posix_new_simple: %jd\n", (intmax_t)res);
         return 1;
     }
     cy_t* const cy = &cy_udp.base;
@@ -112,13 +112,13 @@ int main(const int argc, char* argv[])
     client_state_t state = { .expected = count, .received = 0, .done = false };
     cy_future_context_set(future, (cy_user_context_t){ .ptr = { &state } });
     cy_future_callback_set(future, &on_stream_response);
-    (void)fprintf(stderr, "streaming client ready: count=%u period_ms=%u\n", count, period_ms);
+    (void)fprintf(stderr, "streaming client ready: count=%ju period_ms=%ju\n", (uintmax_t)count, (uintmax_t)period_ms);
 
     // Run the event loop until enough responses are received.
     while (!state.done) {
         const cy_err_t err_spin = cy_udp_posix_spin_once(&cy_udp);
         if (err_spin != CY_OK) {
-            (void)fprintf(stderr, "cy_udp_posix_spin_once: %d\n", err_spin);
+            (void)fprintf(stderr, "cy_udp_posix_spin_once: %jd\n", (intmax_t)err_spin);
             break;
         }
     }
