@@ -5,8 +5,10 @@
 ///                         `____/ .___/`___/_/ /_/`____/`__, / .___/_/ /_/`__,_/_/
 ///                             /_/                     /____/_/
 ///
-/// A lightweight real-time decentralized pub/sub for embedded systems and robotics. See the README.md for details.
+/// A robust lightweight real-time decentralized pub/sub for embedded systems and robotics.
+/// See the README.md for details.
 ///
+/// Source: https://github.com/OpenCyphal-Garage/cy
 /// Copyright (c) Pavel Kirienko <pavel@opencyphal.org>
 
 #pragma once
