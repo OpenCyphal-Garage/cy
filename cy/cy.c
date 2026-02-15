@@ -997,10 +997,9 @@ static uint32_t topic_evictions_from_subject_id(const uint64_t hash,
                                                 const uint32_t subject_id,
                                                 const uint32_t subject_id_modulus)
 {
-    assert(!is_pinned(hash));
     const uint32_t p = subject_id_modulus;
     assert((p > 3) && ((p & 3U) == 3U)); // Method below requires p&3=3, i.e. p%4=3
-    if (subject_id <= CY_SUBJECT_ID_PINNED_MAX) {
+    if ((subject_id <= CY_SUBJECT_ID_PINNED_MAX) || is_pinned(hash)) {
         return 0; // Pinned subjects are collision-free, assume zero evictions.
     }
 
@@ -1084,13 +1083,8 @@ static void topic_allocate(cy_topic_t* const topic, const uint32_t new_evictions
 {
     cy_t* const cy = topic->cy;
 #if CY_CONFIG_TRACE
-    static const int           call_depth_indent = 2;
-    static CY_THREAD_LOCAL int call_depth        = 0U;
-    call_depth++;
     CY_TRACE(cy,
-             "🔍%*s %s evict=%lu->%lu lage=%+d sub_reader=%p couplings=%p",
-             (call_depth - 1) * call_depth_indent,
-             "",
+             "🔍 %s evict=%lu->%lu lage=%+d sub_reader=%p couplings=%p",
              topic_repr(topic).str,
              (unsigned long)topic->evictions,
              (unsigned long)new_evictions,
@@ -1129,9 +1123,7 @@ static void topic_allocate(cy_topic_t* const topic, const uint32_t new_evictions
 #if CY_CONFIG_TRACE
     if (that != NULL) {
         CY_TRACE(cy,
-                 "🎲%*s T%016llx@%08x %s T%016llx@%08x",
-                 (call_depth - 1) * call_depth_indent,
-                 "",
+                 "🎲 T%016llx@S%08x %s T%016llx@S%08x",
                  (unsigned long long)topic->hash,
                  new_sid,
                  victory ? "wins 👑 over" : "loses 💀 to",
@@ -1169,15 +1161,11 @@ static void topic_allocate(cy_topic_t* const topic, const uint32_t new_evictions
 
 #if CY_CONFIG_TRACE
     CY_TRACE(cy,
-             "🔎%*s %s evict=%llu lage=%+d sub_reader=%p",
-             (call_depth - 1) * call_depth_indent,
-             "",
+             "🔎 %s evict=%llu lage=%+d sub_reader=%p",
              topic_repr(topic).str,
              (unsigned long long)topic->evictions,
              topic_lage(topic, now),
              (void*)topic->sub_reader);
-    assert(call_depth > 0);
-    call_depth--;
 #endif
 }
 
@@ -1473,8 +1461,8 @@ static void on_gossip_known_topic(cy_t* const       cy,
         const bool win = (mine_lage > lage) || ((mine_lage == lage) && (mine->evictions > evictions));
         CY_TRACE(cy,
                  "🔀 Divergence on '%s':\n"
-                 "\t local  %s T%016llx@%08x evict=%lu lage=%+d\n"
-                 "\t remote %s T%016llx@%08x evict=%lu lage=%+d",
+                 "\t local  %s T%016llx@S%08x evict=%lu lage=%+d\n"
+                 "\t remote %s T%016llx@S%08x evict=%lu lage=%+d",
                  mine->name,
                  win ? "✅" : "❌",
                  (unsigned long long)mine->hash,
@@ -1483,7 +1471,7 @@ static void on_gossip_known_topic(cy_t* const       cy,
                  mine_lage,
                  win ? "❌" : "✅",
                  (unsigned long long)mine->hash,
-                 topic_subject_id_impl(hash, evictions, cy->platform->subject_id_modulus),
+                 topic_subject_id_impl(mine->hash, evictions, cy->platform->subject_id_modulus),
                  (unsigned long)evictions,
                  lage);
         if (win) {
@@ -1525,9 +1513,9 @@ static void on_gossip_unknown_topic(cy_t* const    cy,
     assert(topic_subject_id(mine) == topic_subject_id_impl(hash, evictions, cy->platform->subject_id_modulus));
     const bool win = left_wins(mine, ts, lage, hash);
     CY_TRACE(cy,
-             "💥 Collision on @%08x:\n"
-             "\t local  %s T%016llx@%08x evict=%lu lage=%+d '%s'\n"
-             "\t remote %s T%016llx@%08x evict=%lu lage=%+d '%s'",
+             "💥 Collision on S%08x:\n"
+             "\t local  %s T%016llx@S%08x evict=%lu lage=%+d '%s'\n"
+             "\t remote %s T%016llx@S%08x evict=%lu lage=%+d",
              topic_subject_id(mine),
              win ? "✅" : "❌",
              (unsigned long long)mine->hash,
@@ -1539,8 +1527,7 @@ static void on_gossip_unknown_topic(cy_t* const    cy,
              (unsigned long long)hash,
              topic_subject_id_impl(hash, evictions, cy->platform->subject_id_modulus),
              (unsigned long)evictions,
-             lage,
-             name.str);
+             lage);
     // We don't need to do anything if we won, but we need to announce to the network (in particular to the
     // infringing node) that we are using this subject-ID, so that the loser knows that it has to move.
     // If we lost, we need to gossip this topic ASAP as well because every other participant on this topic
@@ -2280,7 +2267,7 @@ static bool on_message(cy_t* const           cy,
         }
         assert(dedup->remote_id == remote.id);
         if (dedup_update(dedup, topic, tag, message.timestamp)) {
-            CY_TRACE(cy, "🍒 Dup N%016llx tag=%016llx", (unsigned long long)remote_id, (unsigned long long)tag);
+            CY_TRACE(cy, "🍒 Dup N%016llx tag=%016llx", (unsigned long long)remote.id, (unsigned long long)tag);
             return true; // Already received, ack but don't process.
         }
     }
@@ -2892,8 +2879,9 @@ static void send_message_ack(cy_t* const       cy,
                              const uint64_t    topic_hash,
                              const cy_us_t     deadline)
 {
-    byte_t header[16];
-    (void)serialize_u64(serialize_u64(header, (tag << 8U) | (uint64_t)header_msg_ack), topic_hash);
+    byte_t header[17];
+    header[0] = (byte_t)header_msg_ack;
+    (void)serialize_u64(serialize_u64(&header[1], tag), topic_hash);
     const cy_err_t err = cy->platform->vtable->p2p_send(cy->platform, //
                                                         &remote,
                                                         deadline,
@@ -2901,7 +2889,7 @@ static void send_message_ack(cy_t* const       cy,
     if (err != CY_OK) {
         CY_TRACE(cy,
                  "⚠️ Failed to send message ACK to %016llx for tag %016llx on topic %016llx: %d",
-                 (unsigned long long)remote_id,
+                 (unsigned long long)remote.id,
                  (unsigned long long)tag,
                  (unsigned long long)topic_hash,
                  (int)err);
@@ -2916,10 +2904,9 @@ static void send_response_ack(cy_t* const       cy,
                               const bool        positive,
                               const cy_us_t     deadline)
 {
-    byte_t              header[16];
-    const header_type_t header_type = positive ? header_rsp_ack : header_rsp_nack;
-    (void)serialize_u64(serialize_u64(header, (message_tag << 56U) | (uint64_t)header_type),
-                        seqno | ((uint64_t)tag << 48U));
+    byte_t header[17];
+    header[0] = (byte_t)(positive ? header_rsp_ack : header_rsp_nack);
+    (void)serialize_u64(serialize_u64(&header[1], message_tag), seqno | ((uint64_t)tag << 48U));
     const cy_err_t err = cy->platform->vtable->p2p_send(cy->platform, //
                                                         &remote,
                                                         deadline,
@@ -2928,7 +2915,7 @@ static void send_response_ack(cy_t* const       cy,
         CY_TRACE(cy,
                  "⚠️ Failed to send response %s to %016llx for seqno %016llx: %d",
                  positive ? "ACK" : "NACK",
-                 (unsigned long long)remote_id,
+                 (unsigned long long)remote.id,
                  (unsigned long long)seqno,
                  (int)err);
     }
@@ -2971,10 +2958,19 @@ void cy_on_message(cy_platform_t* const             platform,
             const uint64_t hash  = deserialize_u64(&header[10]);
             cy_topic_t*    topic = NULL; // Avoid double lookup, let on_gossip() do the lookup.
             if (subject_reader != NULL) {
-                const int8_t   lage      = (int8_t)header[1];
-                const uint32_t evictions = topic_evictions_from_subject_id(hash, // reconstruct
-                                                                           subject_reader->subject_id,
-                                                                           cy->platform->subject_id_modulus);
+                uint32_t evictions =
+                  topic_evictions_from_subject_id(hash, subject_reader->subject_id, cy->platform->subject_id_modulus);
+                if (evictions == UINT32_MAX) {
+                    evictions = 0; // default to zero to reduce arbitration prio
+                    // TODO performance counters
+                    CY_TRACE(cy,
+                             "⚠️ Could not deduce evictions: T%016llx@S%08lx N%016llx modulus=%08lx",
+                             (unsigned long long)hash,
+                             (unsigned long)subject_reader->subject_id,
+                             (unsigned long long)remote.id,
+                             (unsigned long)cy->platform->subject_id_modulus);
+                }
+                const int8_t lage = (int8_t)header[1];
                 on_gossip(cy, message.timestamp, remote, hash, evictions, lage, str_empty, &topic);
             } else {
                 topic = cy_topic_find_by_hash(cy, hash);
@@ -3082,7 +3078,7 @@ void cy_on_message(cy_platform_t* const             platform,
             char           name_buf[CY_TOPIC_NAME_MAX + 1];
             const cy_str_t name = { .len = header[1], .str = name_buf };
             if ((header_read < 2) || (name.len == 0) || (name.len > CY_TOPIC_NAME_MAX) ||
-                (cy_message_read(message.content, 15, name.len, (byte_t*)name_buf) != name.len)) {
+                (cy_message_read(message.content, 2, name.len, (byte_t*)name_buf) != name.len)) {
                 goto bad_message;
             }
             on_scout(cy, message.timestamp, remote, name);
@@ -3090,7 +3086,7 @@ void cy_on_message(cy_platform_t* const             platform,
         }
 
         default:
-            CY_TRACE(cy, "⚠️ Unsupported message from %016llx: header type %02x", (unsigned long long)remote_id, type);
+            CY_TRACE(cy, "⚠️ Unsupported message from %016llx: header type %02x", (unsigned long long)remote.id, type);
             break;
     }
 bad_message:
