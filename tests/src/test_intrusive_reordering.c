@@ -11,6 +11,8 @@ typedef struct
     cy_t                 cy;
     guarded_heap_t       heap;
     cy_us_t              now;
+    size_t               fail_alloc_size;
+    size_t               fail_alloc_count;
 } reorder_fixture_t;
 
 typedef struct
@@ -32,6 +34,10 @@ typedef struct
 static void* fixture_realloc(cy_platform_t* const platform, void* const ptr, const size_t size)
 {
     reorder_fixture_t* const self = (reorder_fixture_t*)platform;
+    if ((size > 0U) && (self->fail_alloc_count > 0U) && (size == self->fail_alloc_size)) {
+        self->fail_alloc_count--;
+        return NULL;
+    }
     return guarded_heap_realloc(&self->heap, ptr, size);
 }
 
@@ -57,6 +63,8 @@ static void reorder_env_init(reorder_env_t* const self)
     self->fixture.vtable.realloc              = fixture_realloc;
     self->fixture.cy.platform                 = &self->fixture.platform;
     self->fixture.now                         = 0;
+    self->fixture.fail_alloc_size             = 0;
+    self->fixture.fail_alloc_count            = 0;
     olga_init(&self->fixture.cy.olga, &self->fixture.cy, olga_now);
 
     self->root.cy = &self->fixture.cy;
@@ -91,14 +99,49 @@ static void reorder_env_cleanup(reorder_env_t* const self)
     olga_cancel(&self->fixture.cy.olga, &self->rr.timeout);
 }
 
+static bool push_message_rr(reorder_env_t* const self,
+                            reordering_t* const  rr,
+                            const uint64_t       tag,
+                            const cy_us_t        ts,
+                            unsigned char        payload);
+
 static bool push_message(reorder_env_t* const self, const uint64_t tag, const cy_us_t ts, const unsigned char payload)
+{
+    return push_message_rr(self, &self->rr, tag, ts, payload);
+}
+
+static bool push_message_rr(reorder_env_t* const self,
+                            reordering_t* const  rr,
+                            const uint64_t       tag,
+                            const cy_us_t        ts,
+                            const unsigned char  payload)
 {
     cy_message_t* const msg = cy_test_message_make(&self->fixture.heap, &payload, 1);
     TEST_ASSERT_NOT_NULL(msg);
     const cy_message_ts_t mts = { .timestamp = ts, .content = msg };
-    const bool            out = reordering_push(&self->rr, tag, cy_prio_nominal, mts);
+    const bool            out = reordering_push(rr, tag, cy_prio_nominal, mts);
     cy_message_refcount_dec(msg); // Simulate the caller dropping ownership after reordering_push().
     return out;
+}
+
+static reordering_t* make_dynamic_reordering(reorder_env_t* const self,
+                                             const uint64_t       remote_id,
+                                             const uint64_t       tag,
+                                             const cy_us_t        now)
+{
+    reordering_context_t ctx = {
+        .now           = now,
+        .lane          = { .id = remote_id, .p2p = { { 0 } }, .prio = cy_prio_nominal },
+        .subscriber    = &self->sub,
+        .topic         = &self->topic,
+        .substitutions = { .count = 0, .substitutions = NULL },
+        .tag           = tag,
+    };
+    return CAVL2_TO_OWNER(
+      cavl2_find_or_insert(
+        &self->sub.index_reordering_by_remote_id, &ctx, reordering_cavl_compare, &ctx, reordering_cavl_factory),
+      reordering_t,
+      index);
 }
 
 static void spin_to(reorder_env_t* const self, const cy_us_t now)
@@ -727,6 +770,153 @@ static void test_reordering_continuous_in_order_after_gap(void)
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&env.fixture.heap));
 }
 
+static void test_reordering_push_out_of_memory(void)
+{
+    reorder_env_t env;
+    reorder_env_init(&env);
+
+    env.fixture.fail_alloc_size  = sizeof(reordering_slot_t);
+    env.fixture.fail_alloc_count = 1;
+
+    // tag=8 with baseline=4 means lin_tag=4 (interning path).
+    TEST_ASSERT_FALSE(push_message(&env, 8U, 100, 0x80U));
+    TEST_ASSERT_EQUAL_size_t(0, env.capture.count);
+    TEST_ASSERT_EQUAL_size_t(0, env.rr.interned_count);
+    TEST_ASSERT_FALSE(olga_is_pending(&env.fixture.cy.olga, &env.rr.timeout));
+
+    reorder_env_cleanup(&env);
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&env.fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&env.fixture.heap));
+}
+
+static void test_reordering_cavl_compare(void)
+{
+    reorder_env_t env;
+    reorder_env_init(&env);
+
+    cy_topic_t topic_low  = env.topic;
+    cy_topic_t topic_high = env.topic;
+    topic_low.hash        = env.topic.hash - 1U;
+    topic_high.hash       = env.topic.hash + 1U;
+
+    reordering_t inner;
+    memset(&inner, 0, sizeof(inner));
+    inner.index                       = TREE_NULL;
+    inner.list_recency                = LIST_MEMBER_NULL;
+    inner.timeout                     = OLGA_EVENT_INIT;
+    inner.remote_id                   = 42U;
+    inner.subscriber                  = &env.sub;
+    inner.topic                       = &env.topic;
+    inner.substitutions.count         = 0;
+    inner.substitutions.substitutions = NULL;
+    inner.tag_baseline                = 0;
+    inner.last_ejected_lin_tag        = 0;
+    inner.interned_count              = 0;
+    inner.interned_by_lin_tag         = NULL;
+
+    reordering_context_t ctx = {
+        .now           = 0,
+        .lane          = { .id = 42U, .p2p = { { 0 } }, .prio = cy_prio_nominal },
+        .subscriber    = &env.sub,
+        .topic         = &env.topic,
+        .substitutions = { .count = 0, .substitutions = NULL },
+        .tag           = 0,
+    };
+
+    TEST_ASSERT_EQUAL_INT(0, reordering_cavl_compare(&ctx, &inner.index));
+
+    ctx.topic = &topic_high;
+    TEST_ASSERT_EQUAL_INT(+1, reordering_cavl_compare(&ctx, &inner.index));
+
+    ctx.topic = &topic_low;
+    TEST_ASSERT_EQUAL_INT(-1, reordering_cavl_compare(&ctx, &inner.index));
+
+    ctx.topic   = &env.topic;
+    ctx.lane.id = 43U;
+    TEST_ASSERT_EQUAL_INT(+1, reordering_cavl_compare(&ctx, &inner.index));
+
+    ctx.lane.id = 41U;
+    TEST_ASSERT_EQUAL_INT(-1, reordering_cavl_compare(&ctx, &inner.index));
+
+    reorder_env_cleanup(&env);
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&env.fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&env.fixture.heap));
+}
+
+static void test_reordering_factory_out_of_memory(void)
+{
+    reorder_env_t env;
+    reorder_env_init(&env);
+
+    env.fixture.fail_alloc_size  = sizeof(reordering_t);
+    env.fixture.fail_alloc_count = 1;
+
+    reordering_context_t ctx = {
+        .now           = 0,
+        .lane          = { .id = 42U, .p2p = { { 0 } }, .prio = cy_prio_nominal },
+        .subscriber    = &env.sub,
+        .topic         = &env.topic,
+        .substitutions = { .count = 0, .substitutions = NULL },
+        .tag           = 8U,
+    };
+
+    const cy_tree_t* const node = cavl2_find_or_insert(
+      &env.sub.index_reordering_by_remote_id, &ctx, reordering_cavl_compare, &ctx, reordering_cavl_factory);
+    TEST_ASSERT_NULL(node);
+    TEST_ASSERT_NULL(env.sub.index_reordering_by_remote_id);
+    TEST_ASSERT_EQUAL_size_t(0, env.capture.count);
+
+    reorder_env_cleanup(&env);
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&env.fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&env.fixture.heap));
+}
+
+static void test_reordering_drop_stale_keeps_recent(void)
+{
+    reorder_env_t env;
+    reorder_env_init(&env);
+
+    reordering_t* const rr = make_dynamic_reordering(&env, 42U, 8U, 0);
+    TEST_ASSERT_NOT_NULL(rr);
+    TEST_ASSERT_TRUE(push_message_rr(&env, rr, 8U, 100, 0x80U));
+    TEST_ASSERT_EQUAL_size_t(1, rr->interned_count);
+
+    reordering_drop_stale(&env.sub, 100 + SESSION_LIFETIME);
+    TEST_ASSERT_NOT_NULL(env.sub.index_reordering_by_remote_id);
+    TEST_ASSERT_TRUE(olga_is_pending(&env.fixture.cy.olga, &rr->timeout));
+    TEST_ASSERT_EQUAL_size_t(0, env.capture.count);
+
+    reordering_destroy(rr);
+    TEST_ASSERT_NULL(env.sub.index_reordering_by_remote_id);
+    TEST_ASSERT_EQUAL_size_t(1, env.capture.count);
+    TEST_ASSERT_EQUAL_UINT64(8U, env.capture.tags[0]);
+
+    reorder_env_cleanup(&env);
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&env.fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&env.fixture.heap));
+}
+
+static void test_reordering_drop_stale_removes_old(void)
+{
+    reorder_env_t env;
+    reorder_env_init(&env);
+
+    reordering_t* const rr = make_dynamic_reordering(&env, 42U, 8U, 0);
+    TEST_ASSERT_NOT_NULL(rr);
+    TEST_ASSERT_TRUE(push_message_rr(&env, rr, 8U, 100, 0x80U));
+    TEST_ASSERT_EQUAL_size_t(1, rr->interned_count);
+    TEST_ASSERT_EQUAL_size_t(0, env.capture.count);
+
+    reordering_drop_stale(&env.sub, 100 + SESSION_LIFETIME + 1);
+    TEST_ASSERT_NULL(env.sub.index_reordering_by_remote_id);
+    TEST_ASSERT_EQUAL_size_t(1, env.capture.count);
+    TEST_ASSERT_EQUAL_UINT64(8U, env.capture.tags[0]);
+
+    reorder_env_cleanup(&env);
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&env.fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&env.fixture.heap));
+}
+
 void setUp(void)
 {
     TEST_ASSERT_EQUAL_size_t(0, cy_test_message_live_count());
@@ -756,5 +946,10 @@ int main(void)
     RUN_TEST(test_reordering_min_capacity_resequence_dup_is_deduped);
     RUN_TEST(test_reordering_min_capacity_resequence_older_sibling_accepted);
     RUN_TEST(test_reordering_continuous_in_order_after_gap);
+    RUN_TEST(test_reordering_push_out_of_memory);
+    RUN_TEST(test_reordering_cavl_compare);
+    RUN_TEST(test_reordering_factory_out_of_memory);
+    RUN_TEST(test_reordering_drop_stale_keeps_recent);
+    RUN_TEST(test_reordering_drop_stale_removes_old);
     return UNITY_END();
 }
