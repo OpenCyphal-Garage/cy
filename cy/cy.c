@@ -405,13 +405,6 @@ static byte_t* serialize_u32(byte_t* ptr, const uint32_t value)
     }
     return ptr;
 }
-static byte_t* serialize_u40(byte_t* ptr, const uint64_t value)
-{
-    for (size_t i = 0; i < 5; i++) {
-        *ptr++ = (byte_t)((byte_t)(value >> (i * 8U)) & 0xFFU);
-    }
-    return ptr;
-}
 static byte_t* serialize_u64(byte_t* ptr, const uint64_t value)
 {
     for (size_t i = 0; i < 8; i++) {
@@ -419,10 +412,10 @@ static byte_t* serialize_u64(byte_t* ptr, const uint64_t value)
     }
     return ptr;
 }
-static uint64_t deserialize_u40(const byte_t* ptr)
+static uint32_t deserialize_u32(const byte_t* ptr)
 {
-    uint64_t value = 0;
-    for (size_t i = 0; i < 5; i++) {
+    uint32_t value = 0;
+    for (size_t i = 0; i < 4; i++) {
         value |= ((uint64_t)*ptr++ << (i * 8U));
     }
     return value;
@@ -1519,7 +1512,7 @@ static void on_gossip_unknown_topic(cy_t* const    cy,
                                     const uint32_t evictions,
                                     const int8_t   lage)
 {
-    cy_topic_t* mine =
+    cy_topic_t* const mine =
       topic_find_by_subject_id(cy, topic_subject_id_impl(hash, evictions, cy->platform->subject_id_modulus));
     if (mine == NULL) {
         return; // We are not using this subject-ID, no collision.
@@ -1597,6 +1590,9 @@ static void* wkv_cb_topic_scout_response(const wkv_event_t evt)
     const cy_remote_t* const remote = evt.context;
     CY_TRACE(cy, "📢 %s", topic_repr(topic).str);
     gossip_begin(cy);
+    // TODO: Add a local topic count threshold for broadcasting; P2P only when exceeded. This reduces the memory and
+    //   processing burden for small nodes, where "small" means having few topics. The protocol performance will not
+    //   be compromised because in small nodes, the gossip rate is already high due to the small topic count.
     // schedule_gossip_urgent(topic);  // broadcast option for simple nodes
     ON_ASYNC_ERROR_IF(cy, topic, gossip_topic(cy, topic, cy_now(cy), remote));
     return NULL;
@@ -2535,14 +2531,10 @@ static cy_err_t do_respond(cy_breadcrumb_t* const breadcrumb, const cy_us_t dead
     assert((breadcrumb != NULL) && (breadcrumb->cy != NULL) && (deadline >= 0));
     gossip_begin(breadcrumb->cy);
 
-    // Compose the header.
-    const uint64_t      seqno       = breadcrumb->seqno++;
-    const header_type_t header_type = header_rsp_be;
-    const uint16_t      tag         = 0U;
-    assert(seqno < (1ULL << 48U)); // Sanity check -- this is unreachable.
-    byte_t header[16];
-    (void)serialize_u64(serialize_u64(header, (breadcrumb->message_tag << 56U) | (uint64_t)header_type),
-                        seqno | ((uint64_t)tag << 48U));
+    // Compose the header. The tag is zero since we don't expect any ack.
+    byte_t header[17];
+    header[0] = (byte_t)header_rsp_be;
+    (void)serialize_u64(serialize_u64(&header[1], breadcrumb->message_tag), breadcrumb->seqno++);
     const cy_bytes_t headed_message = { .size = sizeof(header), .data = header, .next = &message };
 
     // Send the P2P response.
@@ -2964,7 +2956,6 @@ void cy_on_message(cy_platform_t* const             platform,
     // This is the central entry point for all incoming messages. It's complex but there's an advantage to keeping the
     // central dispatch logic in one place because of the tight coupling between different parts of the stack.
     switch (type) {
-
         case header_msg_be:
         case header_msg_rel: {
             static const size_t header_size = 18;
@@ -3065,6 +3056,34 @@ void cy_on_message(cy_platform_t* const             platform,
             break;
         }
 #endif
+        case header_gossip: {
+            if (header_read < 15) {
+                goto bad_message;
+            }
+            char           name_buf[CY_TOPIC_NAME_MAX + 1];
+            const cy_str_t name = { .len = header[14], .str = name_buf };
+            if ((name.len > CY_TOPIC_NAME_MAX) ||
+                (cy_message_read(message.content, 15, name.len, (byte_t*)name_buf) != name.len)) {
+                goto bad_message;
+            }
+            const int8_t   lage      = (int8_t)header[1];
+            const uint64_t hash      = deserialize_u64(&header[2]);
+            const uint32_t evictions = deserialize_u32(&header[10]);
+            on_gossip(cy, message.timestamp, remote, hash, evictions, lage, name, NULL);
+            break;
+        }
+
+        case header_scout: {
+            char           name_buf[CY_TOPIC_NAME_MAX + 1];
+            const cy_str_t name = { .len = header[1], .str = name_buf };
+            if ((header_read < 2) || (name.len == 0) || (name.len > CY_TOPIC_NAME_MAX) ||
+                (cy_message_read(message.content, 15, name.len, (byte_t*)name_buf) != name.len)) {
+                goto bad_message;
+            }
+            on_scout(cy, message.timestamp, remote, name);
+            break;
+        }
+
         default:
             CY_TRACE(cy, "⚠️ Unsupported message from %016llx: header type %02x", (unsigned long long)remote_id, type);
             break;
