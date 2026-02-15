@@ -474,6 +474,87 @@ static void test_reordering_capacity_overflow_can_fast_path_after_eject_all(void
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&env.fixture.heap));
 }
 
+/// Sparse buffered history should be consumed step-by-step on overflow without immediate resequencing.
+static void test_reordering_overflow_sparse_stepwise_shift_without_resequence(void)
+{
+    reorder_env_t env;
+    reorder_env_init(&env);
+
+    // Establish progress: baseline=4, last_ejected_lin_tag=1 after tag=5.
+    TEST_ASSERT_TRUE(push_message(&env, 5U, 10, 0x50U));
+    TEST_ASSERT_EQUAL_size_t(1, env.capture.count);
+    TEST_ASSERT_EQUAL_UINT64(5U, env.capture.tags[0]);
+    TEST_ASSERT_EQUAL_UINT64(4U, env.rr.tag_baseline);
+    TEST_ASSERT_EQUAL_UINT64(1U, env.rr.last_ejected_lin_tag);
+
+    // Sparse interned set within current window: lin_tags {3,5,9} => tags {7,9,13}.
+    TEST_ASSERT_TRUE(push_message(&env, 7U, 11, 0x70U));
+    TEST_ASSERT_TRUE(push_message(&env, 9U, 12, 0x90U));
+    TEST_ASSERT_TRUE(push_message(&env, 13U, 13, 0xD0U));
+    TEST_ASSERT_EQUAL_size_t(3, env.rr.interned_count);
+    TEST_ASSERT_EQUAL_size_t(1, env.capture.count);
+
+    // Incoming tag=20 => lin_tag=16 is out of window for last=1/cap=8.
+    // The overflow loop should force-eject sparse buffered tags in multiple iterations:
+    // 7, then 9, then 13; this shifts last_ejected to 9, making lin_tag=16 in-window.
+    // The current message should then be interned (not resequenced, not immediately ejected).
+    TEST_ASSERT_TRUE(push_message(&env, 20U, 14, 0x20U));
+    TEST_ASSERT_EQUAL_size_t(4, env.capture.count);
+    TEST_ASSERT_EQUAL_UINT64(7U, env.capture.tags[1]);
+    TEST_ASSERT_EQUAL_UINT64(9U, env.capture.tags[2]);
+    TEST_ASSERT_EQUAL_UINT64(13U, env.capture.tags[3]);
+
+    TEST_ASSERT_EQUAL_UINT64(4U, env.rr.tag_baseline); // no resequence
+    TEST_ASSERT_EQUAL_UINT64(9U, env.rr.last_ejected_lin_tag);
+    TEST_ASSERT_EQUAL_size_t(1, env.rr.interned_count);
+    TEST_ASSERT_TRUE(olga_is_pending(&env.fixture.cy.olga, &env.rr.timeout));
+
+    reorder_env_cleanup(&env);
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&env.fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&env.fixture.heap));
+}
+
+/// If sparse buffered history is insufficient, stepwise shift should eventually fall back to resequencing.
+static void test_reordering_overflow_sparse_stepwise_then_resequence(void)
+{
+    reorder_env_t env;
+    reorder_env_init(&env);
+
+    // Establish progress: baseline=4, last_ejected_lin_tag=1 after tag=5.
+    TEST_ASSERT_TRUE(push_message(&env, 5U, 10, 0x50U));
+    TEST_ASSERT_EQUAL_size_t(1, env.capture.count);
+    TEST_ASSERT_EQUAL_UINT64(5U, env.capture.tags[0]);
+
+    // Same sparse buffered set: lin_tags {3,5,9} => tags {7,9,13}.
+    TEST_ASSERT_TRUE(push_message(&env, 7U, 11, 0x70U));
+    TEST_ASSERT_TRUE(push_message(&env, 9U, 12, 0x90U));
+    TEST_ASSERT_TRUE(push_message(&env, 13U, 13, 0xD0U));
+    TEST_ASSERT_EQUAL_size_t(3, env.rr.interned_count);
+
+    // Incoming tag=34 => lin_tag=30 is too far ahead.
+    // Stepwise ejection consumes all sparse buffered slots but still cannot fit lin_tag into the window,
+    // so the logic should resequence and intern the current message at lin_tag=capacity/2=4.
+    TEST_ASSERT_TRUE(push_message(&env, 34U, 14, 0x34U));
+    TEST_ASSERT_EQUAL_size_t(4, env.capture.count);
+    TEST_ASSERT_EQUAL_UINT64(7U, env.capture.tags[1]);
+    TEST_ASSERT_EQUAL_UINT64(9U, env.capture.tags[2]);
+    TEST_ASSERT_EQUAL_UINT64(13U, env.capture.tags[3]);
+
+    TEST_ASSERT_EQUAL_UINT64(30U, env.rr.tag_baseline); // 34 - (8/2)
+    TEST_ASSERT_EQUAL_UINT64(0U, env.rr.last_ejected_lin_tag);
+    TEST_ASSERT_EQUAL_size_t(1, env.rr.interned_count);
+    TEST_ASSERT_TRUE(olga_is_pending(&env.fixture.cy.olga, &env.rr.timeout));
+
+    reordering_slot_t* const slot =
+      CAVL2_TO_OWNER(cavl2_min(env.rr.interned_by_lin_tag), reordering_slot_t, index_lin_tag);
+    TEST_ASSERT_NOT_NULL(slot);
+    TEST_ASSERT_EQUAL_UINT64(4U, slot->lin_tag);
+
+    reorder_env_cleanup(&env);
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&env.fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&env.fixture.heap));
+}
+
 /// Partial gap closure: middle message arrives closing a partial chain but leaving remaining gaps.
 static void test_reordering_partial_gap_closure(void)
 {
@@ -669,6 +750,8 @@ int main(void)
     RUN_TEST(test_reordering_late_after_timeout);
     RUN_TEST(test_reordering_capacity_overflow_resequence);
     RUN_TEST(test_reordering_capacity_overflow_can_fast_path_after_eject_all);
+    RUN_TEST(test_reordering_overflow_sparse_stepwise_shift_without_resequence);
+    RUN_TEST(test_reordering_overflow_sparse_stepwise_then_resequence);
     RUN_TEST(test_reordering_partial_gap_closure);
     RUN_TEST(test_reordering_min_capacity_resequence_dup_is_deduped);
     RUN_TEST(test_reordering_min_capacity_resequence_older_sibling_accepted);
