@@ -320,27 +320,6 @@ struct subject_reader_t
     subject_reader_t* next;
 };
 
-typedef struct
-{
-    udpard_udpip_ep_t endpoints[UDPARD_IFACE_COUNT_MAX];
-    udpard_prio_t     priority;
-} p2p_ctx_t;
-
-static cy_p2p_context_t box_p2p_ctx(const udpard_prio_t     priority,
-                                    const udpard_udpip_ep_t endpoints[UDPARD_IFACE_COUNT_MAX])
-{
-    cy_p2p_context_t p2p_context = { { 0 } };
-    {
-        p2p_ctx_t inner = { .priority = priority };
-        for (size_t i = 0; i < UDPARD_IFACE_COUNT_MAX; i++) {
-            inner.endpoints[i] = endpoints[i];
-        }
-        static_assert(sizeof(inner) <= sizeof(p2p_context), "");
-        memcpy(&p2p_context, &inner, sizeof(inner));
-    }
-    return p2p_context;
-}
-
 /// We use the same handler for both subject messages and P2P messages, since they both use the same ingestion callback.
 /// The difference here is that P2P messages have no associated reader instance.
 static void v_on_msg(udpard_rx_t* const rx, udpard_rx_port_t* const port, const udpard_rx_transfer_t tr)
@@ -349,10 +328,10 @@ static void v_on_msg(udpard_rx_t* const rx, udpard_rx_port_t* const port, const 
     const cy_message_ts_t msg   = { .timestamp = tr.timestamp,
                                     .content   = make_message(owner, tr.payload_size_stored, tr.payload) };
     if (msg.content != NULL) {
-        cy_on_message(&owner->base,
-                      (cy_remote_t){ .id = tr.remote.uid, .p2p = box_p2p_ctx(tr.priority, tr.remote.endpoints) },
-                      (cy_subject_reader_t*)port->user, // NULL for P2P
-                      msg);
+        cy_lane_t lane = { .id = tr.remote.uid, .prio = (cy_prio_t)tr.priority };
+        static_assert(sizeof(tr.remote.endpoints) <= sizeof(lane.p2p), "");
+        memcpy(&lane.p2p, tr.remote.endpoints, sizeof(tr.remote.endpoints));
+        cy_on_message(&owner->base, lane, (cy_subject_reader_t*)port->user, msg); // user is NULL for P2P
     } else {
         udpard_fragment_free_all(tr.payload, udpard_make_deleter(owner->mem));
         owner->stats.message_loss_count++;
@@ -511,22 +490,16 @@ static void v_subject_reader_tombstone(cy_platform_t* const platform, cy_subject
 // ---------------------------------------------------------------------------------------------------------------------
 // P2P
 
-static cy_err_t v_p2p_send(cy_platform_t* const     base,
-                           const cy_remote_t* const remote,
-                           const cy_us_t            deadline,
-                           const cy_bytes_t         message)
+static cy_err_t v_p2p_send(cy_platform_t* const   base,
+                           const cy_lane_t* const lane,
+                           const cy_us_t          deadline,
+                           const cy_bytes_t       message)
 {
     cy_udp_posix_t* const owner = (cy_udp_posix_t*)base;
-
     // Unbox the P2P context.
-    p2p_ctx_t inner;
-    static_assert(sizeof(inner) <= sizeof(cy_p2p_context_t), "");
-    memcpy(&inner, &remote->p2p, sizeof(inner));
     udpard_udpip_ep_t endpoints[UDPARD_IFACE_COUNT_MAX] = { 0 };
-    for (size_t i = 0; i < UDPARD_IFACE_COUNT_MAX; i++) {
-        endpoints[i] = inner.endpoints[i];
-    }
-
+    static_assert(sizeof(endpoints) <= sizeof(lane->p2p), "");
+    memcpy(endpoints, &lane->p2p, sizeof(udpard_udpip_ep_t) * UDPARD_IFACE_COUNT_MAX);
     // Push the message.
     // We may need better error reporting in libudpard, this is a bit unwieldy.
     const uint64_t e_oom      = owner->udpard_tx.errors_oom;
@@ -535,13 +508,12 @@ static cy_err_t v_p2p_send(cy_platform_t* const     base,
     const bool ok = udpard_tx_push_p2p(&owner->udpard_tx,
                                        cy_udp_posix_now(),
                                        deadline,
-                                       inner.priority,
+                                       (udpard_prio_t)lane->prio,
                                        endpoints,
                                        cy_bytes_to_udpard_bytes(message),
                                        NULL);
-
     // Report the result.
-    CY_TRACE(owner->base.cy, "💬 N%016jx res=%d", (uintmax_t)remote->id, ok);
+    CY_TRACE(owner->base.cy, "💬 N%016jx res=%d", (uintmax_t)lane->id, ok);
     if (ok) {
         return CY_OK;
     }

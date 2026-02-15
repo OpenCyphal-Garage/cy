@@ -1271,14 +1271,14 @@ static cy_topic_t* topic_subscribe_if_matching(cy_t* const       cy,
 //                                                  GOSSIP & SCOUT
 // =====================================================================================================================
 
-/// The bottom-level gossip transmission function. Broadcast if the remote is NULL, otherwise P2P.
-static cy_err_t do_send_gossip(const cy_t* const        cy,
-                               const cy_us_t            now,
-                               const cy_remote_t* const remote,
-                               const uint64_t           topic_hash,
-                               const uint32_t           topic_evictions,
-                               const int8_t             topic_lage,
-                               const cy_str_t           topic_name)
+/// The bottom-level gossip transmission function. Broadcast if the lane is NULL, otherwise P2P.
+static cy_err_t do_send_gossip(const cy_t* const      cy,
+                               const cy_us_t          now,
+                               const cy_lane_t* const lane,
+                               const uint64_t         topic_hash,
+                               const uint32_t         topic_evictions,
+                               const int8_t           topic_lage,
+                               const cy_str_t         topic_name)
 {
     assert(topic_name.len <= CY_TOPIC_NAME_MAX);
     byte_t           buf[15 + CY_TOPIC_NAME_MAX];
@@ -1292,9 +1292,8 @@ static cy_err_t do_send_gossip(const cy_t* const        cy,
     memcpy(ptr, topic_name.str, topic_name.len);
     const cy_us_t                     dead = now + cy->gossip_period;
     const cy_platform_vtable_t* const vt   = cy->platform->vtable;
-    // TODO: enable explicit priority for P2P. Right now it is stored in P2P context which doesn't make sense.
-    return (remote == NULL) ? vt->subject_writer_send(cy->platform, cy->broad_writer, dead, cy_prio_nominal, message)
-                            : vt->p2p_send(cy->platform, remote, dead, message);
+    return (lane == NULL) ? vt->subject_writer_send(cy->platform, cy->broad_writer, dead, cy_prio_nominal, message)
+                          : vt->p2p_send(cy->platform, lane, dead, message); // use original request priority
 }
 
 /// Updates the gossip schedule, which is why this function can't be used with P2P gossips.
@@ -1460,14 +1459,14 @@ static void on_gossip_unknown_topic(cy_t* const    cy,
 /// The out_topic, if not NULL, is updated with the local topic pointer if one is known or freshly created.
 static void on_gossip(cy_t* const        cy,
                       const cy_us_t      ts,
-                      const cy_remote_t  remote,
+                      const cy_lane_t    lane,
                       const uint64_t     hash,
                       const uint32_t     evictions,
                       const int8_t       lage,
                       const cy_str_t     name,
                       cy_topic_t** const out_topic)
 {
-    (void)remote; // Currently unused; may be useful for immediate P2P consensus repair gossips.
+    (void)lane; // Currently unused; may be useful for immediate P2P consensus repair gossips.
     // Find the topic in our local database. Create if there is a pattern match.
     cy_topic_t* mine = cy_topic_find_by_hash(cy, hash);
     if ((mine == NULL) && (name.len > 0)) { // a name is required but maybe the publisher is non-compliant
@@ -1485,9 +1484,9 @@ static void on_gossip(cy_t* const        cy,
 
 static void* wkv_cb_topic_scout_response(const wkv_event_t evt)
 {
-    cy_topic_t* const        topic  = (cy_topic_t*)evt.node->value;
-    cy_t* const              cy     = topic->cy;
-    const cy_remote_t* const remote = evt.context;
+    cy_topic_t* const      topic = (cy_topic_t*)evt.node->value;
+    cy_t* const            cy    = topic->cy;
+    const cy_lane_t* const lane  = evt.context;
     CY_TRACE(cy, "📢 %s", topic_repr(topic).str);
     gossip_begin(cy);
     // TODO: Add a local topic count threshold for broadcasting; P2P only when exceeded. This reduces the memory and
@@ -1496,7 +1495,7 @@ static void* wkv_cb_topic_scout_response(const wkv_event_t evt)
     // schedule_gossip_urgent(topic);  // broadcast option for simple nodes
     const cy_us_t  now = cy_now(cy);
     const cy_err_t err =
-      do_send_gossip(cy, now, remote, topic->hash, topic->evictions, topic_lage(topic, now), cy_topic_name(topic));
+      do_send_gossip(cy, now, lane, topic->hash, topic->evictions, topic_lage(topic, now), cy_topic_name(topic));
     ON_ASYNC_ERROR_IF(cy, topic, err);
     return NULL;
 }
@@ -1507,11 +1506,11 @@ static void* wkv_cb_topic_scout_response(const wkv_event_t evt)
 /// this the easier way. If we only have a few topics, we don't even need to do anything here since by virtue of
 /// having few topics their gossip rate will be high, so the remote will hear about them soon enough.
 /// This, scout handling is essentially only useful in many-topic nodes, and in general-purpose implementations.
-static void on_scout(cy_t* const cy, const cy_us_t ts, cy_remote_t remote, const cy_str_t name)
+static void on_scout(cy_t* const cy, const cy_us_t ts, cy_lane_t lane, const cy_str_t name)
 {
     (void)ts;
     CY_TRACE(cy, "📢 '%.*s'", STRFMT_ARG(name));
-    (void)wkv_match(&cy->topics_by_name, name, &remote, wkv_cb_topic_scout_response);
+    (void)wkv_match(&cy->topics_by_name, name, &lane, wkv_cb_topic_scout_response);
 }
 
 // =====================================================================================================================
@@ -1699,26 +1698,25 @@ struct cy_subscriber_t
     cy_subscriber_callback_t callback;
 };
 
-static cy_breadcrumb_t make_breadcrumb(const cy_topic_t* const topic,
-                                       const cy_remote_t       remote,
-                                       const uint64_t          message_tag)
+static cy_breadcrumb_t make_breadcrumb(const cy_topic_t* const topic, const cy_lane_t lane, const uint64_t message_tag)
 {
     return (cy_breadcrumb_t){ .cy          = topic->cy,
-                              .remote_id   = remote.id,
+                              .priority    = lane.prio,
+                              .remote_id   = lane.id,
                               .topic_hash  = topic->hash,
                               .message_tag = message_tag,
                               .seqno       = 0, // Starts a new sequence.
-                              .p2p_context = remote.p2p };
+                              .p2p_context = lane.p2p };
 }
 
 static cy_arrival_t make_arrival(cy_topic_t* const           topic,
-                                 const cy_remote_t           remote,
+                                 const cy_lane_t             lane,
                                  const uint64_t              message_tag,
                                  const cy_message_ts_t       message,
                                  const cy_substitution_set_t substitutions)
 {
     return (cy_arrival_t){ .message       = message,
-                           .breadcrumb    = make_breadcrumb(topic, remote, message_tag),
+                           .breadcrumb    = make_breadcrumb(topic, lane, message_tag),
                            .topic         = topic,
                            .substitutions = substitutions };
 }
@@ -1852,6 +1850,7 @@ typedef struct
 {
     cy_tree_t       index_lin_tag;
     uint64_t        lin_tag; ///< UINT64_MAX if empty.
+    cy_prio_t       priority;
     cy_message_ts_t message;
 } reordering_slot_t;
 static_assert((sizeof(void*) > 4) || (sizeof(reordering_slot_t) <= (64 - 8)), "should fit in a small o1heap block");
@@ -1899,7 +1898,7 @@ typedef struct
 typedef struct
 {
     cy_us_t               now;
-    uint64_t              remote_id;
+    cy_lane_t             lane;
     cy_subscriber_t*      subscriber;
     cy_topic_t*           topic;
     cy_substitution_set_t substitutions;
@@ -1928,11 +1927,12 @@ static void reordering_eject(reordering_t* const self, reordering_slot_t* const 
     // Construct the arrival instance. It copies the relevant states from the slot so that it can be destroyed.
     assert(slot->message.timestamp >= 0);
     assert(slot->message.content != NULL);
-    const cy_arrival_t arrival = make_arrival(self->topic,
-                                              (cy_remote_t){ .id = self->remote_id, .p2p = self->p2p_context },
-                                              slot->lin_tag + self->tag_baseline,
-                                              slot->message,
-                                              self->substitutions);
+    const cy_arrival_t arrival =
+      make_arrival(self->topic,
+                   (cy_lane_t){ .id = self->remote_id, .p2p = self->p2p_context, .prio = slot->priority },
+                   slot->lin_tag + self->tag_baseline,
+                   slot->message,
+                   self->substitutions);
     mem_free(cy, slot); // Free the slot before the callback to give the application more memory to work with.
 
     // Invoke the callback with the arrival and dispose the message.
@@ -1997,7 +1997,10 @@ static void reordering_resequence(reordering_t* const self, const uint64_t tag)
 /// Returns true if the message is accepted (either ejected or interned) and should be acknowledged (because the
 /// application will eventually see it); false if this is a late drop and should not be acknowledged.
 /// This is only intended for use when the reordering window is non-negative, otherwise no reordering managed is needed.
-static bool reordering_push(reordering_t* const self, const uint64_t tag, const cy_message_ts_t message)
+static bool reordering_push(reordering_t* const   self,
+                            const uint64_t        tag,
+                            const cy_prio_t       priority,
+                            const cy_message_ts_t message)
 {
     assert(self->subscriber->params.reordering_window >= 0);
     assert(self->subscriber->params.reordering_capacity >= REORDERING_CAPACITY_MIN); // caller must ensure
@@ -2016,7 +2019,7 @@ static bool reordering_push(reordering_t* const self, const uint64_t tag, const 
         self->last_ejected_lin_tag = lin_tag;
         subscriber_invoke(self->subscriber,
                           make_arrival(self->topic,
-                                       (cy_remote_t){ .id = self->remote_id, .p2p = self->p2p_context },
+                                       (cy_lane_t){ .id = self->remote_id, .p2p = self->p2p_context, .prio = priority },
                                        tag,
                                        message,
                                        self->substitutions));
@@ -2080,8 +2083,9 @@ static bool reordering_push(reordering_t* const self, const uint64_t tag, const 
         return true; // Duplicate accepted for reliability semantics; idempotent drop for the application.
     }
     cy_message_refcount_inc(message.content); // stayin' alive
-    slot->lin_tag = lin_tag;
-    slot->message = message;
+    slot->lin_tag  = lin_tag;
+    slot->priority = priority;
+    slot->message  = message;
     self->interned_count++;
     assert((self->interned_count == 1) || olga_is_pending(&cy->olga, &self->timeout));
     if (!olga_is_pending(&cy->olga, &self->timeout)) {
@@ -2116,11 +2120,11 @@ static int32_t reordering_cavl_compare(const void* const user, const cy_tree_t* 
 {
     const reordering_context_t* const outer = (const reordering_context_t*)user;
     const reordering_t*               inner = (const reordering_t*)node;
-    if (outer->remote_id == inner->remote_id) {
+    if (outer->lane.id == inner->remote_id) {
         // NOLINTNEXTLINE(*-nested-conditional-operator)
         return (outer->topic->hash == inner->topic->hash) ? 0 : ((outer->topic->hash > inner->topic->hash) ? +1 : -1);
     }
-    return (outer->remote_id > inner->remote_id) ? +1 : -1;
+    return (outer->lane.id > inner->remote_id) ? +1 : -1;
 }
 
 static cy_tree_t* reordering_cavl_factory(void* const user)
@@ -2130,7 +2134,7 @@ static cy_tree_t* reordering_cavl_factory(void* const user)
     reordering_t* const self = mem_alloc_zero(outer->subscriber->root->cy, sizeof(reordering_t));
     if (self != NULL) {
         self->timeout             = OLGA_EVENT_INIT;
-        self->remote_id           = outer->remote_id;
+        self->remote_id           = outer->lane.id;
         self->subscriber          = outer->subscriber;
         self->topic               = outer->topic;
         self->substitutions       = outer->substitutions;
@@ -2140,7 +2144,7 @@ static cy_tree_t* reordering_cavl_factory(void* const user)
     }
     CY_TRACE(outer->topic->cy,
              "🔢 REORDERING: N%016jx tag=%016jx: %s",
-             (uintmax_t)outer->remote_id,
+             (uintmax_t)outer->lane.id,
              (uintmax_t)outer->tag,
              (self != NULL) ? "ok" : "OUT OF MEMORY");
     return (self != NULL) ? &self->index : NULL;
@@ -2151,7 +2155,7 @@ static cy_tree_t* reordering_cavl_factory(void* const user)
 
 // Returns true if the message was accepted, false if it should not be acknowledged (e.g. late drop for ordered subs).
 static bool on_message(cy_t* const           cy,
-                       const cy_remote_t     remote,
+                       const cy_lane_t       lane,
                        cy_topic_t* const     topic,
                        const uint64_t        tag,
                        const cy_message_ts_t message,
@@ -2162,9 +2166,9 @@ static bool on_message(cy_t* const           cy,
     // Reliable transfers may be duplicated in case of ACK loss.
     // Non-reliable transfers are deduplicated by the transport, which makes them much more efficient.
     if (reliable) {
-        dedup_factory_context_t ctx = { .owner = topic, .remote_id = remote.id, .tag = tag, .now = message.timestamp };
+        dedup_factory_context_t ctx = { .owner = topic, .remote_id = lane.id, .tag = tag, .now = message.timestamp };
         dedup_t* const dedup = CAVL2_TO_OWNER(cavl2_find_or_insert(&topic->sub_index_dedup_by_remote_id, // ------
-                                                                   &remote.id,
+                                                                   &lane.id,
                                                                    dedup_cavl_compare,
                                                                    &ctx,
                                                                    dedup_factory),
@@ -2173,9 +2177,9 @@ static bool on_message(cy_t* const           cy,
         if (dedup == NULL) { // Out of memory.
             return false;    // The remote will retransmit and we might be able to accept it then.
         }
-        assert(dedup->remote_id == remote.id);
+        assert(dedup->remote_id == lane.id);
         if (dedup_update(dedup, topic, tag, message.timestamp)) {
-            CY_TRACE(cy, "🍒 Dup N%016jx tag=%016jx", (uintmax_t)remote.id, (uintmax_t)tag);
+            CY_TRACE(cy, "🍒 Dup N%016jx tag=%016jx", (uintmax_t)lane.id, (uintmax_t)tag);
             return true; // Already received, ack but don't process.
         }
     }
@@ -2197,7 +2201,7 @@ static bool on_message(cy_t* const           cy,
             if (use_reordering) {
                 reordering_context_t ctx = {
                     .now           = message.timestamp,
-                    .remote_id     = remote.id,
+                    .lane          = lane,
                     .subscriber    = sub,
                     .topic         = topic, // The topic and coupling references will be kept alive by the subscriber.
                     .substitutions = substitutions,
@@ -2212,16 +2216,16 @@ static bool on_message(cy_t* const           cy,
                                                         reordering_t,
                                                         index);
                 if (rr != NULL) { // Simply ignore on OOM, nothing we can do.
-                    assert(rr->remote_id == remote.id);
+                    assert(rr->remote_id == lane.id);
                     assert(rr->topic == topic);
                     assert(rr->subscriber == sub);
-                    rr->p2p_context = remote.p2p; // keep the latest known return path discovery from the transport
-                    if (reordering_push(rr, tag, message)) {
+                    rr->p2p_context = lane.p2p; // keep the latest known return path discovery from the transport
+                    if (reordering_push(rr, tag, lane.prio, message)) {
                         acknowledge = true;
                     }
                 }
             } else {
-                subscriber_invoke(sub, make_arrival(topic, remote, tag, message, substitutions));
+                subscriber_invoke(sub, make_arrival(topic, lane, tag, message, substitutions));
                 acknowledge = true;
             }
             sub = next_sub;
@@ -2442,8 +2446,10 @@ static cy_err_t do_respond(cy_breadcrumb_t* const breadcrumb, const cy_us_t dead
     const cy_bytes_t headed_message = { .size = sizeof(header), .data = header, .next = &message };
 
     // Send the P2P response.
-    const cy_remote_t remote = { .id = breadcrumb->remote_id, .p2p = breadcrumb->p2p_context };
-    return breadcrumb->cy->platform->vtable->p2p_send(breadcrumb->cy->platform, &remote, deadline, headed_message);
+    const cy_lane_t lane = { .id   = breadcrumb->remote_id,
+                             .p2p  = breadcrumb->p2p_context,
+                             .prio = breadcrumb->priority };
+    return breadcrumb->cy->platform->vtable->p2p_send(breadcrumb->cy->platform, &lane, deadline, headed_message);
 }
 
 cy_err_t cy_respond(cy_breadcrumb_t* const breadcrumb, const cy_us_t deadline, const cy_bytes_t message)
@@ -2783,49 +2789,49 @@ static void on_response_ack(cy_t* const cy, response_future_t* const future, con
 }
 #endif
 
-static void send_message_ack(cy_t* const       cy,
-                             const cy_remote_t remote,
-                             const uint64_t    tag,
-                             const uint64_t    topic_hash,
-                             const cy_us_t     deadline)
+static void send_message_ack(cy_t* const     cy,
+                             const cy_lane_t lane,
+                             const uint64_t  tag,
+                             const uint64_t  topic_hash,
+                             const cy_us_t   deadline)
 {
     byte_t header[17];
     header[0] = (byte_t)header_msg_ack;
     (void)serialize_u64(serialize_u64(&header[1], tag), topic_hash);
     const cy_err_t err = cy->platform->vtable->p2p_send(cy->platform, //
-                                                        &remote,
+                                                        &lane,
                                                         deadline,
                                                         (cy_bytes_t){ .size = sizeof(header), .data = header });
     if (err != CY_OK) {
         CY_TRACE(cy,
                  "⚠️ Failed to send message ACK to %016jx for tag %016jx on topic %016jx: %jd",
-                 (uintmax_t)remote.id,
+                 (uintmax_t)lane.id,
                  (uintmax_t)tag,
                  (uintmax_t)topic_hash,
                  (intmax_t)err);
     }
 }
 
-static void send_response_ack(cy_t* const       cy,
-                              const cy_remote_t remote,
-                              const uint64_t    message_tag,
-                              const uint64_t    seqno,
-                              const uint16_t    tag,
-                              const bool        positive,
-                              const cy_us_t     deadline)
+static void send_response_ack(cy_t* const     cy,
+                              const cy_lane_t lane,
+                              const uint64_t  message_tag,
+                              const uint64_t  seqno,
+                              const uint16_t  tag,
+                              const bool      positive,
+                              const cy_us_t   deadline)
 {
     byte_t header[17];
     header[0] = (byte_t)(positive ? header_rsp_ack : header_rsp_nack);
     (void)serialize_u64(serialize_u64(&header[1], message_tag), (seqno & SEQNO48_MASK) | ((uint64_t)tag << 48U));
     const cy_err_t err = cy->platform->vtable->p2p_send(cy->platform, //
-                                                        &remote,
+                                                        &lane,
                                                         deadline,
                                                         (cy_bytes_t){ .size = sizeof(header), .data = header });
     if (err != CY_OK) {
         CY_TRACE(cy,
                  "⚠️ Failed to send response %s to %016jx for seqno %016jx: %jd",
                  positive ? "ACK" : "NACK",
-                 (uintmax_t)remote.id,
+                 (uintmax_t)lane.id,
                  (uintmax_t)seqno,
                  (intmax_t)err);
     }
@@ -2841,7 +2847,7 @@ uint32_t cy_broadcast_subject_id(cy_platform_t* const platform)
 }
 
 void cy_on_message(cy_platform_t* const             platform,
-                   const cy_remote_t                remote,
+                   const cy_lane_t                  lane,
                    const cy_subject_reader_t* const subject_reader,
                    const cy_message_ts_t            message)
 {
@@ -2881,10 +2887,10 @@ void cy_on_message(cy_platform_t* const             platform,
                              "⚠️ Could not deduce evictions: T%016jx@S%08jx N%016jx modulus=%08jx",
                              (uintmax_t)hash,
                              (uintmax_t)subject_reader->subject_id,
-                             (uintmax_t)remote.id,
+                             (uintmax_t)lane.id,
                              (uintmax_t)cy->platform->subject_id_modulus);
                 }
-                on_gossip(cy, message.timestamp, remote, hash, evictions, lage, str_empty, &topic);
+                on_gossip(cy, message.timestamp, lane, hash, evictions, lage, str_empty, &topic);
             } else {
                 topic = cy_topic_find_by_hash(cy, hash);
             }
@@ -2892,9 +2898,9 @@ void cy_on_message(cy_platform_t* const             platform,
                 assert((topic->sub_reader == NULL) || (topic_subject_id(topic) == topic->sub_reader->subject_id));
                 const bool     reliable = type == header_msg_rel;
                 const uint64_t tag      = deserialize_u64(&header[2]);
-                const bool     accepted = on_message(cy, remote, topic, tag, message, reliable);
+                const bool     accepted = on_message(cy, lane, topic, tag, message, reliable);
                 if (reliable && accepted) { // This is either new or retransmit, must ack either way.
-                    send_message_ack(cy, remote, tag, hash, message.timestamp + ACK_TX_TIMEOUT);
+                    send_message_ack(cy, lane, tag, hash, message.timestamp + ACK_TX_TIMEOUT);
                 }
             }
             break;
@@ -2910,7 +2916,7 @@ void cy_on_message(cy_platform_t* const             platform,
             } else {
                 CY_TRACE(cy,
                          "⚠️ Orphan message ACK from %016jx for tag %016jx",
-                         (uintmax_t)remote_id,
+                         (uintmax_t)lane.id,
                          (uintmax_t)tag);
             }
             break;
@@ -2932,8 +2938,7 @@ void cy_on_message(cy_platform_t* const             platform,
                 /// nack instead of a pack. If this becomes a problem, store a short list of recently
                 /// positively-acked responses in the Cy state.
                 send_response_ack(cy,
-                                  p2p_context,
-                                  remote_id,
+                                  lane,
                                   message_tag,
                                   seqno,
                                   tag,
@@ -2941,11 +2946,11 @@ void cy_on_message(cy_platform_t* const             platform,
                                   message.timestamp + ACK_TX_TIMEOUT);
             }
             if (future != NULL) {
-                on_response(cy, p2p_context, remote_id, future, seqno, tag, message);
+                on_response(cy, p2p_context, lane.id, future, seqno, tag, message);
             } else {
                 CY_TRACE(cy,
                          "⚠️ Orphan response from %016jx for request tag %016jx",
-                         (uintmax_t)remote_id,
+                         (uintmax_t)lane.id,
                          (uintmax_t)message_tag);
             }
             break;
@@ -2986,7 +2991,7 @@ void cy_on_message(cy_platform_t* const             platform,
             }
             const uint64_t hash      = deserialize_u64(&header[2]);
             const uint32_t evictions = deserialize_u32(&header[10]);
-            on_gossip(cy, message.timestamp, remote, hash, evictions, lage, name, NULL);
+            on_gossip(cy, message.timestamp, lane, hash, evictions, lage, name, NULL);
             break;
         }
 
@@ -2997,12 +3002,12 @@ void cy_on_message(cy_platform_t* const             platform,
                 (cy_message_read(message.content, 2, name.len, (byte_t*)name_buf) != name.len)) {
                 goto bad_message;
             }
-            on_scout(cy, message.timestamp, remote, name);
+            on_scout(cy, message.timestamp, lane, name);
             break;
         }
 
         default:
-            CY_TRACE(cy, "⚠️ Unsupported message from %016jx: header type %02d", (uintmax_t)remote.id, type);
+            CY_TRACE(cy, "⚠️ Unsupported message from %016jx: header type %02d", (uintmax_t)lane.id, type);
             break;
     }
 bad_message:

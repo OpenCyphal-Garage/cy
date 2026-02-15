@@ -78,6 +78,8 @@ uint64 topic_hash       # For subject allocation collision detection and immedia
 
 Sent in response to a reliable message publication. Message publications have no negative acknowledgements because they are inherently multicast: even if we can't accept a message, someone else might be able to.
 
+The ack priority level must match that of the original message.
+
 ```bash
 uint6 type
 void2
@@ -91,6 +93,8 @@ uint64 topic_hash       # From the acknowledged message.
 Response tags are not used for ordering recovery since there is a seqno available, and there is no risk of reboot misattribution -- they are only needed for acknowledgement correlation and as such they are much narrower and there is no monotonicity requirement, the sender can choose values arbitrarily.
 
 For P2P NACKs are well-defined since these interactions are inherently unicast.
+
+The (n)ack priority level must match that of the original response.
 
 ```bash
 uint6 type

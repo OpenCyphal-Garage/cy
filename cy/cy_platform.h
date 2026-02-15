@@ -96,11 +96,13 @@ struct cy_platform_t
     const struct cy_platform_vtable_t* vtable;
 };
 
-typedef struct cy_remote_t
+/// Identifies a remote node that originated a message along with the information needed to send a response if needed.
+typedef struct cy_lane_t
 {
-    uint64_t         id;  ///< Uniquely identifies the remote node within the network.
-    cy_p2p_context_t p2p; ///< Transport-specific metadata needed to send a P2P message to this remote.
-} cy_remote_t;
+    uint64_t         id;   ///< Uniquely identifies the remote node within the network.
+    cy_p2p_context_t p2p;  ///< Transport-specific metadata needed to send a P2P message to this remote.
+    cy_prio_t        prio; ///< Stored here to allow rx/tx priority matching.
+} cy_lane_t;
 
 /// Most of the platform API is defined by this large vtable.
 /// All functions are non-blocking except for spin(), which may or may not be blocking.
@@ -113,11 +115,7 @@ typedef struct cy_platform_vtable_t
     /// from this function.
     cy_subject_writer_t* (*subject_writer_new)(cy_platform_t*, uint32_t subject_id);
     void (*subject_writer_destroy)(cy_platform_t*, cy_subject_writer_t*);
-    cy_err_t (*subject_writer_send)(cy_platform_t*, //
-                                    cy_subject_writer_t*,
-                                    cy_us_t    deadline,
-                                    cy_prio_t  priority,
-                                    cy_bytes_t message);
+    cy_err_t (*subject_writer_send)(cy_platform_t*, cy_subject_writer_t*, cy_us_t deadline, cy_prio_t, cy_bytes_t);
 
     // === SUBJECT READER ===
 
@@ -128,10 +126,10 @@ typedef struct cy_platform_vtable_t
     // === P2P ===
 
     /// Instructs the underlying transport layer to send a peer-to-peer transfer to the specified remote node.
-    /// The remote and message lifetime ends upon return from this function.
+    /// The lane and message lifetime ends upon return from this function.
     /// If the transport layer needs any additional metadata to send a P2P message (e.g., destination address/port),
     /// it must be stored inside the responder context prior to cy_on_message() invocation.
-    cy_err_t (*p2p_send)(cy_platform_t*, const cy_remote_t*, cy_us_t deadline, cy_bytes_t message);
+    cy_err_t (*p2p_send)(cy_platform_t*, const cy_lane_t*, cy_us_t deadline, cy_bytes_t message);
 
     /// Sets/updates the maximum extent of incoming P2P transfers. Messages larger than this may be truncated.
     /// The initial value prior to the first invocation is transport-defined.
@@ -187,7 +185,7 @@ uint32_t cy_broadcast_subject_id(cy_platform_t* const platform);
 /// New message received on a topic or P2P. The data ownership is taken by this function.
 /// The subject reader is NULL for P2P messages.
 void cy_on_message(cy_platform_t* const             platform,
-                   const cy_remote_t                remote,
+                   const cy_lane_t                  lane,
                    const cy_subject_reader_t* const subject_reader,
                    const cy_message_ts_t            message);
 
