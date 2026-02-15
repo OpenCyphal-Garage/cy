@@ -15,16 +15,10 @@
 
 #include "cy.h"
 
-/// For compatibility with Cyphal v1.0, the heartbeat topic is pinned at subject-ID 7509.
-/// Historical trivia: number 0x1D55==7509==0b1110101010101 was chosen because it has a long alternating bit pattern,
-/// which enables a more robust automatic bit rate detection in CAN bus networks.
-#define CY_HEARTBEAT_TOPIC_NAME "/#1d55"
-#define CY_HEARTBEAT_TOPIC_HASH 0x1D55U
-
 /// See the subject_id_modulus for details.
-#define CY_SUBJECT_ID_MODULUS_17bit 122867ULL
-#define CY_SUBJECT_ID_MODULUS_23bit 8380403ULL
-#define CY_SUBJECT_ID_MODULUS_32bit 4294959083ULL
+#define CY_SUBJECT_ID_MODULUS_17bit 122867UL     ///< Suitable for all Cyphal transports.
+#define CY_SUBJECT_ID_MODULUS_23bit 8380403UL    ///< Incompatible with Cyphal/CAN.
+#define CY_SUBJECT_ID_MODULUS_32bit 4294959083UL ///< Incompatible with Cyphal/CAN and Cyphal/UDPv4.
 
 #ifdef __cplusplus
 extern "C"
@@ -102,6 +96,12 @@ struct cy_platform_t
     const struct cy_platform_vtable_t* vtable;
 };
 
+typedef struct cy_remote_t
+{
+    uint64_t         id;  ///< Uniquely identifies the remote node within the network.
+    cy_p2p_context_t p2p; ///< Transport-specific metadata needed to send a P2P message to this remote.
+} cy_remote_t;
+
 /// Most of the platform API is defined by this large vtable.
 /// All functions are non-blocking except for spin(), which may or may not be blocking.
 typedef struct cy_platform_vtable_t
@@ -128,14 +128,10 @@ typedef struct cy_platform_vtable_t
     // === P2P ===
 
     /// Instructs the underlying transport layer to send a peer-to-peer transfer to the specified remote node.
-    /// The message lifetime ends upon return from this function.
+    /// The remote and message lifetime ends upon return from this function.
     /// If the transport layer needs any additional metadata to send a P2P message (e.g., destination address/port),
     /// it must be stored inside the responder context prior to cy_on_message() invocation.
-    cy_err_t (*p2p_send)(cy_platform_t*,
-                         const cy_p2p_context_t*, // Never NULL
-                         cy_us_t    deadline,
-                         uint64_t   remote_id,
-                         cy_bytes_t message);
+    cy_err_t (*p2p_send)(cy_platform_t*, const cy_remote_t*, cy_us_t deadline, cy_bytes_t message);
 
     /// Sets/updates the maximum extent of incoming P2P transfers. Messages larger than this may be truncated.
     /// The initial value prior to the first invocation is transport-defined.
@@ -181,11 +177,17 @@ typedef struct cy_platform_vtable_t
     uint64_t (*random)(cy_platform_t*);
 } cy_platform_vtable_t;
 
+/// A special subject-ID is dedicated to broadcast subject. All nodes subscribe to this subject.
+/// This is where topic allocation CRDT gossips are published. Other uses are also possible that involve all nodes.
+/// This works because the primality of the subject-ID modulus implies that a few of the subject-IDs above the
+/// CY_SUBJECT_ID_MAX(modulus) will be unused.
+/// Cy does not require deduplication on the broadcast subject for transport implementation simplicity.
+uint32_t cy_broadcast_subject_id(cy_platform_t* const platform);
+
 /// New message received on a topic or P2P. The data ownership is taken by this function.
 /// The subject reader is NULL for P2P messages.
 void cy_on_message(cy_platform_t* const             platform,
-                   const cy_p2p_context_t           p2p_context,
-                   const uint64_t                   remote_id,
+                   const cy_remote_t                remote,
                    const cy_subject_reader_t* const subject_reader,
                    const cy_message_ts_t            message);
 

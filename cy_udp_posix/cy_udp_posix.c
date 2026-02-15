@@ -349,8 +349,7 @@ static void v_on_msg(udpard_rx_t* const rx, udpard_rx_port_t* const port, const 
                                     .content   = make_message(owner, tr.payload_size_stored, tr.payload) };
     if (msg.content != NULL) {
         cy_on_message(&owner->base,
-                      box_p2p_ctx(tr.priority, tr.remote.endpoints),
-                      tr.remote.uid,
+                      (cy_remote_t){ .id = tr.remote.uid, .p2p = box_p2p_ctx(tr.priority, tr.remote.endpoints) },
                       (cy_subject_reader_t*)port->user, // NULL for P2P
                       msg);
     } else {
@@ -397,11 +396,11 @@ static cy_subject_reader_t* v_subject_reader_new(cy_platform_t* const base,
     if (self != NULL) {
         self->base.subject_id = subject_id;
 
-        // We special-case the heartbeat topic to have STATELESS reassembly strategy to conserve CPU and RAM.
-        // It is useful for the network stack because the heartbeat topic is a bottleneck to be aware of -- every
+        // We special-case the broadcast subject to have STATELESS reassembly strategy to conserve CPU and RAM.
+        // It is useful for the network stack because the broadcast subject is a bottleneck to be aware of -- every
         // node publishes on it and every node is subscribed, so there is a lot of traffic, while the protocol stack
-        // itself is invariant to heartbeat message reordering/duplicates.
-        const bool stateless = subject_id == CY_HEARTBEAT_TOPIC_HASH;
+        // itself is invariant to broadcast message reordering/duplicates.
+        const bool stateless = subject_id == cy_broadcast_subject_id(base);
         bool       ok        = false;
         if (!stateless) {
             static const udpard_rx_port_vtable_t port_vtbl = { .on_message = v_on_msg };
@@ -509,19 +508,17 @@ static void v_subject_reader_tombstone(cy_platform_t* const platform, cy_subject
 // ---------------------------------------------------------------------------------------------------------------------
 // P2P
 
-static cy_err_t v_p2p_send(cy_platform_t* const          base,
-                           const cy_p2p_context_t* const p2p_context,
-                           const cy_us_t                 deadline,
-                           const uint64_t                remote_id,
-                           const cy_bytes_t              message)
+static cy_err_t v_p2p_send(cy_platform_t* const     base,
+                           const cy_remote_t* const remote,
+                           const cy_us_t            deadline,
+                           const cy_bytes_t         message)
 {
-    (void)remote_id; // we only need the remote endpoints, which are stored in the P2P context.
     cy_udp_posix_t* const owner = (cy_udp_posix_t*)base;
 
     // Unbox the P2P context.
     p2p_ctx_t inner;
     static_assert(sizeof(inner) <= sizeof(cy_p2p_context_t), "");
-    memcpy(&inner, p2p_context, sizeof(inner));
+    memcpy(&inner, &remote->p2p, sizeof(inner));
     udpard_udpip_ep_t endpoints[UDPARD_IFACE_COUNT_MAX] = { 0 };
     for (size_t i = 0; i < UDPARD_IFACE_COUNT_MAX; i++) {
         endpoints[i] = inner.endpoints[i];

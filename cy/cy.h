@@ -454,7 +454,7 @@ cy_err_t cy_home_set(cy_t* const cy, const cy_str_t home);
 cy_err_t cy_namespace_set(cy_t* const cy, const cy_str_t name_space);
 
 /// This function must be invoked periodically to ensure liveness.
-/// The returned value indicates the success of the heartbeat publication, if any took place, or zero.
+/// The returned value indicates the success of the gossip publication, if any took place, or zero.
 /// Transient failures normally should be logged & ignored.
 /// The function will return not later than the specified deadline. It may return early.
 cy_err_t               cy_spin_until(cy_t* const cy, const cy_us_t deadline);
@@ -520,7 +520,7 @@ cy_user_context_t* cy_topic_user_context(cy_topic_t* const topic);
 // =====================================================================================================================
 
 /// Shorter topic names reduce the gossip traffic overhead.
-/// In CAN FD networks, topic names should not exceed 39 characters to avoid multi-frame heartbeats.
+/// In CAN FD networks, normalized topic names should not exceed 48 characters to avoid multi-frame gossips.
 /// This limit is chosen rather arbitrarily, keeping in mind RTPS where the maximum is 255,
 /// and ROS2 where the maximum is 248. In practice, topics very rarely exceed ~100 characters.
 #define CY_TOPIC_NAME_MAX 200
