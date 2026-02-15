@@ -436,6 +436,44 @@ static void test_reordering_capacity_overflow_resequence(void)
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&env.fixture.heap));
 }
 
+/// Capacity overflow may still leave the current message exactly next in order after forced ejection.
+/// In that case we should accept it immediately and skip resequencing delay.
+static void test_reordering_capacity_overflow_can_fast_path_after_eject_all(void)
+{
+    reorder_env_t env;
+    reorder_env_init(&env);
+
+    // Establish baseline progress first: tag=5 => lin_tag=1 ejected.
+    TEST_ASSERT_TRUE(push_message(&env, 5U, 10, 0x50U));
+    TEST_ASSERT_EQUAL_size_t(1, env.capture.count);
+    TEST_ASSERT_EQUAL_UINT64(5U, env.capture.tags[0]);
+
+    // Keep a gap at tag=6 and fill interned slots up to the capacity limit (lin_tags 3..9 => tags 7..13).
+    TEST_ASSERT_TRUE(push_message(&env, 7U, 11, 0x70U));
+    TEST_ASSERT_TRUE(push_message(&env, 8U, 12, 0x80U));
+    TEST_ASSERT_TRUE(push_message(&env, 9U, 13, 0x90U));
+    TEST_ASSERT_TRUE(push_message(&env, 10U, 14, 0xA0U));
+    TEST_ASSERT_TRUE(push_message(&env, 11U, 15, 0xB0U));
+    TEST_ASSERT_TRUE(push_message(&env, 12U, 16, 0xC0U));
+    TEST_ASSERT_TRUE(push_message(&env, 13U, 17, 0xD0U));
+    TEST_ASSERT_EQUAL_size_t(1, env.capture.count);
+    TEST_ASSERT_EQUAL_size_t(7, env.rr.interned_count);
+
+    // tag=14 is just beyond capacity (lin_tag=10 while last_ejected=1 and capacity=8).
+    // Forced ejection flushes 7..13; then 14 becomes exactly next and should be ejected immediately.
+    TEST_ASSERT_TRUE(push_message(&env, 14U, 18, 0xE0U));
+    TEST_ASSERT_EQUAL_size_t(9, env.capture.count);
+    TEST_ASSERT_EQUAL_UINT64(7U, env.capture.tags[1]);
+    TEST_ASSERT_EQUAL_UINT64(13U, env.capture.tags[7]);
+    TEST_ASSERT_EQUAL_UINT64(14U, env.capture.tags[8]);
+    TEST_ASSERT_EQUAL_size_t(0, env.rr.interned_count);
+    TEST_ASSERT_FALSE(olga_is_pending(&env.fixture.cy.olga, &env.rr.timeout));
+
+    reorder_env_cleanup(&env);
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&env.fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&env.fixture.heap));
+}
+
 /// Partial gap closure: middle message arrives closing a partial chain but leaving remaining gaps.
 static void test_reordering_partial_gap_closure(void)
 {
@@ -630,6 +668,7 @@ int main(void)
     RUN_TEST(test_reordering_head_of_line_change_rearms_timeout);
     RUN_TEST(test_reordering_late_after_timeout);
     RUN_TEST(test_reordering_capacity_overflow_resequence);
+    RUN_TEST(test_reordering_capacity_overflow_can_fast_path_after_eject_all);
     RUN_TEST(test_reordering_partial_gap_closure);
     RUN_TEST(test_reordering_min_capacity_resequence_dup_is_deduped);
     RUN_TEST(test_reordering_min_capacity_resequence_older_sibling_accepted);

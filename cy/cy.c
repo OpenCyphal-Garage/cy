@@ -2014,19 +2014,6 @@ static bool reordering_push(reordering_t* const   self,
     // Dispatch the message according to its tag ordering.
     uint64_t lin_tag = tag - self->tag_baseline;
 
-    // The next expected message can be ejected immediately. No need to allocate state, happy fast path, most common.
-    if (lin_tag == self->last_ejected_lin_tag + 1U) {
-        self->last_ejected_lin_tag = lin_tag;
-        subscriber_invoke(self->subscriber,
-                          make_arrival(self->topic,
-                                       (cy_lane_t){ .id = self->remote_id, .p2p = self->p2p_context, .prio = priority },
-                                       tag,
-                                       message,
-                                       self->substitutions));
-        reordering_scan(self, false); // The just-ejected message may have closed an earlier gap.
-        return true;
-    }
-
     // Late arrival or duplicate, the gap is already closed and the application has moved on, cannot accept.
     // Note that this check does not detect possible duplicates that are currently interned; this is checked below.
     if (lin_tag <= self->last_ejected_lin_tag) {
@@ -2039,6 +2026,15 @@ static bool reordering_push(reordering_t* const   self,
         return false;
     }
 
+    // The next expected message can be ejected immediately. No need to allocate state, happy fast path, most common.
+    const cy_lane_t lane = { .id = self->remote_id, .p2p = self->p2p_context, .prio = priority };
+    if (lin_tag == self->last_ejected_lin_tag + 1U) {
+        self->last_ejected_lin_tag = lin_tag;
+        subscriber_invoke(self->subscriber, make_arrival(self->topic, lane, tag, message, self->substitutions));
+        reordering_scan(self, false); // The just-ejected message may have closed an earlier gap.
+        return true;
+    }
+
     // Too far ahead meaning that the remote has restarted. Eject all interned messages, if any, and reset the state.
     if (lin_tag > (self->last_ejected_lin_tag + self->subscriber->params.reordering_capacity)) {
         CY_TRACE(cy,
@@ -2048,6 +2044,12 @@ static bool reordering_push(reordering_t* const   self,
                  (uintmax_t)lin_tag,
                  (uintmax_t)self->last_ejected_lin_tag);
         reordering_eject_all(self);
+        // If force-ejection advanced us right up to this message, accept it immediately without resequencing delay.
+        if (lin_tag == (self->last_ejected_lin_tag + 1U)) {
+            self->last_ejected_lin_tag = lin_tag;
+            subscriber_invoke(self->subscriber, make_arrival(self->topic, lane, tag, message, self->substitutions));
+            return true;
+        }
         reordering_resequence(self, tag);
         lin_tag = tag - self->tag_baseline;
     }
