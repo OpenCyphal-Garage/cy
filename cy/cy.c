@@ -1908,6 +1908,7 @@ typedef struct
 /// Remove the slot and invoke the user callback.
 static void reordering_eject(reordering_t* const self, reordering_slot_t* const slot)
 {
+    assert(slot != NULL);
     assert(self->topic->cy == self->subscriber->root->cy);
     const cy_t* const cy = self->topic->cy;
 
@@ -1973,7 +1974,6 @@ static void reordering_eject_all(reordering_t* const self)
     while (self->interned_count > 0) {
         reordering_slot_t* const slot =
           CAVL2_TO_OWNER(cavl2_min(self->interned_by_lin_tag), reordering_slot_t, index_lin_tag);
-        assert(slot != NULL);
         reordering_eject(self, slot);
     }
     assert(self->interned_count == 0);
@@ -2012,7 +2012,8 @@ static bool reordering_push(reordering_t* const   self,
     enlist_head(&self->subscriber->list_reordering_by_recency, &self->list_recency);
 
     // Dispatch the message according to its tag ordering.
-    uint64_t lin_tag = tag - self->tag_baseline;
+    uint64_t     lin_tag  = tag - self->tag_baseline;
+    const size_t capacity = self->subscriber->params.reordering_capacity;
 
     // Late arrival or duplicate, the gap is already closed and the application has moved on, cannot accept.
     // Note that this check does not detect possible duplicates that are currently interned; this is checked below.
@@ -2026,8 +2027,16 @@ static bool reordering_push(reordering_t* const   self,
         return false;
     }
 
-    // The next expected message can be ejected immediately. No need to allocate state, happy fast path, most common.
+    // If the message is too far ahead, either the remote has restarted or we are just holding too many old messages.
+    // Either way we will need to move the window a little to the right, which we do now.
+    // We move it only by the bare minimum amount to minimize losses to forced ejections.
+    while ((self->interned_count > 0) && (lin_tag > (self->last_ejected_lin_tag + capacity))) {
+        reordering_scan(self, true);
+    }
+
     const cy_lane_t lane = { .id = self->remote_id, .p2p = self->p2p_context, .prio = priority };
+
+    // The next expected message can be ejected immediately. No need to allocate state, happy fast path, most common.
     if (lin_tag == self->last_ejected_lin_tag + 1U) {
         self->last_ejected_lin_tag = lin_tag;
         subscriber_invoke(self->subscriber, make_arrival(self->topic, lane, tag, message, self->substitutions));
@@ -2035,21 +2044,15 @@ static bool reordering_push(reordering_t* const   self,
         return true;
     }
 
-    // Too far ahead meaning that the remote has restarted. Eject all interned messages, if any, and reset the state.
-    if (lin_tag > (self->last_ejected_lin_tag + self->subscriber->params.reordering_capacity)) {
+    // If we are still too far ahead, the remote has probably restarted or the gap is too large to swallow.
+    if (lin_tag > (self->last_ejected_lin_tag + capacity)) {
         CY_TRACE(cy,
                  "🔢 RESEQUENCING: N%016jx tag=%016jx lin_tag=%016jx last_ejected_lin_tag=%016jx",
                  (uintmax_t)self->remote_id,
                  (uintmax_t)tag,
                  (uintmax_t)lin_tag,
                  (uintmax_t)self->last_ejected_lin_tag);
-        reordering_eject_all(self);
-        // If force-ejection advanced us right up to this message, accept it immediately without resequencing delay.
-        if (lin_tag == (self->last_ejected_lin_tag + 1U)) {
-            self->last_ejected_lin_tag = lin_tag;
-            subscriber_invoke(self->subscriber, make_arrival(self->topic, lane, tag, message, self->substitutions));
-            return true;
-        }
+        assert(self->interned_count == 0); // The above logic will have emptied the interned messages in this case.
         reordering_resequence(self, tag);
         lin_tag = tag - self->tag_baseline;
     }
@@ -2060,7 +2063,7 @@ static bool reordering_push(reordering_t* const   self,
     // For the assertion to hold, we must ensure that the reordering capacity is at least 4, otherwise the resequencing
     // logic would set the baseline too low for the assertion to hold.
     assert(lin_tag > (self->last_ejected_lin_tag + 1U));
-    assert(lin_tag <= (self->last_ejected_lin_tag + self->subscriber->params.reordering_capacity));
+    assert(lin_tag <= (self->last_ejected_lin_tag + capacity));
     reordering_slot_t* const slot = mem_alloc_zero(cy, sizeof(reordering_slot_t));
     if (slot == NULL) {
         CY_TRACE(cy,
