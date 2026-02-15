@@ -1292,11 +1292,8 @@ static cy_err_t do_send_gossip(const cy_t* const        cy,
                             : vt->p2p_send(cy->platform, remote, dead, message);
 }
 
-/// Broadcast if the remote is NULL, otherwise P2P.
-static cy_err_t gossip_topic(cy_t* const              cy,
-                             cy_topic_t* const        topic,
-                             const cy_us_t            now,
-                             const cy_remote_t* const remote)
+/// Updates the gossip schedule, which is why this function can't be used with P2P gossips.
+static cy_err_t gossip_topic(cy_t* const cy, cy_topic_t* const topic, const cy_us_t now)
 {
     CY_TRACE(cy, "🗣️ %s", topic_repr(topic).str);
     assert(cy->gossip_next < HEAT_DEATH); // must gossip_begin() beforehand.
@@ -1304,7 +1301,7 @@ static cy_err_t gossip_topic(cy_t* const              cy,
     schedule_gossip(topic);               // reschedule even if failed -- some other node might pick up the gossip
     return do_send_gossip(cy,             //
                           now,
-                          remote,
+                          NULL,
                           topic->hash,
                           topic->evictions,
                           topic_lage(topic, now),
@@ -1492,7 +1489,10 @@ static void* wkv_cb_topic_scout_response(const wkv_event_t evt)
     //   processing burden for small nodes, where "small" means having few topics. The protocol performance will not
     //   be compromised because in small nodes, the gossip rate is already high due to the small topic count.
     // schedule_gossip_urgent(topic);  // broadcast option for simple nodes
-    ON_ASYNC_ERROR_IF(cy, topic, gossip_topic(cy, topic, cy_now(cy), remote));
+    const cy_us_t  now = cy_now(cy);
+    const cy_err_t err =
+      do_send_gossip(cy, now, remote, topic->hash, topic->evictions, topic_lage(topic, now), cy_topic_name(topic));
+    ON_ASYNC_ERROR_IF(cy, topic, err);
     return NULL;
 }
 
@@ -2430,6 +2430,7 @@ static cy_err_t do_respond(cy_breadcrumb_t* const breadcrumb, const cy_us_t dead
     gossip_begin(breadcrumb->cy);
 
     // Compose the header. The tag is zero since we don't expect any ack.
+    assert(breadcrumb->seqno < (SEQNO48_MASK - 1U));
     byte_t header[17];
     header[0] = (byte_t)header_rsp_be;
     (void)serialize_u64(serialize_u64(&header[1], breadcrumb->message_tag), breadcrumb->seqno++);
@@ -2568,6 +2569,8 @@ cy_t* cy_new(cy_platform_t* const platform)
         platform->cy = NULL;
         return NULL;
     }
+    cy->broad_reader->subject_id = broad_id;
+    cy->broad_writer->subject_id = broad_id;
 
     cy->async_error_handler = default_async_error_handler;
     cy->topic_iter          = NULL;
@@ -2616,7 +2619,7 @@ static cy_err_t gossip_poll(cy_t* const cy, const cy_us_t now)
             if ((topic != NULL) || (scout == NULL)) {
                 topic = (topic != NULL) ? topic : LIST_TAIL(cy->list_gossip, cy_topic_t, list_gossip);
                 if (topic != NULL) {
-                    res = gossip_topic(cy, topic, now, NULL);
+                    res = gossip_topic(cy, topic, now);
                 }
             } else {
                 res = scout_pattern(cy, scout, now);
@@ -2812,7 +2815,7 @@ static void send_response_ack(cy_t* const       cy,
 {
     byte_t header[17];
     header[0] = (byte_t)(positive ? header_rsp_ack : header_rsp_nack);
-    (void)serialize_u64(serialize_u64(&header[1], message_tag), seqno | ((uint64_t)tag << 48U));
+    (void)serialize_u64(serialize_u64(&header[1], message_tag), (seqno & SEQNO48_MASK) | ((uint64_t)tag << 48U));
     const cy_err_t err = cy->platform->vtable->p2p_send(cy->platform, //
                                                         &remote,
                                                         deadline,
