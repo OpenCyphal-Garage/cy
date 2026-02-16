@@ -193,13 +193,7 @@ cy_publisher_t* cy_advertise_sample(cy_t* const cy, const cy_str_t name);
 /// Publish a best-effort (non-reliable) one-way message without expecting a response.
 cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t deadline, const cy_bytes_t message);
 
-/// Future result of publishing a reliable message.
-typedef struct cy_publish_result_t
-{
-    uint16_t acknowledgements; /// The number of remote subscribers that acknowledged reception of the message.
-} cy_publish_result_t;
-
-/// Publish a reliable one-way message. The future result is of type cy_publish_result_t.
+/// Publish a reliable one-way message.
 cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadline, const cy_bytes_t message);
 
 /// Future result of a request message that expects a response.
@@ -207,7 +201,7 @@ typedef struct cy_request_result_t
 {
     /// Delivery result of the request message itself.
     /// It is updated while the future is still pending, as a means to provide intermediate progress feedback.
-    cy_publish_result_t request;
+    // cy_publish_result_t request;
 
     /// The response is valid only if the future status is cy_future_success.
     /// It is updated with every received response; the arrival of new responses can be monitored using either

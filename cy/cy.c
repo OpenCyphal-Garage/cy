@@ -237,6 +237,20 @@ static bool is_quadratic_residue_prime(const uint32_t a, const uint32_t p)
     return (a == 0) || (pow_mod_u32(a, (p - 1U) / 2U, p) == 1U);
 }
 
+static uint64_t* bisect64(uint64_t* start, const uint64_t* end, const uint64_t value)
+{
+    assert((start != NULL) && (end != NULL) && (start <= end));
+    while (start < end) {
+        uint64_t* const mid = start + (((size_t)(end - start)) / 2U);
+        if (*mid < value) {
+            start = mid + 1;
+        } else {
+            end = mid;
+        }
+    }
+    return start;
+}
+
 /// The limits are inclusive. Returns min unless min < max.
 static int64_t random_int(const cy_t* const cy, const int64_t min, const int64_t max)
 {
@@ -713,6 +727,7 @@ struct cy_topic_t
     /// Keeps the (sub)set of remote-IDs that confirm reception of reliable multicast publications on this topic.
     /// If the count reaches the limit, the least recently seen ones will be overwritten.
     size_t     assoc_limit;
+    uint16_t   assoc_slack_limit; ///< Subscriber considered unresponsive if misses this many consecutive deliveries.
     size_t     assoc_count;
     cy_tree_t* assoc_index_by_id; ///< Ascending, smallest on the left.
     cy_list_t  assoc_fifo;        ///< Oldest at the tail, newest at the head.
@@ -776,12 +791,13 @@ static topic_repr_t topic_repr(const cy_topic_t* const topic)
 
 #endif
 
-/// Models interest of a remote subscriber in data that we publish on a topic.
+/// Models the interest of a remote subscriber in data that we publish on a topic.
 typedef struct
 {
     cy_tree_t        index_id; ///< Ascending, smallest on the left.
     cy_list_member_t fifo;     ///< Oldest at the tail.
     uint64_t         id;
+    uint16_t         slack;
 } association_t;
 
 typedef struct
@@ -808,7 +824,7 @@ static void association_forget(cy_topic_t* const topic, association_t* const ass
     mem_free(cy, assoc);
 }
 
-/// Creates a new association fully except does not insert it into the FIFO.
+/// Creates a new association fully except does not insert it into the FIFO and does not update the last_seen.
 /// Will automatically forget excess associations if the limit is reached. Returns NULL on OOM.
 static cy_tree_t* association_cavl_factory(void* const user)
 {
@@ -816,18 +832,36 @@ static cy_tree_t* association_cavl_factory(void* const user)
     cy_topic_t* const                    topic = ctx->topic;
     cy_t* const                          cy    = topic->cy;
     // Strictly respect the limit to avoid memory overconsumption. The limit may have changed since last call.
-    while (topic->assoc_count >= larger(topic->assoc_limit, 1)) {
+    while (topic->assoc_count >= topic->assoc_limit) {
+        if (topic->assoc_count == 0) {
+            return NULL;
+        }
         association_forget(topic, LIST_TAIL(topic->assoc_fifo, association_t, fifo));
     }
     // Allocate the new one after the memory is reclaimed.
     association_t* const assoc = (association_t*)mem_alloc_zero(cy, sizeof(association_t));
     if (assoc != NULL) {
-        assoc->id = ctx->remote_id;
+        assoc->id    = ctx->remote_id;
+        assoc->slack = 0;
         topic->assoc_count++;
         CY_TRACE(cy, "⛓✨ %s N%016jx count=%zu", topic_repr(topic).str, (uintmax_t)assoc->id, topic->assoc_count);
     }
     assert(topic->assoc_count <= topic->assoc_limit);
     return (cy_tree_t*)assoc;
+}
+
+static void association_on_ack(cy_topic_t* const topic, association_t* const assoc)
+{
+    enlist_head(&topic->assoc_fifo, &assoc->fifo); // move to the front
+    assoc->slack = 0;
+}
+
+static void association_on_slack(cy_topic_t* const topic, association_t* const assoc)
+{
+    assoc->slack++;
+    if (assoc->slack >= topic->assoc_slack_limit) {
+        association_forget(topic, assoc);
+    }
 }
 
 /// For each topic we are subscribed to, there is a single subscriber root.
@@ -1258,7 +1292,8 @@ static cy_err_t topic_new(cy_t* const        cy,
     topic->ts_animated = now;
     topic->couplings   = NULL;
 
-    topic->assoc_limit       = 64; ///< Arbitrarily chosen, can be reconfigured by the application ad-hoc.
+    topic->assoc_limit       = 10; ///< Arbitrarily chosen, can be reconfigured by the application ad-hoc.
+    topic->assoc_slack_limit = 2;
     topic->assoc_count       = 0;
     topic->assoc_index_by_id = NULL;
     topic->assoc_fifo        = LIST_EMPTY;
@@ -1770,9 +1805,8 @@ cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t deadline, const cy_
 
 typedef struct
 {
-    cy_future_t         base;  ///< The key is the tag.
-    cy_publisher_t*     owner; ///< Back-reference to the publisher for cancellation etc.
-    cy_publish_result_t result;
+    cy_future_t     base;  ///< The key is the tag.
+    cy_publisher_t* owner; ///< Back-reference to the publisher for cancellation etc.
 
     /// Retransmission states.
     olga_event_t event;
@@ -1780,6 +1814,8 @@ typedef struct
     byte_t       epoch;
 
     /// The association set is captured at publication and it becomes the target set we require acks from.
+    /// The first ((assoc_count+63)/64) ids are used as bitmaps where a set bit indicates that an ack was received.
+    size_t   assoc_acked;
     size_t   assoc_count;
     uint64_t assoc_ids[];
 } publish_future_t;
@@ -1790,7 +1826,23 @@ static const cy_future_vtable_t publish_future_vtable = {
 
 static void publish_future_on_ack(publish_future_t* const self, const uint64_t remote_id)
 {
-    //
+    const size_t          bitmap_slots = (self->assoc_count + 63U) / 64U;
+    uint64_t* const       id_begin     = self->assoc_ids + bitmap_slots;
+    const uint64_t* const id_ptr       = bisect64(id_begin, id_begin + self->assoc_count, remote_id);
+    // Normally, the ack handler would create the new association, but it can run out of memory.
+    if ((id_ptr < (id_begin + self->assoc_count)) && (*id_ptr == remote_id)) {
+        const size_t index = (size_t)(id_ptr - id_begin);
+        assert(index < self->assoc_count);
+        const size_t   slot_idx = index / 64U;
+        const uint64_t slot_bit = 1ULL << (index % 64U);
+        if (0 == (self->assoc_ids[slot_idx] & slot_bit)) { // Ensure not a duplicate
+            self->assoc_ids[slot_idx] |= slot_bit;
+            self->assoc_acked++;
+            if (self->assoc_acked >= self->assoc_count) {
+                // TODO future complete, all acks received!
+            }
+        }
+    }
 }
 
 cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadline, const cy_bytes_t message)
@@ -1802,19 +1854,22 @@ cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadli
     cy_t* const       cy    = topic->cy;
 
     // Prepare the future.
+    const size_t            assoc_bitmap_slots = (topic->assoc_count + 63U) / 64U;
     publish_future_t* const fut =
-      future_new(cy, &publish_future_vtable, sizeof(publish_future_t) + (topic->assoc_count * sizeof(uint64_t)));
+      future_new(cy,
+                 &publish_future_vtable,
+                 sizeof(publish_future_t) + ((assoc_bitmap_slots + topic->assoc_count) * sizeof(uint64_t)));
     if (fut == NULL) {
         return NULL;
     }
-    fut->owner  = pub;
-    fut->result = (cy_publish_result_t){ 0 };
-    fut->data   = bytes_dup(cy, message);
+    fut->owner = pub;
+    fut->data  = bytes_dup(cy, message);
     if (fut->data == NULL) {
         mem_free(cy, fut);
         return NULL;
     }
     fut->epoch       = 0;
+    fut->assoc_acked = 0;
     fut->assoc_count = topic->assoc_count;
 
     // Compute the timings but don't arm the timer yet because transmission may still fail.
@@ -1838,8 +1893,8 @@ cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadli
     association_t* ass     = CAVL2_TO_OWNER(cavl2_min(topic->assoc_index_by_id), association_t, index_id);
     size_t         ass_idx = 0;
     while ((ass_idx < fut->assoc_count) && (ass != NULL)) {
-        fut->assoc_ids[ass_idx++] = ass->id;
-        ass                       = CAVL2_TO_OWNER(cavl2_next_greater(&ass->index_id), association_t, index_id);
+        fut->assoc_ids[assoc_bitmap_slots + ass_idx++] = ass->id;
+        ass = CAVL2_TO_OWNER(cavl2_next_greater(&ass->index_id), association_t, index_id);
     }
     future_index_insert(&fut->base, &topic->pub_futures_by_tag, fut->base.key);
     future_deadline_arm(&fut->base, now + ack_timeout);
@@ -3003,8 +3058,13 @@ static void on_response(cy_t* const             cy,
 }
 #endif
 
-static void on_message_ack(cy_t* const cy, cy_topic_t* const topic, const uint64_t remote_id, const uint64_t tag)
+static void on_message_ack(cy_t* const       cy,
+                           cy_topic_t* const topic,
+                           const uint64_t    remote_id,
+                           const uint64_t    tag,
+                           const cy_us_t     ts)
 {
+    (void)ts;
     // Update the subscriber association set. Note that by design we don't require a pending future for this to work.
     association_factory_context_t fac = { .topic = topic, .remote_id = remote_id };
     association_t* const ass = CAVL2_TO_OWNER(cavl2_find_or_insert(&topic->assoc_index_by_id, // ---------------
@@ -3015,7 +3075,7 @@ static void on_message_ack(cy_t* const cy, cy_topic_t* const topic, const uint64
                                               association_t,
                                               index_id);
     if (ass != NULL) {
-        enlist_head(&topic->assoc_fifo, &ass->fifo); // move to the front
+        association_on_ack(topic, ass);
     } else {
         ON_ASYNC_ERROR(cy, topic, CY_ERR_MEMORY);
     }
@@ -3160,7 +3220,7 @@ void cy_on_message(cy_platform_t* const             platform,
             const uint64_t    hash  = deserialize_u64(&header[9]);
             cy_topic_t* const topic = cy_topic_find_by_hash(cy, hash);
             if (topic != NULL) {
-                on_message_ack(cy, topic, lane.id, tag);
+                on_message_ack(cy, topic, lane.id, tag, message.timestamp);
             } else {
                 CY_TRACE(cy,
                          "⚠️ Orphan message ACK N%016jx T%016jx tag=%016jx",
