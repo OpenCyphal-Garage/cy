@@ -201,6 +201,8 @@ static size_t  larger(const size_t a, const size_t b) { return (a > b) ? a : b; 
 static size_t  smaller(const size_t a, const size_t b) { return (a < b) ? a : b; }
 static int64_t max_i64(const int64_t a, const int64_t b) { return (a > b) ? a : b; }
 static int64_t min_i64(const int64_t a, const int64_t b) { return (a < b) ? a : b; }
+static cy_us_t later(const cy_us_t a, const cy_us_t b) { return max_i64(a, b); }
+static cy_us_t sooner(const cy_us_t a, const cy_us_t b) { return min_i64(a, b); }
 
 /// Returns -1 if the argument is zero to allow contiguous comparison.
 static int_fast8_t log2_floor(const uint64_t x) { return (int_fast8_t)((x == 0) ? -1 : (63 - __builtin_clzll(x))); }
@@ -237,9 +239,6 @@ static bool is_quadratic_residue_prime(const uint32_t a, const uint32_t p)
 {
     return (a == 0) || (pow_mod_u32(a, (p - 1U) / 2U, p) == 1U);
 }
-
-/// Deterministic in the sense that if the MSb 32 are zero, the result is the same as the input.
-static uint32_t hash64to32(const uint64_t x) { return (uint32_t)((x >> 32U) ^ (x & UINT32_MAX)); }
 
 /// The limits are inclusive. Returns min unless min < max.
 static int64_t random_int(const cy_t* const cy, const int64_t min, const int64_t max)
@@ -713,15 +712,13 @@ struct cy_topic_t
     cy_us_t ts_origin;   ///< An approximation of when the topic was first seen on the network.
     cy_us_t ts_animated; ///< Last time the topic saw activity that prevents it from being retired.
 
-    /// Multicast association set.
-    /// Keeps a subset of remote-IDs that have confirmed reception of reliable multicast publications on this topic.
-    /// If the number of subscribers exceeds the capacity, only some subset will be stored.
-    /// Since this is needed only for topics on which we publish reliably, the set is allocated lazily on first use;
-    /// this also provides the opportunity to change its size before use if needed.
-    /// We store 32-bit remote-ID hashes to conserve space; the collision risk is minimal and here is acceptable.
-    size_t    masc_capacity;
-    size_t    masc_count;
-    uint32_t* masc_set;
+    /// Subscriber association set.
+    /// Keeps the (sub)set of remote-IDs that confirm reception of reliable multicast publications on this topic.
+    /// If the count reaches the limit, the least recently seen ones will be overwritten.
+    size_t     assoc_limit;
+    size_t     assoc_count;
+    cy_tree_t* assoc_index_by_id;
+    cy_list_t  assoc_fifo;
 
     /// Publisher-related states.
     ///
@@ -781,6 +778,14 @@ static topic_repr_t topic_repr(const cy_topic_t* const topic)
 }
 
 #endif
+
+/// Models interest of a remote subscriber in data that we publish on a topic.
+typedef struct
+{
+    cy_tree_t        index_id;
+    cy_list_member_t fifo;
+    uint64_t         id;
+} association_t;
 
 /// For each topic we are subscribed to, there is a single subscriber root.
 /// The application can create an arbitrary number of subscribers per topic, which all go under the same root.
@@ -848,14 +853,14 @@ static void topic_destroy(cy_topic_t* const topic)
 
 static int_fast8_t topic_lage(const cy_topic_t* const topic, const cy_us_t now)
 {
-    return log2_floor((uint64_t)max_i64(0, (now - topic->ts_origin) / MEGA));
+    return log2_floor((uint64_t)later(0, (now - topic->ts_origin) / MEGA));
 }
 
 /// CRDT merge operator on the topic log-age. Shift ts_origin into the past if needed.
 static void topic_merge_lage(cy_topic_t* const topic, const cy_us_t now, int_fast8_t r_lage)
 {
     r_lage           = (int_fast8_t)((r_lage < LAGE_MIN) ? LAGE_MIN : ((r_lage > LAGE_MAX) ? LAGE_MAX : r_lage));
-    topic->ts_origin = min_i64(topic->ts_origin, now - (pow2us(r_lage) * MEGA));
+    topic->ts_origin = sooner(topic->ts_origin, now - (pow2us(r_lage) * MEGA));
 }
 
 static bool is_pinned(const uint64_t hash) { return hash <= CY_SUBJECT_ID_PINNED_MAX; }
@@ -1210,9 +1215,10 @@ static cy_err_t topic_new(cy_t* const        cy,
     topic->ts_animated = now;
     topic->couplings   = NULL;
 
-    topic->masc_capacity = 30; ///< A sensible default, can be overridden, o1heap-optimized.
-    topic->masc_count    = 0;
-    topic->masc_set      = NULL; ///< Allocated lazily only if needed.
+    topic->assoc_limit       = 64; ///< Arbitrarily chosen, can be reconfigured by the application ad-hoc.
+    topic->assoc_count       = 0;
+    topic->assoc_index_by_id = NULL;
+    topic->assoc_fifo        = LIST_EMPTY;
 
     topic->sub_reader                   = NULL;
     topic->sub_index_dedup_by_remote_id = NULL;
@@ -1669,10 +1675,13 @@ cy_publisher_t* cy_advertise_client(cy_t* const cy, const cy_str_t name, const s
     return (res == CY_OK) ? pub : NULL;
 }
 
-// ReSharper disable once CppParameterMayBeConstPtrOrRef
-cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t deadline, const cy_bytes_t message)
+static cy_err_t do_publish(cy_publisher_t* const pub,
+                           const cy_us_t         deadline,
+                           const cy_bytes_t      message,
+                           const header_type_t   header_type,
+                           uint64_t* const       out_tag)
 {
-    if ((pub == NULL) || (deadline < 0)) {
+    if ((pub == NULL) || (deadline < 0) || ((message.data == NULL) && (message.size > 0))) {
         return CY_ERR_ARGUMENT;
     }
     cy_topic_t* const topic = pub->topic;
@@ -1682,9 +1691,14 @@ cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t deadline, const cy_
 
     // Compose the session layer header.
     // TODO: How do we handle CAN compatibility? No header for pinned topics? The transport will strip the header?
-    byte_t header[18] = { header_msg_be, (byte_t)topic_lage(topic, cy_now(cy)) };
-    (void)serialize_u64(serialize_u64(&header[2], topic->pub_next_tag++), topic->hash);
+    const uint64_t tag        = topic->pub_next_tag++;
+    byte_t         header[18] = { (byte_t)header_type, (byte_t)topic_lage(topic, cy_now(cy)) };
+    (void)serialize_u64(serialize_u64(&header[2], tag), topic->hash);
     const cy_bytes_t headed_message = { .size = sizeof(header), .data = header, .next = &message };
+
+    if (out_tag != NULL) {
+        *out_tag = tag;
+    }
 
     // Lazy creation is the simplest option because we have to drop the subject writer on topic reallocation,
     // and it may fail to be created at the time of reallocation, so we'd have to retry anyway.
@@ -1706,24 +1720,83 @@ cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t deadline, const cy_
                                                      headed_message);
 }
 
-// typedef struct
-// {
-//     cy_future_t     base;  ///< The key is the tag.
-//     cy_publisher_t* owner; ///< Back-reference to the publisher for cancellation etc.
-//
-//     /// Multicast association states mirroring those in the topic.
-//     size_t    masc_capacity;
-//     size_t    masc_count;
-//     uint32_t* masc_set;
-// } publish_future_t;
-//
-// cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadline, const cy_bytes_t message)
-// {
-//     (void)pub;
-//     (void)deadline;
-//     (void)message;
-//     return NULL;
-// }
+cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t deadline, const cy_bytes_t message)
+{
+    return do_publish(pub, deadline, message, header_msg_be, NULL);
+}
+
+typedef struct
+{
+    cy_future_t         base;  ///< The key is the tag.
+    cy_publisher_t*     owner; ///< Back-reference to the publisher for cancellation etc.
+    cy_publish_result_t result;
+
+    /// Retransmission states.
+    olga_event_t event;
+    cy_bytes_t*  data;
+    byte_t       epoch;
+
+    /// The association set is captured at publication and it becomes the target set we require acks from.
+    size_t   assoc_count;
+    uint64_t assoc_ids[];
+} publish_future_t;
+
+static const cy_future_vtable_t publish_future_vtable = {
+    0 // TODO
+};
+
+cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadline, const cy_bytes_t message)
+{
+    if ((pub == NULL) || (deadline < 0) || ((message.data == NULL) && (message.size > 0))) {
+        return NULL;
+    }
+    cy_topic_t* const topic = pub->topic;
+    cy_t* const       cy    = topic->cy;
+
+    // Prepare the future.
+    publish_future_t* const fut =
+      future_new(cy, &publish_future_vtable, sizeof(publish_future_t) + (topic->assoc_count * sizeof(uint64_t)));
+    if (fut == NULL) {
+        return NULL;
+    }
+    fut->owner  = pub;
+    fut->result = (cy_publish_result_t){ 0 };
+    fut->data   = bytes_dup(cy, message);
+    if (fut->data == NULL) {
+        mem_free(cy, fut);
+        return NULL;
+    }
+    fut->epoch       = 0;
+    fut->assoc_count = topic->assoc_count;
+
+    // Compute the timings but don't arm the timer yet because transmission may still fail.
+    // The transmission deadline of each attempt equals the next attempt time such that we don't enqueue duplicates.
+    // There must be some gap time before the overall deadline to ensure we can actually see the ACKs.
+    const cy_us_t now         = cy_now(cy);
+    const cy_us_t ack_timeout = cy_ack_timeout(pub);
+    const cy_us_t tx_deadline = sooner(deadline - ack_timeout, now + ack_timeout);
+
+    // Once the fallible operations are completed, it is safe to transmit.
+    const cy_err_t res = do_publish(pub, tx_deadline, message, header_msg_rel, &fut->base.key);
+    if (res != CY_OK) {
+        mem_free(cy, fut->data);
+        mem_free(cy, fut);
+        return NULL;
+    }
+
+    // Complete the final infallible steps.
+    // The association set is copied ORDERED from low to high values which enables bisection.
+    // Entries that didn't get an ack will be removed from the association set.
+    association_t* ass     = CAVL2_TO_OWNER(cavl2_min(topic->assoc_index_by_id), association_t, index_id);
+    size_t         ass_idx = 0;
+    while ((ass_idx < fut->assoc_count) && (ass != NULL)) {
+        fut->assoc_ids[ass_idx++] = ass->id;
+        ass                       = CAVL2_TO_OWNER(cavl2_next_greater(&ass->index_id), association_t, index_id);
+    }
+    future_index_insert(&fut->base, &topic->pub_futures_by_tag, fut->base.key);
+    future_deadline_arm(&fut->base, now + ack_timeout);
+    return &fut->base;
+}
 
 cy_prio_t cy_priority(const cy_publisher_t* const pub) { return (pub != NULL) ? pub->priority : cy_prio_nominal; }
 void      cy_priority_set(cy_publisher_t* const pub, const cy_prio_t priority)
@@ -2523,7 +2596,7 @@ cy_subscriber_t* cy_subscribe_ordered(cy_t* const    cy,
     if ((cy != NULL) && (reordering_window >= 0)) {
         const subscriber_params_t params = {
             .extent_pure         = extent,
-            .reordering_window   = min_i64(reordering_window, SESSION_LIFETIME / 2), // sane limit for extra paranoia
+            .reordering_window   = sooner(reordering_window, SESSION_LIFETIME / 2), // sane limit for extra paranoia
             .reordering_capacity = REORDERING_CAPACITY_DEFAULT,
         };
         return subscribe(cy, name, params);
@@ -2796,7 +2869,7 @@ cy_err_t cy_spin_until(cy_t* const cy, const cy_us_t deadline)
     cy_us_t  now = 0;
     cy_err_t err = CY_OK;
     do {
-        const cy_us_t wait_deadline = min_i64(deadline, min_i64(cy->gossip_next_urgent, cy->gossip_next));
+        const cy_us_t wait_deadline = sooner(deadline, sooner(cy->gossip_next_urgent, cy->gossip_next));
         err                         = cy->platform->vtable->spin(cy->platform, wait_deadline);
         if (err == CY_OK) {
             err = poll(cy, &now);
@@ -2854,14 +2927,11 @@ cy_str_t cy_topic_name(const cy_topic_t* const topic)
 uint64_t cy_topic_hash(const cy_topic_t* const topic) { return (topic != NULL) ? topic->hash : UINT64_MAX; }
 cy_t*    cy_topic_owner(const cy_topic_t* const topic) { return (topic != NULL) ? topic->cy : NULL; }
 
-size_t cy_topic_multicast_association_capacity(const cy_topic_t* const topic)
-{
-    return (topic != NULL) ? topic->masc_capacity : 0;
-}
-void cy_topic_multicast_association_capacity_set(cy_topic_t* const topic, const size_t capacity)
+size_t cy_topic_association_limit(const cy_topic_t* const topic) { return (topic != NULL) ? topic->assoc_limit : 0; }
+void   cy_topic_association_limit_set(cy_topic_t* const topic, const size_t limit)
 {
     if (topic != NULL) {
-        topic->masc_capacity = capacity;
+        topic->assoc_limit = limit;
     }
 }
 
