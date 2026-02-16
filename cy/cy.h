@@ -514,6 +514,12 @@ cy_str_t cy_topic_name(const cy_topic_t* const topic);
 uint64_t cy_topic_hash(const cy_topic_t* const topic);
 cy_t*    cy_topic_owner(const cy_topic_t* const topic);
 
+/// Reliable delivery is guaranteed to at most this many subscribers on a topic; excess are best-effort.
+/// The limit is intended to bound memory use on high-fanout topics.
+/// A sensible default is provided that is large enough for most scenarios, so usually this does not need changing.
+size_t cy_topic_multicast_association_capacity(const cy_topic_t* const topic);
+void   cy_topic_multicast_association_capacity_set(cy_topic_t* const topic, const size_t capacity);
+
 /// Provides access to the application-specific context associated per topic.
 /// By default it is set to CY_USER_CONTEXT_EMPTY when the topic is created.
 /// It can be used to associate arbitrary application-specific data with the topic.

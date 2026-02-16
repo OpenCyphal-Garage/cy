@@ -100,6 +100,11 @@ cy_gen_test_intrusive_matrix(test_intrusive_subject_id
         src/test_intrusive_subject_id.c
         src/helpers.c
 )
+cy_gen_test_intrusive_matrix(test_intrusive_misc
+        src/test_intrusive_misc.c
+        src/helpers.c
+        platform_stubs/guarded_heap.c
+)
 
 # API TESTS.
 # These tests only have access to the public API and are written in modern C++.

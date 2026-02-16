@@ -195,7 +195,7 @@ typedef enum
 
 static uint32_t topic_subject_id(const cy_topic_t* const topic);
 static cy_str_t name_normalize(const size_t in_size, const char* in, const size_t dest_size, char* const dest);
-static cy_err_t name_assign(cy_t* const cy, cy_str_t* const assignee, const cy_str_t name);
+static cy_err_t name_assign(const cy_t* const cy, cy_str_t* const assignee, const cy_str_t name);
 
 static size_t  larger(const size_t a, const size_t b) { return (a > b) ? a : b; }
 static size_t  smaller(const size_t a, const size_t b) { return (a < b) ? a : b; }
@@ -238,6 +238,9 @@ static bool is_quadratic_residue_prime(const uint32_t a, const uint32_t p)
     return (a == 0) || (pow_mod_u32(a, (p - 1U) / 2U, p) == 1U);
 }
 
+/// Deterministic in the sense that if the MSb 32 are zero, the result is the same as the input.
+static uint32_t hash64to32(const uint64_t x) { return (uint32_t)((x >> 32U) ^ (x & UINT32_MAX)); }
+
 /// The limits are inclusive. Returns min unless min < max.
 static int64_t random_int(const cy_t* const cy, const int64_t min, const int64_t max)
 {
@@ -257,12 +260,12 @@ static void* wkv_realloc(wkv_t* const self, void* ptr, const size_t new_size)
     return ((cy_t*)self->context)->platform->vtable->realloc(((cy_t*)self->context)->platform, ptr, new_size);
 }
 
-static void* mem_alloc(cy_t* const cy, const size_t size)
+static void* mem_alloc(const cy_t* const cy, const size_t size)
 {
     return cy->platform->vtable->realloc(cy->platform, NULL, size);
 }
 
-static void* mem_alloc_zero(cy_t* const cy, const size_t size)
+static void* mem_alloc_zero(const cy_t* const cy, const size_t size)
 {
     void* const out = mem_alloc(cy, size);
     if (out != NULL) {
@@ -276,6 +279,80 @@ static void mem_free(const cy_t* const cy, void* ptr)
     if (ptr != NULL) {
         cy->platform->vtable->realloc(cy->platform, ptr, 0);
     }
+}
+
+/// The chunk size is optimized to minimize heap fragmentation. See o1heap for theory.
+/// This is only used with reliable transmissions where the library needs to store the payload for possible retransmits.
+#define BYTES_DUP_CHUNK (1024U - (sizeof(void*) * 2U))
+
+/// Frees the chain of bytes assuming that each instance is stored in the same block with the data it holds.
+static void bytes_undup(const cy_t* const cy, cy_bytes_t* bytes)
+{
+    assert(cy != NULL);
+    static const size_t data_per_chunk = BYTES_DUP_CHUNK - sizeof(cy_bytes_t);
+    while (bytes != NULL) {
+        assert(bytes->data == ((const void*)(bytes + 1)));
+        assert((bytes->next == NULL) ? (bytes->size <= data_per_chunk) : (bytes->size == data_per_chunk));
+        cy_bytes_t* const next = (cy_bytes_t*)bytes->next;
+        mem_free(cy, bytes);
+        bytes = next;
+    }
+}
+
+/// Copies bytes to the heap in small chunks to reduce fragmentation risks. NULL on OOM. Use bytes_undup() to undo.
+static cy_bytes_t* bytes_dup(const cy_t* const cy, const cy_bytes_t src)
+{
+    assert(cy != NULL);
+    static const size_t data_per_chunk = BYTES_DUP_CHUNK - sizeof(cy_bytes_t);
+    const cy_bytes_t*   in             = &src;
+    size_t              in_offset      = 0;
+    cy_bytes_t*         head           = NULL;
+    cy_bytes_t*         tail           = NULL;
+    while (true) {
+        while ((in != NULL) && (in_offset >= in->size)) { // skip empty
+            in        = in->next;
+            in_offset = 0;
+        }
+        if (in == NULL) {
+            break;
+        }
+        assert((in->size == 0) || (in->data != NULL));
+
+        cy_bytes_t* const chunk = (cy_bytes_t*)mem_alloc(cy, BYTES_DUP_CHUNK);
+        if (chunk == NULL) {
+            bytes_undup(cy, head);
+            return NULL;
+        }
+        chunk->size = 0;
+        chunk->data = (const void*)(chunk + 1);
+        chunk->next = NULL;
+
+        if (tail == NULL) {
+            head = chunk;
+        } else {
+            tail->next = chunk;
+        }
+        tail = chunk;
+
+        while (chunk->size < data_per_chunk) {
+            while ((in != NULL) && (in_offset >= in->size)) {
+                in        = in->next;
+                in_offset = 0;
+            }
+            if (in == NULL) {
+                break;
+            }
+            assert((in->size == 0) || (in->data != NULL));
+
+            const size_t copy_size = smaller(data_per_chunk - chunk->size, in->size - in_offset);
+            assert(copy_size > 0);
+            memcpy(((byte_t*)(chunk + 1)) + chunk->size, ((const byte_t*)in->data) + in_offset, copy_size);
+            chunk->size += copy_size;
+            in_offset += copy_size;
+        }
+        assert(chunk->size <= data_per_chunk);
+    }
+    return head;
 }
 
 /// Simply returns the value of the first hit. Useful for existence checks.
@@ -636,6 +713,16 @@ struct cy_topic_t
     cy_us_t ts_origin;   ///< An approximation of when the topic was first seen on the network.
     cy_us_t ts_animated; ///< Last time the topic saw activity that prevents it from being retired.
 
+    /// Multicast association set.
+    /// Keeps a subset of remote-IDs that have confirmed reception of reliable multicast publications on this topic.
+    /// If the number of subscribers exceeds the capacity, only some subset will be stored.
+    /// Since this is needed only for topics on which we publish reliably, the set is allocated lazily on first use;
+    /// this also provides the opportunity to change its size before use if needed.
+    /// We store 32-bit remote-ID hashes to conserve space; the collision risk is minimal and here is acceptable.
+    size_t    masc_capacity;
+    size_t    masc_count;
+    uint32_t* masc_set;
+
     /// Publisher-related states.
     ///
     /// The tag counter is random-initialized when topic created, then incremented with each publish.
@@ -648,6 +735,7 @@ struct cy_topic_t
     uint64_t             pub_next_tag;
     size_t               pub_count;  ///< Number of active advertisements; counted for garbage collection.
     cy_subject_writer_t* pub_writer; ///< Initially NULL, created ad-hoc, then lives on until topic destruction.
+    cy_tree_t*           pub_futures_by_tag;
 
     /// Subscriber-related states.
     ///
@@ -1117,17 +1205,25 @@ static cy_err_t topic_new(cy_t* const        cy,
     topic->evictions = evictions;
     topic->hash      = hash;
 
-    const cy_us_t now                   = cy_now(cy);
-    topic->ts_origin                    = now - (pow2us(lage) * MEGA);
-    topic->ts_animated                  = now;
-    topic->pub_next_tag                 = cy->platform->vtable->random(cy->platform);
-    topic->couplings                    = NULL;
+    const cy_us_t now  = cy_now(cy);
+    topic->ts_origin   = now - (pow2us(lage) * MEGA);
+    topic->ts_animated = now;
+    topic->couplings   = NULL;
+
+    topic->masc_capacity = 30; ///< A sensible default, can be overridden, o1heap-optimized.
+    topic->masc_count    = 0;
+    topic->masc_set      = NULL; ///< Allocated lazily only if needed.
+
     topic->sub_reader                   = NULL;
     topic->sub_index_dedup_by_remote_id = NULL;
     topic->sub_list_dedup_by_recency    = LIST_EMPTY;
-    topic->pub_count                    = 0;
-    topic->pub_writer                   = NULL;
-    topic->user_context                 = CY_USER_CONTEXT_EMPTY;
+
+    topic->pub_next_tag       = cy->platform->vtable->random(cy->platform);
+    topic->pub_count          = 0;
+    topic->pub_writer         = NULL;
+    topic->pub_futures_by_tag = NULL;
+
+    topic->user_context = CY_USER_CONTEXT_EMPTY;
 
     // Insert the new topic into the name and hash indexes. TODO ensure uniqueness.
     topic->index_name = wkv_set(&cy->topics_by_name, resolved_name);
@@ -1609,6 +1705,25 @@ cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t deadline, const cy_
                                                      pub->priority,
                                                      headed_message);
 }
+
+// typedef struct
+// {
+//     cy_future_t     base;  ///< The key is the tag.
+//     cy_publisher_t* owner; ///< Back-reference to the publisher for cancellation etc.
+//
+//     /// Multicast association states mirroring those in the topic.
+//     size_t    masc_capacity;
+//     size_t    masc_count;
+//     uint32_t* masc_set;
+// } publish_future_t;
+//
+// cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadline, const cy_bytes_t message)
+// {
+//     (void)pub;
+//     (void)deadline;
+//     (void)message;
+//     return NULL;
+// }
 
 cy_prio_t cy_priority(const cy_publisher_t* const pub) { return (pub != NULL) ? pub->priority : cy_prio_nominal; }
 void      cy_priority_set(cy_publisher_t* const pub, const cy_prio_t priority)
@@ -2739,6 +2854,17 @@ cy_str_t cy_topic_name(const cy_topic_t* const topic)
 uint64_t cy_topic_hash(const cy_topic_t* const topic) { return (topic != NULL) ? topic->hash : UINT64_MAX; }
 cy_t*    cy_topic_owner(const cy_topic_t* const topic) { return (topic != NULL) ? topic->cy : NULL; }
 
+size_t cy_topic_multicast_association_capacity(const cy_topic_t* const topic)
+{
+    return (topic != NULL) ? topic->masc_capacity : 0;
+}
+void cy_topic_multicast_association_capacity_set(cy_topic_t* const topic, const size_t capacity)
+{
+    if (topic != NULL) {
+        topic->masc_capacity = capacity;
+    }
+}
+
 cy_user_context_t* cy_topic_user_context(cy_topic_t* const topic)
 {
     return (topic != NULL) ? &topic->user_context : NULL;
@@ -3035,7 +3161,7 @@ static bool is_valid_char(const char c) { return (c >= 33) && (c <= 126); }
 
 /// Normalizes the name and copies it into a heap-allocated storage.
 /// On OOM failure, the original is left unchanged.
-static cy_err_t name_assign(cy_t* const cy, cy_str_t* const assignee, const cy_str_t name)
+static cy_err_t name_assign(const cy_t* const cy, cy_str_t* const assignee, const cy_str_t name)
 {
     assert(assignee != NULL);
     if (cy != NULL) {
