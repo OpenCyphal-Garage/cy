@@ -517,6 +517,7 @@ cy_t*    cy_topic_owner(const cy_topic_t* const topic);
 /// Reliable delivery is guaranteed to at most this many subscribers on a topic; excess are best-effort.
 /// The limit is intended to bound memory use on high-fanout topics.
 /// A sensible default is provided that is large enough for most scenarios, so usually this does not need changing.
+/// Changes will take effect eventually.
 size_t cy_topic_association_limit(const cy_topic_t* const topic);
 void   cy_topic_association_limit_set(cy_topic_t* const topic, const size_t limit);
 

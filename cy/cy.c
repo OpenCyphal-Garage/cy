@@ -132,9 +132,6 @@ struct cy_t
     wkv_t subscribers_by_pattern; ///< Only patterns for implicit subscriptions on gossips.
 
     /// Pending network state indexes. Removal is guided by remote nodes and by deadline (via olga).
-    /// We use separate indexes because messages use the same tag for ack and response correlation,
-    /// and also for faster lookup.
-    cy_tree_t* publish_futures_by_tag;
     cy_tree_t* request_futures_by_tag;
     cy_tree_t* response_futures_by_tag;
 
@@ -567,7 +564,7 @@ static int32_t future_cavl_compare(const void* const user, const cy_tree_t* cons
 {
     const uint64_t outer = *(const uint64_t*)user;
     const uint64_t inner = ((const cy_future_t*)node)->key;
-    return (outer == inner) ? 0 : ((outer > inner) ? +1 : -1); // NOLINT(*-nested-conditional-operator)
+    return (outer == inner) ? 0 : ((outer > inner) ? +1 : -1);
 }
 
 /// Returns false if such key already exists (index not modified).
@@ -585,9 +582,9 @@ static void future_index_remove(cy_future_t* const self, cy_tree_t** const index
     cavl2_remove(index, &self->index);
 }
 
-static cy_future_t* future_index_lookup(cy_tree_t** const index, const uint64_t key)
+static cy_future_t* future_index_lookup(cy_tree_t* const index, const uint64_t key)
 {
-    return (cy_future_t*)cavl2_find(*index, &key, future_cavl_compare);
+    return (cy_future_t*)cavl2_find(index, &key, future_cavl_compare);
 }
 
 // FUTURE TIMEOUT
@@ -717,8 +714,8 @@ struct cy_topic_t
     /// If the count reaches the limit, the least recently seen ones will be overwritten.
     size_t     assoc_limit;
     size_t     assoc_count;
-    cy_tree_t* assoc_index_by_id;
-    cy_list_t  assoc_fifo;
+    cy_tree_t* assoc_index_by_id; ///< Ascending, smallest on the left.
+    cy_list_t  assoc_fifo;        ///< Oldest at the tail, newest at the head.
 
     /// Publisher-related states.
     ///
@@ -782,10 +779,56 @@ static topic_repr_t topic_repr(const cy_topic_t* const topic)
 /// Models interest of a remote subscriber in data that we publish on a topic.
 typedef struct
 {
-    cy_tree_t        index_id;
-    cy_list_member_t fifo;
+    cy_tree_t        index_id; ///< Ascending, smallest on the left.
+    cy_list_member_t fifo;     ///< Oldest at the tail.
     uint64_t         id;
 } association_t;
+
+typedef struct
+{
+    cy_topic_t* topic;
+    uint64_t    remote_id;
+} association_factory_context_t;
+
+static int32_t association_cavl_compare(const void* const user, const cy_tree_t* const node)
+{
+    const uint64_t outer = *(const uint64_t*)user;
+    const uint64_t inner = ((const association_t*)node)->id;
+    return (outer == inner) ? 0 : ((outer > inner) ? +1 : -1);
+}
+
+static void association_forget(cy_topic_t* const topic, association_t* const assoc)
+{
+    cy_t* const cy = topic->cy;
+    assert(cavl2_is_inserted(topic->assoc_index_by_id, &assoc->index_id));
+    cavl2_remove(&topic->assoc_index_by_id, &assoc->index_id);
+    delist(&topic->assoc_fifo, &assoc->fifo);
+    topic->assoc_count--;
+    CY_TRACE(cy, "⛓🗑 %s N%016jx count=%zu", topic_repr(topic).str, (uintmax_t)assoc->id, topic->assoc_count);
+    mem_free(cy, assoc);
+}
+
+/// Creates a new association fully except does not insert it into the FIFO.
+/// Will automatically forget excess associations if the limit is reached. Returns NULL on OOM.
+static cy_tree_t* association_cavl_factory(void* const user)
+{
+    association_factory_context_t* const ctx   = (association_factory_context_t*)user;
+    cy_topic_t* const                    topic = ctx->topic;
+    cy_t* const                          cy    = topic->cy;
+    // Strictly respect the limit to avoid memory overconsumption. The limit may have changed since last call.
+    while (topic->assoc_count >= larger(topic->assoc_limit, 1)) {
+        association_forget(topic, LIST_TAIL(topic->assoc_fifo, association_t, fifo));
+    }
+    // Allocate the new one after the memory is reclaimed.
+    association_t* const assoc = (association_t*)mem_alloc_zero(cy, sizeof(association_t));
+    if (assoc != NULL) {
+        assoc->id = ctx->remote_id;
+        topic->assoc_count++;
+        CY_TRACE(cy, "⛓✨ %s N%016jx count=%zu", topic_repr(topic).str, (uintmax_t)assoc->id, topic->assoc_count);
+    }
+    assert(topic->assoc_count <= topic->assoc_limit);
+    return (cy_tree_t*)assoc;
+}
 
 /// For each topic we are subscribed to, there is a single subscriber root.
 /// The application can create an arbitrary number of subscribers per topic, which all go under the same root.
@@ -1745,6 +1788,11 @@ static const cy_future_vtable_t publish_future_vtable = {
     0 // TODO
 };
 
+static void publish_future_on_ack(publish_future_t* const self, const uint64_t remote_id)
+{
+    //
+}
+
 cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadline, const cy_bytes_t message)
 {
     if ((pub == NULL) || (deadline < 0) || ((message.data == NULL) && (message.size > 0))) {
@@ -2001,7 +2049,7 @@ static int32_t dedup_cavl_compare(const void* const user, const cy_tree_t* const
 {
     const uint64_t outer = *(const uint64_t*)user;
     const uint64_t inner = ((const dedup_t*)node)->remote_id;
-    return (outer == inner) ? 0 : ((outer > inner) ? +1 : -1); // NOLINT(*-nested-conditional-operator)
+    return (outer == inner) ? 0 : ((outer > inner) ? +1 : -1);
 }
 
 static cy_tree_t* dedup_factory(void* const user)
@@ -2047,7 +2095,7 @@ static int32_t reordering_slot_cavl_compare(const void* const user, const cy_tre
 {
     const uint64_t outer = *(const uint64_t*)user;
     const uint64_t inner = ((const reordering_slot_t*)node)->lin_tag;
-    return (outer == inner) ? 0 : ((outer > inner) ? +1 : -1); // NOLINT(*-nested-conditional-operator)
+    return (outer == inner) ? 0 : ((outer > inner) ? +1 : -1);
 }
 
 /// Subscribers operating in the ordered mode use this instance, one per (remote node & topic) per subscription,
@@ -2316,7 +2364,6 @@ static int32_t reordering_cavl_compare(const void* const user, const cy_tree_t* 
     const reordering_context_t* const outer = (const reordering_context_t*)user;
     const reordering_t*               inner = (const reordering_t*)node;
     if (outer->lane.id == inner->remote_id) {
-        // NOLINTNEXTLINE(*-nested-conditional-operator)
         return (outer->topic->hash == inner->topic->hash) ? 0 : ((outer->topic->hash > inner->topic->hash) ? +1 : -1);
     }
     return (outer->lane.id > inner->remote_id) ? +1 : -1;
@@ -2743,7 +2790,6 @@ cy_t* cy_new(cy_platform_t* const platform)
     cy->subscribers_by_pattern.sub_one = cy_name_one;
     cy->subscribers_by_pattern.sub_any = cy_name_any;
 
-    cy->publish_futures_by_tag  = NULL;
     cy->request_futures_by_tag  = NULL;
     cy->response_futures_by_tag = NULL;
 
@@ -2957,33 +3003,30 @@ static void on_response(cy_t* const             cy,
 }
 #endif
 
-#if 0 // NOLINT(readability-avoid-unconditional-preprocessor-if)
-static void on_message_ack(cy_t* const cy, publish_future_t* const future)
+static void on_message_ack(cy_t* const cy, cy_topic_t* const topic, const uint64_t remote_id, const uint64_t tag)
 {
-    // Currently, we use a very simple implementation that ceases delivery attempts after the first acknowledgment
-    // is received, similar to the CAN bus. Such mode of reliability is useful in the following scenarios:
-    //
-    // - With topics with a single subscriber, or sent via P2P transport (responses to published messages).
-    //   With a single recipient, a single acknowledgement is sufficient to guarantee delivery.
-    //
-    // - The application only cares about one acknowledgement (anycast), e.g., with modular redundant nodes.
-    //
-    // - The application assumes that if one copy was delivered successfully, then other copies have likely
-    //   succeeded as well (depends on the required reliability guarantees), similar to the CAN bus.
-    //
-    // TODO In the future, there are plans to extend this mechanism to track the number of acknowledgements per topic,
-    // such that we can keep pending publications until a specified number of acknowledgements have been received.
-    // A remote node can be considered to have disappeared if it failed to acknowledge a transfer after the maximum
-    // number of attempts have been made (i.e., the deadline expired). This is somewhat similar in principle to the
-    // connection-oriented DDS/RTPS approach, where pub/sub associations are established and removed automatically,
-    // transparently to the application.
-    future_deadline_disarm(&future->base);
-    future_index_remove(&future->base, &cy->publish_futures_by_tag);
-    assert(future->result.acknowledgements == 0);
-    future->result.acknowledgements++;
-    future_notify(&future->base);
+    // Update the subscriber association set. Note that by design we don't require a pending future for this to work.
+    association_factory_context_t fac = { .topic = topic, .remote_id = remote_id };
+    association_t* const ass = CAVL2_TO_OWNER(cavl2_find_or_insert(&topic->assoc_index_by_id, // ---------------
+                                                                   &remote_id,
+                                                                   association_cavl_compare,
+                                                                   &fac,
+                                                                   association_cavl_factory),
+                                              association_t,
+                                              index_id);
+    if (ass != NULL) {
+        enlist_head(&topic->assoc_fifo, &ass->fifo); // move to the front
+    } else {
+        ON_ASYNC_ERROR(cy, topic, CY_ERR_MEMORY);
+    }
+    assert(topic->assoc_count <= topic->assoc_limit);
+
+    // Report to the future if there is still one around. This does not affect the association set updates.
+    publish_future_t* const future = (publish_future_t*)future_index_lookup(topic->pub_futures_by_tag, tag);
+    if (future != NULL) {
+        publish_future_on_ack(future, remote_id);
+    }
 }
-#endif
 
 #if 0 // NOLINT(readability-avoid-unconditional-preprocessor-if)
 static void on_response_ack(cy_t* const cy, response_future_t* const future, const bool positive)
@@ -3109,22 +3152,25 @@ void cy_on_message(cy_platform_t* const             platform,
             break;
         }
 
-#if 0 // NOLINT(readability-avoid-unconditional-preprocessor-if)
         case header_msg_ack: {
-            const uint64_t tag = deserialize_u56(&header[1]);
-            assert(type == header_msg_ack);
-            publish_future_t* const future = (publish_future_t*)future_index_lookup(&cy->publish_futures_by_tag, tag);
-            if (future != NULL) {
-                on_message_ack(cy, future);
+            if (header_read < 17) {
+                goto bad_message;
+            }
+            const uint64_t    tag   = deserialize_u64(&header[1]);
+            const uint64_t    hash  = deserialize_u64(&header[9]);
+            cy_topic_t* const topic = cy_topic_find_by_hash(cy, hash);
+            if (topic != NULL) {
+                on_message_ack(cy, topic, lane.id, tag);
             } else {
                 CY_TRACE(cy,
-                         "⚠️ Orphan message ACK from %016jx for tag %016jx",
+                         "⚠️ Orphan message ACK N%016jx T%016jx tag=%016jx",
                          (uintmax_t)lane.id,
+                         (uintmax_t)hash,
                          (uintmax_t)tag);
             }
             break;
         }
-#endif
+
 #if 0 // NOLINT(readability-avoid-unconditional-preprocessor-if)
         case header_rsp_be:
         case header_rsp_rel: {

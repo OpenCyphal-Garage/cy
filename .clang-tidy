@@ -55,6 +55,8 @@ Checks: >-
   -*-enum-size,
   -*-macro-usage,
   -*-deprecated-headers,
+  -*-nested-conditional-operator,
+  -*-security.ArrayBound,
 CheckOptions:
   - key: misc-const-correctness.TransformPointersAsValues
     value: 'true'
