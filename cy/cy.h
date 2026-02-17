@@ -306,9 +306,9 @@ typedef struct cy_substitution_t
     size_t   ordinal; ///< Zero-based index of the substitution token as occurred in the pattern.
 } cy_substitution_t;
 
-/// When a name pattern match occurs, Cy will store the string substitutions that had to be made to
-/// achieve the match. The substitutions are listed in the order of their occurrence in the pattern.
-/// For example, if the pattern is "ins/*/data/#" and the key is "ins/0/data/foo/456",
+/// When a name pattern match occurs, Cy will store the string substitutions that had to be made to achieve the match.
+/// The substitutions are listed in the order of their occurrence in the pattern.
+/// For example, if the pattern is "ins/*/data/>" and the key is "ins/0/data/foo/456",
 /// then the substitutions will be (together with their ordinals):
 ///  1. #0 "0"
 ///  2. #1 "foo"

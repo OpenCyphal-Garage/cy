@@ -435,6 +435,7 @@ static size_t bitmap_footprint(const size_t count) { return ((count + 63U) / 64U
 bitmap_t* bitmap_new(const cy_t* const cy, const size_t count) { return mem_alloc_zero(cy, bitmap_footprint(count)); }
 
 static void bitmap_set(bitmap_t* const bitmap, const size_t bit) { bitmap[bit / 64U] |= 1ULL << (bit % 64U); }
+static void bitmap_clear(bitmap_t* const bitmap, const size_t bit) { bitmap[bit / 64U] &= ~(1ULL << (bit % 64U)); }
 
 static bool bitmap_test(const bitmap_t* const bitmap, const size_t bit)
 {
@@ -1299,7 +1300,7 @@ static cy_err_t topic_new(cy_t* const        cy,
     topic->ts_animated = now;
     topic->couplings   = NULL;
 
-    topic->assoc_slack_limit  = 3;
+    topic->assoc_slack_limit  = 2;
     topic->assoc_count        = 0;
     topic->assoc_by_remote_id = NULL;
 
@@ -1830,12 +1831,22 @@ typedef struct
 
 static cy_future_status_t publish_future_status(const cy_future_t* const self)
 {
-    //
+    return ((const publish_future_t*)self)->status;
 }
-static size_t publish_future_result(cy_future_t* const self, const size_t storage_size, void* const storage);
-static void   publish_future_cancel(cy_future_t* const self);
-static void   publish_future_timeout(cy_future_t* const self);
-static void   publish_future_finalize(cy_future_t* const self);
+
+static size_t publish_future_result(cy_future_t* const self, const size_t storage_size, void* const storage)
+{
+    (void)self;         // Currently we don't return anything, but we could easily expose some ack-related information.
+    (void)storage_size; // For example, the number of acks/retransmissions, etc.
+    (void)storage;
+    return 0;
+}
+
+static void publish_future_cancel(cy_future_t* const self);
+
+static void publish_future_timeout(cy_future_t* const self);
+
+static void publish_future_finalize(cy_future_t* const self);
 
 static const cy_future_vtable_t publish_future_vtable = { .status   = publish_future_status,
                                                           .result   = publish_future_result,
@@ -1844,51 +1855,51 @@ static const cy_future_vtable_t publish_future_vtable = { .status   = publish_fu
                                                           .finalize = publish_future_finalize };
 
 /// When we're done with the future, we need to update the shared states of our associations.
-/// This is where we update the slack counters and enforce the slack limits.
-/// This function is idempotent.
+/// This is where we update the slack counters and enforce the slack limits. This function is idempotent.
 static void publish_future_release_associations(publish_future_t* const self)
 {
     cy_topic_t* const topic = self->owner->topic;
     for (size_t i = 0; i < self->assoc_capacity; i++) {
         association_t* const ass = self->assoc_set[i];
-        assert(ass->pending_count > 0);
-        ass->pending_count--;
-        if (!bitmap_test(self->assoc_knockout, i)) {
+        self->assoc_set[i]       = NULL; // no longer safe to keep because we decrement the pending refcount
+        if (bitmap_test(self->assoc_knockout, i)) {
             ass->slack++;
         }
+        assert(ass->pending_count > 0);
+        ass->pending_count--;
         if ((ass->slack >= topic->assoc_slack_limit) && (ass->pending_count == 0)) {
             association_forget(topic, ass);
         }
     }
-    // Seal the state to make this idempodent.
+    // Seal the state to make this idempotent.
     self->assoc_capacity = 0;
     mem_free(topic->cy, self->assoc_knockout);
     self->assoc_knockout = NULL;
 }
 
+static void publish_future_cleanup(publish_future_t* const self)
+{
+    future_deadline_disarm(&self->base);
+    future_index_remove(&self->base, &self->owner->topic->pub_futures_by_tag);
+    publish_future_release_associations(self);
+    future_notify(&self->base);
+}
+
 static void publish_future_on_ack(publish_future_t* const self, association_t* const association)
 {
-    // State consistency checks.
-    assert(association->slack == 0);
-    assert(self->status == cy_future_pending);
+    assert(association->slack == 0); // the slack must be reset by the caller, the topic-level ack handler
+    assert((self->status == cy_future_pending) || (self->status == cy_future_success));
+    self->status = cy_future_success; // any ack -> success by design
 
-    // Check if we have this association and it hasn't been acked already.
-    const size_t idx = association_bisect(self->assoc_set, self->assoc_capacity, association->remote_id);
-    if ((idx >= self->assoc_capacity) || (self->assoc_set[idx] != association) ||
-        bitmap_test(self->assoc_knockout, idx)) {
-        return; // The association wasn't known at the time of publication or already acknowledged.
+    const size_t idx   = association_bisect(self->assoc_set, self->assoc_capacity, association->remote_id);
+    const bool   known = (idx < self->assoc_capacity) && (self->assoc_set[idx] == association);
+    if (known && bitmap_test(self->assoc_knockout, idx)) {
+        bitmap_clear(self->assoc_knockout, idx);
+        assert(self->assoc_remaining > 0);
+        self->assoc_remaining--;
     }
-
-    // Process the new ack.
-    self->status = cy_future_success;
-    bitmap_set(self->assoc_knockout, idx);
-    assert(self->assoc_remaining > 0);
-    self->assoc_remaining--;
-    if (self->assoc_remaining == 0) {
-        future_deadline_disarm(&self->base);
-        future_index_remove(&self->base, &self->owner->topic->pub_futures_by_tag);
-        publish_future_release_associations(self);
-        future_notify(&self->base);
+    if (self->assoc_remaining == 0) { // also handles the case of no known associations at publication
+        publish_future_cleanup(self);
     }
 }
 
@@ -1911,13 +1922,14 @@ cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadli
     fut->epoch           = 0;
     fut->assoc_capacity  = topic->assoc_count;
     fut->assoc_remaining = 0;
-    fut->assoc_knockout  = bitmap_new(cy, topic->assoc_count);
-    if (fut->assoc_knockout == NULL) {
+    fut->assoc_knockout  = bitmap_new(cy, fut->assoc_capacity);
+    if ((fut->assoc_knockout == NULL) && (fut->assoc_capacity > 0)) {
         mem_free(cy, fut);
         return NULL;
     }
     fut->data = bytes_dup(cy, message);
     if (fut->data == NULL) {
+        mem_free(cy, fut->assoc_knockout);
         mem_free(cy, fut);
         return NULL;
     }
@@ -1932,14 +1944,16 @@ cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadli
     // Once the fallible operations are completed, it is safe to transmit.
     const cy_err_t res = do_publish(pub, tx_deadline, message, header_msg_rel, &fut->base.key);
     if (res != CY_OK) {
-        mem_free(cy, fut->data);
+        bytes_undup(cy, fut->data);
+        mem_free(cy, fut->assoc_knockout);
         mem_free(cy, fut);
         return NULL;
     }
 
-    // Complete the final infallible steps.
+    // Populate the association pointer array ORDERED from low to high IDs for fast lookups.
     association_t* ass_cursor = (association_t*)cavl2_min(topic->assoc_by_remote_id);
     while ((fut->assoc_remaining < fut->assoc_capacity) && (ass_cursor != NULL)) {
+        assert(fut->assoc_knockout != NULL);
         // Some associations may be pending removal already, skip them. There will be unused pointers but we don't care.
         if (ass_cursor->slack < topic->assoc_slack_limit) {
             bitmap_set(fut->assoc_knockout, fut->assoc_remaining);
@@ -1951,8 +1965,13 @@ cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadli
         }
         ass_cursor = (association_t*)cavl2_next_greater((cy_tree_t*)ass_cursor);
     }
-    future_index_insert(&fut->base, &topic->pub_futures_by_tag, fut->base.key);
+    fut->assoc_capacity = fut->assoc_remaining; // trim the tail; unused pointers are cheap to ignore.
+
+    // Complete the final infallible steps.
     future_deadline_arm(&fut->base, now + ack_timeout);
+    const bool insert_ok = future_index_insert(&fut->base, &topic->pub_futures_by_tag, fut->base.key);
+    assert(insert_ok); // cannot fail by design
+    (void)insert_ok;
     return &fut->base;
 }
 
@@ -3127,14 +3146,13 @@ static void on_message_ack(cy_t* const       cy,
     if (ass != NULL) {
         assert(topic->assoc_count > 0);
         ass->slack = 0;
+        // Report to the future if there is still one around. This does not affect the association set updates.
+        publish_future_t* const future = (publish_future_t*)future_index_lookup(topic->pub_futures_by_tag, tag);
+        if (future != NULL) {
+            publish_future_on_ack(future, ass);
+        }
     } else {
         ON_ASYNC_ERROR(cy, topic, CY_ERR_MEMORY);
-    }
-
-    // Report to the future if there is still one around. This does not affect the association set updates.
-    publish_future_t* const future = (publish_future_t*)future_index_lookup(topic->pub_futures_by_tag, tag);
-    if (future != NULL) {
-        publish_future_on_ack(future, ass);
     }
 }
 
