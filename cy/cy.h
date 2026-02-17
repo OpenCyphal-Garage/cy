@@ -150,8 +150,11 @@ typedef enum cy_future_status_t
 cy_future_status_t cy_future_status(const cy_future_t* const self);
 
 /// The result depends on the type of the future; some intermediate results may be available while still pending.
-/// The lifetime of the returned pointer is bound to the lifetime of the future instance (valid until destroyed).
-void* cy_future_result(cy_future_t* const self);
+/// Returns the size of the result; if the size of the provided storage is less, the result may not be copied or
+/// may be copied incompletely depending on the specific future type. One valid use case is to pass in zero storage
+/// to query the size needed, and then allocate the storage and call this function again to copy the result,
+/// assuming the size hasn't increased in the meantime.
+size_t cy_future_result(cy_future_t* const self, const size_t storage_size, void* const storage);
 
 /// The application can store arbitrary data in the context to share information with the future callback, if used.
 cy_user_context_t cy_future_context(const cy_future_t* const self);

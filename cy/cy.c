@@ -519,7 +519,7 @@ static void message_skip(cy_message_t* const msg, const size_t offset)
 typedef struct cy_future_vtable_t
 {
     cy_future_status_t (*status)(const cy_future_t*);
-    void* (*result)(cy_future_t*);
+    size_t (*result)(cy_future_t*, size_t, void*);
     void (*cancel)(cy_future_t*); ///< Pre: status() == pending; post: status() != pending.
     void (*timeout)(cy_future_t*);
     void (*finalize)(cy_future_t*); ///< Invoked immediately before destruction; pre: status() != pending.
@@ -632,7 +632,10 @@ static void future_noop(cy_future_t* const self) { (void)self; }
 // FUTURE API
 
 cy_future_status_t cy_future_status(const cy_future_t* const self) { return self->vtable->status(self); }
-void*              cy_future_result(cy_future_t* const self) { return self->vtable->result(self); }
+size_t             cy_future_result(cy_future_t* const self, const size_t storage_size, void* const storage)
+{
+    return self->vtable->result(self, storage_size, storage);
+}
 
 cy_user_context_t cy_future_context(const cy_future_t* const self) { return self->context; }
 void cy_future_context_set(cy_future_t* const self, const cy_user_context_t context) { self->context = context; }
