@@ -37,6 +37,7 @@ struct cy_tree_t
 
 // Standard library includes come last.
 #include <assert.h>
+#include <limits.h>
 #include <string.h>
 
 // TODO FIXME REMOVE WHEN REFACTORING DONE
@@ -201,8 +202,13 @@ static int64_t min_i64(const int64_t a, const int64_t b) { return (a < b) ? a : 
 static cy_us_t later(const cy_us_t a, const cy_us_t b) { return max_i64(a, b); }
 static cy_us_t sooner(const cy_us_t a, const cy_us_t b) { return min_i64(a, b); }
 
+static byte_t popcount(const uint64_t x) { return (byte_t)__builtin_popcountll(x); }
+
+/// Number of leading zeros in [0,64].
+static byte_t clz64(const uint64_t x) { return (x > 0) ? (byte_t)__builtin_clzll(x) : 64; }
+
 /// Returns -1 if the argument is zero to allow contiguous comparison.
-static int_fast8_t log2_floor(const uint64_t x) { return (int_fast8_t)((x == 0) ? -1 : (63 - __builtin_clzll(x))); }
+static int_fast8_t log2_floor(const uint64_t x) { return (int_fast8_t)(63 - (int_fast8_t)clz64(x)); }
 
 /// The inverse of log2_floor() with the same special case: exp=-1 returns 0.
 static cy_us_t pow2us(const int_fast8_t exp)
@@ -415,6 +421,24 @@ static uint64_t deserialize_u64(const byte_t* ptr)
         value |= ((uint64_t)*ptr++ << (i * 8U));
     }
     return value;
+}
+
+// =====================================================================================================================
+//                                                      BITMAP
+// =====================================================================================================================
+
+typedef uint64_t bitmap_t;
+
+static size_t bitmap_footprint(const size_t count) { return ((count + 63U) / 64U) * sizeof(bitmap_t); }
+
+/// Initially the bitmap will have all bits cleared.
+bitmap_t* bitmap_new(const cy_t* const cy, const size_t count) { return mem_alloc_zero(cy, bitmap_footprint(count)); }
+
+static void bitmap_set(bitmap_t* const bitmap, const size_t bit) { bitmap[bit / 64U] |= 1ULL << (bit % 64U); }
+
+static bool bitmap_test(const bitmap_t* const bitmap, const size_t bit)
+{
+    return (bitmap[bit / 64U] & (1ULL << (bit % 64U))) != 0;
 }
 
 // =====================================================================================================================
@@ -666,23 +690,6 @@ void cy_future_destroy(cy_future_t* const self)
 //                                                      TOPICS
 // =====================================================================================================================
 
-/// We use uint64 bitmasks so this cannot exceed 64, but any smaller values are fine.
-/// There is benefit in using values a little under a power of 2 to enable more efficient o1heap allocations,
-/// but it's not essential.
-#define ASSOCIATION_CAPACITY 63U
-
-/// Models the interest of a remote subscriber in data that we publish on a topic.
-/// We store a small number of these in a contiguous array so linear search is optimal.
-/// Whenever an ack is received, the global epoch counter is incremented and assigned, which enables LRU eviction.
-/// Hence, zero epoch indicates a virgin association, which is also used to erase unresponsive entries.
-typedef struct
-{
-    uint64_t remote_id;  ///< Which remote has acked.
-    uint64_t epoch : 56; ///< Lower value indicates less recent activity; used for LRU eviction.
-    uint64_t slack : 8;  ///< Number of missed acks.
-} association_t;
-static_assert(sizeof(association_t) == 16, "Size is critical");
-
 /// A topic that is only used by pattern subscriptions (like `ins/*/data/>`, without publishers or explicit
 /// subscriptions) is called implicit. Such topics are automatically retired when they see no traffic and
 /// no gossips from publishers or receiving subscribers for implicit_topic_timeout.
@@ -732,11 +739,10 @@ struct cy_topic_t
     cy_us_t ts_animated; ///< Last time the topic saw activity that prevents it from being retired.
 
     /// Subscriber association set.
-    /// Keeps the (sub)set of remote-IDs that confirm reception of reliable multicast publications on this topic.
-    /// The set is lazily allocated on first reliable publish to conserve memory, kept alive until topic destroyed.
-    uint64_t assoc_epoch;       ///< Incremented with every ack to enable LRU association replacement.
-    byte_t   assoc_slack_limit; ///< Subscriber considered unresponsive if misses this many consecutive deliveries.
-    association_t* assoc_set;
+    /// The set of remote-IDs that confirm reception of reliable multicast publications on this topic.
+    byte_t     assoc_slack_limit; ///< Subscriber considered unresponsive if misses this many consecutive deliveries.
+    size_t     assoc_count;
+    cy_tree_t* assoc_by_remote_id;
 
     /// Publisher-related states.
     ///
@@ -797,6 +803,74 @@ static topic_repr_t topic_repr(const cy_topic_t* const topic)
 
 #endif
 
+/// Models the interest of a remote subscriber in data that we publish on a topic.
+typedef struct
+{
+    cy_tree_t index_remote_id;
+    uint64_t  remote_id;
+    size_t    pending_count; ///< Cannot be removed unless zero to avoid dangly pointers.
+    size_t    slack;
+} association_t;
+
+typedef struct
+{
+    cy_topic_t* topic;
+    uint64_t    remote_id;
+} association_factory_context_t;
+
+static int32_t association_cavl_compare(const void* const user, const cy_tree_t* const node)
+{
+    const uint64_t outer = *(const uint64_t*)user;
+    const uint64_t inner = ((const association_t*)node)->remote_id;
+    return (outer == inner) ? 0 : ((outer > inner) ? +1 : -1);
+}
+
+static void association_forget(cy_topic_t* const topic, association_t* const assoc)
+{
+    cy_t* const cy = topic->cy;
+    assert(cavl2_is_inserted(topic->assoc_by_remote_id, &assoc->index_remote_id));
+    cavl2_remove(&topic->assoc_by_remote_id, &assoc->index_remote_id);
+    topic->assoc_count--;
+    CY_TRACE(cy, "⛓🗑 %s N%016jx count=%zu", topic_repr(topic).str, (uintmax_t)assoc->remote_id, topic->assoc_count);
+    mem_free(cy, assoc);
+}
+
+static cy_tree_t* association_cavl_factory(void* const user)
+{
+    association_factory_context_t* const ctx   = (association_factory_context_t*)user;
+    cy_topic_t* const                    topic = ctx->topic;
+    cy_t* const                          cy    = topic->cy;
+    association_t* const                 assoc = (association_t*)mem_alloc_zero(cy, sizeof(association_t));
+    if (assoc != NULL) {
+        assoc->remote_id     = ctx->remote_id;
+        assoc->pending_count = 0;
+        assoc->slack         = 0;
+        topic->assoc_count++;
+        CY_TRACE(
+          cy, "⛓✨ %s N%016jx count=%zu", topic_repr(topic).str, (uintmax_t)assoc->remote_id, topic->assoc_count);
+    }
+    return (cy_tree_t*)assoc;
+}
+
+/// Given an array of association pointers sorted by remote-ID, locate the pointer pointing to the association with
+/// the given remote-ID or the position where it should be inserted if not found.
+static size_t association_bisect(association_t* const* const assoc, const size_t count, const uint64_t remote_id)
+{
+    assert((assoc != NULL) || (count == 0));
+    size_t lo = 0;
+    size_t hi = count;
+    while (lo < hi) {
+        const size_t mid = lo + ((hi - lo) / 2U);
+        assert(assoc[mid] != NULL);
+        if (assoc[mid]->remote_id < remote_id) {
+            lo = mid + 1U;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
 /// For each topic we are subscribed to, there is a single subscriber root.
 /// The application can create an arbitrary number of subscribers per topic, which all go under the same root.
 /// If pattern subscriptions are used, a single root may match multiple topics; the matching is tracked using
@@ -850,20 +924,6 @@ static int32_t cavl_comp_topic_subject_id(const void* const user, const cy_tree_
 }
 
 static bool topic_has_subscribers(const cy_topic_t* const topic) { return topic->couplings != NULL; }
-
-/// The association set is lazily initialized only if reliable publication is used. It is normally kept until destroyed.
-static bool topic_ensure_association_set(cy_topic_t* const topic)
-{
-    if (topic->assoc_set == NULL) {
-        topic->assoc_set = mem_alloc_zero(topic->cy, ASSOCIATION_CAPACITY * sizeof(association_t));
-        if (topic->assoc_set != NULL) {
-            for (size_t i = 0; i < ASSOCIATION_CAPACITY; i++) {
-                topic->assoc_set[i].remote_id = UINT64_MAX; // sentinel, inessential
-            }
-        }
-    }
-    return topic->assoc_set != NULL;
-}
 
 /// Topics are never destroyed synchronously to avoid potential state loss in the platform layer if the application
 /// publishes and/or subscribes intermittently. Instead, once all publishers and subscribers are gone, the topic
@@ -1239,9 +1299,9 @@ static cy_err_t topic_new(cy_t* const        cy,
     topic->ts_animated = now;
     topic->couplings   = NULL;
 
-    topic->assoc_epoch       = 0;
-    topic->assoc_slack_limit = 2;
-    topic->assoc_set         = NULL;
+    topic->assoc_slack_limit  = 3;
+    topic->assoc_count        = 0;
+    topic->assoc_by_remote_id = NULL;
 
     topic->sub_reader                   = NULL;
     topic->sub_index_dedup_by_remote_id = NULL;
@@ -1750,24 +1810,22 @@ cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t deadline, const cy_
 
 typedef struct
 {
-    cy_future_t     base; ///< The key is the tag.
-    cy_publisher_t* owner;
+    cy_future_t        base; ///< The key is the tag.
+    cy_publisher_t*    owner;
+    cy_future_status_t status;
 
     /// Retransmission states.
-    olga_event_t event;
-    cy_bytes_t*  data;
-    byte_t       epoch;
+    cy_bytes_t* data;
+    byte_t      epoch;
 
     /// The association set is captured at publication and it becomes the target set we require acks from.
-    /// Each ack knocks a bit out; those left standing by timeout indicate unresponsive remotes.
-    /// This only provides deterministic delivery as long as there are not too many remotes; otherwise, LRU
-    /// associations will be replaced. Crucially, the bitmap does not care about the replacement; since LRU policy
-    /// applies, the replacement takes away the node that is the least likely to respond, which is optimal.
-    ///
     /// If we started out with an empty set, it means that there are no known subscribers, so we will attempt to
     /// discover some. We do this by waiting for a single ack from anyone and calling it a day. If more acks arrive
     /// later, they will be processed for the topic and the assoc set updated accordingly in the background.
-    uint64_t assoc_knockout;
+    size_t         assoc_capacity;
+    size_t         assoc_remaining;
+    bitmap_t*      assoc_knockout;
+    association_t* assoc_set[]; ///< Ordered by remote-ID, allows bisection.
 } publish_future_t;
 
 static cy_future_status_t publish_future_status(const cy_future_t* const self)
@@ -1785,13 +1843,51 @@ static const cy_future_vtable_t publish_future_vtable = { .status   = publish_fu
                                                           .timeout  = publish_future_timeout,
                                                           .finalize = publish_future_finalize };
 
-static void publish_future_on_ack(publish_future_t* const self, const size_t association_index)
+/// When we're done with the future, we need to update the shared states of our associations.
+/// This is where we update the slack counters and enforce the slack limits.
+/// This function is idempotent.
+static void publish_future_release_associations(publish_future_t* const self)
 {
-    self->assoc_knockout &= ~(1ULL << association_index);
-    if (self->assoc_knockout == 0) {
+    cy_topic_t* const topic = self->owner->topic;
+    for (size_t i = 0; i < self->assoc_capacity; i++) {
+        association_t* const ass = self->assoc_set[i];
+        assert(ass->pending_count > 0);
+        ass->pending_count--;
+        if (!bitmap_test(self->assoc_knockout, i)) {
+            ass->slack++;
+        }
+        if ((ass->slack >= topic->assoc_slack_limit) && (ass->pending_count == 0)) {
+            association_forget(topic, ass);
+        }
+    }
+    // Seal the state to make this idempodent.
+    self->assoc_capacity = 0;
+    mem_free(topic->cy, self->assoc_knockout);
+    self->assoc_knockout = NULL;
+}
+
+static void publish_future_on_ack(publish_future_t* const self, association_t* const association)
+{
+    // State consistency checks.
+    assert(association->slack == 0);
+    assert(self->status == cy_future_pending);
+
+    // Check if we have this association and it hasn't been acked already.
+    const size_t idx = association_bisect(self->assoc_set, self->assoc_capacity, association->remote_id);
+    if ((idx >= self->assoc_capacity) || (self->assoc_set[idx] != association) ||
+        bitmap_test(self->assoc_knockout, idx)) {
+        return; // The association wasn't known at the time of publication or already acknowledged.
+    }
+
+    // Process the new ack.
+    self->status = cy_future_success;
+    bitmap_set(self->assoc_knockout, idx);
+    assert(self->assoc_remaining > 0);
+    self->assoc_remaining--;
+    if (self->assoc_remaining == 0) {
         future_deadline_disarm(&self->base);
         future_index_remove(&self->base, &self->owner->topic->pub_futures_by_tag);
-        self->owner = NULL;
+        publish_future_release_associations(self);
         future_notify(&self->base);
     }
 }
@@ -1804,23 +1900,27 @@ cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadli
     cy_topic_t* const topic = pub->topic;
     cy_t* const       cy    = topic->cy;
 
-    if (!topic_ensure_association_set(topic)) {
-        return NULL;
-    }
-
     // Prepare the future.
-    publish_future_t* const fut = future_new(cy, &publish_future_vtable, sizeof(publish_future_t));
+    publish_future_t* const fut =
+      future_new(cy, &publish_future_vtable, sizeof(publish_future_t) + (topic->assoc_count * sizeof(association_t*)));
     if (fut == NULL) {
         return NULL;
     }
-    fut->owner = pub;
-    fut->data  = bytes_dup(cy, message);
+    fut->owner           = pub;
+    fut->status          = cy_future_pending;
+    fut->epoch           = 0;
+    fut->assoc_capacity  = topic->assoc_count;
+    fut->assoc_remaining = 0;
+    fut->assoc_knockout  = bitmap_new(cy, topic->assoc_count);
+    if (fut->assoc_knockout == NULL) {
+        mem_free(cy, fut);
+        return NULL;
+    }
+    fut->data = bytes_dup(cy, message);
     if (fut->data == NULL) {
         mem_free(cy, fut);
         return NULL;
     }
-    fut->epoch          = 0;
-    fut->assoc_knockout = 0;
 
     // Compute the timings but don't arm the timer yet because transmission may still fail.
     // The transmission deadline of each attempt equals the next attempt time such that we don't enqueue duplicates.
@@ -1838,11 +1938,21 @@ cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadli
     }
 
     // Complete the final infallible steps.
+    association_t* ass_cursor = (association_t*)cavl2_min(topic->assoc_by_remote_id);
+    while ((fut->assoc_remaining < fut->assoc_capacity) && (ass_cursor != NULL)) {
+        // Some associations may be pending removal already, skip them. There will be unused pointers but we don't care.
+        if (ass_cursor->slack < topic->assoc_slack_limit) {
+            bitmap_set(fut->assoc_knockout, fut->assoc_remaining);
+            fut->assoc_set[fut->assoc_remaining] = ass_cursor;
+            fut->assoc_remaining++;
+            ass_cursor->pending_count++;
+        } else {
+            assert(ass_cursor->pending_count > 0); // Sanity check -- otherwise would have been removed.
+        }
+        ass_cursor = (association_t*)cavl2_next_greater((cy_tree_t*)ass_cursor);
+    }
     future_index_insert(&fut->base, &topic->pub_futures_by_tag, fut->base.key);
     future_deadline_arm(&fut->base, now + ack_timeout);
-    for (size_t i = 0; i < ASSOCIATION_CAPACITY; i++) {
-        fut->assoc_knockout |= (uint64_t)(topic->assoc_set[i].epoch != 0) << i;
-    }
     return &fut->base;
 }
 
@@ -3003,44 +3113,28 @@ static void on_message_ack(cy_t* const       cy,
 {
     (void)ts;
     assert(topic != NULL);
-    if (topic->assoc_set == NULL) {
-        CY_TRACE(cy,
-                 "⚠️ %s N%016jx tag=%016jx no association set",
-                 topic_repr(topic).str,
-                 (uintmax_t)remote_id,
-                 (uintmax_t)tag);
-        return; // Misdelivered ACK, ignore.
-    }
 
-    // Update the subscriber association set. Note that by design we don't require a pending future for this to work;
-    // this is crucial because it allows the user to destroy futures while we still update the association information.
-    // The linear scan may look silly but it is actually the best choice for small contiguous arrays.
-    association_t* match = NULL;
-    for (size_t i = 0; i < ASSOCIATION_CAPACITY; i++) {
-        if (topic->assoc_set[i].remote_id == remote_id) {
-            match = &topic->assoc_set[i];
-            break;
-        }
+    // Update the subscriber association set. Note that by design we don't require a pending future for this to work.
+    // Associations are destroyed only by the futures when a publish outcome is known.
+    association_factory_context_t fac = { .topic = topic, .remote_id = remote_id };
+    association_t* const ass = CAVL2_TO_OWNER(cavl2_find_or_insert(&topic->assoc_by_remote_id, // ---------------
+                                                                   &remote_id,
+                                                                   association_cavl_compare,
+                                                                   &fac,
+                                                                   association_cavl_factory),
+                                              association_t,
+                                              index_remote_id);
+    if (ass != NULL) {
+        assert(topic->assoc_count > 0);
+        ass->slack = 0;
+    } else {
+        ON_ASYNC_ERROR(cy, topic, CY_ERR_MEMORY);
     }
-    if (match == NULL) {
-        match = topic->assoc_set;
-        for (size_t i = 1; i < ASSOCIATION_CAPACITY; i++) {
-            if (topic->assoc_set[i].epoch < match->epoch) {
-                match = &topic->assoc_set[i];
-            }
-        }
-        match->remote_id = remote_id;
-    }
-    match->epoch = ++(topic->assoc_epoch); // zero reserved for empty slots
-    match->slack = 0;                      // ack resets the slack
-
-    const size_t match_index = (size_t)(match - topic->assoc_set);
-    assert(match_index < ASSOCIATION_CAPACITY);
 
     // Report to the future if there is still one around. This does not affect the association set updates.
     publish_future_t* const future = (publish_future_t*)future_index_lookup(topic->pub_futures_by_tag, tag);
     if (future != NULL) {
-        publish_future_on_ack(future, match_index);
+        publish_future_on_ack(future, ass);
     }
 }
 
