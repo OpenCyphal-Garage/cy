@@ -534,9 +534,11 @@ struct cy_future_t
     olga_event_t timeout; ///< Futures can always expire on timeout.
     cy_t*        cy;
 
+    /// User-mutable state (via API functions).
     cy_user_context_t    context;
     cy_future_callback_t callback;
 
+    /// Immutable.
     const cy_future_vtable_t* vtable;
 };
 
@@ -848,6 +850,20 @@ static int32_t cavl_comp_topic_subject_id(const void* const user, const cy_tree_
 }
 
 static bool topic_has_subscribers(const cy_topic_t* const topic) { return topic->couplings != NULL; }
+
+/// The association set is lazily initialized only if reliable publication is used. It is normally kept until destroyed.
+static bool topic_ensure_association_set(cy_topic_t* const topic)
+{
+    if (topic->assoc_set == NULL) {
+        topic->assoc_set = mem_alloc_zero(topic->cy, ASSOCIATION_CAPACITY * sizeof(association_t));
+        if (topic->assoc_set != NULL) {
+            for (size_t i = 0; i < ASSOCIATION_CAPACITY; i++) {
+                topic->assoc_set[i].remote_id = UINT64_MAX; // sentinel, inessential
+            }
+        }
+    }
+    return topic->assoc_set != NULL;
+}
 
 /// Topics are never destroyed synchronously to avoid potential state loss in the platform layer if the application
 /// publishes and/or subscribes intermittently. Instead, once all publishers and subscribers are gone, the topic
@@ -1734,8 +1750,8 @@ cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t deadline, const cy_
 
 typedef struct
 {
-    cy_future_t     base;  ///< The key is the tag.
-    cy_publisher_t* owner; ///< Back-reference to the publisher for cancellation etc.
+    cy_future_t     base; ///< The key is the tag.
+    cy_publisher_t* owner;
 
     /// Retransmission states.
     olga_event_t event;
@@ -1744,24 +1760,39 @@ typedef struct
 
     /// The association set is captured at publication and it becomes the target set we require acks from.
     /// Each ack knocks a bit out; those left standing by timeout indicate unresponsive remotes.
-    /// This only provides deterministic delivery as long as there are no more than 64 remotes; otherwise, LRU
+    /// This only provides deterministic delivery as long as there are not too many remotes; otherwise, LRU
     /// associations will be replaced. Crucially, the bitmap does not care about the replacement; since LRU policy
     /// applies, the replacement takes away the node that is the least likely to respond, which is optimal.
+    ///
+    /// If we started out with an empty set, it means that there are no known subscribers, so we will attempt to
+    /// discover some. We do this by waiting for a single ack from anyone and calling it a day. If more acks arrive
+    /// later, they will be processed for the topic and the assoc set updated accordingly in the background.
     uint64_t assoc_knockout;
 } publish_future_t;
 
-static const cy_future_vtable_t publish_future_vtable = {
-    0 // TODO
-};
+static cy_future_status_t publish_future_status(const cy_future_t* const self)
+{
+    //
+}
+static size_t publish_future_result(cy_future_t* const self, const size_t storage_size, void* const storage);
+static void   publish_future_cancel(cy_future_t* const self);
+static void   publish_future_timeout(cy_future_t* const self);
+static void   publish_future_finalize(cy_future_t* const self);
+
+static const cy_future_vtable_t publish_future_vtable = { .status   = publish_future_status,
+                                                          .result   = publish_future_result,
+                                                          .cancel   = publish_future_cancel,
+                                                          .timeout  = publish_future_timeout,
+                                                          .finalize = publish_future_finalize };
 
 static void publish_future_on_ack(publish_future_t* const self, const size_t association_index)
 {
-    // If we started out with an empty set, it means that there are no known subscribers, so we will attempt to
-    // discover some. We do this by waiting for a single ack from anyone and calling it a day. If more acks arrive
-    // later, they will be processed for the topic and the assoc set updated accordingly in the background.
     self->assoc_knockout &= ~(1ULL << association_index);
     if (self->assoc_knockout == 0) {
-        // TODO
+        future_deadline_disarm(&self->base);
+        future_index_remove(&self->base, &self->owner->topic->pub_futures_by_tag);
+        self->owner = NULL;
+        future_notify(&self->base);
     }
 }
 
@@ -1773,15 +1804,8 @@ cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadli
     cy_topic_t* const topic = pub->topic;
     cy_t* const       cy    = topic->cy;
 
-    // The association set is lazily initialized only if reliable publication is used.
-    if (topic->assoc_set == NULL) {
-        topic->assoc_set = mem_alloc_zero(cy, ASSOCIATION_CAPACITY * sizeof(association_t));
-        if (topic->assoc_set == NULL) {
-            return NULL; // OOM cannot proceed
-        }
-        for (size_t i = 0; i < ASSOCIATION_CAPACITY; i++) {
-            topic->assoc_set[i].remote_id = UINT64_MAX; // sentinel, inessential
-        }
+    if (!topic_ensure_association_set(topic)) {
+        return NULL;
     }
 
     // Prepare the future.
@@ -1817,7 +1841,7 @@ cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadli
     future_index_insert(&fut->base, &topic->pub_futures_by_tag, fut->base.key);
     future_deadline_arm(&fut->base, now + ack_timeout);
     for (size_t i = 0; i < ASSOCIATION_CAPACITY; i++) {
-        fut->assoc_knockout |= (uint64_t)(topic->assoc_set[i].epoch > 0) << i;
+        fut->assoc_knockout |= (uint64_t)(topic->assoc_set[i].epoch != 0) << i;
     }
     return &fut->base;
 }
