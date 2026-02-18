@@ -741,6 +741,10 @@ struct cy_topic_t
 
     /// Subscriber association set.
     /// The set of remote-IDs that confirm reception of reliable multicast publications on this topic.
+    /// TODO there should be a limit on the number of associations to prevent DoS; if the limit is reached,
+    ///   new associations are rejected until some existing ones are evicted for inactivity.
+    ///   The limit should be large enough to allow real use cases but small enough to prevent DoS;
+    ///   ~500 might be a reasonable default.
     byte_t     assoc_slack_limit; ///< Subscriber considered unresponsive if misses this many consecutive deliveries.
     size_t     assoc_count;
     cy_tree_t* assoc_by_remote_id;
@@ -754,9 +758,10 @@ struct cy_topic_t
     /// whatever they may be (e.g., the transfer-ID counter etc, depending on the transport implementation).
     /// When the topic is reallocated, the old writer is destroyed but the new one is not created until the next
     /// publication attempt.
-    uint64_t             pub_next_tag;
-    size_t               pub_count;  ///< Number of active advertisements; counted for garbage collection.
-    cy_subject_writer_t* pub_writer; ///< Initially NULL, created ad-hoc, then lives on until topic destruction.
+    uint64_t             pub_tag_baseline; ///< Randomly chosen once when topic created.
+    uint64_t             pub_seqno;        ///< Grows from zero, added to the tag baseline to obtain the tag.
+    size_t               pub_count;        ///< Number of active advertisements; counted for garbage collection.
+    cy_subject_writer_t* pub_writer;       ///< Initially NULL, created ad-hoc, then lives on until topic destruction.
     cy_tree_t*           pub_futures_by_tag;
 
     /// Subscriber-related states.
@@ -805,12 +810,42 @@ static topic_repr_t topic_repr(const cy_topic_t* const topic)
 #endif
 
 /// Models the interest of a remote subscriber in data that we publish on a topic.
+/// Entries survive as long as we receive acks from the remote, allowing some configurable consecutive loss slack.
+///
+/// This DOES NOT represent deliverability of of any particular message, but rather represents the EXPECTATION that
+/// future messages on this topic will likely be acknowledged by this remote. One practical implication is that given
+/// multiple pending deliveries, the association will survive as long as at least one of them is acknowledged,
+/// even if the others are not.
 typedef struct
 {
     cy_tree_t index_remote_id;
     uint64_t  remote_id;
-    size_t    pending_count; ///< Cannot be removed unless zero to avoid dangly pointers.
-    size_t    slack;
+
+    /// The association cannot be removed unless zero to avoid dangly pointers.
+    /// We could use a narrower integer type here but then we'd have to track overflows which complicates logic;
+    /// instead we prefer the simpler option where overflow is unreachable.
+    size_t pending_count;
+
+    /// The slack counter tracks the number of missed acks. When it exceeds the limit, the association is considered
+    /// unresponsive and is removed. In the simple scenario with one pending delivery (future) at a time, it would
+    /// simply be reset to zero on every received ack. However, when concurrent deliveries (futures) are involved,
+    /// there exists a race condition that requires separate handling. Suppose we have pending publications A and B:
+    ///
+    ///     A published with tag a.
+    ///     B published with tag b.
+    ///     ACK arrives for B, the future is finalized. The slack is reset to zero.
+    ///     ACK fails to arrive for A, the future is finalized with timeout. The slack is incremented (incorrectly).
+    ///
+    /// The issue here is that the remote is actually reachable because B made it through, and since A came earlier,
+    /// its failure to reach the remote is a worse predictor of the remote's reachability in the future;
+    /// yet the naive approach will penalize the association for its unreachability *in the past*.
+    /// To avoid this, the slack adjustment logic must model the publication ordering in some way.
+    ///
+    /// There are various ways to do that: we could compare the tags (which are strictly increasing by one per message)
+    /// and ensure that only the future with the latest tag value can update the slack,
+    /// or we could reset the slack on ACK not to zero but to the negated current number of pending deliveries at
+    /// the time of ACK arrival, and make every future unconditionally increment the slack upon finalization.
+    int32_t slack;
 } association_t;
 
 typedef struct
@@ -1308,7 +1343,8 @@ static cy_err_t topic_new(cy_t* const        cy,
     topic->sub_index_dedup_by_remote_id = NULL;
     topic->sub_list_dedup_by_recency    = LIST_EMPTY;
 
-    topic->pub_next_tag       = cy->platform->vtable->random(cy->platform);
+    topic->pub_tag_baseline   = cy->platform->vtable->random(cy->platform);
+    topic->pub_seqno          = 0;
     topic->pub_count          = 0;
     topic->pub_writer         = NULL;
     topic->pub_futures_by_tag = NULL;
@@ -1775,7 +1811,7 @@ static cy_err_t do_publish(cy_publisher_t* const pub,
 
     // Compose the session layer header.
     // TODO: How do we handle CAN compatibility? No header for pinned topics? The transport will strip the header?
-    const uint64_t tag        = topic->pub_next_tag++;
+    const uint64_t tag        = topic->pub_tag_baseline + topic->pub_seqno++;
     byte_t         header[18] = { (byte_t)header_type, (byte_t)topic_lage(topic, cy_now(cy)) };
     (void)serialize_u64(serialize_u64(&header[2], tag), topic->hash);
     const cy_bytes_t headed_message = { .size = sizeof(header), .data = header, .next = &message };
@@ -1811,13 +1847,14 @@ cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t deadline, const cy_
 
 typedef struct
 {
-    cy_future_t        base; ///< The key is the tag.
-    cy_publisher_t*    owner;
-    cy_future_status_t status;
+    cy_future_t     base; ///< The key is the tag.
+    cy_publisher_t* owner;
+    bool            done;
+    bool            acknowledged;
 
     /// Retransmission states.
-    cy_bytes_t* data;
     byte_t      epoch;
+    cy_bytes_t* data;
 
     /// The association set is captured at publication and it becomes the target set we require acks from.
     /// If we started out with an empty set, it means that there are no known subscribers, so we will attempt to
@@ -1829,24 +1866,32 @@ typedef struct
     association_t* assoc_set[]; ///< Ordered by remote-ID, allows bisection.
 } publish_future_t;
 
-static cy_future_status_t publish_future_status(const cy_future_t* const self)
+static cy_future_status_t publish_future_status(const cy_future_t* const base)
 {
-    return ((const publish_future_t*)self)->status;
+    const publish_future_t* const self = (const publish_future_t*)base;
+    if (self->done) {
+        return self->acknowledged ? cy_future_success : cy_future_failure;
+    }
+    return cy_future_pending;
 }
 
-static size_t publish_future_result(cy_future_t* const self, const size_t storage_size, void* const storage)
+static size_t publish_future_result(cy_future_t* const base, const size_t storage_size, void* const storage)
 {
-    (void)self;         // Currently we don't return anything, but we could easily expose some ack-related information.
-    (void)storage_size; // For example, the number of acks/retransmissions, etc.
-    (void)storage;
-    return 0;
+    (void)base;         // Currently we don't return anything, but we could easily expose some ack-related information.
+    (void)storage_size; // For example, the number of acks/retransmissions, etc. We could even expose the list of
+    (void)storage;      // remotes that acknowledged the message: either as a contiguous list
+    return 0;           // (requires more future heap), or incrementally with multiple calls to result().
 }
 
-static void publish_future_cancel(cy_future_t* const self);
+static void publish_future_cancel(cy_future_t* const base)
+{
+    (void)base;
+    // TODO: when releasing associations, do not increment slack for unconfirmed messages.
+}
 
-static void publish_future_timeout(cy_future_t* const self);
+static void publish_future_timeout(cy_future_t* const base);
 
-static void publish_future_finalize(cy_future_t* const self);
+static void publish_future_finalize(cy_future_t* const base);
 
 static const cy_future_vtable_t publish_future_vtable = { .status   = publish_future_status,
                                                           .result   = publish_future_result,
@@ -1861,13 +1906,11 @@ static void publish_future_release_associations(publish_future_t* const self)
     cy_topic_t* const topic = self->owner->topic;
     for (size_t i = 0; i < self->assoc_capacity; i++) {
         association_t* const ass = self->assoc_set[i];
-        self->assoc_set[i]       = NULL; // no longer safe to keep because we decrement the pending refcount
-        if (bitmap_test(self->assoc_knockout, i)) {
-            ass->slack++;
-        }
+        self->assoc_set[i]       = NULL; // No longer safe to keep because we will decrement the pending refcount.
+        ass->slack++;                    // Increment unconditionally because on ACK it is set to negated pending count.
         assert(ass->pending_count > 0);
         ass->pending_count--;
-        if ((ass->slack >= topic->assoc_slack_limit) && (ass->pending_count == 0)) {
+        if ((ass->slack >= (int32_t)topic->assoc_slack_limit) && (ass->pending_count == 0)) {
             association_forget(topic, ass);
         }
     }
@@ -1879,6 +1922,7 @@ static void publish_future_release_associations(publish_future_t* const self)
 
 static void publish_future_cleanup(publish_future_t* const self)
 {
+    self->done = true;
     future_deadline_disarm(&self->base);
     future_index_remove(&self->base, &self->owner->topic->pub_futures_by_tag);
     publish_future_release_associations(self);
@@ -1887,13 +1931,15 @@ static void publish_future_cleanup(publish_future_t* const self)
 
 static void publish_future_on_ack(publish_future_t* const self, association_t* const association)
 {
-    assert(association->slack == 0); // the slack must be reset by the caller, the topic-level ack handler
-    assert((self->status == cy_future_pending) || (self->status == cy_future_success));
-    self->status = cy_future_success; // any ack -> success by design
+    assert(!self->done);
+    self->acknowledged = true;
 
     const size_t idx   = association_bisect(self->assoc_set, self->assoc_capacity, association->remote_id);
     const bool   known = (idx < self->assoc_capacity) && (self->assoc_set[idx] == association);
     if (known && bitmap_test(self->assoc_knockout, idx)) {
+        assert(association->pending_count > 0);
+        assert(association->slack < 0);                                      // reset by topic-level ack handler
+        assert(association->slack == -(intmax_t)association->pending_count); // reset by topic-level ack handler
         bitmap_clear(self->assoc_knockout, idx);
         assert(self->assoc_remaining > 0);
         self->assoc_remaining--;
@@ -1918,7 +1964,8 @@ cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadli
         return NULL;
     }
     fut->owner           = pub;
-    fut->status          = cy_future_pending;
+    fut->done            = false;
+    fut->acknowledged    = false;
     fut->epoch           = 0;
     fut->assoc_capacity  = topic->assoc_count;
     fut->assoc_remaining = 0;
@@ -1955,7 +2002,8 @@ cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadli
     while ((fut->assoc_remaining < fut->assoc_capacity) && (ass_cursor != NULL)) {
         assert(fut->assoc_knockout != NULL);
         // Some associations may be pending removal already, skip them. There will be unused pointers but we don't care.
-        if (ass_cursor->slack < topic->assoc_slack_limit) {
+        // The skipped associations may still be resurrected by our new publication if the remotes acknowledge.
+        if (ass_cursor->slack < (int32_t)topic->assoc_slack_limit) {
             bitmap_set(fut->assoc_knockout, fut->assoc_remaining);
             fut->assoc_set[fut->assoc_remaining] = ass_cursor;
             fut->assoc_remaining++;
@@ -1968,10 +2016,10 @@ cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadli
     fut->assoc_capacity = fut->assoc_remaining; // trim the tail; unused pointers are cheap to ignore.
 
     // Complete the final infallible steps.
-    future_deadline_arm(&fut->base, now + ack_timeout);
     const bool insert_ok = future_index_insert(&fut->base, &topic->pub_futures_by_tag, fut->base.key);
     assert(insert_ok); // cannot fail by design
     (void)insert_ok;
+    future_deadline_arm(&fut->base, now + ack_timeout);
     return &fut->base;
 }
 
@@ -3145,13 +3193,17 @@ static void on_message_ack(cy_t* const       cy,
                                               index_remote_id);
     if (ass != NULL) {
         assert(topic->assoc_count > 0);
-        ass->slack = 0;
-        // Report to the future if there is still one around. This does not affect the association set updates.
+        // Each association represents the expectation that the remote will likely acknowledge future publications on
+        // this topic, so we reset the slack on any ack regardless of whether it pertains to any current publication.
+        assert(ass->pending_count < INT32_MAX);
+        ass->slack = -(int32_t)ass->pending_count; // ensure that none of the pending futures will increase slack
         publish_future_t* const future = (publish_future_t*)future_index_lookup(topic->pub_futures_by_tag, tag);
         if (future != NULL) {
             publish_future_on_ack(future, ass);
         }
     } else {
+        // NB: OOM here causes the empty-snapshot discovery path to lose this ACK. This is accepted by design:
+        // the message may be reported as non-delivered because there is not enough local memory to store state.
         ON_ASYNC_ERROR(cy, topic, CY_ERR_MEMORY);
     }
 }
