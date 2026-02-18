@@ -188,11 +188,6 @@ typedef struct cy_publisher_t cy_publisher_t;
 cy_publisher_t* cy_advertise(cy_t* const cy, const cy_str_t name);
 cy_publisher_t* cy_advertise_client(cy_t* const cy, const cy_str_t name, const size_t response_extent);
 
-/// Create a new publisher that ensures that there is at most one, the most recent, message pending for transmission.
-/// If a new message is published while another one is still pending, the previous one is cancelled.
-/// TODO not implemented; very simple idea -- store last cancellation token in the topic and cancel it on new publish.
-cy_publisher_t* cy_advertise_sample(cy_t* const cy, const cy_str_t name);
-
 /// Publish a best-effort (non-reliable) one-way message without expecting a response.
 cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t deadline, const cy_bytes_t message);
 
