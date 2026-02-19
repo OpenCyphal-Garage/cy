@@ -84,6 +84,10 @@ static void assert_duplicated_chain(const unsigned char* const payload,
                                     const size_t               payload_size,
                                     const cy_bytes_t*          duplicated)
 {
+    if (payload_size == 0) {
+        TEST_ASSERT_TRUE(duplicated == &bytes_empty_sentinel);
+        return;
+    }
     const size_t chunk  = BYTES_DUP_CHUNK - sizeof(cy_bytes_t);
     size_t       copied = 0U;
     size_t       count  = 0U;
@@ -124,15 +128,11 @@ static void run_case(fixture_t* const fixture,
     const cy_bytes_t source = build_source(payload, payload_size, fragment_count, fragment_sizes, fragments);
 
     fixture_set_fail_after(fixture, SIZE_MAX);
-    cy_bytes_t* const duplicated = bytes_dup(&fixture->cy, source);
+    const cy_bytes_t* const duplicated = bytes_dup(&fixture->cy, source);
 
     const size_t chunk_count = expected_chunk_count(payload_size);
-    if (chunk_count == 0U) {
-        TEST_ASSERT_NULL(duplicated);
-    } else {
-        TEST_ASSERT_NOT_NULL(duplicated);
-        assert_duplicated_chain(payload, payload_size, duplicated);
-    }
+    TEST_ASSERT_NOT_NULL(duplicated);
+    assert_duplicated_chain(payload, payload_size, duplicated);
     TEST_ASSERT_EQUAL_size_t(chunk_count, guarded_heap_allocated_fragments(&fixture->heap));
     TEST_ASSERT_EQUAL_size_t(chunk_count * BYTES_DUP_CHUNK, guarded_heap_allocated_bytes(&fixture->heap));
 
@@ -214,7 +214,7 @@ static void test_bytes_dup_oom_cleans_up_partial_chain(void)
 
     for (size_t fail_after = 0U; fail_after < chunk_count; fail_after++) {
         fixture_set_fail_after(&fixture, fail_after);
-        cy_bytes_t* const duplicated = bytes_dup(&fixture.cy, source);
+        const cy_bytes_t* const duplicated = bytes_dup(&fixture.cy, source);
         TEST_ASSERT_NULL(duplicated);
         TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&fixture.heap));
         TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&fixture.heap));

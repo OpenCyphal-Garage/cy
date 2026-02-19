@@ -288,26 +288,31 @@ static void mem_free(const cy_t* const cy, void* ptr)
 /// This is only used with reliable transmissions where the library needs to store the payload for possible retransmits.
 #define BYTES_DUP_CHUNK (1024U - (sizeof(void*) * 2U))
 
+/// Used as a placeholder to represent empty bytes with bytes_dup()/undup() without special-casing empty messages.
+static const cy_bytes_t bytes_empty_sentinel = { .size = 0, .data = "", .next = NULL };
+
 /// Frees all memory allocated by bytes_dup(). No-op if bytes are NULL.
-static void bytes_undup(const cy_t* const cy, cy_bytes_t* bytes)
+static void bytes_undup(const cy_t* const cy, const cy_bytes_t* bytes)
 {
     assert(cy != NULL);
-    while (bytes != NULL) {
-        assert(bytes->data == ((const void*)(bytes + 1)));
-        cy_bytes_t* const next = (cy_bytes_t*)bytes->next;
-        mem_free(cy, bytes);
-        bytes = next;
+    if (&bytes_empty_sentinel != bytes) {
+        while (bytes != NULL) {
+            assert(bytes->data == ((const void*)(bytes + 1)));
+            const cy_bytes_t* const next = bytes->next;
+            mem_free(cy, (void*)bytes);
+            bytes = next;
+        }
     }
 }
 
-/// Copies bytes to the heap in small chunks to reduce fragmentation risks. NULL on OOM. Use bytes_undup() to undo.
-static cy_bytes_t* bytes_dup(const cy_t* const cy, const cy_bytes_t src)
+/// Copies bytes to the heap in small chunks to reduce fragmentation risks. NULL iff OOM. Use bytes_undup() to undo.
+static const cy_bytes_t* bytes_dup(const cy_t* const cy, const cy_bytes_t src)
 {
     assert(cy != NULL);
     static const size_t data_per_chunk = BYTES_DUP_CHUNK - sizeof(cy_bytes_t);
     const cy_bytes_t*   in             = &src;
     size_t              in_offset      = 0;
-    cy_bytes_t*         head           = NULL;
+    const cy_bytes_t*   head           = NULL;
     cy_bytes_t*         tail           = NULL;
     while (true) {
         while ((in != NULL) && (in_offset >= in->size)) { // skip empty
@@ -315,6 +320,9 @@ static cy_bytes_t* bytes_dup(const cy_t* const cy, const cy_bytes_t src)
             in_offset = 0;
         }
         if (in == NULL) {
+            if (head == NULL) {
+                head = &bytes_empty_sentinel;
+            }
             break;
         }
         assert((in->size == 0) || (in->data != NULL));
@@ -354,29 +362,6 @@ static cy_bytes_t* bytes_dup(const cy_t* const cy, const cy_bytes_t src)
         assert(chunk->size <= data_per_chunk);
     }
     return head;
-}
-
-static bool bytes_empty(const cy_bytes_t src)
-{
-    const cy_bytes_t* chunk = &src;
-    while (chunk != NULL) {
-        if (chunk->size > 0) {
-            return false;
-        }
-        chunk = chunk->next;
-    }
-    return true;
-}
-
-static cy_bytes_t* bytes_dup_empty(const cy_t* const cy)
-{
-    cy_bytes_t* const out = (cy_bytes_t*)mem_alloc(cy, BYTES_DUP_CHUNK);
-    if (out != NULL) {
-        out->size = 0;
-        out->data = (const void*)(out + 1);
-        out->next = NULL;
-    }
-    return out;
 }
 
 /// Simply returns the value of the first hit. Useful for existence checks.
@@ -1906,8 +1891,8 @@ typedef struct
     bool            acknowledged;
 
     /// Retransmission states.
-    cy_us_t     ack_timeout;
-    cy_bytes_t* data;
+    cy_us_t           ack_timeout;
+    const cy_bytes_t* data;
 
     /// The association set is captured at publication and it becomes the target set we require acks from.
     /// If we started out with an empty set, it means that there are no known subscribers, so we will attempt to
@@ -2145,9 +2130,6 @@ cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadli
     // to have reliable delivery in the transport layer; we can borrow some ideas from there to minimize TX copy.
     if (!one_shot) {
         fut->data = bytes_dup(cy, message);
-        if ((fut->data == NULL) && bytes_empty(message)) {
-            fut->data = bytes_dup_empty(cy);
-        }
         if (fut->data == NULL) {
             mem_free(cy, fut->assoc_knockout);
             mem_free(cy, fut);
