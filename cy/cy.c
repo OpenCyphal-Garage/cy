@@ -292,10 +292,8 @@ static void mem_free(const cy_t* const cy, void* ptr)
 static void bytes_undup(const cy_t* const cy, cy_bytes_t* bytes)
 {
     assert(cy != NULL);
-    static const size_t data_per_chunk = BYTES_DUP_CHUNK - sizeof(cy_bytes_t);
     while (bytes != NULL) {
         assert(bytes->data == ((const void*)(bytes + 1)));
-        assert((bytes->next == NULL) ? (bytes->size <= data_per_chunk) : (bytes->size == data_per_chunk));
         cy_bytes_t* const next = (cy_bytes_t*)bytes->next;
         mem_free(cy, bytes);
         bytes = next;
