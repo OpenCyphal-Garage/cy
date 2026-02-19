@@ -356,6 +356,29 @@ static cy_bytes_t* bytes_dup(const cy_t* const cy, const cy_bytes_t src)
     return head;
 }
 
+static bool bytes_empty(const cy_bytes_t src)
+{
+    const cy_bytes_t* chunk = &src;
+    while (chunk != NULL) {
+        if (chunk->size > 0) {
+            return false;
+        }
+        chunk = chunk->next;
+    }
+    return true;
+}
+
+static cy_bytes_t* bytes_dup_empty(const cy_t* const cy)
+{
+    cy_bytes_t* const out = (cy_bytes_t*)mem_alloc(cy, BYTES_DUP_CHUNK);
+    if (out != NULL) {
+        out->size = 0;
+        out->data = (const void*)(out + 1);
+        out->next = NULL;
+    }
+    return out;
+}
+
 /// Simply returns the value of the first hit. Useful for existence checks.
 static void* wkv_cb_first(const wkv_event_t evt) { return evt.node->value; }
 
@@ -633,7 +656,7 @@ static int32_t future_cavl_compare(const void* const user, const cy_tree_t* cons
 static bool future_index_insert(cy_future_t* const self, cy_tree_t** const index, const uint64_t key)
 {
     self->key = key;
-    return cavl2_find_or_insert(index, &self->index, future_cavl_compare, &self->key, cavl2_trivial_factory) ==
+    return cavl2_find_or_insert(index, &self->key, future_cavl_compare, &self->index, cavl2_trivial_factory) ==
            &self->index;
 }
 
@@ -2122,6 +2145,9 @@ cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadli
     // to have reliable delivery in the transport layer; we can borrow some ideas from there to minimize TX copy.
     if (!one_shot) {
         fut->data = bytes_dup(cy, message);
+        if ((fut->data == NULL) && bytes_empty(message)) {
+            fut->data = bytes_dup_empty(cy);
+        }
         if (fut->data == NULL) {
             mem_free(cy, fut->assoc_knockout);
             mem_free(cy, fut);
