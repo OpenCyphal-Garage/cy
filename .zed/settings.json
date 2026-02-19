@@ -1,0 +1,46 @@
+// Folder-specific settings
+//
+// For a full list of overridable settings, and general information on folder-specific settings,
+// see the documentation: https://zed.dev/docs/configuring-zed#settings-files
+{
+  "semantic_tokens": "combined",
+  "lsp": {
+    "clangd": {
+      "binary": {
+        "path": "/usr/bin/clangd",
+        "arguments": [
+          "--clang-tidy",
+          "--compile-commands-dir=build",
+          "--enable-config",
+        ],
+      },
+    },
+  },
+  "languages": {
+    "C": {
+      "semantic_tokens": "combined",
+      "formatter": {
+        "external": {
+          "command": "clang-format",
+          "arguments": ["--assume-filename", "{buffer_path}"],
+        },
+      },
+      "format_on_save": "on",
+    },
+    "C++": {
+      "semantic_tokens": "combined",
+      "formatter": {
+        "external": {
+          "command": "clang-format",
+          "arguments": ["--assume-filename", "{buffer_path}"],
+        },
+      },
+      "format_on_save": "on",
+    },
+    "CMake": {
+      "preferred_line_length": 120,
+    },
+  },
+  "preferred_line_length": 120,
+  "wrap_guides": [120],
+}

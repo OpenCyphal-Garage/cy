@@ -8,9 +8,9 @@
 #include <cstring>
 
 namespace {
-constexpr std::uint8_t HeaderMsgBestEffort = 0U;
-constexpr std::uint8_t HeaderMsgReliable   = 1U;
-constexpr std::uint8_t HeaderMsgAck        = 2U;
+constexpr std::uint8_t header_msg_best_effort = 0U;
+constexpr std::uint8_t header_msg_reliable    = 1U;
+constexpr std::uint8_t header_msg_ack         = 2U;
 
 struct arrival_capture_t
 {
@@ -291,13 +291,13 @@ void test_api_reliable_duplicate_acked_once_to_application()
     const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("rx/dup"));
     TEST_ASSERT_NOT_NULL(topic);
 
-    dispatch_message(&platform, topic, HeaderMsgReliable, 0x1234U, 0xAAU, 100, 0x11U);
-    dispatch_message(&platform, topic, HeaderMsgReliable, 0x1234U, 0xAAU, 101, 0x22U);
+    dispatch_message(&platform, topic, header_msg_reliable, 0x1234U, 0xAAU, 100, 0x11U);
+    dispatch_message(&platform, topic, header_msg_reliable, 0x1234U, 0xAAU, 101, 0x22U);
 
     TEST_ASSERT_EQUAL_size_t(1, capture.count);
     TEST_ASSERT_EQUAL_UINT64(0x1234U, capture.tags[0]);
     TEST_ASSERT_EQUAL_size_t(2, platform.p2p_count);
-    TEST_ASSERT_EQUAL_UINT8(HeaderMsgAck, static_cast<std::uint8_t>(platform.last_p2p[0] & 63U));
+    TEST_ASSERT_EQUAL_UINT8(header_msg_ack, static_cast<std::uint8_t>(platform.last_p2p[0] & 63U));
     TEST_ASSERT_EQUAL_size_t(0, cy_test_message_live_count());
 
     platform_deinit(&platform);
@@ -323,8 +323,8 @@ void test_api_ordered_subscriber_timeout_flush()
     const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("rx/ord"));
     TEST_ASSERT_NOT_NULL(topic);
 
-    dispatch_message(&platform, topic, HeaderMsgBestEffort, 8U, 0xBBU, 100, 0x41U);
-    dispatch_message(&platform, topic, HeaderMsgBestEffort, 9U, 0xBBU, 101, 0x42U);
+    dispatch_message(&platform, topic, header_msg_best_effort, 8U, 0xBBU, 100, 0x41U);
+    dispatch_message(&platform, topic, header_msg_best_effort, 9U, 0xBBU, 101, 0x42U);
     TEST_ASSERT_EQUAL_size_t(0, capture.count);
     TEST_ASSERT_EQUAL_size_t(0, platform.p2p_count);
 

@@ -150,8 +150,11 @@ typedef enum cy_future_status_t
 cy_future_status_t cy_future_status(const cy_future_t* const self);
 
 /// The result depends on the type of the future; some intermediate results may be available while still pending.
-/// The lifetime of the returned pointer is bound to the lifetime of the future instance (valid until destroyed).
-void* cy_future_result(cy_future_t* const self);
+/// Returns the size of the result; if the size of the provided storage is less, the result may not be copied or
+/// may be copied incompletely depending on the specific future type. One valid use case is to pass in zero storage
+/// to query the size needed, and then allocate the storage and call this function again to copy the result,
+/// assuming the size hasn't increased in the meantime.
+size_t cy_future_result(cy_future_t* const self, const size_t storage_size, void* const storage);
 
 /// The application can store arbitrary data in the context to share information with the future callback, if used.
 cy_user_context_t cy_future_context(const cy_future_t* const self);
@@ -185,21 +188,22 @@ typedef struct cy_publisher_t cy_publisher_t;
 cy_publisher_t* cy_advertise(cy_t* const cy, const cy_str_t name);
 cy_publisher_t* cy_advertise_client(cy_t* const cy, const cy_str_t name, const size_t response_extent);
 
-/// Create a new publisher that ensures that there is at most one, the most recent, message pending for transmission.
-/// If a new message is published while another one is still pending, the previous one is cancelled.
-/// TODO not implemented; very simple idea -- store last cancellation token in the topic and cancel it on new publish.
-cy_publisher_t* cy_advertise_sample(cy_t* const cy, const cy_str_t name);
-
 /// Publish a best-effort (non-reliable) one-way message without expecting a response.
 cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t deadline, const cy_bytes_t message);
 
-/// Future result of publishing a reliable message.
-typedef struct cy_publish_result_t
-{
-    uint16_t acknowledgements; /// The number of remote subscribers that acknowledged reception of the message.
-} cy_publish_result_t;
-
-/// Publish a reliable one-way message. The future result is of type cy_publish_result_t.
+/// Publish a reliable one-way message.
+/// Reliable messages consume more memory for associated states and are a greater burden on the network and nodes.
+///
+/// The session layer tracks remote subscribers (called associations) using a simple stateless protocol and
+/// ensures that all live subscribers confirm message reception, retransmitting as necessary, switching between
+/// multicast and P2P strategies as necessary to manage network utilization. The association set management,
+/// retransmission, ack deduplication, and related bookkeeping are hidden from the application.
+/// The application will observe future failure if no subscriber confirms reception before the deadline.
+///
+/// API for querying the tracked associations and per-remote delivery success may be added in the future since it is
+/// expected that some applications would benefit from the knowledge of which specific remotes accept their data.
+///
+/// Currently, the future result is not defined (only success/failure).
 cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadline, const cy_bytes_t message);
 
 /// Future result of a request message that expects a response.
@@ -207,7 +211,7 @@ typedef struct cy_request_result_t
 {
     /// Delivery result of the request message itself.
     /// It is updated while the future is still pending, as a means to provide intermediate progress feedback.
-    cy_publish_result_t request;
+    // cy_publish_result_t request;
 
     /// The response is valid only if the future status is cy_future_success.
     /// It is updated with every received response; the arrival of new responses can be monitored using either
@@ -235,6 +239,8 @@ cy_future_t* cy_request(cy_publisher_t* const pub,
                         const cy_bytes_t      message);
 
 /// Defaults to cy_prio_nominal for all newly created publishers.
+/// Changing the priority may affect the reliable delivery timeout, so if a specific timeout value is needed,
+/// it should be set after setting the priority.
 cy_prio_t cy_priority(const cy_publisher_t* const pub);
 void      cy_priority_set(cy_publisher_t* const pub, const cy_prio_t priority);
 
@@ -309,9 +315,9 @@ typedef struct cy_substitution_t
     size_t   ordinal; ///< Zero-based index of the substitution token as occurred in the pattern.
 } cy_substitution_t;
 
-/// When a name pattern match occurs, Cy will store the string substitutions that had to be made to
-/// achieve the match. The substitutions are listed in the order of their occurrence in the pattern.
-/// For example, if the pattern is "ins/*/data/#" and the key is "ins/0/data/foo/456",
+/// When a name pattern match occurs, Cy will store the string substitutions that had to be made to achieve the match.
+/// The substitutions are listed in the order of their occurrence in the pattern.
+/// For example, if the pattern is "ins/*/data/>" and the key is "ins/0/data/foo/456",
 /// then the substitutions will be (together with their ordinals):
 ///  1. #0 "0"
 ///  2. #1 "foo"
@@ -513,6 +519,8 @@ cy_topic_t* cy_topic_iter_next(cy_topic_t* const topic);
 cy_str_t cy_topic_name(const cy_topic_t* const topic);
 uint64_t cy_topic_hash(const cy_topic_t* const topic);
 cy_t*    cy_topic_owner(const cy_topic_t* const topic);
+
+// TODO: provide API for querying the associations of reliable topics (discovered subscribers).
 
 /// Provides access to the application-specific context associated per topic.
 /// By default it is set to CY_USER_CONTEXT_EMPTY when the topic is created.
