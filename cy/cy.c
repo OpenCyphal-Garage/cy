@@ -611,6 +611,15 @@ static void* future_new(cy_t* const cy, const cy_future_vtable_t* const vtbl, co
     return future;
 }
 
+/// Remember that the user callback may destroy the future!
+/// The future pointer is thus invalidated after this function; any access counts as use-after-free.
+static void future_notify(cy_future_t* const self)
+{
+    if (self->callback != NULL) {
+        self->callback(self);
+    }
+}
+
 // FUTURE INDEXING
 
 static int32_t future_cavl_compare(const void* const user, const cy_tree_t* const node)
@@ -655,17 +664,6 @@ static void future_deadline_arm(cy_future_t* const self, const cy_us_t deadline)
 }
 
 static void future_deadline_disarm(cy_future_t* const self) { olga_cancel(&self->cy->olga, &self->timeout); }
-
-// FUTURE HELPERS
-
-/// Remember that the user callback may destroy the future!
-/// The future pointer is thus invalidated after this function; any access counts as use-after-free.
-static void future_notify(cy_future_t* const self)
-{
-    if (self->callback != NULL) {
-        self->callback(self);
-    }
-}
 
 // FUTURE API
 
@@ -2200,20 +2198,32 @@ void cy_unadvertise(cy_publisher_t* const pub)
     if (pub == NULL) {
         return;
     }
+    cy_topic_t* const topic = pub->topic;
 
     // Finalize pending publish futures.
-    // TODO: IMPLEMENT
+    // We could store a dedicated list of pending futures per publisher, it's easy, but I don't see much benefit
+    // because there are typically very few pending futures at a time, especially at the time of publisher destruction,
+    // so it seems pragmatic to just walk the list. This is easy to improve if it becomes an issue.
+    while (true) {
+        // Restart the search in case the callback destroys another future.
+        publish_future_t* fut = (publish_future_t*)cavl2_min(topic->pub_futures_by_tag);
+        while ((fut != NULL) && (fut->owner != pub)) {
+            fut = (publish_future_t*)cavl2_next_greater((cy_tree_t*)fut);
+        }
+        if (fut == NULL) {
+            break;
+        }
+        cy_future_destroy(&fut->base);
+    }
 
     // Dereference the topic.
-    cy_topic_t* const topic = pub->topic;
     assert(!is_implicit(topic));
     assert(topic->pub_count > 0);
     topic->pub_count--;
-    if (topic->pub_count == 0) {
-        if (topic_has_subscribers(topic)) { // Demote to implicit; will be eventually garbage collected.
-            enlist_head(&topic->cy->list_implicit, &topic->list_implicit);
-            assert(is_implicit(topic));
-        }
+    if (validate_is_implicit(topic)) { // topics are destroyed lazily via garbage collection to avoid state loss
+        enlist_head(&topic->cy->list_implicit, &topic->list_implicit);
+        assert(is_implicit(topic));
+        CY_TRACE(topic->cy, "🧛 %s demoted to implicit", topic_repr(topic).str);
     }
 }
 
