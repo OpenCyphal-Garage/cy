@@ -125,6 +125,17 @@ static void test_is_last_attempt_zero_timeout(void)
     TEST_ASSERT_FALSE(publish_future_is_last_attempt(5, 0, 5));
 }
 
+static void test_is_last_attempt_preserves_full_ack_window(void)
+{
+    // Timeline from cy.c docs with total deadline 24:
+    // t=10 initial attempt timeout=1  -> ack_deadline=11
+    // t=11 retry #1       timeout=2  -> ack_deadline=13
+    // t=13 retry #2       timeout=4  -> ack_deadline=17 (must be last)
+    TEST_ASSERT_FALSE(publish_future_is_last_attempt(11, 1, 24));
+    TEST_ASSERT_FALSE(publish_future_is_last_attempt(13, 2, 24));
+    TEST_ASSERT_TRUE(publish_future_is_last_attempt(17, 4, 24));
+}
+
 static void test_bisect_empty(void) { TEST_ASSERT_EQUAL_size_t(0U, association_bisect(NULL, 0U, 123U)); }
 
 static void test_bisect_single_match(void)
@@ -475,6 +486,7 @@ int main(void)
     RUN_TEST(test_is_last_attempt_large_margin);
     RUN_TEST(test_is_last_attempt_large_room);
     RUN_TEST(test_is_last_attempt_zero_timeout);
+    RUN_TEST(test_is_last_attempt_preserves_full_ack_window);
     RUN_TEST(test_bisect_empty);
     RUN_TEST(test_bisect_single_match);
     RUN_TEST(test_bisect_single_miss_low);

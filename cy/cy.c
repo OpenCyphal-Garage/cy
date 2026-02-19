@@ -1971,6 +1971,8 @@ static void publish_future_cancel(cy_future_t* const base)
     }
 }
 
+/// Decides whether there enough room for the next full backoff window.
+///
 /// The final attempt has a larger window, which is exactly what we want because if the RTT is larger than
 /// expected we may still be receiving the acks from the earlier attempts.
 ///
@@ -1985,7 +1987,9 @@ static bool publish_future_is_last_attempt(const cy_us_t current_ack_deadline,
                                            const cy_us_t current_ack_timeout,
                                            const cy_us_t total_deadline)
 {
-    return (current_ack_deadline + (current_ack_timeout * 2)) > total_deadline;
+    const cy_us_t next_ack_timeout = current_ack_timeout * 2; // next retry would use exponential backoff
+    const cy_us_t remaining_budget = total_deadline - current_ack_deadline;
+    return remaining_budget < next_ack_timeout;
 }
 
 static void publish_future_timeout(cy_future_t* const base, const cy_us_t now)
