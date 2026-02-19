@@ -433,7 +433,10 @@ typedef uint64_t bitmap_t;
 static size_t bitmap_footprint(const size_t count) { return ((count + 63U) / 64U) * sizeof(bitmap_t); }
 
 /// Initially the bitmap will have all bits cleared.
-bitmap_t* bitmap_new(const cy_t* const cy, const size_t count) { return mem_alloc_zero(cy, bitmap_footprint(count)); }
+static bitmap_t* bitmap_new(const cy_t* const cy, const size_t count)
+{
+    return mem_alloc_zero(cy, bitmap_footprint(count));
+}
 
 static void bitmap_set(bitmap_t* const bitmap, const size_t bit) { bitmap[bit / 64U] |= 1ULL << (bit % 64U); }
 static void bitmap_clear(bitmap_t* const bitmap, const size_t bit) { bitmap[bit / 64U] &= ~(1ULL << (bit % 64U)); }
@@ -666,20 +669,6 @@ static void future_notify(cy_future_t* const self)
     }
 }
 
-static void future_cancel_and_notify(cy_future_t* const self)
-{
-    if (cy_future_status(self) == cy_future_pending) {
-        future_deadline_disarm(self);
-        self->vtable->cancel(self);
-        assert(cy_future_status(self) != cy_future_pending);
-        future_notify(self);
-    }
-}
-
-/// Stub for futures that do not require finalization.
-// ReSharper disable once CppParameterMayBeConstPtrOrRef
-static void future_noop(cy_future_t* const self) { (void)self; }
-
 // FUTURE API
 
 cy_future_status_t cy_future_status(const cy_future_t* const self) { return self->vtable->status(self); }
@@ -705,7 +694,10 @@ void cy_future_destroy(cy_future_t* const self)
 {
     if (self != NULL) {
         self->callback = NULL; // Remember that a future may be destroyed from within its own callback.
-        future_cancel_and_notify(self);
+        if (cy_future_status(self) == cy_future_pending) {
+            self->vtable->cancel(self);
+        }
+        assert(cy_future_status(self) != cy_future_pending);
         self->vtable->finalize(self);
         mem_free(self->cy, self);
     }
@@ -1895,7 +1887,7 @@ typedef struct
     bool            acknowledged;
 
     /// Retransmission states.
-    byte_t      epoch; ///< The epoch counter never overflows due to the exponential backoff.
+    byte_t      retries; ///< The counter never overflows due to the exponential backoff.
     cy_bytes_t* data;
 
     /// The association set is captured at publication and it becomes the target set we require acks from.
@@ -1903,10 +1895,24 @@ typedef struct
     /// discover some. We do this by waiting for a single ack from anyone and calling it a day. If more acks arrive
     /// later, they will be processed for the topic and the assoc set updated accordingly in the background.
     size_t         assoc_capacity;
-    size_t         assoc_remaining;
+    size_t         assoc_remaining; ///< We could use bitmap_popcount() instead but we prefer lower complexity.
     bitmap_t*      assoc_knockout;
     association_t* assoc_set[]; ///< Ordered by remote-ID, allows bisection.
 } publish_future_t;
+
+static cy_future_status_t publish_future_status(const cy_future_t* const base)
+{
+    const publish_future_t* const self = (const publish_future_t*)base;
+    return (self->done) ? (self->acknowledged ? cy_future_success : cy_future_failure) : cy_future_pending;
+}
+
+static size_t publish_future_result(cy_future_t* const base, const size_t storage_size, void* const storage)
+{
+    (void)base;         // Currently we don't return anything, but we could easily expose some ack-related information.
+    (void)storage_size; // For example, the number of acks/retransmissions, etc. We could even expose the list of
+    (void)storage;      // remotes that acknowledged the message: either as a contiguous list
+    return 0;           // (requires more future heap), or incrementally with multiple calls to result().
+}
 
 /// When we're done with the future, we need to update the shared states of our associations.
 static void publish_future_release_associations(publish_future_t* const self, const bool premature_cancellation)
@@ -1939,34 +1945,18 @@ static void publish_future_release_associations(publish_future_t* const self, co
     self->assoc_knockout = NULL;
 }
 
-static cy_future_status_t publish_future_status(const cy_future_t* const base)
-{
-    const publish_future_t* const self = (const publish_future_t*)base;
-    if (self->done) {
-        return self->acknowledged ? cy_future_success : cy_future_failure;
-    }
-    return cy_future_pending;
-}
-
+/// Invalidates the future -- the user callback may destroy it. Expect finalization & further access invalid.
 static void publish_future_materialize(publish_future_t* const self, const bool premature_cancellation)
 {
     assert(!self->done);
-    self->done     = true;
-    cy_t* const cy = self->owner->topic->cy;
+    self->done           = true;
+    const cy_t* const cy = self->owner->topic->cy;
     future_deadline_disarm(&self->base);
     future_index_remove(&self->base, &self->owner->topic->pub_futures_by_tag);
     publish_future_release_associations(self, premature_cancellation);
     bytes_undup(cy, self->data);
     self->data = NULL;
-    future_notify(&self->base);
-}
-
-static size_t publish_future_result(cy_future_t* const base, const size_t storage_size, void* const storage)
-{
-    (void)base;         // Currently we don't return anything, but we could easily expose some ack-related information.
-    (void)storage_size; // For example, the number of acks/retransmissions, etc. We could even expose the list of
-    (void)storage;      // remotes that acknowledged the message: either as a contiguous list
-    return 0;           // (requires more future heap), or incrementally with multiple calls to result().
+    future_notify(&self->base); // Invalidates the future. Expect finalization call.
 }
 
 static void publish_future_cancel(cy_future_t* const base)
@@ -1981,11 +1971,13 @@ static void publish_future_timeout(cy_future_t* const base, const cy_us_t now)
 {
     publish_future_t* const self = (publish_future_t*)base;
     assert(!self->done);
-    cy_topic_t* const topic         = self->owner->topic;
-    cy_t* const       cy            = topic->cy;
-    const bool        final_timeout = self->data == NULL;
-    if (!final_timeout) {
-        const cy_us_t ack_timeout  = cy_ack_timeout(self->owner) * (1LL << self->epoch++); // NOLINT(*signed*)
+    cy_topic_t* const topic = self->owner->topic;
+    cy_t* const       cy    = topic->cy;
+    const bool        final = self->data == NULL;
+    if (!final) {
+        const byte_t retries = ++(self->retries); // overflow not possible due to exponential backoff
+        assert(retries > 0);
+        const cy_us_t ack_timeout  = cy_ack_timeout(self->owner) * (1LL << retries); // NOLINT(*signed*)
         const cy_us_t ack_deadline = now + ack_timeout;
         // The final attempt has a larger window, which is exactly what we want because if the RTT is larger than
         // expected we may still be receiving the acks from the earlier attempts.
@@ -2000,21 +1992,21 @@ static void publish_future_timeout(cy_future_t* const base, const cy_us_t now)
             // Potential improvement to consider: the P2P context is updated on received acks only; if stale,
             // it may cause repeated P2P delivery failures; we could possibly consider this in the heuristic?
             // We already have the last_seen in the association, we could also use that.
-            const bool use_p2p = (self->assoc_remaining == 1) && (self->epoch > 1); // unicast heuristic
+            const bool use_p2p = (self->assoc_remaining == 1) && (retries > 1); // unicast heuristic
             cy_lane_t  lane    = { 0 };
             if (use_p2p) {
                 const size_t assoc_idx = bitmap_clz(self->assoc_knockout, self->assoc_capacity);
                 assert(assoc_idx < self->assoc_capacity);
                 assert(bitmap_test(self->assoc_knockout, assoc_idx));
-                association_t* const assoc = self->assoc_set[assoc_idx];
+                const association_t* const assoc = self->assoc_set[assoc_idx];
                 assert(assoc != NULL);
                 lane = (cy_lane_t){ .id = assoc->remote_id, .p2p = assoc->p2p_context, .prio = self->owner->priority };
                 CY_TRACE(cy,
-                         "☝️ %s prefer P2P delivery to N%016jx tag=%016jx epoch=%u",
+                         "☝️ %s prefer P2P delivery to N%016jx tag=%016jx retries=%u",
                          topic_repr(topic).str,
                          (uintmax_t)assoc->remote_id,
                          (uintmax_t)self->base.key,
-                         self->epoch);
+                         retries);
             }
             const cy_err_t er = do_publish_impl(self->owner, //
                                                 ack_deadline,
@@ -2023,6 +2015,8 @@ static void publish_future_timeout(cy_future_t* const base, const cy_us_t now)
                                                 self->base.key,
                                                 use_p2p ? &lane : NULL);
             ON_ASYNC_ERROR_IF(cy, topic, er);
+            assert(ack_deadline < self->deadline);
+            future_deadline_arm(base, ack_deadline);
         } else {
             bytes_undup(cy, self->data);
             self->data = NULL;
@@ -2040,6 +2034,8 @@ static void publish_future_finalize(cy_future_t* const base)
     assert(self->assoc_capacity == 0);
     assert(self->assoc_knockout == NULL);
     assert(self->data == NULL);
+    assert(!olga_is_pending(&base->cy->olga, &base->timeout));
+    assert(!cavl2_is_inserted(self->owner->topic->pub_futures_by_tag, &base->index));
     (void)self;
 }
 
@@ -2049,15 +2045,15 @@ static const cy_future_vtable_t publish_future_vtable = { .status   = publish_fu
                                                           .timeout  = publish_future_timeout,
                                                           .finalize = publish_future_finalize };
 
-static void publish_future_on_ack(publish_future_t* const self, association_t* const association)
+static void publish_future_on_ack(publish_future_t* const self, const uint64_t remote_id)
 {
     assert(!self->done);
     self->acknowledged = true;
 
-    const size_t idx   = association_bisect(self->assoc_set, self->assoc_capacity, association->remote_id);
-    const bool   known = (idx < self->assoc_capacity) && (self->assoc_set[idx] == association);
+    const size_t idx   = association_bisect(self->assoc_set, self->assoc_capacity, remote_id);
+    const bool   known = (idx < self->assoc_capacity) && (self->assoc_set[idx]->remote_id == remote_id);
     if (known && bitmap_test(self->assoc_knockout, idx)) {
-        assert(association->pending_count > 0);
+        assert(self->assoc_set[idx]->pending_count > 0);
         bitmap_clear(self->assoc_knockout, idx);
         assert(self->assoc_remaining > 0);
         self->assoc_remaining--;
@@ -2085,7 +2081,7 @@ cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadli
     fut->deadline        = deadline;
     fut->done            = false;
     fut->acknowledged    = false;
-    fut->epoch           = 0;
+    fut->retries         = 0;
     fut->assoc_capacity  = topic->assoc_count;
     fut->assoc_remaining = 0;
     fut->assoc_knockout  = bitmap_new(cy, fut->assoc_capacity);
@@ -3329,7 +3325,7 @@ static void on_message_ack(cy_t* const       cy,
         }
         publish_future_t* const future = (publish_future_t*)future_index_lookup(topic->pub_futures_by_tag, tag);
         if (future != NULL) {
-            publish_future_on_ack(future, ass);
+            publish_future_on_ack(future, lane.id);
         }
     } else {
         // NB: OOM here causes the empty-snapshot discovery path to lose this ACK. This is accepted by design:
