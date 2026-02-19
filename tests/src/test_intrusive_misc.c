@@ -230,6 +230,49 @@ static void test_bytes_undup_null_is_noop(void)
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&fixture.heap));
 }
 
+static void test_bytes_dup_all_empty_fragments_returns_sentinel(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+
+    static const unsigned char dummy = 0xA5U;
+    cy_bytes_t                 fragments[3];
+    memset(fragments, 0, sizeof(fragments));
+    fragments[0].size = 0U;
+    fragments[0].data = &dummy;
+    fragments[0].next = &fragments[1];
+    fragments[1].size = 0U;
+    fragments[1].data = NULL;
+    fragments[1].next = &fragments[2];
+    fragments[2].size = 0U;
+    fragments[2].data = &dummy;
+    fragments[2].next = NULL;
+
+    const cy_bytes_t* const duplicated = bytes_dup(&fixture.cy, fragments[0]);
+    TEST_ASSERT_TRUE(duplicated == &bytes_empty_sentinel);
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&fixture.heap));
+
+    bytes_undup(&fixture.cy, duplicated);
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&fixture.heap));
+}
+
+static void test_bytes_dup_oom_before_first_chunk(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+
+    static const unsigned char payload = 0x5AU;
+    const cy_bytes_t           source  = { .size = 1U, .data = &payload, .next = NULL };
+
+    fixture_set_fail_after(&fixture, 0U);
+    const cy_bytes_t* const duplicated = bytes_dup(&fixture.cy, source);
+    TEST_ASSERT_NULL(duplicated);
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&fixture.heap));
+}
+
 static size_t bitmap_clz_reference(const bitmap_t* const bitmap, const size_t count)
 {
     for (size_t i = 0U; i < count; i++) {
@@ -284,6 +327,8 @@ int main(void)
     RUN_TEST(test_bytes_dup_undup_three_fragments_exhaustive_small_sizes);
     RUN_TEST(test_bytes_dup_oom_cleans_up_partial_chain);
     RUN_TEST(test_bytes_undup_null_is_noop);
+    RUN_TEST(test_bytes_dup_all_empty_fragments_returns_sentinel);
+    RUN_TEST(test_bytes_dup_oom_before_first_chunk);
     RUN_TEST(test_bitmap_clz_basic);
     RUN_TEST(test_bitmap_clz_ignores_tail_padding_bits);
     return UNITY_END();

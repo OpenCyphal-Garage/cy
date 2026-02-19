@@ -284,7 +284,7 @@ void spin_to(test_platform_t& p, const cy_us_t new_now)
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(p.cy));
 }
 
-cy_publisher_t* setup_publisher(test_platform_t& p, const char* const topic_name)
+cy_publisher_t* setup_publisher(const test_platform_t& p, const char* const topic_name)
 {
     cy_publisher_t* const pub = cy_advertise(p.cy, cy_str(topic_name));
     TEST_ASSERT_NOT_NULL(pub);
