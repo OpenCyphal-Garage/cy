@@ -287,7 +287,7 @@ static void mem_free(const cy_t* const cy, void* ptr)
 /// This is only used with reliable transmissions where the library needs to store the payload for possible retransmits.
 #define BYTES_DUP_CHUNK (1024U - (sizeof(void*) * 2U))
 
-/// Frees the chain of bytes assuming that each instance is stored in the same block with the data it holds.
+/// Frees all memory allocated by bytes_dup(). No-op if bytes are NULL.
 static void bytes_undup(const cy_t* const cy, cy_bytes_t* bytes)
 {
     assert(cy != NULL);
@@ -546,7 +546,7 @@ typedef struct cy_future_vtable_t
     cy_future_status_t (*status)(const cy_future_t*);
     size_t (*result)(cy_future_t*, size_t, void*);
     void (*cancel)(cy_future_t*); ///< Pre: status() == pending; post: status() != pending.
-    void (*timeout)(cy_future_t*);
+    void (*timeout)(cy_future_t*, cy_us_t now);
     void (*finalize)(cy_future_t*); ///< Invoked immediately before destruction; pre: status() != pending.
 } cy_future_vtable_t;
 
@@ -619,9 +619,8 @@ static cy_future_t* future_index_lookup(cy_tree_t* const index, const uint64_t k
 static void future_timeout_trampoline(olga_t* const sched, olga_event_t* const event, const cy_us_t now)
 {
     (void)sched;
-    (void)now;
     cy_future_t* const self = (cy_future_t*)event->user;
-    self->vtable->timeout(self);
+    self->vtable->timeout(self, now);
 }
 
 static void future_deadline_arm(cy_future_t* const self, const cy_us_t deadline)
@@ -1792,6 +1791,29 @@ cy_publisher_t* cy_advertise_client(cy_t* const cy, const cy_str_t name, const s
     return (res == CY_OK) ? pub : NULL;
 }
 
+static cy_err_t do_publish_impl(cy_publisher_t* const pub,
+                                const cy_us_t         deadline,
+                                const cy_bytes_t      message,
+                                const header_type_t   header_type,
+                                const uint64_t        tag)
+{
+    cy_topic_t* const topic = pub->topic;
+    cy_t* const       cy    = topic->cy;
+    assert(topic->pub_count > 0);
+
+    // TODO: How do we handle CAN compatibility? No header for pinned topics? The transport will strip the header?
+    byte_t header[18] = { (byte_t)header_type, (byte_t)topic_lage(topic, cy_now(cy)) };
+    (void)serialize_u64(serialize_u64(&header[2], tag), topic->hash);
+    const cy_bytes_t headed_message = { .size = sizeof(header), .data = header, .next = &message };
+
+    assert(topic_subject_id(topic) == topic->pub_writer->subject_id);
+    return cy->platform->vtable->subject_writer_send(cy->platform, //
+                                                     topic->pub_writer,
+                                                     deadline,
+                                                     pub->priority,
+                                                     headed_message);
+}
+
 static cy_err_t do_publish(cy_publisher_t* const pub,
                            const cy_us_t         deadline,
                            const cy_bytes_t      message,
@@ -1803,19 +1825,6 @@ static cy_err_t do_publish(cy_publisher_t* const pub,
     }
     cy_topic_t* const topic = pub->topic;
     cy_t* const       cy    = topic->cy;
-    assert(topic->pub_count > 0);
-    gossip_begin(cy);
-
-    // Compose the session layer header.
-    // TODO: How do we handle CAN compatibility? No header for pinned topics? The transport will strip the header?
-    const uint64_t tag        = topic->pub_tag_baseline + topic->pub_seqno++;
-    byte_t         header[18] = { (byte_t)header_type, (byte_t)topic_lage(topic, cy_now(cy)) };
-    (void)serialize_u64(serialize_u64(&header[2], tag), topic->hash);
-    const cy_bytes_t headed_message = { .size = sizeof(header), .data = header, .next = &message };
-
-    if (out_tag != NULL) {
-        *out_tag = tag;
-    }
 
     // Lazy creation is the simplest option because we have to drop the subject writer on topic reallocation,
     // and it may fail to be created at the time of reallocation, so we'd have to retry anyway.
@@ -1829,12 +1838,13 @@ static cy_err_t do_publish(cy_publisher_t* const pub,
         }
         topic->pub_writer->subject_id = subject_id;
     }
-    assert(topic_subject_id(topic) == topic->pub_writer->subject_id);
-    return cy->platform->vtable->subject_writer_send(cy->platform, //
-                                                     topic->pub_writer,
-                                                     deadline,
-                                                     pub->priority,
-                                                     headed_message);
+
+    const uint64_t tag = topic->pub_tag_baseline + topic->pub_seqno++;
+    if (out_tag != NULL) {
+        *out_tag = tag;
+    }
+    gossip_begin(cy);
+    return do_publish_impl(pub, deadline, message, header_type, tag);
 }
 
 cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t deadline, const cy_bytes_t message)
@@ -1846,11 +1856,12 @@ typedef struct
 {
     cy_future_t     base; ///< The key is the tag.
     cy_publisher_t* owner;
+    cy_us_t         deadline;
     bool            done;
     bool            acknowledged;
 
     /// Retransmission states.
-    byte_t      epoch;
+    byte_t      epoch; ///< The epoch counter never overflows due to the exponential backoff.
     cy_bytes_t* data;
 
     /// The association set is captured at publication and it becomes the target set we require acks from.
@@ -1864,7 +1875,6 @@ typedef struct
 } publish_future_t;
 
 /// When we're done with the future, we need to update the shared states of our associations.
-/// This is where we update the slack counters and enforce the slack limits. This function is idempotent.
 static void publish_future_release_associations(publish_future_t* const self, const bool premature_cancellation)
 {
     cy_topic_t* const topic = self->owner->topic;
@@ -1904,12 +1914,16 @@ static cy_future_status_t publish_future_status(const cy_future_t* const base)
     return cy_future_pending;
 }
 
-static void publish_future_cleanup(publish_future_t* const self, const bool premature_cancellation)
+static void publish_future_materialize(publish_future_t* const self, const bool premature_cancellation)
 {
-    self->done = true;
+    assert(!self->done);
+    self->done     = true;
+    cy_t* const cy = self->owner->topic->cy;
     future_deadline_disarm(&self->base);
     future_index_remove(&self->base, &self->owner->topic->pub_futures_by_tag);
     publish_future_release_associations(self, premature_cancellation);
+    bytes_undup(cy, self->data);
+    self->data = NULL;
     future_notify(&self->base);
 }
 
@@ -1925,13 +1939,45 @@ static void publish_future_cancel(cy_future_t* const base)
 {
     publish_future_t* const self = (publish_future_t*)base;
     if (!self->done) {
-        publish_future_cleanup(self, true);
+        publish_future_materialize(self, true);
     }
 }
 
-static void publish_future_timeout(cy_future_t* const base); // TODO not implemented
+static void publish_future_timeout(cy_future_t* const base, const cy_us_t now)
+{
+    publish_future_t* const self = (publish_future_t*)base;
+    assert(!self->done);
+    cy_topic_t* const topic         = self->owner->topic;
+    cy_t* const       cy            = topic->cy;
+    const bool        final_timeout = self->data == NULL;
+    if (!final_timeout) {
+        const cy_us_t ack_timeout  = cy_ack_timeout(self->owner) * (1LL << self->epoch++); // NOLINT(*signed*)
+        const cy_us_t ack_deadline = now + ack_timeout;
+        // The final attempt has a larger window, which is exactly what we want because if the RTT is larger than
+        // expected we may still be receiving the acks from the earlier attempts.
+        const bool has_time_for_round_trip = (ack_deadline + ack_timeout) <= self->deadline;
+        if (has_time_for_round_trip) {
+            const cy_err_t er = do_publish_impl(self->owner, ack_deadline, *self->data, header_msg_rel, self->base.key);
+            ON_ASYNC_ERROR_IF(cy, topic, er);
+        } else {
+            bytes_undup(cy, self->data);
+            self->data = NULL;
+            future_deadline_arm(base, self->deadline); // final deadline, no further retransmissions
+        }
+    } else {
+        publish_future_materialize(self, false); // may be successful depending on received acks
+    }
+}
 
-static void publish_future_finalize(cy_future_t* const base); // TODO not implemented
+static void publish_future_finalize(cy_future_t* const base)
+{
+    publish_future_t* const self = (publish_future_t*)base;
+    assert(self->done);
+    assert(self->assoc_capacity == 0);
+    assert(self->assoc_knockout == NULL);
+    assert(self->data == NULL);
+    (void)self;
+}
 
 static const cy_future_vtable_t publish_future_vtable = { .status   = publish_future_status,
                                                           .result   = publish_future_result,
@@ -1953,7 +1999,7 @@ static void publish_future_on_ack(publish_future_t* const self, association_t* c
         self->assoc_remaining--;
     }
     if (self->assoc_remaining == 0) { // also handles the case of no known associations at publication
-        publish_future_cleanup(self, false);
+        publish_future_materialize(self, false);
     }
 }
 
@@ -1972,6 +2018,7 @@ cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadli
         return NULL;
     }
     fut->owner           = pub;
+    fut->deadline        = deadline;
     fut->done            = false;
     fut->acknowledged    = false;
     fut->epoch           = 0;
@@ -1991,10 +2038,12 @@ cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadli
 
     // Compute the timings but don't arm the timer yet because transmission may still fail.
     // The transmission deadline of each attempt equals the next attempt time such that we don't enqueue duplicates.
-    // There must be some gap time before the overall deadline to ensure we can actually see the ACKs.
-    const cy_us_t now         = cy_now(cy);
-    const cy_us_t ack_timeout = cy_ack_timeout(pub);
-    const cy_us_t tx_deadline = sooner(deadline - ack_timeout, now + ack_timeout);
+    // If the application gave us a deadline that's too tight, that's on them -- we will still try hoping for the best.
+    // Remember that the given deadline is a strict limit that we are not allowed to exceed.
+    const cy_us_t now          = cy_now(cy);
+    const cy_us_t ack_timeout  = cy_ack_timeout(pub);
+    const cy_us_t ack_deadline = sooner(deadline, now + ack_timeout);
+    const cy_us_t tx_deadline  = ack_deadline;
 
     // Once the fallible operations are completed, it is safe to transmit.
     const cy_err_t res = do_publish(pub, tx_deadline, message, header_msg_rel, &fut->base.key);
@@ -2026,7 +2075,7 @@ cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadli
     const bool insert_ok = future_index_insert(&fut->base, &topic->pub_futures_by_tag, fut->base.key);
     assert(insert_ok); // cannot fail by design
     (void)insert_ok;
-    future_deadline_arm(&fut->base, now + ack_timeout);
+    future_deadline_arm(&fut->base, ack_deadline);
     return &fut->base;
 }
 
