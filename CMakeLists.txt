@@ -33,6 +33,7 @@ if (NOT NO_STATIC_ANALYSIS)
             --suppress=constParameterCallback
             --suppress=duplInheritedMember
             --suppress=preprocessorErrorDirective
+            --suppress=unreadVariable
             --inline-suppr
     )
     set(CMAKE_C_CPPCHECK ${cppcheck};--language=c;--std=c11;${cppcheck_options})

@@ -1885,7 +1885,7 @@ typedef struct
     bool            acknowledged;
 
     /// Retransmission states.
-    byte_t      retries; ///< The counter never overflows due to the exponential backoff.
+    cy_us_t     ack_timeout;
     cy_bytes_t* data;
 
     /// The association set is captured at publication and it becomes the target set we require acks from.
@@ -1965,63 +1965,84 @@ static void publish_future_cancel(cy_future_t* const base)
     }
 }
 
+/// The final attempt has a larger window, which is exactly what we want because if the RTT is larger than
+/// expected we may still be receiving the acks from the earlier attempts.
+///
+/// For example, assume we have the initial timeout 1, the initial transmission time 10, total deadline 21.
+/// The transmissions will take place as follows:
+///
+///  - t=10: initial attempt     timeout=1   deadline=11     --> (11+1*2)<21
+///  - t=11: 1st retry           timeout=2   deadline=13     --> (13+2*2)<21
+///  - t=13: 2nd retry           timeout=4   deadline=17     --> (17+4*2)>21, last attempt
+///  - passively wait for acks until 21, no further attempts.
+static bool publish_future_is_last_attempt(const cy_us_t current_ack_deadline,
+                                           const cy_us_t current_ack_timeout,
+                                           const cy_us_t total_deadline)
+{
+    return (current_ack_deadline + (current_ack_timeout * 2)) > total_deadline;
+}
+
 static void publish_future_timeout(cy_future_t* const base, const cy_us_t now)
 {
-    publish_future_t* const self = (publish_future_t*)base;
+    publish_future_t* const self  = (publish_future_t*)base;
+    cy_topic_t* const       topic = self->owner->topic;
+    cy_t* const             cy    = topic->cy;
+
+    // Check completion.
     assert(!self->done);
-    cy_topic_t* const topic = self->owner->topic;
-    cy_t* const       cy    = topic->cy;
-    const bool        final = self->data == NULL;
-    if (!final) {
-        const byte_t retries = ++(self->retries); // overflow not possible due to exponential backoff
-        assert(retries > 0);
-        const cy_us_t ack_timeout  = cy_ack_timeout(self->owner) * (1LL << retries); // NOLINT(*signed*)
-        const cy_us_t ack_deadline = now + ack_timeout;
-        // The final attempt has a larger window, which is exactly what we want because if the RTT is larger than
-        // expected we may still be receiving the acks from the earlier attempts.
-        const bool has_time_for_round_trip = (ack_deadline + ack_timeout) <= self->deadline;
-        if (has_time_for_round_trip) {
-            // We can use multicast throughout, but it may be inefficient if we only need to reach few subscribers.
-            // This is not a correctness issue because each subscriber will receive our message at most once per
-            // attempt, but rather an issue of efficiency: ideally we don't want to burden subscribers that already
-            // confirmed the message with processing it again and then sending acks again. The first (maybe also ~2nd)
-            // attempt always must be multicast because there may be new subscribers that we don't know about yet;
-            // subsequent attempts MAY be unicast per heuristics that are subject to review/improvement.
-            // Potential improvement to consider: the P2P context is updated on received acks only; if stale,
-            // it may cause repeated P2P delivery failures; we could possibly consider this in the heuristic?
-            // We already have the last_seen in the association, we could also use that.
-            const bool use_p2p = (self->assoc_remaining == 1) && (retries > 1); // unicast heuristic
-            cy_lane_t  lane    = { 0 };
-            if (use_p2p) {
-                const size_t assoc_idx = bitmap_clz(self->assoc_knockout, self->assoc_capacity);
-                assert(assoc_idx < self->assoc_capacity);
-                assert(bitmap_test(self->assoc_knockout, assoc_idx));
-                const association_t* const assoc = self->assoc_set[assoc_idx];
-                assert(assoc != NULL);
-                lane = (cy_lane_t){ .id = assoc->remote_id, .p2p = assoc->p2p_context, .prio = self->owner->priority };
-                CY_TRACE(cy,
-                         "☝️ %s prefer P2P delivery to N%016jx tag=%016jx retries=%u",
-                         topic_repr(topic).str,
-                         (uintmax_t)assoc->remote_id,
-                         (uintmax_t)self->base.key,
-                         retries);
-            }
-            const cy_err_t er = do_publish_impl(self->owner, //
-                                                ack_deadline,
-                                                *self->data,
-                                                header_msg_rel,
-                                                self->base.key,
-                                                use_p2p ? &lane : NULL);
-            ON_ASYNC_ERROR_IF(cy, topic, er);
-            assert(ack_deadline < self->deadline);
-            future_deadline_arm(base, ack_deadline);
-        } else {
-            bytes_undup(cy, self->data);
-            self->data = NULL;
-            future_deadline_arm(base, self->deadline); // final deadline, no further retransmissions
-        }
+    if (self->data == NULL) {                    // This is the final poll.
+        assert(now >= self->deadline);           // Ensure correct scheduling.
+        publish_future_materialize(self, false); // The future may be successful depending on received acks.
+        return;
+    }
+
+    self->ack_timeout *= 2; // exponential backoff
+    const cy_us_t ack_deadline = self->ack_timeout + now;
+    const bool    last_attempt = publish_future_is_last_attempt(ack_deadline, self->ack_timeout, self->deadline);
+
+    // We can use multicast throughout, but it may be inefficient if we only need to reach few remaining subscribers.
+    // This is not a correctness issue because each subscriber will receive our message at most once per attempt,
+    // but rather an issue of efficiency: ideally we don't want to burden subscribers that already confirmed
+    // the message with processing it again and then sending acks again. The first (maybe also ~2nd)
+    // attempt always must be multicast because there may be new subscribers that we don't know about yet;
+    // subsequent attempts MAY be unicast per heuristics that are subject to review/improvement.
+    //
+    // Potential improvement to consider: the P2P context is updated on received acks only; if stale,
+    // it may cause repeated P2P delivery failures; we could possibly consider this in the heuristic?
+    // We already have the last_seen in the association, we could also use that.
+    const bool       use_p2p = (self->assoc_remaining == 1) && last_attempt; // heuristic subject to review
+    cy_lane_t        lane    = { 0 };
+    const cy_lane_t* lane_p  = NULL;
+    if (use_p2p) {
+        const size_t assoc_idx = bitmap_clz(self->assoc_knockout, self->assoc_capacity);
+        assert(assoc_idx < self->assoc_capacity);
+        assert(bitmap_test(self->assoc_knockout, assoc_idx));
+        const association_t* const assoc = self->assoc_set[assoc_idx];
+        assert(assoc != NULL);
+        lane = (cy_lane_t){ .id = assoc->remote_id, .p2p = assoc->p2p_context, .prio = self->owner->priority };
+        CY_TRACE(cy,
+                 "☝️ %s P2P to N%016jx tag=%016jx",
+                 topic_repr(topic).str,
+                 (uintmax_t)assoc->remote_id,
+                 (uintmax_t)self->base.key);
+        lane_p = &lane;
+    }
+
+    // Send the message.
+    const cy_err_t er = do_publish_impl(self->owner, ack_deadline, *self->data, header_msg_rel, self->base.key, lane_p);
+    ON_ASYNC_ERROR_IF(cy, topic, er);
+
+    // Schedule the next poll event.
+    // If there is going to be another attempt, schedule the next timeout to fire when it's time to transmit;
+    // otherwise, if this is the last attempt, we will only need to get back to this state at the final deadline.
+    // If there will be no more attempts, we don't need to keep the payload, so we should free it early.
+    if (last_attempt) {
+        bytes_undup(cy, self->data); // Release memory ASAP, no longer going to need it.
+        self->data = NULL;
+        future_deadline_arm(base, self->deadline);
     } else {
-        publish_future_materialize(self, false); // may be successful depending on received acks
+        assert(ack_deadline < self->deadline);
+        future_deadline_arm(base, ack_deadline);
     }
 }
 
@@ -2079,17 +2100,11 @@ cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadli
     fut->deadline        = deadline;
     fut->done            = false;
     fut->acknowledged    = false;
-    fut->retries         = 0;
+    fut->ack_timeout     = cy_ack_timeout(pub);
     fut->assoc_capacity  = topic->assoc_count;
     fut->assoc_remaining = 0;
     fut->assoc_knockout  = bitmap_new(cy, fut->assoc_capacity);
     if ((fut->assoc_knockout == NULL) && (fut->assoc_capacity > 0)) {
-        mem_free(cy, fut);
-        return NULL;
-    }
-    fut->data = bytes_dup(cy, message);
-    if (fut->data == NULL) {
-        mem_free(cy, fut->assoc_knockout);
         mem_free(cy, fut);
         return NULL;
     }
@@ -2099,15 +2114,30 @@ cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadli
     // If the application gave us a deadline that's too tight, that's on them -- we will still try hoping for the best.
     // Remember that the given deadline is a strict limit that we are not allowed to exceed.
     const cy_us_t now          = cy_now(cy);
-    const cy_us_t ack_timeout  = cy_ack_timeout(pub);
-    const cy_us_t ack_deadline = sooner(deadline, now + ack_timeout);
+    const cy_us_t ack_deadline = sooner(deadline, now + fut->ack_timeout);
     const cy_us_t tx_deadline  = ack_deadline;
+    const bool    one_shot     = publish_future_is_last_attempt(ack_deadline, fut->ack_timeout, deadline);
+
+    // If we anticipate retransmissions, copy the data. This is wasteful. There is a way to improve it though:
+    // we can extend the transport API such that we could copy once into the TX queue memory and then hold it via
+    // refcounting until we're done transmitting. See the old experimental libudpard implementation where we used
+    // to have reliable delivery in the transport layer; we can borrow some ideas from there to minimize TX copy.
+    if (!one_shot) {
+        fut->data = bytes_dup(cy, message);
+        if (fut->data == NULL) {
+            mem_free(cy, fut->assoc_knockout);
+            mem_free(cy, fut);
+            return NULL;
+        }
+    } else {
+        fut->data = NULL; // Not enough time for retransmissions, no need to copy the data.
+    }
 
     // Once the fallible operations are completed, it is safe to transmit.
     // The initial transmission always uses multicast. We can switch to P2P later if only few nodes need retries.
     const cy_err_t res = do_publish(pub, tx_deadline, message, header_msg_rel, &fut->base.key);
     if (res != CY_OK) {
-        bytes_undup(cy, fut->data);
+        bytes_undup(cy, fut->data); // No-op if NULL.
         mem_free(cy, fut->assoc_knockout);
         mem_free(cy, fut);
         return NULL;
@@ -2134,7 +2164,7 @@ cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadli
     const bool insert_ok = future_index_insert(&fut->base, &topic->pub_futures_by_tag, fut->base.key);
     assert(insert_ok); // cannot fail by design
     (void)insert_ok;
-    future_deadline_arm(&fut->base, ack_deadline);
+    future_deadline_arm(&fut->base, one_shot ? deadline : ack_deadline);
     return &fut->base;
 }
 
@@ -2150,7 +2180,8 @@ cy_us_t cy_ack_timeout(const cy_publisher_t* const pub)
 {
     cy_us_t out = BIG_BANG;
     if (pub != NULL) {
-        out = pub->ack_baseline_timeout * (cy_us_t)(1ULL << (byte_t)pub->priority);
+        assert(pub->ack_baseline_timeout > 0);
+        out = pub->ack_baseline_timeout * (1LL << (byte_t)pub->priority); // NOLINT(*signed*)
     }
     return out;
 }
