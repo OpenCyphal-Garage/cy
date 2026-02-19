@@ -412,13 +412,13 @@ void test_no_subscribers_single_ack_succeeds()
     test_platform_t platform{};
     test_begin(platform);
 
-    static const char* const TopicName = "reliable/no_subscribers_single_ack";
-    cy_publisher_t* const    pub       = setup_publisher(platform, TopicName);
+    static const char* const topic_name = "reliable/no_subscribers_single_ack";
+    cy_publisher_t* const    pub        = setup_publisher(platform, topic_name);
 
     const cy_bytes_t    msg  = { .size = 1U, .data = "\xA1", .next = nullptr };
     cy_future_t* const  fut  = cy_publish_reliable(pub, platform.now + 1'000'000, msg);
     const std::uint64_t tag  = captured_tag(platform);
-    const std::uint64_t hash = topic_hash_for(platform, TopicName);
+    const std::uint64_t hash = topic_hash_for(platform, topic_name);
     TEST_ASSERT_NOT_NULL(fut);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0xABCDEF01), platform.now);
@@ -454,13 +454,13 @@ void test_no_subscribers_timeout_with_prior_ack_succeeds()
     test_platform_t platform{};
     test_begin(platform);
 
-    static const char* const TopicName = "reliable/no_subscribers_timeout_ack";
-    cy_publisher_t* const    pub       = setup_publisher(platform, TopicName);
+    static const char* const topic_name = "reliable/no_subscribers_timeout_ack";
+    cy_publisher_t* const    pub        = setup_publisher(platform, topic_name);
 
     const cy_bytes_t    msg  = { .size = 1U, .data = "\xA3", .next = nullptr };
     cy_future_t* const  fut  = cy_publish_reliable(pub, platform.now + 1'000'000, msg);
     const std::uint64_t tag  = captured_tag(platform);
-    const std::uint64_t hash = topic_hash_for(platform, TopicName);
+    const std::uint64_t hash = topic_hash_for(platform, topic_name);
     TEST_ASSERT_NOT_NULL(fut);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0x01020304), platform.now);
@@ -476,14 +476,14 @@ void test_one_subscriber_acked()
     test_platform_t platform{};
     test_begin(platform);
 
-    static const char* const TopicName = "reliable/one_subscriber_acked";
-    cy_publisher_t* const    pub       = setup_publisher(platform, TopicName);
-    build_association(platform, pub, TopicName, UINT64_C(0x1111));
+    static const char* const topic_name = "reliable/one_subscriber_acked";
+    cy_publisher_t* const    pub        = setup_publisher(platform, topic_name);
+    build_association(platform, pub, topic_name, UINT64_C(0x1111));
 
     const cy_bytes_t    msg  = { .size = 1U, .data = "\xA4", .next = nullptr };
     cy_future_t* const  fut  = cy_publish_reliable(pub, platform.now + 1'000'000, msg);
     const std::uint64_t tag  = captured_tag(platform);
-    const std::uint64_t hash = topic_hash_for(platform, TopicName);
+    const std::uint64_t hash = topic_hash_for(platform, topic_name);
     TEST_ASSERT_NOT_NULL(fut);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0x1111), platform.now);
@@ -499,15 +499,15 @@ void test_two_subscribers_both_acked()
     test_platform_t platform{};
     test_begin(platform);
 
-    static const char* const TopicName = "reliable/two_subscribers_both_acked";
-    cy_publisher_t* const    pub       = setup_publisher(platform, TopicName);
-    build_association(platform, pub, TopicName, UINT64_C(0x2222));
-    build_association(platform, pub, TopicName, UINT64_C(0x3333));
+    static const char* const topic_name = "reliable/two_subscribers_both_acked";
+    cy_publisher_t* const    pub        = setup_publisher(platform, topic_name);
+    build_association(platform, pub, topic_name, UINT64_C(0x2222));
+    build_association(platform, pub, topic_name, UINT64_C(0x3333));
 
     const cy_bytes_t    msg  = { .size = 1U, .data = "\xA5", .next = nullptr };
     cy_future_t* const  fut  = cy_publish_reliable(pub, platform.now + 1'000'000, msg);
     const std::uint64_t tag  = captured_tag(platform);
-    const std::uint64_t hash = topic_hash_for(platform, TopicName);
+    const std::uint64_t hash = topic_hash_for(platform, topic_name);
     TEST_ASSERT_NOT_NULL(fut);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0x2222), platform.now);
@@ -525,16 +525,16 @@ void test_two_subscribers_one_acks()
     test_platform_t platform{};
     test_begin(platform);
 
-    static const char* const TopicName = "reliable/two_subscribers_one_acks";
-    cy_publisher_t* const    pub       = setup_publisher(platform, TopicName);
-    build_association(platform, pub, TopicName, UINT64_C(0x4444));
-    build_association(platform, pub, TopicName, UINT64_C(0x5555));
+    static const char* const topic_name = "reliable/two_subscribers_one_acks";
+    cy_publisher_t* const    pub        = setup_publisher(platform, topic_name);
+    build_association(platform, pub, topic_name, UINT64_C(0x4444));
+    build_association(platform, pub, topic_name, UINT64_C(0x5555));
 
     const cy_bytes_t    msg      = { .size = 1U, .data = "\xA6", .next = nullptr };
     const cy_us_t       deadline = platform.now + ACK_TIMEOUT;
     cy_future_t* const  fut      = cy_publish_reliable(pub, deadline, msg);
     const std::uint64_t tag      = captured_tag(platform);
-    const std::uint64_t hash     = topic_hash_for(platform, TopicName);
+    const std::uint64_t hash     = topic_hash_for(platform, topic_name);
     TEST_ASSERT_NOT_NULL(fut);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0x4444), platform.now);
@@ -553,10 +553,10 @@ void test_two_subscribers_none_ack_timeout()
     test_platform_t platform{};
     test_begin(platform);
 
-    static const char* const TopicName = "reliable/two_subscribers_none_ack_timeout";
-    cy_publisher_t* const    pub       = setup_publisher(platform, TopicName);
-    build_association(platform, pub, TopicName, UINT64_C(0x6666));
-    build_association(platform, pub, TopicName, UINT64_C(0x7777));
+    static const char* const topic_name = "reliable/two_subscribers_none_ack_timeout";
+    cy_publisher_t* const    pub        = setup_publisher(platform, topic_name);
+    build_association(platform, pub, topic_name, UINT64_C(0x6666));
+    build_association(platform, pub, topic_name, UINT64_C(0x7777));
 
     const cy_bytes_t   msg      = { .size = 1U, .data = "\xA7", .next = nullptr };
     const cy_us_t      deadline = platform.now + ACK_TIMEOUT;
@@ -576,14 +576,14 @@ void test_retransmission_on_timeout()
     test_platform_t platform{};
     test_begin(platform);
 
-    static const char* const TopicName = "reliable/retransmission_on_timeout";
-    cy_publisher_t* const    pub       = setup_publisher(platform, TopicName);
+    static const char* const topic_name = "reliable/retransmission_on_timeout";
+    cy_publisher_t* const    pub        = setup_publisher(platform, topic_name);
 
     const cy_bytes_t    msg      = { .size = 1U, .data = "\xA8", .next = nullptr };
     const cy_us_t       deadline = platform.now + (5 * ACK_TIMEOUT);
     cy_future_t* const  fut      = cy_publish_reliable(pub, deadline, msg);
     const std::uint64_t tag      = captured_tag(platform);
-    const std::uint64_t hash     = topic_hash_for(platform, TopicName);
+    const std::uint64_t hash     = topic_hash_for(platform, topic_name);
     TEST_ASSERT_NOT_NULL(fut);
 
     const std::size_t initial_rel_multicast_count = platform.reliable_multicast_count;
@@ -620,15 +620,15 @@ void test_single_remaining_not_last_attempt_stays_multicast()
     test_platform_t platform{};
     test_begin(platform);
 
-    static const char* const TopicName = "reliable/single_remaining_not_last_attempt_stays_multicast";
-    cy_publisher_t* const    pub       = setup_publisher(platform, TopicName);
-    build_association(platform, pub, TopicName, UINT64_C(0xA123));
+    static const char* const topic_name = "reliable/single_remaining_not_last_attempt_stays_multicast";
+    cy_publisher_t* const    pub        = setup_publisher(platform, topic_name);
+    build_association(platform, pub, topic_name, UINT64_C(0xA123));
 
     const cy_bytes_t    msg      = { .size = 1U, .data = "\xC1", .next = nullptr };
     const cy_us_t       deadline = platform.now + (10 * ACK_TIMEOUT);
     cy_future_t* const  fut      = cy_publish_reliable(pub, deadline, msg);
     const std::uint64_t tag      = captured_tag(platform);
-    const std::uint64_t hash     = topic_hash_for(platform, TopicName);
+    const std::uint64_t hash     = topic_hash_for(platform, topic_name);
     TEST_ASSERT_NOT_NULL(fut);
 
     const std::size_t p2p_before       = platform.p2p_count;
@@ -681,14 +681,14 @@ void test_exponential_backoff_second_timeout()
     test_platform_t platform{};
     test_begin(platform);
 
-    static const char* const TopicName = "reliable/exponential_backoff_second_timeout";
-    cy_publisher_t* const    pub       = setup_publisher(platform, TopicName);
+    static const char* const topic_name = "reliable/exponential_backoff_second_timeout";
+    cy_publisher_t* const    pub        = setup_publisher(platform, topic_name);
 
     const cy_bytes_t    msg      = { .size = 1U, .data = "\xA9", .next = nullptr };
     const cy_us_t       deadline = platform.now + (100 * ACK_TIMEOUT);
     cy_future_t* const  fut      = cy_publish_reliable(pub, deadline, msg);
     const std::uint64_t tag      = captured_tag(platform);
-    const std::uint64_t hash     = topic_hash_for(platform, TopicName);
+    const std::uint64_t hash     = topic_hash_for(platform, topic_name);
     TEST_ASSERT_NOT_NULL(fut);
 
     const cy_us_t t0 = platform.now;
@@ -711,14 +711,14 @@ void test_last_attempt_no_further_retransmission()
     test_platform_t platform{};
     test_begin(platform);
 
-    static const char* const TopicName = "reliable/last_attempt_no_further_retransmission";
-    cy_publisher_t* const    pub       = setup_publisher(platform, TopicName);
+    static const char* const topic_name = "reliable/last_attempt_no_further_retransmission";
+    cy_publisher_t* const    pub        = setup_publisher(platform, topic_name);
 
     const cy_bytes_t    msg      = { .size = 1U, .data = "\xAA", .next = nullptr };
     const cy_us_t       deadline = platform.now + (5 * ACK_TIMEOUT);
     cy_future_t* const  fut      = cy_publish_reliable(pub, deadline, msg);
     const std::uint64_t tag      = captured_tag(platform);
-    const std::uint64_t hash     = topic_hash_for(platform, TopicName);
+    const std::uint64_t hash     = topic_hash_for(platform, topic_name);
     TEST_ASSERT_NOT_NULL(fut);
 
     const cy_us_t t0 = platform.now;
@@ -741,16 +741,16 @@ void test_p2p_retry_single_remaining()
     test_platform_t platform{};
     test_begin(platform);
 
-    static const char* const TopicName = "reliable/p2p_retry_single_remaining";
-    cy_publisher_t* const    pub       = setup_publisher(platform, TopicName);
-    build_association(platform, pub, TopicName, UINT64_C(0x1234));
-    build_association(platform, pub, TopicName, UINT64_C(0x5678));
+    static const char* const topic_name = "reliable/p2p_retry_single_remaining";
+    cy_publisher_t* const    pub        = setup_publisher(platform, topic_name);
+    build_association(platform, pub, topic_name, UINT64_C(0x1234));
+    build_association(platform, pub, topic_name, UINT64_C(0x5678));
 
     const cy_bytes_t    msg      = { .size = 1U, .data = "\xAB", .next = nullptr };
     const cy_us_t       deadline = platform.now + (5 * ACK_TIMEOUT);
     cy_future_t* const  fut      = cy_publish_reliable(pub, deadline, msg);
     const std::uint64_t tag      = captured_tag(platform);
-    const std::uint64_t hash     = topic_hash_for(platform, TopicName);
+    const std::uint64_t hash     = topic_hash_for(platform, topic_name);
     TEST_ASSERT_NOT_NULL(fut);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0x1234), platform.now);
@@ -797,14 +797,14 @@ void test_tight_deadline_ack_succeeds()
     test_platform_t platform{};
     test_begin(platform);
 
-    static const char* const TopicName = "reliable/tight_deadline_ack_succeeds";
-    cy_publisher_t* const    pub       = setup_publisher(platform, TopicName);
+    static const char* const topic_name = "reliable/tight_deadline_ack_succeeds";
+    cy_publisher_t* const    pub        = setup_publisher(platform, topic_name);
 
     const cy_bytes_t    msg      = { .size = 1U, .data = "\xAD", .next = nullptr };
     const cy_us_t       deadline = platform.now + ACK_TIMEOUT;
     cy_future_t* const  fut      = cy_publish_reliable(pub, deadline, msg);
     const std::uint64_t tag      = captured_tag(platform);
-    const std::uint64_t hash     = topic_hash_for(platform, TopicName);
+    const std::uint64_t hash     = topic_hash_for(platform, topic_name);
     TEST_ASSERT_NOT_NULL(fut);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0xABCD), platform.now);
@@ -843,13 +843,13 @@ void test_future_callback_on_success()
     test_begin(platform);
     callback_capture_t capture{};
 
-    static const char* const TopicName = "reliable/future_callback_on_success";
-    cy_publisher_t* const    pub       = setup_publisher(platform, TopicName);
+    static const char* const topic_name = "reliable/future_callback_on_success";
+    cy_publisher_t* const    pub        = setup_publisher(platform, topic_name);
 
     const cy_bytes_t    msg  = { .size = 1U, .data = "\xAF", .next = nullptr };
     cy_future_t* const  fut  = cy_publish_reliable(pub, platform.now + 1'000'000, msg);
     const std::uint64_t tag  = captured_tag(platform);
-    const std::uint64_t hash = topic_hash_for(platform, TopicName);
+    const std::uint64_t hash = topic_hash_for(platform, topic_name);
     TEST_ASSERT_NOT_NULL(fut);
 
     callback_capture_bind(fut, capture);
@@ -895,13 +895,13 @@ void test_future_callback_set_after_completion()
     test_begin(platform);
     callback_capture_t capture{};
 
-    static const char* const TopicName = "reliable/future_callback_set_after_completion";
-    cy_publisher_t* const    pub       = setup_publisher(platform, TopicName);
+    static const char* const topic_name = "reliable/future_callback_set_after_completion";
+    cy_publisher_t* const    pub        = setup_publisher(platform, topic_name);
 
     const cy_bytes_t    msg  = { .size = 1U, .data = "\xB1", .next = nullptr };
     cy_future_t* const  fut  = cy_publish_reliable(pub, platform.now + 1'000'000, msg);
     const std::uint64_t tag  = captured_tag(platform);
-    const std::uint64_t hash = topic_hash_for(platform, TopicName);
+    const std::uint64_t hash = topic_hash_for(platform, topic_name);
     TEST_ASSERT_NOT_NULL(fut);
 
     callback_capture_bind(fut, capture);
@@ -923,13 +923,13 @@ void test_future_auto_destroy_callback()
     test_platform_t platform{};
     test_begin(platform);
 
-    static const char* const TopicName = "reliable/future_auto_destroy_callback";
-    cy_publisher_t* const    pub       = setup_publisher(platform, TopicName);
+    static const char* const topic_name = "reliable/future_auto_destroy_callback";
+    cy_publisher_t* const    pub        = setup_publisher(platform, topic_name);
 
     const cy_bytes_t    msg  = { .size = 1U, .data = "\xB2", .next = nullptr };
     cy_future_t* const  fut  = cy_publish_reliable(pub, platform.now + 1'000'000, msg);
     const std::uint64_t tag  = captured_tag(platform);
-    const std::uint64_t hash = topic_hash_for(platform, TopicName);
+    const std::uint64_t hash = topic_hash_for(platform, topic_name);
     TEST_ASSERT_NOT_NULL(fut);
 
     cy_future_callback_set(fut, cy_future_destroy);
@@ -967,13 +967,13 @@ void test_future_result_returns_zero()
     test_platform_t platform{};
     test_begin(platform);
 
-    static const char* const TopicName = "reliable/future_result_returns_zero";
-    cy_publisher_t* const    pub       = setup_publisher(platform, TopicName);
+    static const char* const topic_name = "reliable/future_result_returns_zero";
+    cy_publisher_t* const    pub        = setup_publisher(platform, topic_name);
 
     const cy_bytes_t    msg  = { .size = 1U, .data = "\xB4", .next = nullptr };
     cy_future_t* const  fut  = cy_publish_reliable(pub, platform.now + 1'000'000, msg);
     const std::uint64_t tag  = captured_tag(platform);
-    const std::uint64_t hash = topic_hash_for(platform, TopicName);
+    const std::uint64_t hash = topic_hash_for(platform, topic_name);
     TEST_ASSERT_NOT_NULL(fut);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0x5353), platform.now);
@@ -1010,8 +1010,8 @@ void test_multiple_concurrent_futures()
     test_platform_t platform{};
     test_begin(platform);
 
-    static const char* const TopicName = "reliable/multiple_concurrent_futures";
-    cy_publisher_t* const    pub       = setup_publisher(platform, TopicName);
+    static const char* const topic_name = "reliable/multiple_concurrent_futures";
+    cy_publisher_t* const    pub        = setup_publisher(platform, topic_name);
 
     const cy_bytes_t   msg      = { .size = 1U, .data = "\xB6", .next = nullptr };
     const cy_us_t      deadline = platform.now + ACK_TIMEOUT;
@@ -1025,7 +1025,7 @@ void test_multiple_concurrent_futures()
     TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut1));
     TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut2));
 
-    const std::uint64_t hash = topic_hash_for(platform, TopicName);
+    const std::uint64_t hash = topic_hash_for(platform, topic_name);
     dispatch_ack(&platform, tag1, hash, UINT64_C(0xBEEF), platform.now);
     TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut1));
     TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut2));
@@ -1044,15 +1044,15 @@ void test_ack_builds_association()
     test_platform_t platform{};
     test_begin(platform);
 
-    static const char* const TopicName = "reliable/ack_builds_association";
-    cy_publisher_t* const    pub       = setup_publisher(platform, TopicName);
+    static const char* const topic_name = "reliable/ack_builds_association";
+    cy_publisher_t* const    pub        = setup_publisher(platform, topic_name);
 
     const cy_bytes_t msg = { .size = 1U, .data = "\xB7", .next = nullptr };
 
     cy_future_t* const fut1 = cy_publish_reliable(pub, platform.now + 1'000'000, msg);
     TEST_ASSERT_NOT_NULL(fut1);
     const std::uint64_t tag1 = captured_tag(platform);
-    const std::uint64_t hash = topic_hash_for(platform, TopicName);
+    const std::uint64_t hash = topic_hash_for(platform, topic_name);
     dispatch_ack(&platform, tag1, hash, UINT64_C(0xAAAA), platform.now);
     TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut1));
     cy_future_destroy(fut1);
@@ -1074,15 +1074,15 @@ void test_ack_from_unknown_remote_still_succeeds()
     test_platform_t platform{};
     test_begin(platform);
 
-    static const char* const TopicName = "reliable/ack_from_unknown_remote_still_succeeds";
-    cy_publisher_t* const    pub       = setup_publisher(platform, TopicName);
-    build_association(platform, pub, TopicName, UINT64_C(0xBBBB));
+    static const char* const topic_name = "reliable/ack_from_unknown_remote_still_succeeds";
+    cy_publisher_t* const    pub        = setup_publisher(platform, topic_name);
+    build_association(platform, pub, topic_name, UINT64_C(0xBBBB));
 
     const cy_bytes_t    msg      = { .size = 1U, .data = "\xB8", .next = nullptr };
     const cy_us_t       deadline = platform.now + ACK_TIMEOUT;
     cy_future_t* const  fut      = cy_publish_reliable(pub, deadline, msg);
     const std::uint64_t tag      = captured_tag(platform);
-    const std::uint64_t hash     = topic_hash_for(platform, TopicName);
+    const std::uint64_t hash     = topic_hash_for(platform, topic_name);
     TEST_ASSERT_NOT_NULL(fut);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0xCCCC), platform.now);
@@ -1101,14 +1101,14 @@ void test_duplicate_ack_from_same_remote()
     test_platform_t platform{};
     test_begin(platform);
 
-    static const char* const TopicName = "reliable/duplicate_ack_from_same_remote";
-    cy_publisher_t* const    pub       = setup_publisher(platform, TopicName);
-    build_association(platform, pub, TopicName, UINT64_C(0xDDDD));
+    static const char* const topic_name = "reliable/duplicate_ack_from_same_remote";
+    cy_publisher_t* const    pub        = setup_publisher(platform, topic_name);
+    build_association(platform, pub, topic_name, UINT64_C(0xDDDD));
 
     const cy_bytes_t    msg  = { .size = 1U, .data = "\xB9", .next = nullptr };
     cy_future_t* const  fut  = cy_publish_reliable(pub, platform.now + 1'000'000, msg);
     const std::uint64_t tag  = captured_tag(platform);
-    const std::uint64_t hash = topic_hash_for(platform, TopicName);
+    const std::uint64_t hash = topic_hash_for(platform, topic_name);
     TEST_ASSERT_NOT_NULL(fut);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0xDDDD), platform.now);
@@ -1126,15 +1126,15 @@ void test_duplicate_ack_while_pending()
     test_platform_t platform{};
     test_begin(platform);
 
-    static const char* const TopicName = "reliable/duplicate_ack_while_pending";
-    cy_publisher_t* const    pub       = setup_publisher(platform, TopicName);
-    build_association(platform, pub, TopicName, UINT64_C(0xDA01));
-    build_association(platform, pub, TopicName, UINT64_C(0xDA02));
+    static const char* const topic_name = "reliable/duplicate_ack_while_pending";
+    cy_publisher_t* const    pub        = setup_publisher(platform, topic_name);
+    build_association(platform, pub, topic_name, UINT64_C(0xDA01));
+    build_association(platform, pub, topic_name, UINT64_C(0xDA02));
 
     const cy_bytes_t    msg  = { .size = 1U, .data = "\xC4", .next = nullptr };
     cy_future_t* const  fut  = cy_publish_reliable(pub, platform.now + 1'000'000, msg);
     const std::uint64_t tag  = captured_tag(platform);
-    const std::uint64_t hash = topic_hash_for(platform, TopicName);
+    const std::uint64_t hash = topic_hash_for(platform, topic_name);
     TEST_ASSERT_NOT_NULL(fut);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0xDA01), platform.now);
@@ -1154,13 +1154,13 @@ void test_ack_future_seqno_ignored()
     test_platform_t platform{};
     test_begin(platform);
 
-    static const char* const TopicName = "reliable/ack_future_seqno_ignored";
-    cy_publisher_t* const    pub       = setup_publisher(platform, TopicName);
+    static const char* const topic_name = "reliable/ack_future_seqno_ignored";
+    cy_publisher_t* const    pub        = setup_publisher(platform, topic_name);
 
     const cy_bytes_t    msg  = { .size = 1U, .data = "\xBA", .next = nullptr };
     cy_future_t* const  fut  = cy_publish_reliable(pub, platform.now + 1'000'000, msg);
     const std::uint64_t tag  = captured_tag(platform);
-    const std::uint64_t hash = topic_hash_for(platform, TopicName);
+    const std::uint64_t hash = topic_hash_for(platform, topic_name);
     TEST_ASSERT_NOT_NULL(fut);
 
     dispatch_ack(&platform, tag + 100U, hash, UINT64_C(0xA0A0), platform.now);
@@ -1179,13 +1179,13 @@ void test_ack_invalid_seqno_ignored()
     test_platform_t platform{};
     test_begin(platform);
 
-    static const char* const TopicName = "reliable/ack_invalid_seqno_ignored";
-    cy_publisher_t* const    pub       = setup_publisher(platform, TopicName);
+    static const char* const topic_name = "reliable/ack_invalid_seqno_ignored";
+    cy_publisher_t* const    pub        = setup_publisher(platform, topic_name);
 
     const cy_bytes_t    msg  = { .size = 1U, .data = "\xBB", .next = nullptr };
     cy_future_t* const  fut  = cy_publish_reliable(pub, platform.now + 1'000'000, msg);
     const std::uint64_t tag  = captured_tag(platform);
-    const std::uint64_t hash = topic_hash_for(platform, TopicName);
+    const std::uint64_t hash = topic_hash_for(platform, topic_name);
     TEST_ASSERT_NOT_NULL(fut);
 
     dispatch_ack(&platform, tag - 1U, hash, UINT64_C(0xA1A1), platform.now);
@@ -1204,11 +1204,11 @@ void test_send_message_ack_error_path()
     test_platform_t platform{};
     test_begin(platform);
 
-    static const char* const TopicName = "reliable/send_message_ack_error_path";
-    cy_subscriber_t* const   sub       = cy_subscribe(platform.cy, cy_str(TopicName), 16U);
+    static const char* const topic_name = "reliable/send_message_ack_error_path";
+    cy_subscriber_t* const   sub        = cy_subscribe(platform.cy, cy_str(topic_name), 16U);
     TEST_ASSERT_NOT_NULL(sub);
 
-    const std::uint64_t           hash = topic_hash_for(platform, TopicName);
+    const std::uint64_t           hash = topic_hash_for(platform, topic_name);
     std::array<unsigned char, 19> wire{};
     wire[0] = 1U;
     wire[1] = 0U;
@@ -1270,9 +1270,9 @@ void test_oom_bitmap_alloc()
     test_platform_t platform{};
     test_begin(platform);
 
-    static const char* const TopicName = "reliable/oom_bitmap_alloc";
-    cy_publisher_t* const    pub       = setup_publisher(platform, TopicName);
-    build_association(platform, pub, TopicName, UINT64_C(0xEEEE));
+    static const char* const topic_name = "reliable/oom_bitmap_alloc";
+    cy_publisher_t* const    pub        = setup_publisher(platform, topic_name);
+    build_association(platform, pub, topic_name, UINT64_C(0xEEEE));
     platform_set_fail_after(&platform, 1U);
 
     const cy_bytes_t msg = { .size = 1U, .data = "\xBD", .next = nullptr };
@@ -1287,9 +1287,9 @@ void test_oom_bytes_dup()
     test_platform_t platform{};
     test_begin(platform);
 
-    static const char* const TopicName = "reliable/oom_bytes_dup";
-    cy_publisher_t* const    pub       = setup_publisher(platform, TopicName);
-    build_association(platform, pub, TopicName, UINT64_C(0xEFEF));
+    static const char* const topic_name = "reliable/oom_bytes_dup";
+    cy_publisher_t* const    pub        = setup_publisher(platform, topic_name);
+    build_association(platform, pub, topic_name, UINT64_C(0xEFEF));
     platform_set_fail_after(&platform, 2U);
 
     const cy_bytes_t msg = { .size = 1U, .data = "\xBE", .next = nullptr };
@@ -1304,13 +1304,13 @@ void test_empty_message()
     test_platform_t platform{};
     test_begin(platform);
 
-    static const char* const TopicName = "reliable/empty_message";
-    cy_publisher_t* const    pub       = setup_publisher(platform, TopicName);
+    static const char* const topic_name = "reliable/empty_message";
+    cy_publisher_t* const    pub        = setup_publisher(platform, topic_name);
 
     const cy_bytes_t    msg  = { .size = 0U, .data = nullptr, .next = nullptr };
     cy_future_t* const  fut  = cy_publish_reliable(pub, platform.now + 1'000'000, msg);
     const std::uint64_t tag  = captured_tag(platform);
-    const std::uint64_t hash = topic_hash_for(platform, TopicName);
+    const std::uint64_t hash = topic_hash_for(platform, topic_name);
     TEST_ASSERT_NOT_NULL(fut);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0xF0F0), platform.now);
@@ -1326,9 +1326,9 @@ void test_association_eviction_on_slack()
     test_platform_t platform{};
     test_begin(platform);
 
-    static const char* const TopicName = "reliable/association_eviction_on_slack";
-    cy_publisher_t* const    pub       = setup_publisher(platform, TopicName);
-    build_association(platform, pub, TopicName, UINT64_C(0xFFFF));
+    static const char* const topic_name = "reliable/association_eviction_on_slack";
+    cy_publisher_t* const    pub        = setup_publisher(platform, topic_name);
+    build_association(platform, pub, topic_name, UINT64_C(0xFFFF));
 
     const std::size_t assoc_slack_limit = 2U;
     const cy_bytes_t  msg               = { .size = 1U, .data = "\xBF", .next = nullptr };
@@ -1346,7 +1346,7 @@ void test_association_eviction_on_slack()
     cy_future_t* const fut      = cy_publish_reliable(pub, deadline, msg);
     TEST_ASSERT_NOT_NULL(fut);
     const std::uint64_t tag  = captured_tag(platform);
-    const std::uint64_t hash = topic_hash_for(platform, TopicName);
+    const std::uint64_t hash = topic_hash_for(platform, topic_name);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0x9999), platform.now);
     TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut));
@@ -1361,9 +1361,9 @@ void test_association_at_slack_limit_is_skipped()
     test_platform_t platform{};
     test_begin(platform);
 
-    static const char* const TopicName = "reliable/association_at_slack_limit_is_skipped";
-    cy_publisher_t* const    pub       = setup_publisher(platform, TopicName);
-    build_association(platform, pub, TopicName, UINT64_C(0xCAFE));
+    static const char* const topic_name = "reliable/association_at_slack_limit_is_skipped";
+    cy_publisher_t* const    pub        = setup_publisher(platform, topic_name);
+    build_association(platform, pub, topic_name, UINT64_C(0xCAFE));
 
     const cy_bytes_t msg = { .size = 1U, .data = "\xC3", .next = nullptr };
 
@@ -1388,7 +1388,7 @@ void test_association_at_slack_limit_is_skipped()
 
     cy_future_t* const  fut_4 = cy_publish_reliable(pub, platform.now + ACK_TIMEOUT, msg);
     const std::uint64_t tag_4 = captured_tag(platform);
-    const std::uint64_t hash  = topic_hash_for(platform, TopicName);
+    const std::uint64_t hash  = topic_hash_for(platform, topic_name);
     TEST_ASSERT_NOT_NULL(fut_4);
 
     dispatch_ack(&platform, tag_4, hash, UINT64_C(0xBADA), platform.now);
