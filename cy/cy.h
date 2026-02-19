@@ -192,6 +192,18 @@ cy_publisher_t* cy_advertise_client(cy_t* const cy, const cy_str_t name, const s
 cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t deadline, const cy_bytes_t message);
 
 /// Publish a reliable one-way message.
+/// Reliable messages consume more memory for associated states and are a greater burden on the network and nodes.
+///
+/// The session layer tracks remote subscribers (called associations) using a simple stateless protocol and
+/// ensures that all live subscribers confirm message reception, retransmitting as necessary, switching between
+/// multicast and P2P strategies as necessary to manage network utilization. The association set management,
+/// retransmission, ack deduplication, and related bookkeeping are hidden from the application.
+/// The application will observe future failure if no subscriber confirms reception before the deadline.
+///
+/// API for querying the tracked associations and per-remote delivery success may be added in the future since it is
+/// expected that some applications would benefit from the knowledge of which specific remotes accept their data.
+///
+/// Currently, the future result is not defined (only success/failure).
 cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadline, const cy_bytes_t message);
 
 /// Future result of a request message that expects a response.
@@ -227,6 +239,8 @@ cy_future_t* cy_request(cy_publisher_t* const pub,
                         const cy_bytes_t      message);
 
 /// Defaults to cy_prio_nominal for all newly created publishers.
+/// Changing the priority may affect the reliable delivery timeout, so if a specific timeout value is needed,
+/// it should be set after setting the priority.
 cy_prio_t cy_priority(const cy_publisher_t* const pub);
 void      cy_priority_set(cy_publisher_t* const pub, const cy_prio_t priority);
 
