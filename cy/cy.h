@@ -506,6 +506,8 @@ cy_str_t cy_topic_name(const cy_topic_t* const topic);
 uint64_t cy_topic_hash(const cy_topic_t* const topic);
 cy_t*    cy_topic_owner(const cy_topic_t* const topic);
 
+// TODO: provide API for querying the associations of reliable topics (discovered subscribers).
+
 /// Provides access to the application-specific context associated per topic.
 /// By default it is set to CY_USER_CONTEXT_EMPTY when the topic is created.
 /// It can be used to associate arbitrary application-specific data with the topic.

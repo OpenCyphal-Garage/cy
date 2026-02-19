@@ -232,6 +232,48 @@ static void test_bytes_undup_null_is_noop(void)
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&fixture.heap));
 }
 
+static size_t bitmap_clz_reference(const bitmap_t* const bitmap, const size_t count)
+{
+    for (size_t i = 0U; i < count; i++) {
+        if (bitmap_test(bitmap, i)) {
+            return i;
+        }
+    }
+    return count;
+}
+
+static void test_bitmap_clz_basic(void)
+{
+    bitmap_t bm[3] = { 0, 0, 0 };
+
+    TEST_ASSERT_EQUAL_size_t(0U, bitmap_clz(NULL, 0U));
+    TEST_ASSERT_EQUAL_size_t(5U, bitmap_clz(NULL, 5U));
+    TEST_ASSERT_EQUAL_size_t(0U, bitmap_clz(bm, 0U));
+    TEST_ASSERT_EQUAL_size_t(130U, bitmap_clz(bm, 130U));
+
+    bitmap_set(bm, 0U);
+    TEST_ASSERT_EQUAL_size_t(0U, bitmap_clz(bm, 130U));
+
+    bitmap_clear(bm, 0U);
+    bitmap_set(bm, 64U);
+    TEST_ASSERT_EQUAL_size_t(64U, bitmap_clz(bm, 130U));
+
+    bitmap_set(bm, 2U);
+    TEST_ASSERT_EQUAL_size_t(2U, bitmap_clz(bm, 130U));
+}
+
+static void test_bitmap_clz_ignores_tail_padding_bits(void)
+{
+    bitmap_t bm[2] = { 0, 0 };
+
+    // count=65 means only bits 0..64 are valid.
+    bm[1] = UINT64_C(1) << 1U; // global bit 65 (out of range)
+    TEST_ASSERT_EQUAL_size_t(65U, bitmap_clz(bm, 65U));
+
+    bm[1] = UINT64_C(1) << 0U; // global bit 64 (in range)
+    TEST_ASSERT_EQUAL_size_t(64U, bitmap_clz(bm, 65U));
+}
+
 void setUp(void) {}
 
 void tearDown(void) {}
@@ -244,5 +286,7 @@ int main(void)
     RUN_TEST(test_bytes_dup_undup_three_fragments_exhaustive_small_sizes);
     RUN_TEST(test_bytes_dup_oom_cleans_up_partial_chain);
     RUN_TEST(test_bytes_undup_null_is_noop);
+    RUN_TEST(test_bitmap_clz_basic);
+    RUN_TEST(test_bitmap_clz_ignores_tail_padding_bits);
     return UNITY_END();
 }

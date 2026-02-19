@@ -14,6 +14,7 @@
 // ReSharper disable CppDFAConstantParameter
 // ReSharper disable CppDFANullDereference
 
+#include "cy.h"
 #include "cy_platform.h"
 
 // Configure cavl2.h. Key definitions must be provided before including the header.
@@ -442,6 +443,30 @@ static bool bitmap_test(const bitmap_t* const bitmap, const size_t bit)
     return (bitmap[bit / 64U] & (1ULL << (bit % 64U))) != 0;
 }
 
+/// Find the index of the first set bit. Returns `count` if no bits are set.
+static size_t bitmap_clz(const bitmap_t* const bitmap, const size_t count)
+{
+    if (bitmap != NULL) {
+        const size_t words = (count + 63U) / 64U;
+        for (size_t i = 0; i < words; i++) {
+            bitmap_t bits = bitmap[i];
+            if (i == (words - 1U)) { // Ignore the padding bits of the last word if count is not a multiple of 64.
+                const size_t tail = count % 64U;
+                if (tail > 0U) {
+                    bits &= (1ULL << tail) - 1ULL;
+                }
+            }
+            if (bits != 0U) {
+                const size_t first = 63U - clz64(bits & (0ULL - bits));
+                const size_t out   = (i * 64U) + first;
+                assert(out < count);
+                return out;
+            }
+        }
+    }
+    return count;
+}
+
 // =====================================================================================================================
 //                                                    LIST UTILITIES
 // =====================================================================================================================
@@ -837,10 +862,15 @@ static topic_repr_t topic_repr(const cy_topic_t* const topic)
 typedef struct
 {
     cy_tree_t index_remote_id;
-    uint64_t  remote_id;
-    size_t    pending_count; ///< The association cannot be removed unless zero to avoid dangly pointers.
-    size_t    slack;
-    uint64_t  seqno_witness;
+
+    uint64_t         remote_id;
+    cy_p2p_context_t p2p_context; ///< For P2P deliveries (as an alternative to multicast-only), updated regularly.
+    cy_us_t          last_seen;   ///< Not used for eviction, only for diagnostics and possibly API exposure.
+
+    /// States related to lifecycle management / eviction.
+    size_t   pending_count; ///< The association cannot be removed unless zero to avoid dangly pointers.
+    size_t   slack;
+    uint64_t seqno_witness;
 } association_t;
 
 typedef struct
@@ -866,6 +896,7 @@ static void association_forget(cy_topic_t* const topic, association_t* const ass
     mem_free(cy, assoc);
 }
 
+/// The last seen and P2P context need to be set by the caller afterward.
 static cy_tree_t* association_cavl_factory(void* const user)
 {
     association_factory_context_t* const ctx   = (association_factory_context_t*)user;
@@ -874,6 +905,7 @@ static cy_tree_t* association_cavl_factory(void* const user)
     association_t* const                 assoc = (association_t*)mem_alloc_zero(cy, sizeof(association_t));
     if (assoc != NULL) {
         assoc->remote_id     = ctx->remote_id;
+        assoc->last_seen     = BIG_BANG;
         assoc->pending_count = 0;
         assoc->slack         = 0;
         assoc->seqno_witness = 0; // Will be updated by the caller.
@@ -1791,11 +1823,13 @@ cy_publisher_t* cy_advertise_client(cy_t* const cy, const cy_str_t name, const s
     return (res == CY_OK) ? pub : NULL;
 }
 
-static cy_err_t do_publish_impl(cy_publisher_t* const pub,
-                                const cy_us_t         deadline,
-                                const cy_bytes_t      message,
-                                const header_type_t   header_type,
-                                const uint64_t        tag)
+/// If lane is provided, P2P delivery will be used, otherwise normal multicast on the topic's subject.
+static cy_err_t do_publish_impl(cy_publisher_t* const  pub,
+                                const cy_us_t          deadline,
+                                const cy_bytes_t       message,
+                                const header_type_t    header_type,
+                                const uint64_t         tag,
+                                const cy_lane_t* const lane)
 {
     cy_topic_t* const topic = pub->topic;
     cy_t* const       cy    = topic->cy;
@@ -1806,12 +1840,12 @@ static cy_err_t do_publish_impl(cy_publisher_t* const pub,
     (void)serialize_u64(serialize_u64(&header[2], tag), topic->hash);
     const cy_bytes_t headed_message = { .size = sizeof(header), .data = header, .next = &message };
 
+    assert(topic->pub_writer != NULL);
     assert(topic_subject_id(topic) == topic->pub_writer->subject_id);
-    return cy->platform->vtable->subject_writer_send(cy->platform, //
-                                                     topic->pub_writer,
-                                                     deadline,
-                                                     pub->priority,
-                                                     headed_message);
+    const cy_platform_vtable_t* const vt = cy->platform->vtable;
+    return (lane == NULL)
+             ? vt->subject_writer_send(cy->platform, topic->pub_writer, deadline, pub->priority, headed_message)
+             : vt->p2p_send(cy->platform, lane, deadline, headed_message);
 }
 
 static cy_err_t do_publish(cy_publisher_t* const pub,
@@ -1844,7 +1878,7 @@ static cy_err_t do_publish(cy_publisher_t* const pub,
         *out_tag = tag;
     }
     gossip_begin(cy);
-    return do_publish_impl(pub, deadline, message, header_type, tag);
+    return do_publish_impl(pub, deadline, message, header_type, tag, NULL);
 }
 
 cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t deadline, const cy_bytes_t message)
@@ -1957,7 +1991,37 @@ static void publish_future_timeout(cy_future_t* const base, const cy_us_t now)
         // expected we may still be receiving the acks from the earlier attempts.
         const bool has_time_for_round_trip = (ack_deadline + ack_timeout) <= self->deadline;
         if (has_time_for_round_trip) {
-            const cy_err_t er = do_publish_impl(self->owner, ack_deadline, *self->data, header_msg_rel, self->base.key);
+            // We can use multicast throughout, but it may be inefficient if we only need to reach few subscribers.
+            // This is not a correctness issue because each subscriber will receive our message at most once per
+            // attempt, but rather an issue of efficiency: ideally we don't want to burden subscribers that already
+            // confirmed the message with processing it again and then sending acks again. The first (maybe also ~2nd)
+            // attempt always must be multicast because there may be new subscribers that we don't know about yet;
+            // subsequent attempts MAY be unicast per heuristics that are subject to review/improvement.
+            // Potential improvement to consider: the P2P context is updated on received acks only; if stale,
+            // it may cause repeated P2P delivery failures; we could possibly consider this in the heuristic?
+            // We already have the last_seen in the association, we could also use that.
+            const bool use_p2p = (self->assoc_remaining == 1) && (self->epoch > 1); // unicast heuristic
+            cy_lane_t  lane    = { 0 };
+            if (use_p2p) {
+                const size_t assoc_idx = bitmap_clz(self->assoc_knockout, self->assoc_capacity);
+                assert(assoc_idx < self->assoc_capacity);
+                assert(bitmap_test(self->assoc_knockout, assoc_idx));
+                association_t* const assoc = self->assoc_set[assoc_idx];
+                assert(assoc != NULL);
+                lane = (cy_lane_t){ .id = assoc->remote_id, .p2p = assoc->p2p_context, .prio = self->owner->priority };
+                CY_TRACE(cy,
+                         "☝️ %s prefer P2P delivery to N%016jx tag=%016jx epoch=%u",
+                         topic_repr(topic).str,
+                         (uintmax_t)assoc->remote_id,
+                         (uintmax_t)self->base.key,
+                         self->epoch);
+            }
+            const cy_err_t er = do_publish_impl(self->owner, //
+                                                ack_deadline,
+                                                *self->data,
+                                                header_msg_rel,
+                                                self->base.key,
+                                                use_p2p ? &lane : NULL);
             ON_ASYNC_ERROR_IF(cy, topic, er);
         } else {
             bytes_undup(cy, self->data);
@@ -2046,6 +2110,7 @@ cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadli
     const cy_us_t tx_deadline  = ack_deadline;
 
     // Once the fallible operations are completed, it is safe to transmit.
+    // The initial transmission always uses multicast. We can switch to P2P later if only few nodes need retries.
     const cy_err_t res = do_publish(pub, tx_deadline, message, header_msg_rel, &fut->base.key);
     if (res != CY_OK) {
         bytes_undup(cy, fut->data);
@@ -3230,11 +3295,10 @@ static void on_response(cy_t* const             cy,
 
 static void on_message_ack(cy_t* const       cy,
                            cy_topic_t* const topic,
-                           const uint64_t    remote_id,
+                           const cy_lane_t   lane,
                            const uint64_t    tag,
                            const cy_us_t     ts)
 {
-    (void)ts;
     assert(topic != NULL);
 
     // Protect against acks that are clearly invalid, so that we don't blow up the association set unnecessarily.
@@ -3247,9 +3311,9 @@ static void on_message_ack(cy_t* const       cy,
 
     // Update the subscriber association set. Note that by design we don't require a pending future for this to work.
     // Associations are destroyed only by the futures when a publish outcome is known.
-    association_factory_context_t fac = { .topic = topic, .remote_id = remote_id };
+    association_factory_context_t fac = { .topic = topic, .remote_id = lane.id };
     association_t* const ass = CAVL2_TO_OWNER(cavl2_find_or_insert(&topic->assoc_by_remote_id, // ---------------
-                                                                   &remote_id,
+                                                                   &lane.id,
                                                                    association_cavl_compare,
                                                                    &fac,
                                                                    association_cavl_factory),
@@ -3257,6 +3321,8 @@ static void on_message_ack(cy_t* const       cy,
                                               index_remote_id);
     if (ass != NULL) {
         assert(topic->assoc_count > 0);
+        ass->last_seen   = ts;
+        ass->p2p_context = lane.p2p;       // Always update the latest return path discovery state.
         if (seqno >= ass->seqno_witness) { // Prevent old pending futures from altering slack.
             ass->slack         = 0;
             ass->seqno_witness = seqno;
@@ -3404,7 +3470,7 @@ void cy_on_message(cy_platform_t* const             platform,
             const uint64_t    hash  = deserialize_u64(&header[9]);
             cy_topic_t* const topic = cy_topic_find_by_hash(cy, hash);
             if (topic != NULL) {
-                on_message_ack(cy, topic, lane.id, tag, message.timestamp);
+                on_message_ack(cy, topic, lane, tag, message.timestamp);
             } else {
                 CY_TRACE(cy,
                          "⚠️ Orphan message ACK N%016jx T%016jx tag=%016jx",
