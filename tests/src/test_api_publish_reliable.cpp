@@ -40,12 +40,14 @@ struct test_platform_t final
 
     std::size_t                   multicast_count{ 0U };
     std::size_t                   reliable_multicast_count{ 0U };
+    bool                          fail_next_reliable_multicast{ false };
     std::uint32_t                 last_multicast_subject_id{ 0U };
     std::array<unsigned char, 19> last_multicast{};
 
     std::size_t                   p2p_count{ 0U };
     std::array<unsigned char, 17> last_p2p{};
     std::size_t                   p2p_extent{ 0U };
+    bool                          fail_next_p2p_send{ false };
 };
 
 test_platform_t* platform_from(cy_platform_t* const platform)
@@ -101,6 +103,10 @@ extern "C" cy_err_t platform_subject_writer_send(cy_platform_t* const       plat
     }
     if ((self->last_multicast[0] & 63U) == 1U) {
         self->reliable_multicast_count++;
+        if (self->fail_next_reliable_multicast) {
+            self->fail_next_reliable_multicast = false;
+            return CY_ERR_MEDIA;
+        }
     }
     return CY_OK;
 }
@@ -145,6 +151,10 @@ extern "C" cy_err_t platform_p2p_send(cy_platform_t* const   platform,
         const std::size_t to_copy = std::min(self->last_p2p.size() - copied, frag->size);
         std::memcpy(self->last_p2p.data() + copied, frag->data, to_copy);
         copied += to_copy;
+    }
+    if (self->fail_next_p2p_send) {
+        self->fail_next_p2p_send = false;
+        return CY_ERR_MEDIA;
     }
     return CY_OK;
 }
@@ -583,6 +593,83 @@ void test_retransmission_on_timeout()
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0x8888), platform.now);
     TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut));
+
+    cy_future_destroy(fut);
+    cy_unadvertise(pub);
+    test_end(platform);
+}
+
+void test_initial_send_failure_returns_null()
+{
+    test_platform_t platform{};
+    test_begin(platform);
+
+    cy_publisher_t* const pub = setup_publisher(platform, "reliable/initial_send_failure_returns_null");
+
+    const cy_bytes_t msg                  = { .size = 1U, .data = "\xC0", .next = nullptr };
+    platform.fail_next_reliable_multicast = true;
+    TEST_ASSERT_NULL(cy_publish_reliable(pub, platform.now + (5 * ACK_TIMEOUT), msg));
+    TEST_ASSERT_FALSE(platform.fail_next_reliable_multicast);
+
+    cy_unadvertise(pub);
+    test_end(platform);
+}
+
+void test_single_remaining_not_last_attempt_stays_multicast()
+{
+    test_platform_t platform{};
+    test_begin(platform);
+
+    static const char* const TopicName = "reliable/single_remaining_not_last_attempt_stays_multicast";
+    cy_publisher_t* const    pub       = setup_publisher(platform, TopicName);
+    build_association(platform, pub, TopicName, UINT64_C(0xA123));
+
+    const cy_bytes_t    msg      = { .size = 1U, .data = "\xC1", .next = nullptr };
+    const cy_us_t       deadline = platform.now + (10 * ACK_TIMEOUT);
+    cy_future_t* const  fut      = cy_publish_reliable(pub, deadline, msg);
+    const std::uint64_t tag      = captured_tag(platform);
+    const std::uint64_t hash     = topic_hash_for(platform, TopicName);
+    TEST_ASSERT_NOT_NULL(fut);
+
+    const std::size_t p2p_before       = platform.p2p_count;
+    const std::size_t multicast_before = platform.reliable_multicast_count;
+    const cy_us_t     t0               = platform.now;
+    spin_to(platform, t0 + ACK_TIMEOUT + 1);
+    TEST_ASSERT_EQUAL_size_t(p2p_before, platform.p2p_count);
+    TEST_ASSERT_TRUE(platform.reliable_multicast_count > multicast_before);
+
+    dispatch_ack(&platform, tag, hash, UINT64_C(0xA123), platform.now);
+    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut));
+
+    cy_future_destroy(fut);
+    cy_unadvertise(pub);
+    test_end(platform);
+}
+
+void test_retransmission_send_error_does_not_abort_future()
+{
+    test_platform_t platform{};
+    test_begin(platform);
+
+    cy_publisher_t* const pub = setup_publisher(platform, "reliable/retransmission_send_error");
+
+    const cy_bytes_t   msg      = { .size = 1U, .data = "\xC2", .next = nullptr };
+    const cy_us_t      deadline = platform.now + (5 * ACK_TIMEOUT);
+    cy_future_t* const fut      = cy_publish_reliable(pub, deadline, msg);
+    TEST_ASSERT_NOT_NULL(fut);
+
+    cy_async_error_handler_set(platform.cy, nullptr);
+    const std::size_t multicast_before    = platform.reliable_multicast_count;
+    platform.fail_next_reliable_multicast = true;
+    const cy_us_t t0                      = platform.now;
+    spin_to(platform, t0 + ACK_TIMEOUT + 1);
+
+    TEST_ASSERT_TRUE(platform.reliable_multicast_count > multicast_before);
+    TEST_ASSERT_FALSE(platform.fail_next_reliable_multicast);
+    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut));
+
+    spin_to(platform, deadline + 1);
+    TEST_ASSERT_EQUAL_INT(cy_future_failure, cy_future_status(fut));
 
     cy_future_destroy(fut);
     cy_unadvertise(pub);
@@ -1034,6 +1121,34 @@ void test_duplicate_ack_from_same_remote()
     test_end(platform);
 }
 
+void test_duplicate_ack_while_pending()
+{
+    test_platform_t platform{};
+    test_begin(platform);
+
+    static const char* const TopicName = "reliable/duplicate_ack_while_pending";
+    cy_publisher_t* const    pub       = setup_publisher(platform, TopicName);
+    build_association(platform, pub, TopicName, UINT64_C(0xDA01));
+    build_association(platform, pub, TopicName, UINT64_C(0xDA02));
+
+    const cy_bytes_t    msg  = { .size = 1U, .data = "\xC4", .next = nullptr };
+    cy_future_t* const  fut  = cy_publish_reliable(pub, platform.now + 1'000'000, msg);
+    const std::uint64_t tag  = captured_tag(platform);
+    const std::uint64_t hash = topic_hash_for(platform, TopicName);
+    TEST_ASSERT_NOT_NULL(fut);
+
+    dispatch_ack(&platform, tag, hash, UINT64_C(0xDA01), platform.now);
+    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut));
+    dispatch_ack(&platform, tag, hash, UINT64_C(0xDA01), platform.now);
+    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut));
+    dispatch_ack(&platform, tag, hash, UINT64_C(0xDA02), platform.now);
+    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut));
+
+    cy_future_destroy(fut);
+    cy_unadvertise(pub);
+    test_end(platform);
+}
+
 void test_ack_future_seqno_ignored()
 {
     test_platform_t platform{};
@@ -1081,6 +1196,57 @@ void test_ack_invalid_seqno_ignored()
 
     cy_future_destroy(fut);
     cy_unadvertise(pub);
+    test_end(platform);
+}
+
+void test_send_message_ack_error_path()
+{
+    test_platform_t platform{};
+    test_begin(platform);
+
+    static const char* const TopicName = "reliable/send_message_ack_error_path";
+    cy_subscriber_t* const   sub       = cy_subscribe(platform.cy, cy_str(TopicName), 16U);
+    TEST_ASSERT_NOT_NULL(sub);
+
+    const std::uint64_t           hash = topic_hash_for(platform, TopicName);
+    std::array<unsigned char, 19> wire{};
+    wire[0] = 1U;
+    wire[1] = 0U;
+    for (std::size_t i = 0U; i < 8U; i++) {
+        wire.at(2U + i) = static_cast<unsigned char>((UINT64_C(1) >> (i * 8U)) & 0xFFU);
+    }
+    for (std::size_t i = 0U; i < 8U; i++) {
+        wire.at(10U + i) = static_cast<unsigned char>((hash >> (i * 8U)) & 0xFFU);
+    }
+    wire[18] = 0x5AU;
+
+    cy_message_t* const msg = cy_test_message_make(&platform.message_heap, wire.data(), wire.size());
+    TEST_ASSERT_NOT_NULL(msg);
+
+    cy_message_ts_t message{};
+    message.timestamp = platform.now;
+    message.content   = msg;
+
+    const cy_lane_t lane = { .id = UINT64_C(0xED01), .p2p = { { 0 } }, .prio = cy_prio_nominal };
+
+    const std::size_t p2p_count_before = platform.p2p_count;
+    platform.fail_next_p2p_send        = true;
+    cy_on_message(&platform.platform, lane, nullptr, message);
+    message.timestamp += 1;
+
+    std::array<unsigned char, 19> wire_ok = wire;
+    for (std::size_t i = 0U; i < 8U; i++) {
+        wire_ok.at(2U + i) = static_cast<unsigned char>((UINT64_C(2) >> (i * 8U)) & 0xFFU);
+    }
+    wire_ok[18]                = 0x5BU;
+    cy_message_t* const msg_ok = cy_test_message_make(&platform.message_heap, wire_ok.data(), wire_ok.size());
+    TEST_ASSERT_NOT_NULL(msg_ok);
+    message.content = msg_ok;
+    cy_on_message(&platform.platform, lane, nullptr, message);
+
+    TEST_ASSERT_EQUAL_size_t(p2p_count_before + 2U, platform.p2p_count);
+    TEST_ASSERT_FALSE(platform.fail_next_p2p_send);
+
     test_end(platform);
 }
 
@@ -1189,6 +1355,52 @@ void test_association_eviction_on_slack()
     cy_unadvertise(pub);
     test_end(platform);
 }
+
+void test_association_at_slack_limit_is_skipped()
+{
+    test_platform_t platform{};
+    test_begin(platform);
+
+    static const char* const TopicName = "reliable/association_at_slack_limit_is_skipped";
+    cy_publisher_t* const    pub       = setup_publisher(platform, TopicName);
+    build_association(platform, pub, TopicName, UINT64_C(0xCAFE));
+
+    const cy_bytes_t msg = { .size = 1U, .data = "\xC3", .next = nullptr };
+
+    const cy_us_t      deadline_1 = platform.now + ACK_TIMEOUT;
+    const cy_us_t      deadline_2 = platform.now + (2 * ACK_TIMEOUT);
+    cy_future_t* const fut_1      = cy_publish_reliable(pub, deadline_1, msg);
+    cy_future_t* const fut_2      = cy_publish_reliable(pub, deadline_2, msg);
+    TEST_ASSERT_NOT_NULL(fut_1);
+    TEST_ASSERT_NOT_NULL(fut_2);
+
+    spin_to(platform, deadline_1 + 1);
+    TEST_ASSERT_EQUAL_INT(cy_future_failure, cy_future_status(fut_1));
+    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut_2));
+
+    const cy_us_t      deadline_3 = platform.now + (2 * ACK_TIMEOUT);
+    cy_future_t* const fut_3      = cy_publish_reliable(pub, deadline_3, msg);
+    TEST_ASSERT_NOT_NULL(fut_3);
+    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut_3));
+
+    spin_to(platform, deadline_2 + 1);
+    TEST_ASSERT_EQUAL_INT(cy_future_failure, cy_future_status(fut_2));
+
+    cy_future_t* const  fut_4 = cy_publish_reliable(pub, platform.now + ACK_TIMEOUT, msg);
+    const std::uint64_t tag_4 = captured_tag(platform);
+    const std::uint64_t hash  = topic_hash_for(platform, TopicName);
+    TEST_ASSERT_NOT_NULL(fut_4);
+
+    dispatch_ack(&platform, tag_4, hash, UINT64_C(0xBADA), platform.now);
+    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut_4));
+
+    cy_future_destroy(fut_1);
+    cy_future_destroy(fut_2);
+    cy_future_destroy(fut_3);
+    cy_future_destroy(fut_4);
+    cy_unadvertise(pub);
+    test_end(platform);
+}
 } // namespace
 
 extern "C" void setUp()
@@ -1213,6 +1425,9 @@ int main()
     RUN_TEST(test_two_subscribers_one_acks);
     RUN_TEST(test_two_subscribers_none_ack_timeout);
     RUN_TEST(test_retransmission_on_timeout);
+    RUN_TEST(test_initial_send_failure_returns_null);
+    RUN_TEST(test_single_remaining_not_last_attempt_stays_multicast);
+    RUN_TEST(test_retransmission_send_error_does_not_abort_future);
     RUN_TEST(test_exponential_backoff_second_timeout);
     RUN_TEST(test_last_attempt_no_further_retransmission);
     RUN_TEST(test_p2p_retry_single_remaining);
@@ -1230,12 +1445,15 @@ int main()
     RUN_TEST(test_ack_builds_association);
     RUN_TEST(test_ack_from_unknown_remote_still_succeeds);
     RUN_TEST(test_duplicate_ack_from_same_remote);
+    RUN_TEST(test_duplicate_ack_while_pending);
     RUN_TEST(test_ack_future_seqno_ignored);
     RUN_TEST(test_ack_invalid_seqno_ignored);
+    RUN_TEST(test_send_message_ack_error_path);
     RUN_TEST(test_oom_future_alloc);
     RUN_TEST(test_oom_bitmap_alloc);
     RUN_TEST(test_oom_bytes_dup);
     RUN_TEST(test_empty_message);
     RUN_TEST(test_association_eviction_on_slack);
+    RUN_TEST(test_association_at_slack_limit_is_skipped);
     return UNITY_END();
 }

@@ -13,6 +13,13 @@ typedef struct
 
     size_t fail_after;      ///< Fail N-th new allocation if new_alloc_count >= fail_after.
     size_t new_alloc_count; ///< Counts new allocations only, excludes realloc/free.
+
+    size_t   async_error_count;
+    cy_err_t last_async_error;
+    uint16_t last_async_error_line;
+
+    cy_err_t p2p_send_result;
+    size_t   p2p_send_count;
 } fixture_t;
 
 static void* fixture_realloc(cy_platform_t* const platform, void* const ptr, const size_t size)
@@ -27,6 +34,31 @@ static void* fixture_realloc(cy_platform_t* const platform, void* const ptr, con
     return guarded_heap_realloc(&self->heap, ptr, size);
 }
 
+static cy_err_t fixture_p2p_send(cy_platform_t* const   platform,
+                                 const cy_lane_t* const lane,
+                                 const cy_us_t          deadline,
+                                 const cy_bytes_t       message)
+{
+    (void)lane;
+    (void)deadline;
+    (void)message;
+    fixture_t* const self = (fixture_t*)platform;
+    self->p2p_send_count++;
+    return self->p2p_send_result;
+}
+
+static void fixture_on_async_error(cy_t* const       cy,
+                                   cy_topic_t* const topic,
+                                   const cy_err_t    error,
+                                   const uint16_t    line_number)
+{
+    (void)topic;
+    fixture_t* const self = (fixture_t*)cy->platform;
+    self->async_error_count++;
+    self->last_async_error      = error;
+    self->last_async_error_line = line_number;
+}
+
 static void fixture_init(fixture_t* const self)
 {
     memset(self, 0, sizeof(*self));
@@ -35,15 +67,30 @@ static void fixture_init(fixture_t* const self)
     self->platform.subject_id_modulus = (uint32_t)CY_SUBJECT_ID_MODULUS_17bit;
     self->platform.cy                 = &self->cy;
     self->vtable.realloc              = fixture_realloc;
+    self->vtable.p2p_send             = fixture_p2p_send;
     self->cy.platform                 = &self->platform;
+    self->cy.async_error_handler      = fixture_on_async_error;
     self->fail_after                  = SIZE_MAX;
     self->new_alloc_count             = 0;
+    self->last_async_error            = CY_OK;
+    self->p2p_send_result             = CY_OK;
 }
 
 static void fixture_set_fail_after(fixture_t* const self, const size_t fail_after)
 {
     self->fail_after      = fail_after;
     self->new_alloc_count = 0;
+}
+
+static void forget_associations(cy_topic_t* const topic)
+{
+    while (topic->assoc_by_remote_id != NULL) {
+        association_t* const ass = CAVL2_TO_OWNER(cavl2_min(topic->assoc_by_remote_id), association_t, index_remote_id);
+        TEST_ASSERT_NOT_NULL(ass);
+        cavl2_remove(&topic->assoc_by_remote_id, &ass->index_remote_id);
+        topic->assoc_count--;
+        mem_free(topic->cy, ass);
+    }
 }
 
 static void test_publish_future_is_last_attempt_basic(void)
@@ -238,6 +285,183 @@ static void test_release_no_slack_when_seqno_behind_witness(void)
     TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&fixture.heap));
 }
 
+static void test_release_no_forget_when_pending_remains(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+
+    cy_topic_t              topic;
+    cy_publisher_t          pub;
+    association_t           ass;
+    publish_future_t* const fut = make_publish_future_with_one_assoc(&fixture, &topic, &pub, &ass, 11U);
+
+    bitmap_set(fut->assoc_knockout, 0U);
+    ass.seqno_witness = 10U;
+    ass.slack         = 1U;
+    ass.pending_count = 2U;
+
+    publish_future_release_associations(fut, false);
+
+    TEST_ASSERT_EQUAL_size_t(2U, ass.slack);
+    TEST_ASSERT_EQUAL_size_t(1U, ass.pending_count);
+    TEST_ASSERT_EQUAL_size_t(0U, fut->assoc_capacity);
+    TEST_ASSERT_NULL(fut->assoc_knockout);
+    TEST_ASSERT_NULL(fut->assoc_set[0]);
+
+    mem_free(&fixture.cy, fut);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&fixture.heap));
+}
+
+static void test_publish_future_cancel_done_is_noop(void)
+{
+    publish_future_t fut;
+    memset(&fut, 0, sizeof(fut));
+    fut.done = true;
+
+    publish_future_cancel(&fut.base);
+    TEST_ASSERT_TRUE(fut.done);
+}
+
+static void test_publish_future_on_ack_unknown_then_duplicate(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+
+    association_t ass[] = { { .remote_id = 10U, .pending_count = 1U }, { .remote_id = 30U, .pending_count = 1U } };
+
+    publish_future_t* const fut =
+      (publish_future_t*)mem_alloc_zero(&fixture.cy, sizeof(publish_future_t) + (2U * sizeof(association_t*)));
+    TEST_ASSERT_NOT_NULL(fut);
+
+    fut->done            = false;
+    fut->acknowledged    = false;
+    fut->assoc_capacity  = 2U;
+    fut->assoc_remaining = 2U;
+    fut->assoc_knockout  = bitmap_new(&fixture.cy, fut->assoc_capacity);
+    TEST_ASSERT_NOT_NULL(fut->assoc_knockout);
+    fut->assoc_set[0] = &ass[0];
+    fut->assoc_set[1] = &ass[1];
+    bitmap_set(fut->assoc_knockout, 0U);
+    bitmap_set(fut->assoc_knockout, 1U);
+
+    publish_future_on_ack(fut, 20U);
+    TEST_ASSERT_TRUE(fut->acknowledged);
+    TEST_ASSERT_EQUAL_size_t(2U, fut->assoc_remaining);
+
+    publish_future_on_ack(fut, 10U);
+    TEST_ASSERT_EQUAL_size_t(1U, fut->assoc_remaining);
+
+    publish_future_on_ack(fut, 10U);
+    TEST_ASSERT_EQUAL_size_t(1U, fut->assoc_remaining);
+
+    mem_free(&fixture.cy, fut->assoc_knockout);
+    mem_free(&fixture.cy, fut);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&fixture.heap));
+}
+
+static void test_on_message_ack_stale_seqno_lag_ignored(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+
+    cy_topic_t topic;
+    memset(&topic, 0, sizeof(topic));
+    topic.cy               = &fixture.cy;
+    topic.pub_tag_baseline = UINT64_C(1000);
+    topic.pub_seqno        = UINT64_C(100005);
+
+    const cy_lane_t lane = { .id = 42U, .p2p = { { 0 } }, .prio = cy_prio_nominal };
+    on_message_ack(&fixture.cy, &topic, lane, UINT64_C(1001), 0);
+
+    TEST_ASSERT_EQUAL_size_t(0U, topic.assoc_count);
+    TEST_ASSERT_NULL(topic.assoc_by_remote_id);
+    TEST_ASSERT_EQUAL_size_t(0U, fixture.async_error_count);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&fixture.heap));
+}
+
+static void test_on_message_ack_allocation_failure_reports_async_error(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+
+    cy_topic_t topic;
+    memset(&topic, 0, sizeof(topic));
+    topic.cy               = &fixture.cy;
+    topic.pub_tag_baseline = UINT64_C(500);
+    topic.pub_seqno        = UINT64_C(2);
+
+    fixture_set_fail_after(&fixture, 0U);
+    const cy_lane_t lane = { .id = 43U, .p2p = { { 0 } }, .prio = cy_prio_nominal };
+    on_message_ack(&fixture.cy, &topic, lane, UINT64_C(501), 0);
+
+    TEST_ASSERT_EQUAL_size_t(1U, fixture.async_error_count);
+    TEST_ASSERT_EQUAL_INT(CY_ERR_MEMORY, fixture.last_async_error);
+    TEST_ASSERT_EQUAL_size_t(0U, topic.assoc_count);
+    TEST_ASSERT_NULL(topic.assoc_by_remote_id);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&fixture.heap));
+}
+
+static void test_on_message_ack_older_than_witness_keeps_witness(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+
+    cy_topic_t topic;
+    memset(&topic, 0, sizeof(topic));
+    topic.cy               = &fixture.cy;
+    topic.pub_tag_baseline = UINT64_C(1000);
+    topic.pub_seqno        = UINT64_C(3);
+
+    const cy_lane_t lane = { .id = 44U, .p2p = { { 0 } }, .prio = cy_prio_nominal };
+    on_message_ack(&fixture.cy, &topic, lane, UINT64_C(1002), 10);
+    TEST_ASSERT_EQUAL_size_t(1U, topic.assoc_count);
+
+    association_t* const ass = CAVL2_TO_OWNER(cavl2_min(topic.assoc_by_remote_id), association_t, index_remote_id);
+    TEST_ASSERT_NOT_NULL(ass);
+    TEST_ASSERT_EQUAL_UINT64(UINT64_C(2), ass->seqno_witness);
+
+    on_message_ack(&fixture.cy, &topic, lane, UINT64_C(1001), 11);
+    TEST_ASSERT_EQUAL_size_t(1U, topic.assoc_count);
+    TEST_ASSERT_EQUAL_UINT64(UINT64_C(2), ass->seqno_witness);
+    TEST_ASSERT_EQUAL_size_t(0U, fixture.async_error_count);
+
+    forget_associations(&topic);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&fixture.heap));
+}
+
+static void test_send_message_ack_error_path(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+    fixture.p2p_send_result = CY_ERR_MEDIA;
+
+    const cy_lane_t lane = { .id = 45U, .p2p = { { 0 } }, .prio = cy_prio_nominal };
+    send_message_ack(&fixture.cy, lane, UINT64_C(1), UINT64_C(2), 100);
+
+    TEST_ASSERT_EQUAL_size_t(1U, fixture.p2p_send_count);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&fixture.heap));
+}
+
+static void test_send_message_ack_success_path(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+
+    const cy_lane_t lane = { .id = 46U, .p2p = { { 0 } }, .prio = cy_prio_nominal };
+    send_message_ack(&fixture.cy, lane, UINT64_C(3), UINT64_C(4), 100);
+
+    TEST_ASSERT_EQUAL_size_t(1U, fixture.p2p_send_count);
+    TEST_ASSERT_EQUAL_size_t(0U, fixture.async_error_count);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&fixture.heap));
+}
+
 void setUp(void) {}
 
 void tearDown(void) {}
@@ -262,5 +486,13 @@ int main(void)
     RUN_TEST(test_release_no_slack_when_premature);
     RUN_TEST(test_release_slack_incremented_when_conditions_met);
     RUN_TEST(test_release_no_slack_when_seqno_behind_witness);
+    RUN_TEST(test_release_no_forget_when_pending_remains);
+    RUN_TEST(test_publish_future_cancel_done_is_noop);
+    RUN_TEST(test_publish_future_on_ack_unknown_then_duplicate);
+    RUN_TEST(test_on_message_ack_stale_seqno_lag_ignored);
+    RUN_TEST(test_on_message_ack_allocation_failure_reports_async_error);
+    RUN_TEST(test_on_message_ack_older_than_witness_keeps_witness);
+    RUN_TEST(test_send_message_ack_error_path);
+    RUN_TEST(test_send_message_ack_success_path);
     return UNITY_END();
 }
