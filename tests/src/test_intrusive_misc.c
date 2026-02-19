@@ -45,11 +45,9 @@ static void fixture_set_fail_after(fixture_t* const self, const size_t fail_afte
     self->new_alloc_count = 0;
 }
 
-static size_t data_per_chunk(void) { return BYTES_DUP_CHUNK - sizeof(cy_bytes_t); }
-
 static size_t expected_chunk_count(const size_t payload_size)
 {
-    const size_t chunk = data_per_chunk();
+    const size_t chunk = BYTES_DUP_CHUNK - sizeof(cy_bytes_t);
     return (payload_size == 0U) ? 0U : (1U + ((payload_size - 1U) / chunk));
 }
 
@@ -86,7 +84,7 @@ static void assert_duplicated_chain(const unsigned char* const payload,
                                     const size_t               payload_size,
                                     const cy_bytes_t*          duplicated)
 {
-    const size_t chunk  = data_per_chunk();
+    const size_t chunk  = BYTES_DUP_CHUNK - sizeof(cy_bytes_t);
     size_t       copied = 0U;
     size_t       count  = 0U;
     while (duplicated != NULL) {
@@ -119,7 +117,7 @@ static void run_case(fixture_t* const fixture,
     TEST_ASSERT_TRUE(fragment_count <= FRAGMENT_MAX);
     TEST_ASSERT_TRUE(payload_size <= PAYLOAD_MAX);
 
-    unsigned char payload[PAYLOAD_MAX];
+    unsigned char payload[PAYLOAD_MAX] = { 0 };
     fill_payload(payload, payload_size);
 
     cy_bytes_t       fragments[FRAGMENT_MAX];
@@ -158,7 +156,7 @@ static void test_bytes_dup_undup_single_fragment_exhaustive_sizes(void)
     fixture_t fixture;
     fixture_init(&fixture);
 
-    const size_t max_size = (data_per_chunk() * 2U) + 3U;
+    const size_t max_size = ((BYTES_DUP_CHUNK - sizeof(cy_bytes_t)) * 2U) + 3U;
     for (size_t total = 0U; total <= max_size; total++) {
         const size_t sizes[1] = { total };
         run_case(&fixture, total, 1U, sizes);
@@ -172,7 +170,7 @@ static void test_bytes_dup_undup_two_fragments_exhaustive_splits(void)
 
     run_two_fragment_exhaustive(&fixture, 0U, 64U);
 
-    const size_t chunk        = data_per_chunk();
+    const size_t chunk        = BYTES_DUP_CHUNK - sizeof(cy_bytes_t);
     const size_t near_one_min = (chunk > 3U) ? (chunk - 3U) : 0U;
     const size_t near_one_max = chunk + 3U;
     const size_t near_two_min = (chunk * 2U > 3U) ? ((chunk * 2U) - 3U) : 0U;
@@ -202,14 +200,14 @@ static void test_bytes_dup_oom_cleans_up_partial_chain(void)
     fixture_t fixture;
     fixture_init(&fixture);
 
-    const size_t total_size  = (data_per_chunk() * 3U) + 1U;
+    const size_t total_size  = ((BYTES_DUP_CHUNK - sizeof(cy_bytes_t)) * 3U) + 1U;
     const size_t chunk_count = expected_chunk_count(total_size);
     TEST_ASSERT_TRUE(chunk_count > 1U);
 
-    unsigned char payload[PAYLOAD_MAX];
+    unsigned char payload[PAYLOAD_MAX] = { 0 };
     fill_payload(payload, total_size);
 
-    const size_t     first_size = data_per_chunk() + 1U;
+    const size_t     first_size = (BYTES_DUP_CHUNK - sizeof(cy_bytes_t)) + 1U;
     const size_t     sizes[2]   = { first_size, total_size - first_size };
     cy_bytes_t       fragments[2];
     const cy_bytes_t source = build_source(payload, total_size, 2U, sizes, fragments);

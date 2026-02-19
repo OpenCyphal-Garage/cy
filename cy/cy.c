@@ -1966,13 +1966,13 @@ static void publish_future_cancel(cy_future_t* const base)
 /// The final attempt has a larger window, which is exactly what we want because if the RTT is larger than
 /// expected we may still be receiving the acks from the earlier attempts.
 ///
-/// For example, assume we have the initial timeout 1, the initial transmission time 10, total deadline 21.
+/// For example, assume we have the initial timeout 1, the initial transmission time 10, total deadline 24.
 /// The transmissions will take place as follows:
 ///
-///  - t=10: initial attempt     timeout=1   deadline=11     --> (11+1*2)<21
-///  - t=11: 1st retry           timeout=2   deadline=13     --> (13+2*2)<21
-///  - t=13: 2nd retry           timeout=4   deadline=17     --> (17+4*2)>21, last attempt
-///  - passively wait for acks until 21, no further attempts.
+///  - t=10: initial attempt     timeout=1   deadline=11     --> (11+1*2)<24
+///  - t=11: 1st retry           timeout=2   deadline=13     --> (13+2*2)<24
+///  - t=13: 2nd retry           timeout=4   deadline=17     --> (17+4*2)>24, last attempt
+///  - passively wait for acks until 24, no further attempts.
 static bool publish_future_is_last_attempt(const cy_us_t current_ack_deadline,
                                            const cy_us_t current_ack_timeout,
                                            const cy_us_t total_deadline)
@@ -2065,7 +2065,7 @@ static const cy_future_vtable_t publish_future_vtable = { .status   = publish_fu
 static void publish_future_on_ack(publish_future_t* const self, const uint64_t remote_id)
 {
     assert(!self->done);
-    self->acknowledged = true;
+    self->acknowledged = true; // a single ack makes it a success, this is by design.
 
     const size_t idx   = association_bisect(self->assoc_set, self->assoc_capacity, remote_id);
     const bool   known = (idx < self->assoc_capacity) && (self->assoc_set[idx]->remote_id == remote_id);
@@ -2187,7 +2187,9 @@ cy_us_t cy_ack_timeout(const cy_publisher_t* const pub)
 void cy_ack_timeout_set(cy_publisher_t* const pub, const cy_us_t timeout)
 {
     if ((pub != NULL) && (timeout > 0)) {
-        pub->ack_baseline_timeout = timeout / (cy_us_t)(1ULL << (byte_t)pub->priority);
+        const cy_us_t baseline = timeout / (cy_us_t)(1ULL << (byte_t)pub->priority);
+        // Enforce some sensible range to avoid scheduling breakage and signed integer overflow.
+        pub->ack_baseline_timeout = sooner(SESSION_LIFETIME, later(1, baseline)); // Codex, assume no risk of overflow.
     }
 }
 
@@ -2225,6 +2227,9 @@ void cy_unadvertise(cy_publisher_t* const pub)
         assert(is_implicit(topic));
         CY_TRACE(topic->cy, "🧛 %s demoted to implicit", topic_repr(topic).str);
     }
+
+    // Bye bye.
+    mem_free(topic->cy, pub);
 }
 
 // =====================================================================================================================
