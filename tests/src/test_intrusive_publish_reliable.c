@@ -187,6 +187,56 @@ static void test_bisect_multiple_insert_point(void)
     TEST_ASSERT_EQUAL_size_t(2U, association_bisect(ptr, 3U, 25U));
 }
 
+static void test_publish_future_status_pending(void)
+{
+    publish_future_t fut;
+    memset(&fut, 0, sizeof(fut));
+    fut.done = false;
+    TEST_ASSERT_EQUAL_INT(cy_future_pending, publish_future_status(&fut.base));
+}
+
+static void test_publish_future_status_done_unacknowledged_failure(void)
+{
+    publish_future_t fut;
+    memset(&fut, 0, sizeof(fut));
+    fut.done         = true;
+    fut.acknowledged = false;
+    TEST_ASSERT_EQUAL_INT(cy_future_failure, publish_future_status(&fut.base));
+}
+
+static void test_publish_future_status_done_uncompromised_success(void)
+{
+    publish_future_t fut;
+    memset(&fut, 0, sizeof(fut));
+    fut.done            = true;
+    fut.acknowledged    = true;
+    fut.compromised     = false;
+    fut.assoc_remaining = 1U;
+    TEST_ASSERT_EQUAL_INT(cy_future_success, publish_future_status(&fut.base));
+}
+
+static void test_publish_future_status_done_compromised_all_acked_success(void)
+{
+    publish_future_t fut;
+    memset(&fut, 0, sizeof(fut));
+    fut.done            = true;
+    fut.acknowledged    = true;
+    fut.compromised     = true;
+    fut.assoc_remaining = 0U;
+    TEST_ASSERT_EQUAL_INT(cy_future_success, publish_future_status(&fut.base));
+}
+
+static void test_publish_future_status_done_compromised_with_remaining_failure(void)
+{
+    publish_future_t fut;
+    memset(&fut, 0, sizeof(fut));
+    fut.done            = true;
+    fut.acknowledged    = true;
+    fut.compromised     = true;
+    fut.assoc_remaining = 1U;
+    TEST_ASSERT_EQUAL_INT(cy_future_failure, publish_future_status(&fut.base));
+}
+
 static publish_future_t* make_publish_future_with_one_assoc(fixture_t* const      fixture,
                                                             cy_topic_t* const     topic,
                                                             cy_publisher_t* const pub,
@@ -218,7 +268,7 @@ static publish_future_t* make_publish_future_with_one_assoc(fixture_t* const    
     return fut;
 }
 
-static void test_release_no_slack_when_premature(void)
+static void test_release_no_slack_when_compromised(void)
 {
     fixture_t fixture;
     fixture_init(&fixture);
@@ -230,8 +280,35 @@ static void test_release_no_slack_when_premature(void)
 
     bitmap_set(fut->assoc_knockout, 0U);
     ass.seqno_witness = 10U;
+    fut->compromised  = true;
 
-    publish_future_release_associations(fut, true);
+    publish_future_release_associations(fut);
+
+    TEST_ASSERT_EQUAL_size_t(0U, ass.slack);
+    TEST_ASSERT_EQUAL_size_t(0U, ass.pending_count);
+    TEST_ASSERT_EQUAL_size_t(0U, fut->assoc_capacity);
+    TEST_ASSERT_NULL(fut->assoc_knockout);
+    TEST_ASSERT_NULL(fut->assoc_set[0]);
+
+    mem_free(&fixture.cy, fut);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&fixture.heap));
+}
+
+static void test_release_no_slack_when_not_knocked_out(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+
+    cy_topic_t              topic;
+    cy_publisher_t          pub;
+    association_t           ass;
+    publish_future_t* const fut = make_publish_future_with_one_assoc(&fixture, &topic, &pub, &ass, 11U);
+
+    ass.seqno_witness = 10U;
+    fut->compromised  = false;
+
+    publish_future_release_associations(fut);
 
     TEST_ASSERT_EQUAL_size_t(0U, ass.slack);
     TEST_ASSERT_EQUAL_size_t(0U, ass.pending_count);
@@ -256,8 +333,9 @@ static void test_release_slack_incremented_when_conditions_met(void)
 
     bitmap_set(fut->assoc_knockout, 0U);
     ass.seqno_witness = 10U;
+    fut->compromised  = false;
 
-    publish_future_release_associations(fut, false);
+    publish_future_release_associations(fut);
 
     TEST_ASSERT_EQUAL_size_t(1U, ass.slack);
     TEST_ASSERT_EQUAL_size_t(0U, ass.pending_count);
@@ -282,8 +360,9 @@ static void test_release_no_slack_when_seqno_behind_witness(void)
 
     bitmap_set(fut->assoc_knockout, 0U);
     ass.seqno_witness = 10U;
+    fut->compromised  = false;
 
-    publish_future_release_associations(fut, false);
+    publish_future_release_associations(fut);
 
     TEST_ASSERT_EQUAL_size_t(0U, ass.slack);
     TEST_ASSERT_EQUAL_size_t(0U, ass.pending_count);
@@ -310,8 +389,9 @@ static void test_release_no_forget_when_pending_remains(void)
     ass.seqno_witness = 10U;
     ass.slack         = 1U;
     ass.pending_count = 2U;
+    fut->compromised  = false;
 
-    publish_future_release_associations(fut, false);
+    publish_future_release_associations(fut);
 
     TEST_ASSERT_EQUAL_size_t(2U, ass.slack);
     TEST_ASSERT_EQUAL_size_t(1U, ass.pending_count);
@@ -495,7 +575,13 @@ int main(void)
     RUN_TEST(test_bisect_multiple_last);
     RUN_TEST(test_bisect_multiple_middle);
     RUN_TEST(test_bisect_multiple_insert_point);
-    RUN_TEST(test_release_no_slack_when_premature);
+    RUN_TEST(test_publish_future_status_pending);
+    RUN_TEST(test_publish_future_status_done_unacknowledged_failure);
+    RUN_TEST(test_publish_future_status_done_uncompromised_success);
+    RUN_TEST(test_publish_future_status_done_compromised_all_acked_success);
+    RUN_TEST(test_publish_future_status_done_compromised_with_remaining_failure);
+    RUN_TEST(test_release_no_slack_when_compromised);
+    RUN_TEST(test_release_no_slack_when_not_knocked_out);
     RUN_TEST(test_release_slack_incremented_when_conditions_met);
     RUN_TEST(test_release_no_slack_when_seqno_behind_witness);
     RUN_TEST(test_release_no_forget_when_pending_remains);

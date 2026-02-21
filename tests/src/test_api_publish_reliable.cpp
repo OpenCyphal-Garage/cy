@@ -676,6 +676,129 @@ void test_retransmission_send_error_does_not_abort_future()
     test_end(platform);
 }
 
+void test_retransmission_send_error_partial_known_acks_fails()
+{
+    test_platform_t platform{};
+    test_begin(platform);
+
+    static const char* const topic_name = "reliable/retransmission_send_error_partial_known_acks_fails";
+    cy_publisher_t* const    pub        = setup_publisher(platform, topic_name);
+    build_association(platform, pub, topic_name, UINT64_C(0xCA01));
+    build_association(platform, pub, topic_name, UINT64_C(0xCA02));
+
+    const cy_bytes_t    msg      = { .size = 1U, .data = "\xC5", .next = nullptr };
+    const cy_us_t       deadline = platform.now + (5 * ACK_TIMEOUT);
+    cy_future_t* const  fut      = cy_publish_reliable(pub, deadline, msg);
+    const std::uint64_t tag      = captured_tag(platform);
+    const std::uint64_t hash     = topic_hash_for(platform, topic_name);
+    TEST_ASSERT_NOT_NULL(fut);
+
+    cy_async_error_handler_set(platform.cy, nullptr);
+    platform.fail_next_reliable_multicast = true;
+    const cy_us_t t0                      = platform.now;
+    spin_to(platform, t0 + ACK_TIMEOUT + 1);
+
+    dispatch_ack(&platform, tag, hash, UINT64_C(0xCA01), platform.now);
+    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut));
+
+    spin_to(platform, deadline + 1);
+    TEST_ASSERT_EQUAL_INT(cy_future_failure, cy_future_status(fut));
+
+    cy_future_destroy(fut);
+    cy_unadvertise(pub);
+    test_end(platform);
+}
+
+void test_retransmission_send_error_all_known_acks_succeeds()
+{
+    test_platform_t platform{};
+    test_begin(platform);
+
+    static const char* const topic_name = "reliable/retransmission_send_error_all_known_acks_succeeds";
+    cy_publisher_t* const    pub        = setup_publisher(platform, topic_name);
+    build_association(platform, pub, topic_name, UINT64_C(0xCB01));
+    build_association(platform, pub, topic_name, UINT64_C(0xCB02));
+
+    const cy_bytes_t    msg  = { .size = 1U, .data = "\xC6", .next = nullptr };
+    cy_future_t* const  fut  = cy_publish_reliable(pub, platform.now + (5 * ACK_TIMEOUT), msg);
+    const std::uint64_t tag  = captured_tag(platform);
+    const std::uint64_t hash = topic_hash_for(platform, topic_name);
+    TEST_ASSERT_NOT_NULL(fut);
+
+    cy_async_error_handler_set(platform.cy, nullptr);
+    platform.fail_next_reliable_multicast = true;
+    const cy_us_t t0                      = platform.now;
+    spin_to(platform, t0 + ACK_TIMEOUT + 1);
+
+    dispatch_ack(&platform, tag, hash, UINT64_C(0xCB01), platform.now);
+    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut));
+    dispatch_ack(&platform, tag, hash, UINT64_C(0xCB02), platform.now);
+    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut));
+
+    cy_future_destroy(fut);
+    cy_unadvertise(pub);
+    test_end(platform);
+}
+
+void test_retransmission_send_error_no_associations_single_ack_succeeds()
+{
+    test_platform_t platform{};
+    test_begin(platform);
+
+    static const char* const topic_name = "reliable/retransmission_send_error_no_associations_single_ack_succeeds";
+    cy_publisher_t* const    pub        = setup_publisher(platform, topic_name);
+
+    const cy_bytes_t    msg  = { .size = 1U, .data = "\xC7", .next = nullptr };
+    cy_future_t* const  fut  = cy_publish_reliable(pub, platform.now + (5 * ACK_TIMEOUT), msg);
+    const std::uint64_t tag  = captured_tag(platform);
+    const std::uint64_t hash = topic_hash_for(platform, topic_name);
+    TEST_ASSERT_NOT_NULL(fut);
+
+    cy_async_error_handler_set(platform.cy, nullptr);
+    platform.fail_next_reliable_multicast = true;
+    const cy_us_t t0                      = platform.now;
+    spin_to(platform, t0 + ACK_TIMEOUT + 1);
+
+    dispatch_ack(&platform, tag, hash, UINT64_C(0xCC01), platform.now);
+    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut));
+
+    cy_future_destroy(fut);
+    cy_unadvertise(pub);
+    test_end(platform);
+}
+
+void test_retransmission_send_error_compromised_is_sticky_across_retries()
+{
+    test_platform_t platform{};
+    test_begin(platform);
+
+    cy_publisher_t* const pub = setup_publisher(platform, "reliable/retransmission_send_error_compromised_sticky");
+
+    const cy_bytes_t   msg      = { .size = 1U, .data = "\xC8", .next = nullptr };
+    const cy_us_t      deadline = platform.now + (10 * ACK_TIMEOUT);
+    cy_future_t* const fut      = cy_publish_reliable(pub, deadline, msg);
+    TEST_ASSERT_NOT_NULL(fut);
+
+    cy_async_error_handler_set(platform.cy, nullptr);
+    platform.fail_next_reliable_multicast = true;
+    const cy_us_t t0                      = platform.now;
+
+    spin_to(platform, t0 + ACK_TIMEOUT + 1);
+    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut));
+    const std::size_t sends_after_first_retry = platform.reliable_multicast_count;
+
+    spin_to(platform, t0 + ACK_TIMEOUT + 1 + (2 * ACK_TIMEOUT) + 1);
+    TEST_ASSERT_TRUE(platform.reliable_multicast_count > sends_after_first_retry);
+    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut));
+
+    spin_to(platform, deadline + 1);
+    TEST_ASSERT_EQUAL_INT(cy_future_failure, cy_future_status(fut));
+
+    cy_future_destroy(fut);
+    cy_unadvertise(pub);
+    test_end(platform);
+}
+
 void test_exponential_backoff_second_timeout()
 {
     test_platform_t platform{};
@@ -1428,6 +1551,10 @@ int main()
     RUN_TEST(test_initial_send_failure_returns_null);
     RUN_TEST(test_single_remaining_not_last_attempt_stays_multicast);
     RUN_TEST(test_retransmission_send_error_does_not_abort_future);
+    RUN_TEST(test_retransmission_send_error_partial_known_acks_fails);
+    RUN_TEST(test_retransmission_send_error_all_known_acks_succeeds);
+    RUN_TEST(test_retransmission_send_error_no_associations_single_ack_succeeds);
+    RUN_TEST(test_retransmission_send_error_compromised_is_sticky_across_retries);
     RUN_TEST(test_exponential_backoff_second_timeout);
     RUN_TEST(test_last_attempt_no_further_retransmission);
     RUN_TEST(test_p2p_retry_single_remaining);
