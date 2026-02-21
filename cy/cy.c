@@ -1827,8 +1827,9 @@ static cy_err_t do_publish_impl(cy_publisher_t* const  pub,
                                 const uint64_t         tag,
                                 const cy_lane_t* const lane)
 {
-    cy_topic_t* const topic = pub->topic;
-    cy_t* const       cy    = topic->cy;
+    cy_topic_t* const                 topic = pub->topic;
+    cy_t* const                       cy    = topic->cy;
+    const cy_platform_vtable_t* const vt    = cy->platform->vtable;
     assert(topic->pub_count > 0);
 
     // TODO: How do we handle CAN compatibility? No header for pinned topics? The transport will strip the header?
@@ -1836,25 +1837,10 @@ static cy_err_t do_publish_impl(cy_publisher_t* const  pub,
     (void)serialize_u64(serialize_u64(&header[2], tag), topic->hash);
     const cy_bytes_t headed_message = { .size = sizeof(header), .data = header, .next = &message };
 
-    assert(topic->pub_writer != NULL);
-    assert(topic_subject_id(topic) == topic->pub_writer->subject_id);
-    const cy_platform_vtable_t* const vt = cy->platform->vtable;
-    return (lane == NULL)
-             ? vt->subject_writer_send(cy->platform, topic->pub_writer, deadline, pub->priority, headed_message)
-             : vt->p2p_send(cy->platform, lane, deadline, headed_message);
-}
-
-static cy_err_t do_publish(cy_publisher_t* const pub,
-                           const cy_us_t         deadline,
-                           const cy_bytes_t      message,
-                           const header_type_t   header_type,
-                           uint64_t* const       out_tag)
-{
-    if ((pub == NULL) || (deadline < 0) || ((message.data == NULL) && (message.size > 0))) {
-        return CY_ERR_ARGUMENT;
+    // P2P writes do not require a subject writer, so we skip creating one.
+    if (lane != NULL) {
+        return vt->p2p_send(cy->platform, lane, deadline, headed_message);
     }
-    cy_topic_t* const topic = pub->topic;
-    cy_t* const       cy    = topic->cy;
 
     // Lazy creation is the simplest option because we have to drop the subject writer on topic reallocation,
     // and it may fail to be created at the time of reallocation, so we'd have to retry anyway.
@@ -1868,12 +1854,29 @@ static cy_err_t do_publish(cy_publisher_t* const pub,
         }
         topic->pub_writer->subject_id = subject_id;
     }
+    assert(topic_subject_id(topic) == topic->pub_writer->subject_id);
+    return vt->subject_writer_send(cy->platform, topic->pub_writer, deadline, pub->priority, headed_message);
+}
+
+static cy_err_t do_publish(cy_publisher_t* const pub,
+                           const cy_us_t         deadline,
+                           const cy_bytes_t      message,
+                           const header_type_t   header_type,
+                           uint64_t* const       out_tag)
+{
+    if ((pub == NULL) || (deadline < 0) || ((message.data == NULL) && (message.size > 0))) {
+        return CY_ERR_ARGUMENT;
+    }
+    cy_topic_t* const topic = pub->topic;
+    cy_t* const       cy    = topic->cy;
+    assert(topic->pub_count > 0);
+
+    gossip_begin(cy);
 
     const uint64_t tag = topic->pub_tag_baseline + topic->pub_seqno++;
     if (out_tag != NULL) {
         *out_tag = tag;
     }
-    gossip_begin(cy);
     return do_publish_impl(pub, deadline, message, header_type, tag, NULL);
 }
 
