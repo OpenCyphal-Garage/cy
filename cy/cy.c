@@ -1890,12 +1890,14 @@ typedef struct
     cy_future_t     base; ///< The key is the tag.
     cy_publisher_t* owner;
     cy_us_t         deadline;
-    bool            done;
-    bool            acknowledged;
+
+    bool done;
+    bool acknowledged;
+    bool compromised; ///< At least one attempt could not be sent due to error or premature cancellation.
 
     /// Retransmission states.
-    cy_us_t           ack_timeout;
     const cy_bytes_t* data;
+    cy_us_t           ack_timeout;
 
     /// The association set is captured at publication and it becomes the target set we require acks from.
     /// If we started out with an empty set, it means that there are no known subscribers, so we will attempt to
@@ -1910,7 +1912,11 @@ typedef struct
 static cy_future_status_t publish_future_status(const cy_future_t* const base)
 {
     const publish_future_t* const self = (const publish_future_t*)base;
-    return (self->done) ? (self->acknowledged ? cy_future_success : cy_future_failure) : cy_future_pending;
+    if (!self->done) {
+        return cy_future_pending;
+    }
+    const bool success = self->acknowledged && (!self->compromised || (self->assoc_remaining == 0));
+    return success ? cy_future_success : cy_future_failure;
 }
 
 static size_t publish_future_result(cy_future_t* const base, const size_t storage_size, void* const storage)
@@ -1922,7 +1928,7 @@ static size_t publish_future_result(cy_future_t* const base, const size_t storag
 }
 
 /// When we're done with the future, we need to update the shared states of our associations.
-static void publish_future_release_associations(publish_future_t* const self, const bool premature_cancellation)
+static void publish_future_release_associations(publish_future_t* const self)
 {
     cy_topic_t* const topic = self->owner->topic;
     for (size_t i = 0; i < self->assoc_capacity; i++) {
@@ -1932,9 +1938,10 @@ static void publish_future_release_associations(publish_future_t* const self, co
         // If this remote hasn't acknowledged the message, register ACK loss. Ignore lost acks if a newer tag was seen
         // as newer tags are stronger predictors of the future ability of the remote to acknowledge messages.
         // Don't register ack loss when canceled prematurely because there may not have been enough time for round trip.
+        // Also, don't register any ack loss if at least one publication has failed, that is obvious.
         const uint64_t seqno = self->base.key - topic->pub_tag_baseline;
         assert(seqno < (1ULL << 48U)); // sanity /math check -- values above 2**48 are unreachable in practice.
-        if (bitmap_test(self->assoc_knockout, i) && (seqno >= ass->seqno_witness) && !premature_cancellation) {
+        if (bitmap_test(self->assoc_knockout, i) && (seqno >= ass->seqno_witness) && !self->compromised) {
             ass->slack++;
         }
 
@@ -1953,14 +1960,14 @@ static void publish_future_release_associations(publish_future_t* const self, co
 }
 
 /// Invalidates the future -- the user callback may destroy it. Expect finalization & further access invalid.
-static void publish_future_materialize(publish_future_t* const self, const bool premature_cancellation)
+static void publish_future_materialize(publish_future_t* const self)
 {
     assert(!self->done);
     self->done           = true;
     const cy_t* const cy = self->owner->topic->cy;
     future_deadline_disarm(&self->base);
     future_index_remove(&self->base, &self->owner->topic->pub_futures_by_tag);
-    publish_future_release_associations(self, premature_cancellation);
+    publish_future_release_associations(self);
     bytes_undup(cy, self->data);
     self->data = NULL;
     future_notify(&self->base); // Invalidates the future. Expect finalization call.
@@ -1970,7 +1977,8 @@ static void publish_future_cancel(cy_future_t* const base)
 {
     publish_future_t* const self = (publish_future_t*)base;
     if (!self->done) {
-        publish_future_materialize(self, true);
+        self->compromised = true; // Reachability information incomplete.
+        publish_future_materialize(self);
     }
 }
 
@@ -2003,9 +2011,9 @@ static void publish_future_timeout(cy_future_t* const base, const cy_us_t now)
 
     // Check completion.
     assert(!self->done);
-    if (self->data == NULL) {                    // This is the final poll.
-        assert(now >= self->deadline);           // Ensure correct scheduling.
-        publish_future_materialize(self, false); // The future may be successful depending on received acks.
+    if (self->data == NULL) {             // This is the final poll.
+        assert(now >= self->deadline);    // Ensure correct scheduling.
+        publish_future_materialize(self); // The future may be successful depending on received acks.
         return;
     }
 
@@ -2044,6 +2052,7 @@ static void publish_future_timeout(cy_future_t* const base, const cy_us_t now)
     // Send the message.
     const cy_err_t er = do_publish_impl(self->owner, ack_deadline, *self->data, header_msg_rel, self->base.key, lane_p);
     ON_ASYNC_ERROR_IF(cy, topic, er);
+    self->compromised = self->compromised || (er != CY_OK);
 
     // Schedule the next poll event.
     // If there is going to be another attempt, schedule the next timeout to fire when it's time to transmit;
@@ -2080,7 +2089,7 @@ static const cy_future_vtable_t publish_future_vtable = { .status   = publish_fu
 static void publish_future_on_ack(publish_future_t* const self, const uint64_t remote_id)
 {
     assert(!self->done);
-    self->acknowledged = true; // a single ack makes it a success, this is by design.
+    self->acknowledged = true; // a single ack makes it a success unless some attempts failed, this is by design.
 
     const size_t idx   = association_bisect(self->assoc_set, self->assoc_capacity, remote_id);
     const bool   known = (idx < self->assoc_capacity) && (self->assoc_set[idx]->remote_id == remote_id);
@@ -2091,7 +2100,7 @@ static void publish_future_on_ack(publish_future_t* const self, const uint64_t r
         self->assoc_remaining--;
     }
     if (self->assoc_remaining == 0) { // also handles the case of no known associations at publication
-        publish_future_materialize(self, false);
+        publish_future_materialize(self);
     }
 }
 
@@ -2113,6 +2122,7 @@ cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadli
     fut->deadline        = deadline;
     fut->done            = false;
     fut->acknowledged    = false;
+    fut->compromised     = false;
     fut->ack_timeout     = cy_ack_timeout(pub);
     fut->assoc_capacity  = topic->assoc_count;
     fut->assoc_remaining = 0;
