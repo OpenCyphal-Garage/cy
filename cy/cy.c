@@ -149,14 +149,6 @@ struct cy_t
     cy_us_t gossip_period;
     cy_us_t gossip_next;
 
-    /// For convenience, we store the lane of the currently processed message here.
-    /// It helps avoiding the need to carry it around during the local CRDT updates, because the gossip exchange
-    /// protocol is built on the idea that gossips are either (fixed-rate broadcast) OR (immediate P2P on repair);
-    /// the latter case needs the remote lane information.
-    /// The lane is set when we begin processing an incoming message and removed when the processing is complete.
-    /// FIXME TODO this interferes with topic creation from a callback; remove.
-    const cy_lane_t* lane;
-
     /// Slow topic iteration state. Updated every cy_update(); when NULL, restart from scratch.
     cy_topic_t* topic_iter;
 
@@ -737,11 +729,13 @@ void cy_future_destroy(cy_future_t* const self)
 /// Broadcasts must be done on a fixed schedule only (with slight dithering to allow duplicate suppression).
 /// Urgent gossips for consensus repair cannot be broadcast to avoid bandwidth explosion; only unicast or multicast.
 /// The priority is taken from the lane if available, otherwise nominal.
-/// For broadcast gossips, the writer must be the broadcast writer. At least writer or lane must be non-NULL.
+/// The caller can provide writer and/or lane; the gossip will be sent over all provided resources;
+/// if none given, does nothing and returns success.
 static cy_err_t send_gossip(const cy_t* const          cy,
                             const cy_us_t              now,
                             const cy_topic_t* const    topic,
-                            cy_subject_writer_t* const writer);
+                            cy_subject_writer_t* const writer,
+                            const cy_lane_t* const     lane);
 
 /// A topic that is only used by pattern subscriptions (like `ins/*/data/>`, without publishers or explicit
 /// subscriptions) is called implicit. Such topics are automatically retired when they see no traffic and
@@ -1209,10 +1203,9 @@ static cy_topic_t* topic_find_by_subject_id(const cy_t* const cy, const uint32_t
     return topic;
 }
 
-/// No-op if subject writer already exists or is not needed.
 static cy_err_t topic_ensure_subject_writer(cy_topic_t* const topic)
 {
-    if ((topic->pub_count > 0) && (topic->pub_writer == NULL)) {
+    if (topic->pub_writer == NULL) {
         cy_t* const    cy         = topic->cy;
         const uint32_t subject_id = topic_subject_id(topic);
         topic->pub_writer         = cy->platform->vtable->subject_writer_new(cy->platform, subject_id);
@@ -1271,7 +1264,10 @@ static void topic_ensure_subscribed(cy_topic_t* const topic) // TODO rename, inv
 /// us make it explicit that there shall be no more than one reader/writer on any subject.
 ///
 /// NOLINTNEXTLINE(*-no-recursion)
-static void topic_allocate(cy_topic_t* const topic, const uint32_t new_evictions, const bool virgin, const cy_us_t now)
+static void topic_allocate(cy_topic_t* const      topic,
+                           const uint32_t         new_evictions,
+                           const cy_us_t          now,
+                           const cy_lane_t* const lane)
 {
     cy_t* const cy = topic->cy;
 #if CY_CONFIG_TRACE
@@ -1287,9 +1283,8 @@ static void topic_allocate(cy_topic_t* const topic, const uint32_t new_evictions
 #endif
 
     // We're not allowed to alter the eviction counter as long as the topic remains in the tree! So we remove it first.
-    if (!virgin) {
-        cavl2_remove(&cy->topics_by_subject_id, &topic->index_subject_id);
-    }
+    // We use _if() version because the topic is not in the index if it's new or if we're re-entering recursively.
+    cavl2_remove_if(&cy->topics_by_subject_id, &topic->index_subject_id);
 
     // This mirrors the formal specification of AllocateTopic(t, topics) given in Core.tla.
     // Note that it is possible that subject_id(hash,old_evictions) == subject_id(hash,new_evictions),
@@ -1312,14 +1307,15 @@ static void topic_allocate(cy_topic_t* const topic, const uint32_t new_evictions
     }
 #endif
 
-    if (victory) { // Allocation done (end of the recursion chain). Every affected topic will end up here eventually.
-        // Destroy the old subject reader. The old writer is still needed, just detach it.
+    if (victory) { // Allocation done. Every affected topic will end up here eventually.
         if (topic->sub_reader != NULL) {
             assert(topic->couplings != NULL);
             cy->platform->vtable->subject_reader_destroy(cy->platform, topic->sub_reader);
             topic->sub_reader = NULL;
         }
-        ON_ASYNC_ERROR_IF(cy, topic, topic_ensure_subject_writer(topic));
+        if ((topic->pub_count > 0) || (lane == NULL)) { // Ensure we have something to send the urgent gossip via
+            ON_ASYNC_ERROR_IF(cy, topic, topic_ensure_subject_writer(topic));
+        }
         cy_subject_writer_t* const old_writer = topic->pub_writer;
         topic->pub_writer                     = NULL;
 
@@ -1358,22 +1354,19 @@ static void topic_allocate(cy_topic_t* const topic, const uint32_t new_evictions
         // This will instruct all of our subscribers to move at once.
         // Notify the remote as well because it may be a publisher but not a subscriber.
         schedule_gossip_soon(topic);
+        ON_ASYNC_ERROR_IF(cy, topic, send_gossip(cy, now, topic, old_writer, lane));
         if (old_writer != NULL) {
-            ON_ASYNC_ERROR_IF(cy, topic, send_gossip(cy, now, topic, old_writer));
             cy->platform->vtable->subject_writer_destroy(cy->platform, old_writer);
-        }
-        if (cy->lane != NULL) {
-            ON_ASYNC_ERROR_IF(cy, topic, send_gossip(cy, now, topic, NULL));
         }
 
         // Re-allocate the defeated topic with incremented eviction counter.
         if (that != NULL) {
             assert(that->pub_writer == NULL);
             assert(that->sub_reader == NULL);
-            topic_allocate(that, that->evictions + 1U, true, now);
+            topic_allocate(that, that->evictions + 1U, now, lane);
         }
     } else {
-        topic_allocate(topic, new_evictions + 1U, true, now);
+        topic_allocate(topic, new_evictions + 1U, now, lane);
     }
 
 #if CY_CONFIG_TRACE
@@ -1390,12 +1383,13 @@ static void topic_allocate(cy_topic_t* const topic, const uint32_t new_evictions
 /// out_topic may be NULL if the reference is not immediately needed (it can be found later via indexes).
 /// The log-age is -1 for newly created topics, as opposed to auto-subscription on pattern match,
 /// where the lage is taken from the gossip message.
-static cy_err_t topic_new(cy_t* const        cy,
-                          cy_topic_t** const out_topic,
-                          const cy_str_t     resolved_name,
-                          const uint64_t     hash,
-                          const uint32_t     evictions,
-                          const int_fast8_t  lage)
+static cy_err_t topic_new(cy_t* const            cy,
+                          cy_topic_t** const     out_topic,
+                          const cy_str_t         resolved_name,
+                          const uint64_t         hash,
+                          const uint32_t         evictions,
+                          const int_fast8_t      lage,
+                          const cy_lane_t* const lane)
 {
     // TODO error handling is broken
     if ((resolved_name.len == 0) || (resolved_name.len > CY_TOPIC_NAME_MAX)) {
@@ -1463,7 +1457,7 @@ static cy_err_t topic_new(cy_t* const        cy,
         // meaning that another pinned topic is not occupying the same subject-ID.
         // Remember that topics arbitrate locally the same way they do externally, meaning that adding a new local topic
         // may displace another local one.
-        topic_allocate(topic, topic->evictions, true, now);
+        topic_allocate(topic, topic->evictions, now, lane);
         if (out_topic != NULL) {
             *out_topic = topic;
         }
@@ -1482,7 +1476,10 @@ oom: // TODO correct deinitialization
     return CY_ERR_NAME;
 }
 
-static cy_err_t topic_ensure(cy_t* const cy, cy_topic_t** const out_topic, const cy_str_t resolved_name)
+static cy_err_t topic_ensure(cy_t* const            cy,
+                             cy_topic_t** const     out_topic,
+                             const cy_str_t         resolved_name,
+                             const cy_lane_t* const lane)
 {
     cy_topic_t* const topic = cy_topic_find_by_name(cy, resolved_name);
     if (topic != NULL) {
@@ -1491,7 +1488,7 @@ static cy_err_t topic_ensure(cy_t* const cy, cy_topic_t** const out_topic, const
         }
         return 0;
     }
-    return topic_new(cy, out_topic, resolved_name, topic_hash(resolved_name), 0, LAGE_MIN);
+    return topic_new(cy, out_topic, resolved_name, topic_hash(resolved_name), 0, LAGE_MIN, lane);
 }
 
 /// Create a new coupling between a topic and a subscriber.
@@ -1547,11 +1544,12 @@ static void* wkv_cb_couple_new_topic(const wkv_event_t evt)
 
 /// If there is a pattern subscriber matching the name of this topic, attempt to create a new subscription.
 /// If a new subscription is created, the new topic will be returned.
-static cy_topic_t* topic_subscribe_if_matching(cy_t* const       cy,
-                                               const cy_str_t    resolved_name,
-                                               const uint64_t    hash,
-                                               const uint32_t    evictions,
-                                               const int_fast8_t lage)
+static cy_topic_t* topic_subscribe_if_matching(cy_t* const            cy,
+                                               const cy_str_t         resolved_name,
+                                               const uint64_t         hash,
+                                               const uint32_t         evictions,
+                                               const int_fast8_t      lage,
+                                               const cy_lane_t* const lane)
 {
     assert((cy != NULL) && (resolved_name.str != NULL));
     if (resolved_name.len == 0) {
@@ -1564,7 +1562,7 @@ static cy_topic_t* topic_subscribe_if_matching(cy_t* const       cy,
     // Create the new topic.
     cy_topic_t* topic = NULL;
     {
-        const cy_err_t res = topic_new(cy, &topic, resolved_name, hash, evictions, lage);
+        const cy_err_t res = topic_new(cy, &topic, resolved_name, hash, evictions, lage, lane);
         if (res != CY_OK) {
             ON_ASYNC_ERROR(cy, NULL, res);
             return NULL;
@@ -1589,8 +1587,12 @@ static cy_topic_t* topic_subscribe_if_matching(cy_t* const       cy,
 static cy_err_t send_gossip(const cy_t* const          cy,
                             const cy_us_t              now,
                             const cy_topic_t* const    topic,
-                            cy_subject_writer_t* const writer)
+                            cy_subject_writer_t* const writer,
+                            const cy_lane_t* const     lane)
 {
+    if ((writer == NULL) && (lane == NULL)) {
+        return CY_OK; // Early exit to avoid unnecessary serialization.
+    }
     byte_t           buf[15 + CY_TOPIC_NAME_MAX];
     const cy_str_t   name    = cy_topic_name(topic);
     const cy_bytes_t message = { .size = 15 + name.len, .data = buf };
@@ -1601,15 +1603,17 @@ static cy_err_t send_gossip(const cy_t* const          cy,
     ptr                      = serialize_u32(ptr, topic->evictions);
     *ptr++                   = (byte_t)name.len;
     memcpy(ptr, name.str, name.len);
-    const cy_us_t                     dead = now + cy->gossip_period;
-    const cy_platform_vtable_t* const vt   = cy->platform->vtable;
-    assert((writer != NULL) || (cy->lane != NULL)); // At least one is required
+    const cy_prio_t                   priority = (lane == NULL) ? cy_prio_nominal : lane->prio;
+    const cy_us_t                     dead     = now + cy->gossip_period;
+    const cy_platform_vtable_t* const vt       = cy->platform->vtable;
+    cy_err_t                          err      = CY_OK;
     if (writer != NULL) {
-        const cy_prio_t priority = (cy->lane == NULL) ? cy_prio_nominal : cy->lane->prio;
-        return vt->subject_writer_send(cy->platform, writer, dead, priority, message);
+        err = vt->subject_writer_send(cy->platform, writer, dead, priority, message);
     }
-    assert(cy->lane != NULL); // at least lane or writer are required by contract
-    return vt->p2p_send(cy->platform, cy->lane, dead, message);
+    if ((lane != NULL) && (err == CY_OK)) {
+        err = vt->p2p_send(cy->platform, lane, dead, message);
+    }
+    return err;
 }
 
 /// The bottom-level scout transmission function. Scouts are always broadcast.
@@ -1646,9 +1650,9 @@ static void on_gossip_known_topic(cy_t* const       cy,
                                   const cy_us_t     ts,
                                   cy_topic_t* const mine,
                                   const uint32_t    evictions,
-                                  const int8_t      lage)
+                                  const int8_t      lage,
+                                  const cy_lane_t   lane)
 {
-    assert(cy->lane != NULL);
     implicit_animate(mine, ts);
     const int_fast8_t mine_lage = topic_lage(mine, ts);
     if (mine->evictions != evictions) {
@@ -1675,12 +1679,12 @@ static void on_gossip_known_topic(cy_t* const       cy,
             // See https://github.com/OpenCyphal-Garage/cy/issues/28 and AcceptGossip() in Core.tla.
             gossip_begin(cy);
             schedule_gossip_soon(mine);
-            ON_ASYNC_ERROR_IF(cy, mine, send_gossip(cy, ts, mine, NULL)); // P2P gossip to the infringing node
+            ON_ASYNC_ERROR_IF(cy, mine, send_gossip(cy, ts, mine, NULL, &lane)); // P2P gossip to the infringing node
         } else {
             assert((mine_lage <= lage) && ((mine_lage < lage) || (mine->evictions < evictions)));
             assert(mine_lage <= lage);
             topic_merge_lage(mine, ts, lage);
-            topic_allocate(mine, evictions, false, ts);
+            topic_allocate(mine, evictions, ts, &lane);
         }
     } else {
         schedule_gossip(mine);         // suppress next gossip -- the network just heard about it
@@ -1690,13 +1694,13 @@ static void on_gossip_known_topic(cy_t* const       cy,
 }
 
 /// We received a gossip message for a topic that is unknown to us. Check for subject-ID collisions.
-static void on_gossip_unknown_topic(cy_t* const    cy,
-                                    const cy_us_t  ts,
-                                    const uint64_t hash,
-                                    const uint32_t evictions,
-                                    const int8_t   lage)
+static void on_gossip_unknown_topic(cy_t* const     cy,
+                                    const cy_us_t   ts,
+                                    const uint64_t  hash,
+                                    const uint32_t  evictions,
+                                    const int8_t    lage,
+                                    const cy_lane_t lane)
 {
-    assert(cy->lane != NULL);
     cy_topic_t* const mine =
       topic_find_by_subject_id(cy, topic_subject_id_impl(hash, evictions, cy->platform->subject_id_modulus));
     if (mine == NULL) {
@@ -1728,9 +1732,9 @@ static void on_gossip_unknown_topic(cy_t* const    cy,
     if (win) {
         gossip_begin(cy);
         schedule_gossip_soon(mine);
-        ON_ASYNC_ERROR_IF(cy, mine, send_gossip(cy, ts, mine, NULL)); // P2P gossip to the infringing node
+        ON_ASYNC_ERROR_IF(cy, mine, send_gossip(cy, ts, mine, NULL, &lane)); // P2P gossip to the infringing node
     } else {
-        topic_allocate(mine, mine->evictions + 1U, false, ts);
+        topic_allocate(mine, mine->evictions + 1U, ts, &lane);
     }
 }
 
@@ -1748,36 +1752,42 @@ static void on_gossip(cy_t* const        cy,
                       const uint32_t     evictions,
                       const int8_t       lage,
                       const cy_str_t     name,
-                      cy_topic_t** const out_topic)
+                      cy_topic_t** const out_topic,
+                      const cy_lane_t    lane)
 {
     cy_topic_t* mine = cy_topic_find_by_hash(cy, hash);
     if ((mine == NULL) && (name.len > 0)) { // a name is required but maybe the publisher is non-compliant
-        mine = topic_subscribe_if_matching(cy, name, hash, evictions, lage);
+        mine = topic_subscribe_if_matching(cy, name, hash, evictions, lage, &lane);
     }
     if (mine != NULL) { // We have this topic! Check if we have consensus on the subject-ID.
-        on_gossip_known_topic(cy, ts, mine, evictions, lage);
+        on_gossip_known_topic(cy, ts, mine, evictions, lage, lane);
     } else { // We don't know this topic; check for a subject-ID collision and do auto-subscription.
-        on_gossip_unknown_topic(cy, ts, hash, evictions, lage);
+        on_gossip_unknown_topic(cy, ts, hash, evictions, lage, lane);
     }
     if (out_topic != NULL) {
         *out_topic = mine;
     }
 }
 
+typedef struct
+{
+    cy_us_t   now;
+    cy_lane_t lane;
+} scout_response_context_t;
+
 static void* wkv_cb_topic_scout_response(const wkv_event_t evt)
 {
-    cy_topic_t* const topic = (cy_topic_t*)evt.node->value;
-    cy_t* const       cy    = topic->cy;
-    const cy_us_t     now   = *(cy_us_t*)evt.context;
+    cy_topic_t* const               topic = (cy_topic_t*)evt.node->value;
+    cy_t* const                     cy    = topic->cy;
+    const scout_response_context_t* ctx   = (const scout_response_context_t*)evt.context;
     CY_TRACE(cy, "📢 %s", topic_repr(topic).str);
     gossip_begin(cy);
-    assert(cy->lane != NULL);
     // Optimization: if the matching topic is going to be gossiped soon anyway, don't bother unicasting it --
     // the remote will receive it soon anyway.
-    const bool broadcast_soon = (cy->gossip_next <= (now + (KILO * 100))) && //
+    const bool broadcast_soon = (cy->gossip_next <= (ctx->now + (KILO * 100))) && //
                                 (LIST_TAIL(cy->list_gossip, cy_topic_t, list_gossip) == topic);
     if (!broadcast_soon) {
-        ON_ASYNC_ERROR_IF(cy, topic, send_gossip(cy, now, topic, NULL));
+        ON_ASYNC_ERROR_IF(cy, topic, send_gossip(cy, ctx->now, topic, NULL, &ctx->lane));
     }
     return NULL;
 }
@@ -1788,10 +1798,11 @@ static void* wkv_cb_topic_scout_response(const wkv_event_t evt)
 /// this the easier way. If we only have a few topics, we don't even need to do anything here since by virtue of
 /// having few topics their gossip rate will be high, so the remote will hear about them soon enough.
 /// This, scout handling is essentially only useful in many-topic nodes, and in general-purpose implementations.
-static void on_scout(cy_t* const cy, cy_us_t ts, const cy_str_t name)
+static void on_scout(cy_t* const cy, cy_us_t ts, const cy_str_t name, const cy_lane_t lane)
 {
     CY_TRACE(cy, "📢 '%.*s'", STRFMT_ARG(name));
-    (void)wkv_match(&cy->topics_by_name, name, &ts, wkv_cb_topic_scout_response);
+    scout_response_context_t ctx = { .now = ts, .lane = lane };
+    (void)wkv_match(&cy->topics_by_name, name, &ctx, wkv_cb_topic_scout_response);
 }
 
 // =====================================================================================================================
@@ -1825,7 +1836,7 @@ cy_publisher_t* cy_advertise_client(cy_t* const cy, const cy_str_t name, const s
     if (pub == NULL) {
         return NULL;
     }
-    const cy_err_t res        = topic_ensure(cy, &pub->topic, resolved);
+    const cy_err_t res        = topic_ensure(cy, &pub->topic, resolved, NULL);
     pub->priority             = cy_prio_nominal;
     pub->publish_futures      = LIST_EMPTY;
     pub->ack_baseline_timeout = cy->ack_baseline_timeout;
@@ -2795,19 +2806,17 @@ static bool on_message(cy_t* const           cy,
                        cy_topic_t* const     topic,
                        const uint64_t        tag,
                        const cy_message_ts_t message,
-                       const bool            reliable)
+                       const bool            reliable,
+                       const cy_lane_t       lane)
 {
-    assert(cy->lane != NULL);
     implicit_animate(topic, message.timestamp);
 
     // Reliable transfers may be duplicated in case of ACK loss.
     // Non-reliable transfers are deduplicated by the transport, which makes them much more efficient.
     if (reliable) {
-        dedup_factory_context_t ctx = {
-            .owner = topic, .remote_id = cy->lane->id, .tag = tag, .now = message.timestamp
-        };
+        dedup_factory_context_t ctx = { .owner = topic, .remote_id = lane.id, .tag = tag, .now = message.timestamp };
         dedup_t* const dedup = CAVL2_TO_OWNER(cavl2_find_or_insert(&topic->sub_index_dedup_by_remote_id, // ------
-                                                                   &cy->lane->id,
+                                                                   &lane.id,
                                                                    dedup_cavl_compare,
                                                                    &ctx,
                                                                    dedup_factory),
@@ -2816,9 +2825,9 @@ static bool on_message(cy_t* const           cy,
         if (dedup == NULL) { // Out of memory.
             return false;    // The remote will retransmit and we might be able to accept it then.
         }
-        assert(dedup->remote_id == cy->lane->id);
+        assert(dedup->remote_id == lane.id);
         if (dedup_update(dedup, topic, tag, message.timestamp)) {
-            CY_TRACE(cy, "🍒 Dup N%016jx tag=%016jx", (uintmax_t)cy->lane->id, (uintmax_t)tag);
+            CY_TRACE(cy, "🍒 Dup N%016jx tag=%016jx", (uintmax_t)lane.id, (uintmax_t)tag);
             return true; // Already received, ack but don't process.
         }
     }
@@ -2840,7 +2849,7 @@ static bool on_message(cy_t* const           cy,
             if (use_reordering) {
                 reordering_context_t ctx = {
                     .now           = message.timestamp,
-                    .lane          = *cy->lane,
+                    .lane          = lane,
                     .subscriber    = sub,
                     .topic         = topic, // The topic and coupling references will be kept alive by the subscriber.
                     .substitutions = substitutions,
@@ -2855,16 +2864,16 @@ static bool on_message(cy_t* const           cy,
                                                         reordering_t,
                                                         index);
                 if (rr != NULL) { // Simply ignore on OOM, nothing we can do.
-                    assert(rr->remote_id == cy->lane->id);
+                    assert(rr->remote_id == lane.id);
                     assert(rr->topic == topic);
                     assert(rr->subscriber == sub);
-                    rr->p2p_context = cy->lane->p2p; // keep the latest known return path discovery from the transport
-                    if (reordering_push(rr, tag, cy->lane->prio, message)) {
+                    rr->p2p_context = lane.p2p; // keep the latest known return path discovery from the transport
+                    if (reordering_push(rr, tag, lane.prio, message)) {
                         acknowledge = true;
                     }
                 }
             } else {
-                subscriber_invoke(sub, make_arrival(topic, *cy->lane, tag, message, substitutions));
+                subscriber_invoke(sub, make_arrival(topic, lane, tag, message, substitutions));
                 acknowledge = true;
             }
             sub = next_sub;
@@ -2977,7 +2986,7 @@ static cy_err_t ensure_subscriber_root(cy_t* const cy, const cy_str_t resolved_n
     } else {
         root->index_pattern  = NULL;
         root->needs_scouting = false; // this is not a pattern subscriber
-        const cy_err_t res   = topic_ensure(cy, NULL, resolved_name);
+        const cy_err_t res   = topic_ensure(cy, NULL, resolved_name, NULL);
         if (res != CY_OK) {
             wkv_del(&cy->subscribers_by_name, node);
             mem_free(cy, node->value);
@@ -3210,9 +3219,6 @@ cy_t* cy_new(cy_platform_t* const platform)
     cy->gossip_next   = HEAT_DEATH;
     cy->gossip_period = 3 * MEGA; // May be made configurable at some point if necessary.
 
-    // Not processing any messages at the moment.
-    cy->lane = NULL;
-
     // Set up the broadcast subject readers/writers.
     const uint32_t broad_id = cy_broadcast_subject_id(platform);
     cy->broad_reader        = cy->platform->vtable->subject_reader_new(cy->platform, broad_id, BROADCAST_EXTENT);
@@ -3270,8 +3276,7 @@ static cy_err_t gossip_poll(cy_t* const cy, const cy_us_t now)
         if (topic != NULL) {
             topic_ensure_subscribed(topic); // use this opportunity to repair the subscription if broken
             schedule_gossip(topic);         // reschedule even if failed -- some other node might pick up the gossip
-            assert(cy->lane == NULL);       // regular gossips are only broadcast
-            res = send_gossip(cy, now, topic, cy->broad_writer); // broadcast gossip
+            res = send_gossip(cy, now, topic, cy->broad_writer, NULL); // broadcast gossip
         }
         cy->gossip_next = now + dither_int(cy, cy->gossip_period, cy->gossip_period / 8);
     }
@@ -3280,7 +3285,6 @@ static cy_err_t gossip_poll(cy_t* const cy, const cy_us_t now)
 
 static cy_err_t poll(cy_t* const cy, cy_us_t* const out_now)
 {
-    assert(cy->lane == NULL); // cannot poll from within a message handler.
     const olga_spin_result_t spin_result = olga_spin(&cy->olga);
     const cy_us_t            now         = (spin_result.now == BIG_BANG) ? cy_now(cy) : spin_result.now;
     retire_expired_implicit_topics(cy, now);
@@ -3312,7 +3316,6 @@ cy_err_t cy_spin_until(cy_t* const cy, const cy_us_t deadline)
     if (cy == NULL) {
         return CY_ERR_ARGUMENT;
     }
-    assert(cy->lane == NULL); // cannot spin from within a message handler.
     cy_us_t  now = 0;
     cy_err_t err = CY_OK;
     do {
@@ -3383,7 +3386,11 @@ cy_user_context_t* cy_topic_user_context(cy_topic_t* const topic)
 //                                              PLATFORM LAYER INTERFACE
 // =====================================================================================================================
 
-static void on_message_ack(cy_t* const cy, cy_topic_t* const topic, const uint64_t tag, const cy_us_t ts)
+static void on_message_ack(cy_t* const       cy,
+                           cy_topic_t* const topic,
+                           const uint64_t    tag,
+                           const cy_us_t     ts,
+                           const cy_lane_t   lane)
 {
     assert(topic != NULL);
 
@@ -3397,9 +3404,9 @@ static void on_message_ack(cy_t* const cy, cy_topic_t* const topic, const uint64
 
     // Update the subscriber association set. Note that by design we don't require a pending future for this to work.
     // Associations are destroyed only by the futures when a publish outcome is known.
-    association_factory_context_t fac = { .topic = topic, .remote_id = cy->lane->id };
+    association_factory_context_t fac = { .topic = topic, .remote_id = lane.id };
     association_t* const ass = CAVL2_TO_OWNER(cavl2_find_or_insert(&topic->assoc_by_remote_id, // ---------------
-                                                                   &cy->lane->id,
+                                                                   &lane.id,
                                                                    association_cavl_compare,
                                                                    &fac,
                                                                    association_cavl_factory),
@@ -3408,14 +3415,14 @@ static void on_message_ack(cy_t* const cy, cy_topic_t* const topic, const uint64
     if (ass != NULL) {
         assert(topic->assoc_count > 0);
         ass->last_seen   = ts;
-        ass->p2p_context = cy->lane->p2p;  // Always update the latest return path discovery state.
+        ass->p2p_context = lane.p2p;       // Always update the latest return path discovery state.
         if (seqno >= ass->seqno_witness) { // Prevent old pending futures from altering slack.
             ass->slack         = 0;
             ass->seqno_witness = seqno;
         }
         publish_future_t* const future = (publish_future_t*)future_index_lookup(topic->pub_futures_by_tag, tag);
         if (future != NULL) {
-            publish_future_on_ack(future, cy->lane->id);
+            publish_future_on_ack(future, lane.id);
         }
     } else {
         // NB: OOM here causes the empty-snapshot discovery path to lose this ACK. This is accepted by design:
@@ -3503,8 +3510,6 @@ void cy_on_message(cy_platform_t* const             platform,
     }
     const header_type_t type = header[0] & HEADER_TYPE_MASK;
 
-    cy->lane = &lane;
-
     // This is the central entry point for all incoming messages. It's complex but there's an advantage to keeping the
     // central dispatch logic in one place because of the tight coupling between different parts of the stack.
     switch (type) {
@@ -3534,7 +3539,7 @@ void cy_on_message(cy_platform_t* const             platform,
                              (uintmax_t)lane.id,
                              (uintmax_t)cy->platform->subject_id_modulus);
                 }
-                on_gossip(cy, message.timestamp, hash, evictions, lage, str_empty, &topic);
+                on_gossip(cy, message.timestamp, hash, evictions, lage, str_empty, &topic, lane);
             } else {
                 topic = cy_topic_find_by_hash(cy, hash);
             }
@@ -3542,7 +3547,7 @@ void cy_on_message(cy_platform_t* const             platform,
                 assert((topic->sub_reader == NULL) || (topic_subject_id(topic) == topic->sub_reader->subject_id));
                 const bool     reliable = type == header_msg_rel;
                 const uint64_t tag      = deserialize_u64(&header[2]);
-                const bool     accepted = on_message(cy, topic, tag, message, reliable);
+                const bool     accepted = on_message(cy, topic, tag, message, reliable, lane);
                 if (reliable && accepted) { // This is either new or retransmit, must ack either way.
                     send_message_ack(cy, lane, tag, hash, message.timestamp + ACK_TX_TIMEOUT);
                 }
@@ -3558,7 +3563,7 @@ void cy_on_message(cy_platform_t* const             platform,
             const uint64_t    hash  = deserialize_u64(&header[9]);
             cy_topic_t* const topic = cy_topic_find_by_hash(cy, hash);
             if (topic != NULL) {
-                on_message_ack(cy, topic, tag, message.timestamp);
+                on_message_ack(cy, topic, tag, message.timestamp, lane);
             } else {
                 CY_TRACE(cy,
                          "⚠️ Orphan message ACK N%016jx T%016jx tag=%016jx",
@@ -3638,7 +3643,7 @@ void cy_on_message(cy_platform_t* const             platform,
             }
             const uint64_t hash      = deserialize_u64(&header[2]);
             const uint32_t evictions = deserialize_u32(&header[10]);
-            on_gossip(cy, message.timestamp, hash, evictions, lage, name, NULL);
+            on_gossip(cy, message.timestamp, hash, evictions, lage, name, NULL, lane);
             break;
         }
 
@@ -3649,7 +3654,7 @@ void cy_on_message(cy_platform_t* const             platform,
                 (cy_message_read(message.content, 2, name.len, (byte_t*)name_buf) != name.len)) {
                 goto bad_message;
             }
-            on_scout(cy, message.timestamp, name);
+            on_scout(cy, message.timestamp, name, lane);
             break;
         }
 
@@ -3659,7 +3664,6 @@ void cy_on_message(cy_platform_t* const             platform,
     }
 bad_message:
     cy_message_refcount_dec(message.content);
-    cy->lane = NULL;
 }
 
 // =====================================================================================================================
