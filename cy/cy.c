@@ -1222,12 +1222,12 @@ static size_t subscription_extent_w_overhead(const cy_topic_t* const topic);
 /// If a subscription is needed but there is no subject reader, this function will attempt to create one.
 static void topic_ensure_subscribed(cy_topic_t* const topic) // TODO rename, invoke from cy_unsubscribe()
 {
-    cy_t* const cy = topic->cy;
+    cy_t* const    cy         = topic->cy;
+    const uint32_t subject_id = topic_subject_id(topic);
     if ((topic->couplings != NULL) && (topic->sub_reader == NULL)) { // A subject reader is needed but missing!
         const size_t extent = subscription_extent_w_overhead(topic);
         assert(extent >= HEADER_MAX_BYTES);
-        const uint32_t subject_id = topic_subject_id(topic);
-        topic->sub_reader         = cy->platform->vtable->subject_reader_new(cy->platform, subject_id, extent);
+        topic->sub_reader = cy->platform->vtable->subject_reader_new(cy->platform, subject_id, extent);
         CY_TRACE(topic->cy,
                  "🗞️ %s S%08jx extent=%zu result=%p",
                  topic_repr(topic).str,
@@ -1240,6 +1240,7 @@ static void topic_ensure_subscribed(cy_topic_t* const topic) // TODO rename, inv
             topic->sub_reader->subject_id = subject_id;
         }
     }
+    assert((topic->sub_reader == NULL) || (topic->sub_reader->subject_id == subject_id));
     if ((topic->couplings == NULL) && (topic->sub_reader != NULL)) { // No longer needed.
         cy->platform->vtable->subject_reader_destroy(cy->platform, topic->sub_reader);
         topic->sub_reader = NULL;
