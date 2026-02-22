@@ -138,7 +138,7 @@ The session layer of Cyphal v1.1 uses a mix of broadcast, multicast, and unicast
 
 #### BROADCAST RULE: Constant-rate gossip with duplicate suppression
 
-Every node publishes a broadcast gossip every 3±3/8 seconds using uniform dithering. Each entry carries a single topic allocation entry. When a gossip for a known topic is received from the network that is not inconsistent with the local state, the local gossip queue is updated to move that topic to the end of the queue, such that redundant gossips are suppressed and the network sees non-redundant gossip messages.
+Every node publishes a broadcast gossip every 2±0.25 seconds using uniform dithering. Each entry carries a single topic allocation entry. When a gossip for a known topic is received from the network that is not inconsistent with the local state, the local gossip queue is updated to move that topic to the end of the queue, such that redundant gossips are suppressed and the network sees non-redundant gossip messages.
 
 The dithering is essential for the suppression to work, as it eventually breaks spurious synchronization (e.g., if multiple nodes with similar topic sets started at the same time). While on a short interval the rate is slightly variable, due to uniform dithering the rate is constant on a large interval.
 

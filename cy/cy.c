@@ -3218,7 +3218,7 @@ cy_t* cy_new(cy_platform_t* const platform)
     // Initially, the gossip scheduling logic is disabled, because the first gossip is sent together with
     // the first publication. This allows listen-only nodes to avoid transmitting anything.
     cy->gossip_next   = HEAT_DEATH;
-    cy->gossip_period = 3 * MEGA; // May be made configurable at some point if necessary.
+    cy->gossip_period = 2 * MEGA; // May be made configurable at some point if necessary.
 
     // Set up the broadcast subject readers/writers.
     const uint32_t broad_id = cy_broadcast_subject_id(platform);
