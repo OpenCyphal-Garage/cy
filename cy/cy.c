@@ -123,7 +123,6 @@ struct cy_t
     cy_list_t list_implicit;      ///< Most recently animated topic is at the head.
     cy_list_t list_gossip_urgent; ///< High-priority gossips. Newest at the head.
     cy_list_t list_gossip;        ///< Normal-priority gossips. Newest at the head.
-    cy_list_t list_scout_pending; ///< Lists subscriber_root_t that are due for gossiping.
 
     /// When a gossip is received, its topic name will be compared against the patterns,
     /// and if a match is found, a new subscription will be constructed automatically; if a new topic instance
@@ -944,12 +943,10 @@ typedef struct subscriber_root_t
     wkv_node_t* index_name;
     wkv_node_t* index_pattern; ///< NULL if this is a verbatim subscriber.
 
-    /// If this is a pattern subscriber, we will need to publish a scout message.
-    /// The entry is delisted when it no longer requires publishing scout messages.
-    cy_list_member_t list_scout_pending;
-
     cy_t*            cy;
     cy_subscriber_t* head; ///< New subscribers are inserted at the head of the list.
+
+    bool needs_scouting;
 } subscriber_root_t;
 
 /// A single topic may match multiple names if patterns are used.
@@ -1569,19 +1566,6 @@ static cy_err_t do_send_scout(const cy_t* const cy, const cy_us_t now, const cy_
     const cy_bytes_t message = { .size = 2 + pattern.len, .data = buf };
     const cy_us_t    dead    = now + cy->gossip_period;
     return cy->platform->vtable->subject_writer_send(cy->platform, cy->broad_writer, dead, cy_prio_nominal, message);
-}
-
-static cy_err_t scout_pattern(cy_t* const cy, subscriber_root_t* const subr, const cy_us_t now)
-{
-    assert(subr != NULL);
-    char name[CY_TOPIC_NAME_MAX + 1];
-    wkv_get_key(&cy->subscribers_by_name, subr->index_name, name);
-    const cy_err_t res = do_send_scout(cy, now, (cy_str_t){ .len = subr->index_name->key_len, .str = name });
-    CY_TRACE(cy, "📢'%s' result=%jd", name, (intmax_t)res);
-    if (res == CY_OK) {
-        delist(&cy->list_scout_pending, &subr->list_scout_pending);
-    }
-    return res;
 }
 
 /// Will schedule the first gossip if it hasn't been broadcast yet. Does nothing otherwise.
@@ -2905,7 +2889,13 @@ static cy_err_t ensure_subscriber_root(cy_t* const cy, const cy_str_t resolved_n
         return CY_ERR_MEMORY;
     }
     if (node->value != NULL) {
-        *out_root = (subscriber_root_t*)node->value;
+        subscriber_root_t* const root = (subscriber_root_t*)node->value;
+        *out_root                     = root;
+        if (root->needs_scouting) {
+            const cy_err_t err   = do_send_scout(cy, cy_now(cy), resolved_name);
+            root->needs_scouting = err != CY_OK;
+            ON_ASYNC_ERROR_IF(cy, NULL, err);
+        }
         return CY_OK;
     }
     CY_TRACE(cy, "✨'%.*s'", STRFMT_ARG(resolved_name));
@@ -2930,10 +2920,15 @@ static cy_err_t ensure_subscriber_root(cy_t* const cy, const cy_str_t resolved_n
         }
         assert(root->index_pattern->value == NULL);
         root->index_pattern->value = root;
-        enlist_head(&cy->list_scout_pending, &root->list_scout_pending);
+        // Publish the first scout message. If it fails, we may try again later, but the loss of a scout message
+        // is not essential since the subscriber monitors gossips continuously and subscribes on match always.
+        const cy_err_t err   = do_send_scout(cy, cy_now(cy), resolved_name);
+        root->needs_scouting = err != CY_OK;
+        ON_ASYNC_ERROR_IF(cy, NULL, err);
     } else {
-        root->index_pattern = NULL;
-        const cy_err_t res  = topic_ensure(cy, NULL, resolved_name);
+        root->index_pattern  = NULL;
+        root->needs_scouting = false; // this is not a pattern subscriber
+        const cy_err_t res   = topic_ensure(cy, NULL, resolved_name);
         if (res != CY_OK) {
             wkv_del(&cy->subscribers_by_name, node);
             mem_free(cy, node->value);
@@ -3141,7 +3136,6 @@ cy_t* cy_new(cy_platform_t* const platform)
     cy->list_implicit      = LIST_EMPTY;
     cy->list_gossip_urgent = LIST_EMPTY;
     cy->list_gossip        = LIST_EMPTY;
-    cy->list_scout_pending = LIST_EMPTY;
 
     wkv_init(&cy->subscribers_by_name, &wkv_realloc);
     cy->subscribers_by_name.context = cy;
@@ -3220,20 +3214,13 @@ cy_err_t cy_namespace_set(cy_t* const cy, const cy_str_t name_space) { return na
 
 static cy_err_t gossip_poll(cy_t* const cy, const cy_us_t now)
 {
-    // Decide if it is time to gossip. We use a very simple minimal-state scheduler that runs two
-    // periods and offers an opportunity to gossip every now and then.
     cy_err_t res = CY_OK;
     if ((now >= cy->gossip_next) || (now >= cy->gossip_next_urgent)) {
-        cy_topic_t*              topic = LIST_TAIL(cy->list_gossip_urgent, cy_topic_t, list_gossip_urgent);
-        subscriber_root_t* const scout = LIST_TAIL(cy->list_scout_pending, subscriber_root_t, list_scout_pending);
-        if ((now >= cy->gossip_next) || (topic != NULL) || (scout != NULL)) {
-            if ((topic != NULL) || (scout == NULL)) {
-                topic = (topic != NULL) ? topic : LIST_TAIL(cy->list_gossip, cy_topic_t, list_gossip);
-                if (topic != NULL) {
-                    res = gossip_topic(cy, topic, now);
-                }
-            } else {
-                res = scout_pattern(cy, scout, now);
+        cy_topic_t* topic = LIST_TAIL(cy->list_gossip_urgent, cy_topic_t, list_gossip_urgent);
+        if ((now >= cy->gossip_next) || (topic != NULL)) {
+            topic = (topic != NULL) ? topic : LIST_TAIL(cy->list_gossip, cy_topic_t, list_gossip);
+            if ((topic != NULL)) {
+                res = gossip_topic(cy, topic, now);
             }
             cy->gossip_next = now + dither_int(cy, cy->gossip_period, cy->gossip_period / 8);
         }

@@ -439,13 +439,14 @@ cy_t* cy_new(cy_platform_t* const platform);
 /// destroy the platform instance itself; the application is responsible for that.
 void cy_destroy(cy_t* const cy);
 
-/// The async error handler is used to report errors occurring in Cy asynchronously with API invocations.
+/// The async error handler is used to report errors occurring in Cy asynchronously with API invocations,
+/// and in a few minor cases may also be invoked synchronously with some API calls.
 /// In particular, it is used for topic resubscription errors occurring in response to consensus updates,
 /// and also in cases where Cy is unable to create an implicit subscription on pattern match due to lack of memory.
 ///
 /// Normally, the error handler does not need to do anything specific aside from perhaps logging the error or updating
 /// relevant performance counters. Cy will keep attempting to repeat the failing operation continuously until it
-/// succeeds or the condition requiring the operation is lifted.
+/// succeeds or the condition requiring the operation is lifted, unless the operation is not mandatory for correctness.
 ///
 /// Since Cy is a single-file library, the line number uniquely identifies the error site.
 /// The topic pointer may be NULL depending on the nature of the error.
