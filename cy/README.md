@@ -32,7 +32,7 @@ For the description of the CRDT consensus algorithm and the topic allocation pro
 
 The transport delivers deduplicated messages, but duplication due to retransmission in case of lost acks may still  occur (for the transport such messages are seen as distinct). To mitigate, additional deduplication is performed at the session layer only for reliable messages based on their 64-bit unique tags.
 
-The session layer is designed to be mostly invariant to the delivery method used: multicast, unicast, or broadcast. This allows senders to choose the preferred delivery method ad-hoc.
+The session layer is designed to be mostly invariant to the delivery method used: multicast, unicast, or broadcast. This allows senders to choose the preferred delivery method ad-hoc. An exception applies to message publications which serve as their own gossips only when multicast (because the subject-ID encodes the eviction counter, see below).
 
 ### Headers
 
@@ -61,7 +61,7 @@ DSDL notation is used to define the headers. Void fields are sent zero and ignor
 
 #### Types 0 (best-effort message publication), 1 (reliable message publication)
 
-The thing to note is that each message on a subject carries its own CRDT gossip state, which allows instant consensus synchronization without waiting for the next gossip broadcast. This ensures fast consensus convergence. The consensus data is only relevant if the message is published on a subject; if sent P2P, then the eviction count cannot be reconstructed as there is no subject-ID known, so the consensus data is ignored by the receiver.
+One thing to note is that each message on a subject carries its own CRDT gossip state, which allows instant consensus synchronization without waiting for the next gossip broadcast. The topic hash and the age-logarithm-floor are included directly in the header while the evictions counter is derived from the subject-ID. The consensus data is only relevant if the message is published on a subject; if sent P2P, then the eviction count cannot be reconstructed as there is no subject-ID known, so the consensus data is ignored by the receiver.
 
 The message tags must be unique across reboots to avoid misattribution; for that, they are randomly initialized and incremented with every published message to enable ordering reconstruction and loss detection. Message tags can be initialized using PRNG with a good seed; the API docs provide examples how this could be achieved (easily) on an embedded system without a hardware TRNG.
 
@@ -107,7 +107,7 @@ uint16 tag              # Chosen by the responder arbitrarily for ack correlatio
 
 #### Type 7 (topic allocation CRDT gossip)
 
-This is usually broadcast, but when consensus divergence is discovered it can also be immediately unicast to the infringing parties at the discretion of the sender. The important difference here is that the broadcast rate has to be tightly managed to avoid overwhelming the smaller nodes, while P2P can be sent directly without strict bandwidth control.
+This is broadcast at a constant rate and also unicast or multicast irregularly as necessary; see the section on CRDT gossips.
 
 ```bash
 uint6 type
@@ -121,7 +121,7 @@ utf8[<=CY_TOPIC_NAME_MAX] topic_name  # Has 1 byte length prefix. The name is no
 
 #### Type 8 (topic discovery scout)
 
-This is typically broadcast to let every node check if it has any matching topics. On match, responses are sent using the CRDT gossip message either unicast to the origin of the scout or broadcast.
+This is typically broadcast to let every node check if it has any matching topics. On match, responses are sent as the ordinary CRDT gossip message. Responses are usually unicast, but this is not required; the only requirement is that the requester should be likely to receive them.
 
 ```bash
 uint6 type
@@ -129,3 +129,29 @@ void2
 utf8[<=CY_TOPIC_NAME_MAX] pattern  # Has 1 byte length prefix. The pattern is applied to normalized names.
 # Total size is 2 bytes + pattern length.
 ```
+
+### CRDT gossips
+
+The topic to subject-ID mapping is done via a CRDT described in the formal verification model. For the CRDT to function, nodes must periodically exchange their states with each other. The simplest approach is to regularly broadcast all state of each node or a part of it, the limit case of the latter being a single allocation per message with a round-robin scheduler choosing next state every published message. This works and is simple, but suffers from long convergence times and slow conflict/divergence resolution. One improvement would be to publish irregular gossips when conflicts or divergences occur, but this creates variable bandwidth usage and processing load on other nodes since gossips are broadcast, which is undesirable in real-time networks.
+
+The session layer of Cyphal v1.1 uses a mix of broadcast, multicast, and unicast gossips to provide both constant broadcast rates with zero burstiness and immediate conflict resolution where the immediate gossips affect only nodes that are directly interested in the altered topics.
+
+#### BROADCAST RULE: Constant-rate gossip with duplicate suppression
+
+Every node publishes a broadcast gossip every 3 seconds with 3/8 seconds uniform dithering. Each entry carries a single topic allocation entry. When a gossip for a known topic is received from the network that is not inconsistent with the local state, the local gossip queue is updated to move that topic to the end of the queue, such that redundant gossips are suppressed and the network sees non-redundant gossip messages, which speeds up discovery.
+
+The dithering is essential for the suppression to work, as it eventually breaks spurious synchronization (e.g., if multiple nodes with similar topic sets started at the same time). While on a short interval the rate is variable, due to uniform dithering the rate is constant on a large interval.
+
+#### UNICAST RULE: Immediate gossip on CRDT repair
+
+When a topic collision (multiple topics using the same subject) or divergence (distinct nodes using different subjects for the same topic) is detected, the node updates its local CRDT replica according to the rules, and immediately sends gossip messages for all affected topics (there maybe more than one in pathological cases) back to the original node, and moves the affected topics to the front of the broadcast gossip queue to gossip them sooner.
+
+The unicast gossips will not make the new state immediately known to all interested nodes but only to the two of them, but other nodes will eventually learn the updated state from broadcast gossips from either the local or the remote node (which provides a better median time-to-next-gossip compared to the single-node case), and if one of the involved nodes is a publisher, it will multicast-gossip the updated allocation on the old subject (see below).
+
+Incoming scout queries are handled similarly: topics matching the scout pattern are P2P-gossiped immediately to the scout origin. Some may fail, which is not a big deal because fixed-rate gossips will eventually make up for the lost messages. P2P scout responses may be skipped for topics that are due to broadcast-gossip soon to avoid redundancies.
+
+#### MULTICAST RULE: Gossip from publishers to subscribers
+
+Every message published on a topic serves as its own gossip. The topic hash (64-bit) and the age-logarithm-floor (8 bits) are included in the message header, and the evictions counter is derived from the subject-ID through a trivial transformation.
+
+When a topic that the local node is a publisher on is moved to a new subject (due to collision/divergence repair), a gossip message is published on the old subject to announce to the subscribers that a relocation is needed. Shall the new subject cause conflicts on any of the subscribers, the unicast rule applies: the subscribers that could not accept the proposed allocation will immediately propose a new allocation to the publisher, which will then propagate the new allocation to the other subscribers during the next round.
