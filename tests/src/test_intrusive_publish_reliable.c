@@ -464,7 +464,7 @@ static void test_on_message_ack_stale_seqno_lag_ignored(void)
     topic.pub_seqno        = UINT64_C(100005);
 
     const cy_lane_t lane = { .id = 42U, .p2p = { { 0 } }, .prio = cy_prio_nominal };
-    on_message_ack(&fixture.cy, &topic, lane, UINT64_C(1001), 0);
+    on_message_ack(&fixture.cy, &topic, UINT64_C(1001), 0, lane);
 
     TEST_ASSERT_EQUAL_size_t(0U, topic.assoc_count);
     TEST_ASSERT_NULL(topic.assoc_by_remote_id);
@@ -486,7 +486,7 @@ static void test_on_message_ack_allocation_failure_reports_async_error(void)
 
     fixture_set_fail_after(&fixture, 0U);
     const cy_lane_t lane = { .id = 43U, .p2p = { { 0 } }, .prio = cy_prio_nominal };
-    on_message_ack(&fixture.cy, &topic, lane, UINT64_C(501), 0);
+    on_message_ack(&fixture.cy, &topic, UINT64_C(501), 0, lane);
 
     TEST_ASSERT_EQUAL_size_t(1U, fixture.async_error_count);
     TEST_ASSERT_EQUAL_INT(CY_ERR_MEMORY, fixture.last_async_error);
@@ -508,14 +508,14 @@ static void test_on_message_ack_older_than_witness_keeps_witness(void)
     topic.pub_seqno        = UINT64_C(3);
 
     const cy_lane_t lane = { .id = 44U, .p2p = { { 0 } }, .prio = cy_prio_nominal };
-    on_message_ack(&fixture.cy, &topic, lane, UINT64_C(1002), 10);
+    on_message_ack(&fixture.cy, &topic, UINT64_C(1002), 10, lane);
     TEST_ASSERT_EQUAL_size_t(1U, topic.assoc_count);
 
     association_t* const ass = CAVL2_TO_OWNER(cavl2_min(topic.assoc_by_remote_id), association_t, index_remote_id);
     TEST_ASSERT_NOT_NULL(ass);
     TEST_ASSERT_EQUAL_UINT64(UINT64_C(2), ass->seqno_witness);
 
-    on_message_ack(&fixture.cy, &topic, lane, UINT64_C(1001), 11);
+    on_message_ack(&fixture.cy, &topic, UINT64_C(1001), 11, lane);
     TEST_ASSERT_EQUAL_size_t(1U, topic.assoc_count);
     TEST_ASSERT_EQUAL_UINT64(UINT64_C(2), ass->seqno_witness);
     TEST_ASSERT_EQUAL_size_t(0U, fixture.async_error_count);
