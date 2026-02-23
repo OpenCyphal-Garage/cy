@@ -17,6 +17,7 @@ Update docs/examples when public API behavior changes.
 - `examples/`: runnable demos.
 - `lib/`: all external dependencies for the library itself, for the test suite, and for the demos.
 - `formal_verification/`: formal protocol specification and verification models.
+- `papers/`: relevant publications and prior art.
 
 ## Coding Style & Naming Conventions
 
