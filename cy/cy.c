@@ -1535,8 +1535,8 @@ static cy_topic_t* topic_subscribe_if_matching(cy_t* const       cy,
                                                const int_fast8_t lage)
 {
     assert((cy != NULL) && (resolved_name.str != NULL));
-    if (resolved_name.len == 0) {
-        return NULL; // Ensure the remote is not trying to feed us an empty name, that's bad.
+    if ((resolved_name.len == 0) || (topic_hash(resolved_name) != hash)) {
+        return NULL; // Ensure the remote is not trying to feed us a bad name.
     }
     if (NULL == wkv_route(&cy->subscribers_by_pattern, resolved_name, NULL, wkv_cb_first)) {
         return NULL; // No match.
@@ -1554,8 +1554,8 @@ static cy_topic_t* topic_subscribe_if_matching(cy_t* const       cy,
     // Attach subscriptions using topic-owned name to keep substitutions stable.
     // Using the resolved_name here would be deadly since it is stack-allocated.
     if (NULL != wkv_route(&cy->subscribers_by_pattern, cy_topic_name(topic), topic, wkv_cb_couple_new_topic)) {
-        // TODO discard the topic!
-        ON_ASYNC_ERROR(cy, NULL, CY_ERR_MEMORY);
+        ON_ASYNC_ERROR(cy, topic, CY_ERR_MEMORY);
+        topic_destroy(topic);
         return NULL;
     }
     // Create the transport subscription once at the end, considering the parameters from all subscribers.
