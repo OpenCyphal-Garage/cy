@@ -134,7 +134,7 @@ utf8[<=CY_TOPIC_NAME_MAX] pattern  # Has 1 byte length prefix. The pattern is ap
 
 The topic to subject-ID mapping is done via a CRDT described in the formal specification/verification model. For the CRDT to function, nodes must periodically exchange their states with each other. The simplest approach is to regularly broadcast all CRDT state of each node or a part of it, the limit case of the latter being a single topic per message with a scheduler choosing which topic to gossip next. The next topic to gossip is that which has recently seen conflicts/divergences, then the one whose gossips haven't been observed the longest.
 
-The gossip rate is constant on a large time interval, but short-term it is variable due to intentional dithering, which is introduced to enable duplicate gossip suppression. Removal of duplicates speeds up topic discovery and consensus repair.
+The gossip rate is constant on a large time interval, but short-term it is variable due to intentional dithering, which is introduced to enable duplicate gossip suppression, similar to GAAP/ZMAAP. Removal of duplicates speeds up topic discovery and consensus repair.
 
 #### Rejected ideas
 
@@ -152,6 +152,7 @@ More sophisticated designs have been considered but eventually led nowhere so fa
 - [Epidemic broadcast trees](https://asc.di.fct.unl.pt/~jleitao/pdf/srds07-leitao.pdf)
 - [Gossip-based peer sampling](https://www.inf.u-szeged.hu/~jelasity/cikkek/tocs05.pdf)
 - [Cyclon](https://www.cs.unibo.it/babaoglu/courses/csns/resources/tutorials/cyclon.pdf)
+- [Chord](https://en.wikipedia.org/wiki/Chord_%28peer-to-peer%29)
 
 One is to let each node remember the node ID of the last node to gossip a topic provided that the ID is higher than their own and is the lowest seen; if none seen, remember the minimum seen ID. This orders nodes by ID into a singly-linked ring. A doubly-linked ring can be built by extending this principle. Then immediate gossips concerning a topic can be unicast directly to the ring neighbors (in addition to fixed-rate broadcasting), which can speed up repair. The problem is that this doesn't really solve burstiness as the number of nodes gossiping a topic may be low compared to the nodes that are aware of it (due to duplicate gossip suppression and the fact that only publishers provide inline gossips with published messages).
 

@@ -702,6 +702,8 @@ static cy_err_t v_spin(cy_platform_t* const base, const cy_us_t deadline)
 // ---------------------------------------------------------------------------------------------------------------------
 // MISC
 
+static uint64_t v_my_id(const cy_platform_t* const base) { return ((cy_udp_posix_t*)base)->udpard_tx.local_uid; }
+
 static cy_us_t v_now(cy_platform_t* const base)
 {
     (void)base;
@@ -741,6 +743,7 @@ static const cy_platform_vtable_t platform_vtable = {
     // EVENT LOOP
     .spin = v_spin,
     // MISC
+    .my_id   = v_my_id,
     .now     = v_now,
     .realloc = v_realloc,
     .random  = v_random,

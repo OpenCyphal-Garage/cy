@@ -14,6 +14,7 @@
 #pragma once
 
 #include "cy.h"
+#include <stdint.h>
 
 /// See the subject_id_modulus for details.
 #define CY_SUBJECT_ID_MODULUS_17bit 122867UL     ///< Suitable for all Cyphal transports.
@@ -144,6 +145,9 @@ typedef struct cy_platform_vtable_t
     cy_err_t (*spin)(cy_platform_t*, cy_us_t deadline);
 
     // === MISC ===
+
+    /// How the local node is seen by others. Usually this value is globally unique and unchanging (e.g., EUI-64).
+    uint64_t (*my_id)(const cy_platform_t*);
 
     /// Returns the current monotonic time in microseconds. The initial time shall be non-negative.
     cy_us_t (*now)(cy_platform_t*);
