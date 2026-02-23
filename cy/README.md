@@ -132,26 +132,27 @@ utf8[<=CY_TOPIC_NAME_MAX] pattern  # Has 1 byte length prefix. The pattern is ap
 
 ### CRDT gossips
 
-The topic to subject-ID mapping is done via a CRDT described in the formal verification model. For the CRDT to function, nodes must periodically exchange their states with each other. The simplest approach is to regularly broadcast all state of each node or a part of it, the limit case of the latter being a single allocation per message with a round-robin scheduler choosing next state every published message. This works and is simple, but suffers from long convergence times and slow conflict/divergence resolution. One improvement would be to publish irregular gossips when conflicts or divergences occur, but this creates variable bandwidth usage and processing load on other nodes, which is undesirable in real-time networks.
+The topic to subject-ID mapping is done via a CRDT described in the formal specification/verification model. For the CRDT to function, nodes must periodically exchange their states with each other. The simplest approach is to regularly broadcast all CRDT state of each node or a part of it, the limit case of the latter being a single topic per message with a scheduler choosing which topic to gossip next. The next topic to gossip is that which has recently seen conflicts/divergences, then the one whose gossips haven't been observed the longest.
 
-The session layer of Cyphal v1.1 uses a mix of broadcast, multicast, and unicast gossips to provide both constant broadcast rates with zero burstiness and immediate conflict resolution where the immediate gossips affect only nodes that are directly interested in the altered topics.
+The gossip rate is constant on a large time interval, but short-term it is variable due to intentional dithering, which is introduced to enable duplicate gossip suppression. Removal of duplicates speeds up topic discovery and consensus repair.
 
-#### BROADCAST RULE: Constant-rate gossip with duplicate suppression
+#### Rejected ideas
 
-Every node publishes a broadcast gossip every 2±0.25 seconds using uniform dithering. Each entry carries a single topic allocation entry. When a gossip for a known topic is received from the network that is not inconsistent with the local state, the local gossip queue is updated to move that topic to the end of the queue, such that redundant gossips are suppressed and the network sees non-redundant gossip messages.
+One improvement to speed up convergence would be to publish irregular gossips when conflicts or divergences occur, but this creates variable bandwidth usage and processing load on other nodes, which is undesirable in real-time networks. Any traffic variability on the broadcast subject is a problem because every node has to process messages from that subject, which may include resource-limited nodes.
 
-The dithering is essential for the suppression to work, as it eventually breaks spurious synchronization (e.g., if multiple nodes with similar topic sets started at the same time). While on a short interval the rate is slightly variable, due to uniform dithering the rate is constant on a large interval.
+Another idea is to immediately unicast an updated gossip on collision or divergence back to the node that sent a divergent gossip to speed up propagation, but this also causes burstiness because the number of such immediate unicast responses may be large (number of nodes in the network minus one in the worst case).
 
-#### UNICAST RULE: Immediate gossip on CRDT repair
+We could consider letting topic publishers multicast updated gossips on the old subject of their topic, such that all subscribers follow immediately; it is easy to see that this also causes burstiness in topics with many publishers.
 
-When a topic collision (multiple topics using the same subject) or divergence (distinct nodes using different subjects for the same topic) is detected, the node updates its local CRDT replica according to the CRDT rules and immediately sends gossip messages for all affected topics (there maybe more than one in pathological cases) back to the node that sent the dissenting gossip. The affected topics are also moved to the front of the broadcast gossip queue.
+#### Incomplete ideas
 
-The unicast gossips will not make the new state immediately known to all interested nodes, but other nodes will eventually learn the updated state from broadcast gossips from either the local or the remote node (which provides a better median time-to-next-gossip compared to the single-node case, plus deduplication via gossip suppression), and if one of the involved nodes is a publisher, it will multicast-gossip the updated allocation on the old subject (see below).
+More sophisticated designs have been considered but eventually led nowhere so far. They may still have some potential though. First, refer to prior works:
 
-Incoming scout queries are handled similarly: topics matching the scout pattern are P2P-gossiped immediately to the scout origin. Some may fail, which is not a big deal because fixed-rate gossips will eventually make up for the lost messages. P2P scout responses may be skipped for topics that are due to broadcast-gossip soon to minimize redundancies.
+- [HyParView](https://asc.di.fct.unl.pt/~jleitao/pdf/dsn07-leitao.pdf)
+- [Epidemic broadcast trees](https://asc.di.fct.unl.pt/~jleitao/pdf/srds07-leitao.pdf)
+- [Gossip-based peer sampling](https://www.inf.u-szeged.hu/~jelasity/cikkek/tocs05.pdf)
+- [Cyclon](https://www.cs.unibo.it/babaoglu/courses/csns/resources/tutorials/cyclon.pdf)
 
-#### MULTICAST RULE: Gossip from publishers to subscribers
+One is to let each node remember the node ID of the last node to gossip a topic provided that the ID is higher than their own and is the lowest seen; if none seen, remember the minimum seen ID. This orders nodes by ID into a singly-linked ring. A doubly-linked ring can be built by extending this principle. Then immediate gossips concerning a topic can be unicast directly to the ring neighbors (in addition to fixed-rate broadcasting), which can speed up repair. The problem is that this doesn't really solve burstiness as the number of nodes gossiping a topic may be low compared to the nodes that are aware of it (due to duplicate gossip suppression and the fact that only publishers provide inline gossips with published messages).
 
-Every message published on a topic serves as its own gossip. The topic hash (64-bit) and the age-logarithm-floor (8 bits) are included in the message header, and the evictions counter is derived from the subject-ID through a trivial transformation.
-
-When a topic that the local node is a publisher on is moved to a new subject (due to collision/divergence repair), a gossip message is published on the old subject to announce to the subscribers that a relocation is needed. Shall the new subject cause conflicts on any of the subscribers, the unicast rule ensures that the subscribers that could not accept the proposed allocation will immediately return a new proposed allocation to the publisher, which will then propagate the new allocation to the other subscribers during the next round.
+Peer sampling is interesting: each node has a small list of N clique members that receive every urgent gossip immediately (this does not replace fixed-rate broadcast gossips but augments them). When a node has at least one clique slot available, it advertises that in the gossips it publishes, soliciting connections from others with empty slots. Bidirectional connection is verified with every received gossip. Urgent gossips are unicast immediately to all confirmed bidirectional connections.

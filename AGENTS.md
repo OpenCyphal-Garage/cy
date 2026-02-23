@@ -16,7 +16,7 @@ Update docs/examples when public API behavior changes.
 - `tests/`: the test suite; refer to its own README.
 - `examples/`: runnable demos.
 - `lib/`: all external dependencies for the library itself, for the test suite, and for the demos.
-- `formal_verification/`: formal verification models.
+- `formal_verification/`: formal protocol specification and verification models.
 
 ## Coding Style & Naming Conventions
 
