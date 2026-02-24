@@ -1984,14 +1984,14 @@ static void on_gossip(cy_t* const           cy,
     // If there are free or stale slots, replace them unconditionally, such that we always have some minimal set.
     // If all slots are fresh and taken (large network), apply probabilistic replacement (well-known policy).
     gossip_peer_t* this_peer = gossip_peer_find(cy, lane.id);
-    if ((origin == gossip_broadcast) && (this_peer == NULL)) {
+    if (this_peer == NULL) {
         const cy_us_t        last_seen_threshold = ts - (GOSSIP_PERIOD_DEFAULT * 2);
         gossip_peer_t* const oldest              = gossip_peer_oldest(cy);
         if (oldest->last_seen < last_seen_threshold) { // have empty or stale entries, update unconditionally.
             this_peer = oldest;
             CY_TRACE(cy, "🧑‍🤝‍🧑 N%016jx <-- N%016jx", (uintmax_t)this_peer->id, (uintmax_t)lane.id);
             this_peer->id = lane.id;
-        } else if (chance(cy, GOSSIP_PEER_REPLACEMENT_PROBABILITY_RECIPROCAL)) { // random replacement, low prob
+        } else if ((origin == gossip_broadcast) && chance(cy, GOSSIP_PEER_REPLACEMENT_PROBABILITY_RECIPROCAL)) {
             this_peer = &cy->gossip_peers[choice(cy, GOSSIP_PEER_COUNT)];
             CY_TRACE(cy, "🧑‍🤝‍🧑 N%016jx <-- N%016jx", (uintmax_t)this_peer->id, (uintmax_t)lane.id);
             this_peer->id = lane.id;
@@ -3544,9 +3544,8 @@ cy_err_t cy_home_set(cy_t* const cy, const cy_str_t home)
 }
 cy_err_t cy_namespace_set(cy_t* const cy, const cy_str_t name_space) { return name_assign(cy, &cy->ns, name_space); }
 
-static cy_err_t gossip_poll(cy_t* const cy, const cy_us_t now)
+static void gossip_poll(cy_t* const cy, const cy_us_t now)
 {
-    cy_err_t res = CY_OK;
     // Process ordinary slow gossips first. It may seem counterintuitive but they are higher-priority than unicast
     // gossips because they have a much wider reach. We only send at most a single gossip per poll.
     // We could add a basic randomized rate-limit for urgent gossips here as well if needed to manage throughput.
@@ -3555,7 +3554,8 @@ static cy_err_t gossip_poll(cy_t* const cy, const cy_us_t now)
         if (topic != NULL) {
             topic_ensure_subscribed(topic); // use this opportunity to repair the subscription if broken
             schedule_gossip(topic);         // reschedule even if failed -- some other node might pick up the gossip
-            res = send_gossip_broadcast(cy, now, topic);
+            const cy_err_t res = send_gossip_broadcast(cy, now, topic);
+            ON_ASYNC_ERROR_IF(cy, topic, res);
             // Remember the freshly transmitted gossip to break cycles if/when we hear it back through epidemics.
             if (res == CY_OK) {
                 (void)gossip_dedup_update(
@@ -3571,28 +3571,29 @@ static cy_err_t gossip_poll(cy_t* const cy, const cy_us_t now)
         // If no eligible remotes are available, silently drop the gossip, fallback to fixed-rate broadcast.
         uint64_t blacklist[GOSSIP_OUTDEGREE] = { 0 };
         size_t   blacklist_size              = 0;
-        for (size_t i = 0; (i < GOSSIP_OUTDEGREE) && (res == CY_OK); i++) { // Stop at first failure.
+        bool     need_dedup                  = false;
+        for (size_t i = 0; i < GOSSIP_OUTDEGREE; i++) {
             const gossip_peer_t* const peer = gossip_random_peer_except(cy, now, blacklist_size, blacklist);
             if (peer == NULL) {
                 break; // no (more) peers
             }
             blacklist[blacklist_size++] = peer->id; // do not unicast to the same peer twice
             const cy_lane_t lane        = { .id = peer->id, .p2p = peer->p2p, .prio = cy_prio_nominal };
-            res                         = send_gossip_unicast(cy, now, GOSSIP_TTL, topic, lane);
+            const cy_err_t  res         = send_gossip_unicast(cy, now, GOSSIP_TTL, topic, lane);
+            ON_ASYNC_ERROR_IF(cy, topic, res);
+            need_dedup = need_dedup || (res == CY_OK);
         }
         // Remember the freshly transmitted gossip to break cycles if/when we hear it back through epidemics.
-        // Only if we actually sent anything, though.
-        if ((res == CY_OK) && (blacklist_size > 0)) {
+        if (need_dedup) {
             (void)gossip_dedup_update(
               cy, now, gossip_dedup_hash(topic->hash, topic->evictions, topic_lage(topic, now)));
         }
     } else {
         (void)0; // nothing to do this cycle, come back later
     }
-    return res;
 }
 
-static cy_err_t poll(cy_t* const cy, cy_us_t* const out_now)
+static void poll(cy_t* const cy, cy_us_t* const out_now)
 {
     const olga_spin_result_t spin_result = olga_spin(&cy->olga);
     const cy_us_t            now         = (spin_result.now == BIG_BANG) ? cy_now(cy) : spin_result.now;
@@ -3617,7 +3618,9 @@ static cy_err_t poll(cy_t* const cy, cy_us_t* const out_now)
         }
         cy->topic_iter = cy_topic_iter_next(cy->topic_iter);
     }
-    return gossip_poll(cy, now);
+
+    // Broadcast/unicast gossips.
+    gossip_poll(cy, now);
 }
 
 cy_err_t cy_spin_until(cy_t* const cy, const cy_us_t deadline)
@@ -3625,14 +3628,12 @@ cy_err_t cy_spin_until(cy_t* const cy, const cy_us_t deadline)
     if (cy == NULL) {
         return CY_ERR_ARGUMENT;
     }
-    cy_us_t  now = 0; // First run will return immediately to poll() asap.
+    cy_us_t  now = 0; // do a non-blocking spin first because of this init
     cy_err_t err = CY_OK;
     do {
         const cy_us_t wait_deadline = sooner(sooner(deadline, cy->gossip_next), now + SPIN_BLOCK_MAX);
         err                         = cy->platform->vtable->spin(cy->platform, wait_deadline);
-        if (err == CY_OK) {
-            err = poll(cy, &now);
-        }
+        poll(cy, &now);
     } while ((now < deadline) && (err == CY_OK));
     return err;
 }
