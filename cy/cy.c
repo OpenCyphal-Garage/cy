@@ -138,7 +138,8 @@ static uint64_t gossip_dedup_hash(const uint64_t hash, const uint32_t evictions,
 {
     // This hash is fast to compute and is good enough because the topic hash itself is high-entropy.
     // We could also use rapidhash64 shall the need arise but I don't see the point right now.
-    const uint64_t other = (((uint64_t)evictions) << 16U) | (uint64_t)(log_age + (int64_t)(1ULL << 56U));
+    assert((log_age >= LAGE_MIN) && (log_age <= LAGE_MAX));
+    const uint64_t other = (((uint64_t)evictions) << 16U) | (((uint64_t)(log_age - LAGE_MIN)) << 56U);
     return hash ^ other;
 }
 
@@ -1877,7 +1878,7 @@ static gossip_peer_t* gossip_random_peer_except(cy_t* const           cy,
                                                 const size_t          n_blacklist,
                                                 const uint64_t* const blacklist)
 {
-    const cy_us_t last_seen_threshold = now - (GOSSIP_PERIOD_DEFAULT * 2); // older peers not eligible.
+    const cy_us_t last_seen_threshold = now - (GOSSIP_PERIOD_DEFAULT * 3); // older peers not eligible.
     uint64_t      eligible_map        = 0;
     for (size_t i = 0; i < GOSSIP_PEER_COUNT; i++) {
         if (cy->gossip_peers[i].last_seen < last_seen_threshold) {
@@ -3567,6 +3568,7 @@ static cy_err_t gossip_poll(cy_t* const cy, const cy_us_t now)
         cy_topic_t* const topic = LIST_TAIL(cy->list_gossip_urgent, cy_topic_t, list_gossip_urgent);
         delist(&cy->list_gossip_urgent, &topic->list_gossip_urgent); // Delist regardless of outcome.
         // Unicast epidemic gossips to each peer individually.
+        // If no eligible remotes are available, silently drop the gossip, fallback to fixed-rate broadcast.
         uint64_t blacklist[GOSSIP_OUTDEGREE] = { 0 };
         size_t   blacklist_size              = 0;
         for (size_t i = 0; (i < GOSSIP_OUTDEGREE) && (res == CY_OK); i++) { // Stop at first failure.
@@ -3871,6 +3873,11 @@ void cy_on_message(cy_platform_t* const             platform,
             if (incompatibility != 0) {
                 goto bad_message;
             }
+            const gossip_origin_t origin = (subject_reader == NULL) ? gossip_unicast : gossip_broadcast;
+            const uint_fast8_t    ttl    = header[2];
+            if ((origin == gossip_broadcast) && (ttl != 0)) {
+                goto bad_message; // Broadcast gossips with non-zero TTL would cause forwarding storms.
+            }
             char           name_buf[CY_TOPIC_NAME_MAX + 1];
             const cy_str_t name = { .len = header[HEADER_BYTES - 1U], .str = name_buf };
             if ((name.len > CY_TOPIC_NAME_MAX) ||
@@ -3881,10 +3888,8 @@ void cy_on_message(cy_platform_t* const             platform,
             if ((lage < LAGE_MIN) || (lage > LAGE_MAX)) {
                 goto bad_message;
             }
-            const uint_fast8_t    ttl       = header[2];
-            const uint64_t        hash      = deserialize_u64(&header[5]);
-            const uint32_t        evictions = deserialize_u32(&header[13]);
-            const gossip_origin_t origin    = (subject_reader == NULL) ? gossip_unicast : gossip_broadcast;
+            const uint64_t hash      = deserialize_u64(&header[5]);
+            const uint32_t evictions = deserialize_u32(&header[13]);
             on_gossip(cy, message.timestamp, ttl, hash, evictions, lage, name, NULL, lane, origin);
             break;
         }

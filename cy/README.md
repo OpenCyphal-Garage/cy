@@ -125,7 +125,7 @@ uint8 incompatibility   # Transmit zero; ignore message if this is not zero.
 int8   topic_log_age    # floor(log2(topic_age)) if topic_age>0 else -1
 uint64 topic_hash
 uint32 topic_evictions
-utf8[<=CY_TOPIC_NAME_MAX] topic_name  # Has 1 byte length prefix. The name is normalized and nonempty.
+utf8[<=CY_TOPIC_NAME_MAX] topic_name  # Has 1 byte length prefix. The name is normalized.
 # Total size is 18 bytes + topic name length.
 ```
 
