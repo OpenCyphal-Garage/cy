@@ -74,6 +74,8 @@ struct cy_tree_t
 /// Pending ack transfers will timeout from the tx buffer after this time if not transmitted (interface stalled).
 #define ACK_TX_TIMEOUT MEGA
 
+#define GOSSIP_PERIOD_DEFAULT (3 * MEGA)
+
 /// Soft states associated with a remote node publishing on a topic or P2P will be discarded when stale for this long.
 #define SESSION_LIFETIME (60 * MEGA)
 
@@ -169,9 +171,12 @@ struct cy_t
 /// The maximum header size is needed to calculate the extent correctly.
 /// It is added to the serialized message size.
 /// Later revisions of the protocol may increase this size, although it is best to avoid it if possible.
+/// This does not apply to messages that don't carry payload (e.g., gossips may be larger than this).
 #define HEADER_MAX_BYTES 18U
 
-#define BROADCAST_EXTENT (HEADER_MAX_BYTES + CY_TOPIC_NAME_MAX)
+/// Chosen rather arbitrarily ensuring that the gossip certainly fits.
+/// Does not affect normal messages since they are not broadcast.
+#define BROADCAST_EXTENT 500U
 
 #define HEADER_TYPE_MASK 63U
 typedef enum
@@ -1740,17 +1745,20 @@ static void on_gossip(cy_t* const        cy,
                       cy_topic_t** const out_topic,
                       const cy_lane_t    lane)
 {
+    // Find the topic, create one if there's a matching pattern subscriber.
     cy_topic_t* mine = cy_topic_find_by_hash(cy, hash);
     if ((mine == NULL) && (name.len > 0)) { // a name is required but maybe the publisher is non-compliant
         mine = topic_subscribe_if_matching(cy, name, hash, evictions, lage);
     }
+    if (out_topic != NULL) {
+        *out_topic = mine;
+    }
+
+    // Process the gossip.
     if (mine != NULL) { // We have this topic! Check if we have consensus on the subject-ID.
         on_gossip_known_topic(cy, ts, mine, evictions, lage, lane);
     } else { // We don't know this topic; check for a subject-ID collision and do auto-subscription.
         on_gossip_unknown_topic(cy, ts, hash, evictions, lage, lane);
-    }
-    if (out_topic != NULL) {
-        *out_topic = mine;
     }
 }
 
@@ -3202,7 +3210,7 @@ cy_t* cy_new(cy_platform_t* const platform)
     // Initially, the gossip scheduling logic is disabled, because the first gossip is sent together with
     // the first publication. This allows listen-only nodes to avoid transmitting anything.
     cy->gossip_next   = HEAT_DEATH;
-    cy->gossip_period = 2 * MEGA; // May be made configurable at some point if necessary.
+    cy->gossip_period = GOSSIP_PERIOD_DEFAULT;
 
     // Set up the broadcast subject readers/writers.
     const uint32_t broad_id = cy_broadcast_subject_id(platform);

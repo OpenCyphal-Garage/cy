@@ -107,7 +107,7 @@ uint16 tag              # Chosen by the responder arbitrarily for ack correlatio
 
 #### Type 7 (topic allocation CRDT gossip)
 
-This is broadcast at a constant rate and also unicast or multicast irregularly as necessary; see the section on CRDT gossips.
+This is broadcast at a constant rate and may also be unicast ad-hoc when consensus needs repair (optional); see the section on CRDT gossips. Broadcast is the ultimate last-resort baseline for eventual convergence where all nodes MUST participate, while unicasting is an option.
 
 ```bash
 uint6 type
