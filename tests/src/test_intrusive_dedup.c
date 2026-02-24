@@ -1,6 +1,6 @@
 #include <cy.c> // NOLINT(bugprone-suspicious-include)
 #include <unity.h>
-#include "helpers.h"
+#include "guarded_heap.h"
 #include <string.h>
 
 typedef struct

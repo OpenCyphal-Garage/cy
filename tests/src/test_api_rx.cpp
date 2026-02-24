@@ -1,6 +1,7 @@
 #include <cy_platform.h>
 #include <unity.h>
 #include "helpers.h"
+#include "guarded_heap.h"
 #include "message.h"
 #include <array>
 #include <cstddef>
@@ -236,7 +237,7 @@ void dispatch_message(test_platform_t* const  self,
                       const unsigned char     payload_byte)
 {
     std::array<unsigned char, 19> wire{};
-    cy_test_make_message_header(wire.data(), type, tag, cy_topic_hash(topic));
+    make_message_header(wire.data(), type, tag, cy_topic_hash(topic));
     wire[18]                = payload_byte;
     cy_message_t* const msg = cy_test_message_make(&self->message_heap, wire.data(), wire.size());
     TEST_ASSERT_NOT_NULL(msg);
