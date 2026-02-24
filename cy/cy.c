@@ -16,6 +16,7 @@
 
 #include "cy.h"
 #include "cy_platform.h"
+#include <stdint.h>
 
 // Configure cavl2.h. Key definitions must be provided before including the header.
 #define CAVL2_RELATION int32_t
@@ -101,6 +102,45 @@ typedef struct cy_list_t
     cy_list_member_t* tail; ///< NULL if list empty
 } cy_list_t;
 
+/// Maintain a short randomly-selected list of neighbors that can be used to send/forward unicast gossips.
+/// We only use a subset of these to actually forward.
+/// See HyParView et al. but greatly simplified.
+#define GOSSIP_PEER_COUNT 8
+typedef struct
+{
+    uint64_t         id;
+    cy_p2p_context_t p2p;
+    cy_us_t          last_seen; ///< BIG_BANG initially.
+} gossip_peer_t;
+
+/// When a new broadcast gossip arrives, we update the peer set with this probability.
+/// If it's too large, we lose gossip diversity in large networks, prioritizing the most recently heard nodes.
+#define GOSSIP_PEER_REPLACEMENT_PROBABILITY_RECIPROCAL 64
+
+/// We store recent gossips to avoid unnecessary forwarding.
+#define GOSSIP_DEDUP_CAPACITY 16
+typedef struct
+{
+    uint64_t hash;      ///< See gossip_dedup_hash(); avoids having to store the full state.
+    cy_us_t  last_seen; ///< Drives LRU eviction policy.
+} gossip_dedup_t;
+
+/// Some arbitrary implementation-specific hash, not seen on the wire, can be changed at will.
+static uint64_t gossip_dedup_hash(const uint64_t hash, const uint32_t evictions, const int_fast8_t log_age)
+{
+    const uint64_t other = evictions | (uint64_t)(log_age + 0x100000000LL);
+    // return rapidhash((uint64_t[2]){ hash,  other}, 16);
+    return hash ^ other; // Simple and good enough because the topic hash itself is high-entropy.
+}
+
+/// Every gossip is forwarded at most this many times to avoid loops.
+/// This value may be larger for larger dedup capacities although there's no strict relationship, it's probabilistic.
+/// Ideally all nodes should agree on this but it's not essential.
+#define GOSSIP_TTL (1 * GOSSIP_DEDUP_CAPACITY)
+
+/// Each unicast gossip will be forwarded to at most this many unique remote peers.
+#define GOSSIP_OUTDEGREE 2
+
 struct cy_t
 {
     cy_platform_t* platform;
@@ -148,8 +188,12 @@ struct cy_t
     cy_subject_writer_t* broad_writer;
 
     /// Topic allocation CRDT gossip states.
-    cy_us_t gossip_period;
-    cy_us_t gossip_next;
+    /// The dedup list is used to suppress redundant unicast gossips, which happen when multiple nodes initiate repair.
+    /// The gossip peers is a stochastic set of some presumably-live peers that we forward unicast gossips to.
+    cy_us_t        gossip_period;
+    cy_us_t        gossip_next;
+    gossip_dedup_t gossip_dedup[GOSSIP_DEDUP_CAPACITY];
+    gossip_peer_t  gossip_peers[GOSSIP_PEER_COUNT];
 
     /// Slow topic iteration state. Updated every cy_update(); when NULL, restart from scratch.
     cy_topic_t* topic_iter;
@@ -257,6 +301,20 @@ static int64_t random_int(const cy_t* const cy, const int64_t min, const int64_t
 static int64_t dither_int(const cy_t* const cy, const int64_t mean, const int64_t deviation)
 {
     return mean + random_int(cy, -deviation, +deviation);
+}
+
+/// Returns true with a given 1/probability.
+static bool chance(const cy_t* const cy, const uint32_t probability_reciprocal)
+{
+    const uint64_t rnd = cy->platform->vtable->random(cy->platform);
+    return (probability_reciprocal > 0U) && ((rnd % probability_reciprocal) == 0U); // modulo bias negligible
+}
+
+/// Returns a random value in [0, bound).
+static size_t choice(const cy_t* const cy, const size_t bound)
+{
+    const uint64_t rnd = cy->platform->vtable->random(cy->platform);
+    return (bound > 0U) ? (size_t)(rnd % bound) : 0U; // modulo bias negligible
 }
 
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
@@ -729,18 +787,6 @@ void cy_future_destroy(cy_future_t* const self)
 // =====================================================================================================================
 //                                                      TOPICS
 // =====================================================================================================================
-
-/// The bottom-level gossip transmission function using unicast/multicast/broadcast transport.
-/// Broadcasts must be done on a fixed schedule only (with slight dithering to allow duplicate suppression).
-/// Urgent gossips for consensus repair cannot be broadcast to avoid bandwidth explosion.
-/// The priority is taken from the lane if available, otherwise nominal.
-/// The caller can provide writer and/or lane; the gossip will be sent over all provided resources;
-/// if none given, does nothing and returns success.
-static cy_err_t send_gossip(const cy_t* const          cy,
-                            const cy_us_t              now,
-                            const cy_topic_t* const    topic,
-                            cy_subject_writer_t* const writer,
-                            const cy_lane_t* const     lane);
 
 /// A topic that is only used by pattern subscriptions (like `ins/*/data/>`, without publishers or explicit
 /// subscriptions) is called implicit. Such topics are automatically retired when they see no traffic and
@@ -1572,8 +1618,15 @@ static cy_topic_t* topic_subscribe_if_matching(cy_t* const       cy,
 //                                                  GOSSIP & SCOUT
 // =====================================================================================================================
 
+/// The bottom-level gossip transmission function using unicast/multicast/broadcast transport.
+/// Broadcasts must be done on a fixed schedule only (with slight dithering to allow duplicate suppression).
+/// Urgent gossips for consensus repair cannot be broadcast to avoid bandwidth explosion.
+/// The priority is taken from the lane if available, otherwise nominal.
+/// The caller can provide writer and/or lane; the gossip will be sent over all provided resources;
+/// if none given, does nothing and returns success.
 static cy_err_t send_gossip(const cy_t* const          cy,
                             const cy_us_t              now,
+                            const uint_fast8_t         ttl,
                             const cy_topic_t* const    topic,
                             cy_subject_writer_t* const writer,
                             const cy_lane_t* const     lane)
@@ -1581,11 +1634,14 @@ static cy_err_t send_gossip(const cy_t* const          cy,
     if ((writer == NULL) && (lane == NULL)) {
         return CY_OK; // Early exit to avoid unnecessary serialization.
     }
-    byte_t           buf[15 + CY_TOPIC_NAME_MAX];
+    byte_t           buf[18 + CY_TOPIC_NAME_MAX];
     const cy_str_t   name    = cy_topic_name(topic);
-    const cy_bytes_t message = { .size = 15 + name.len, .data = buf };
+    const cy_bytes_t message = { .size = 18 + name.len, .data = buf };
     byte_t*          ptr     = buf;
     *ptr++                   = header_gossip;
+    *ptr++                   = (byte_t)((writer == NULL) ? ttl : 0);
+    *ptr++                   = 0;
+    *ptr++                   = 0;
     *ptr++                   = (byte_t)topic_lage(topic, now);
     ptr                      = serialize_u64(ptr, topic->hash);
     ptr                      = serialize_u32(ptr, topic->evictions);
@@ -1602,6 +1658,20 @@ static cy_err_t send_gossip(const cy_t* const          cy,
         err = vt->p2p_send(cy->platform, lane, dead, message);
     }
     return err;
+}
+
+static cy_err_t send_gossip_broadcast(const cy_t* const cy, const cy_us_t now, const cy_topic_t* const topic)
+{
+    return send_gossip(cy, now, 0, topic, cy->broad_writer, NULL);
+}
+
+static cy_err_t send_gossip_unicast(const cy_t* const       cy,
+                                    const cy_us_t           now,
+                                    const uint_fast8_t      ttl,
+                                    const cy_topic_t* const topic,
+                                    const cy_lane_t         lane)
+{
+    return send_gossip(cy, now, ttl, topic, NULL, &lane);
 }
 
 /// The bottom-level scout transmission function. Scouts are always broadcast.
@@ -1728,6 +1798,94 @@ static void on_gossip_unknown_topic(cy_t* const     cy,
     }
 }
 
+static gossip_peer_t* gossip_peer_oldest(cy_t* const cy)
+{
+    gossip_peer_t* out = &cy->gossip_peers[0];
+    for (size_t i = 1; i < GOSSIP_PEER_COUNT; i++) {
+        if (out->last_seen > cy->gossip_peers[i].last_seen) {
+            out = &cy->gossip_peers[i];
+        }
+    }
+    return out;
+}
+
+static gossip_peer_t* gossip_peer_find(cy_t* const cy, const uint64_t id)
+{
+    for (size_t i = 0; i < GOSSIP_PEER_COUNT; i++) {
+        if (cy->gossip_peers[i].id == id) {
+            return &cy->gossip_peers[i];
+        }
+    }
+    return NULL;
+}
+
+/// Find a non-stale random peer to gossip to whose ID is not in the list. NULL if no suitable peer found.
+static gossip_peer_t* gossip_random_peer_except(cy_t* const           cy,
+                                                const cy_us_t         now,
+                                                const size_t          n_blacklist,
+                                                const uint64_t* const blacklist)
+{
+    const cy_us_t last_seen_threshold = now - (GOSSIP_PERIOD_DEFAULT * 2); // older peers not eligible.
+    static_assert(GOSSIP_PEER_COUNT <= 64, "GOSSIP_PEER_COUNT is too large");
+    uint64_t eligible_map = 0;
+    for (size_t i = 0; i < GOSSIP_PEER_COUNT; i++) {
+        if (cy->gossip_peers[i].last_seen < last_seen_threshold) {
+            continue; // too old
+        }
+        bool blacklisted = false;
+        for (size_t j = 0; j < n_blacklist; j++) {
+            if (cy->gossip_peers[i].id == blacklist[j]) {
+                blacklisted = true;
+                break;
+            }
+        }
+        if (blacklisted) {
+            continue;
+        }
+        eligible_map |= 1ULL << i;
+    }
+    if (eligible_map > 0) {
+        size_t idx = choice(cy, popcount(eligible_map));
+        for (size_t i = 0; i < GOSSIP_PEER_COUNT; i++) {
+            if ((eligible_map & (1ULL << i)) == 0) {
+                continue;
+            }
+            if (idx-- == 0) {
+                return &cy->gossip_peers[i];
+            }
+        }
+    }
+    return NULL;
+}
+
+/// Consults with the dedup hash, updates it, and informs the caller if the gossip is OK to forward:
+/// true if ok to forward, false if should be dropped.
+static bool gossip_dedup_update(cy_t* const cy, const cy_us_t now, const uint64_t gossip_hash)
+{
+    const cy_us_t   last_seen_threshold = now - GOSSIP_PERIOD_DEFAULT; // just to minimize false positives & skip empty
+    gossip_dedup_t* oldest              = cy->gossip_dedup;
+    for (size_t i = 0; i < GOSSIP_DEDUP_CAPACITY; i++) {
+        if (cy->gossip_dedup[i].hash == gossip_hash) {
+            const bool result             = cy->gossip_dedup[i].last_seen < last_seen_threshold;
+            cy->gossip_dedup[i].last_seen = now;
+            return result;
+        }
+        if (oldest->last_seen > cy->gossip_dedup[i].last_seen) {
+            oldest = &cy->gossip_dedup[i];
+        }
+    }
+    oldest->hash      = gossip_hash;
+    oldest->last_seen = now;
+    return true;
+}
+
+typedef enum
+{
+    gossip_broadcast,
+    gossip_unicast,
+    gossip_inline, ///< Embedded with published messages on a topic.
+} gossip_origin_t;
+
 /// The central dispatch of incoming gossips.
 /// This process may spawn new topics, so when receiving messages, keep in mind that the topic set may be changed.
 /// The name may be empty when invoked from message-attached piggyback gossips (there's no name available).
@@ -1736,15 +1894,40 @@ static void on_gossip_unknown_topic(cy_t* const     cy,
 /// This is in general true for the presentation layer design -- delivery method mostly does not matter.
 ///
 /// The out_topic, if not NULL, is updated with the local topic pointer if one is known or freshly created.
-static void on_gossip(cy_t* const        cy,
-                      const cy_us_t      ts,
-                      const uint64_t     hash,
-                      const uint32_t     evictions,
-                      const int8_t       lage,
-                      const cy_str_t     name,
-                      cy_topic_t** const out_topic,
-                      const cy_lane_t    lane)
+static void on_gossip(cy_t* const           cy,
+                      const cy_us_t         ts,
+                      const uint_fast8_t    ttl,
+                      const uint64_t        hash,
+                      const uint32_t        evictions,
+                      const int8_t          lage,
+                      const cy_str_t        name,
+                      cy_topic_t** const    out_topic,
+                      const cy_lane_t       lane,
+                      const gossip_origin_t origin)
 {
+    // Update the gossip peer set. We assume that we never receive gossips from ourselves.
+    // If there are free or stale slots, replace them unconditionally, such that we always have some minimal set.
+    // If all slots are fresh and taken (large network), apply probabilistic replacement (well-known policy).
+    gossip_peer_t* this_peer = gossip_peer_find(cy, lane.id);
+    if ((origin == gossip_broadcast) && (this_peer == NULL)) {
+        const cy_us_t        last_seen_threshold = ts - (GOSSIP_PERIOD_DEFAULT * 2);
+        gossip_peer_t* const oldest              = gossip_peer_oldest(cy);
+        if (oldest->last_seen < last_seen_threshold) { // have empty or stale entries, update unconditionally.
+            this_peer     = oldest;
+            this_peer->id = lane.id;
+        } else if (chance(cy, GOSSIP_PEER_REPLACEMENT_PROBABILITY_RECIPROCAL)) { // random replacement, low prob
+            this_peer     = &cy->gossip_peers[choice(cy, GOSSIP_PEER_COUNT)];
+            this_peer->id = lane.id;
+        } else {
+            assert(this_peer == NULL);
+        }
+    }
+    if (this_peer != NULL) {
+        assert(this_peer->id == lane.id);
+        this_peer->last_seen = ts;
+        this_peer->p2p       = lane.p2p;
+    }
+
     // Find the topic, create one if there's a matching pattern subscriber.
     cy_topic_t* mine = cy_topic_find_by_hash(cy, hash);
     if ((mine == NULL) && (name.len > 0)) { // a name is required but maybe the publisher is non-compliant
@@ -1754,11 +1937,32 @@ static void on_gossip(cy_t* const        cy,
         *out_topic = mine;
     }
 
-    // Process the gossip.
+    // Process the gossip. The dedup is updated for all gossips except inline.
+    bool should_forward = (origin != gossip_inline) && //
+                          gossip_dedup_update(cy, ts, gossip_dedup_hash(hash, evictions, lage)) && (ttl > 0);
+    // TODO suppress forwarding below if obsolete (if the gossip lost arbitration).
+    // TODO POLICY: if the topic is known, and we need to forward, simply re-gossip it (no forwarding).
+    // TODO POLICY: if the topic is unknown, and we need to forward, only do so if we didn't win arbitration.
     if (mine != NULL) { // We have this topic! Check if we have consensus on the subject-ID.
         on_gossip_known_topic(cy, ts, mine, evictions, lage, lane);
     } else { // We don't know this topic; check for a subject-ID collision and do auto-subscription.
         on_gossip_unknown_topic(cy, ts, hash, evictions, lage, lane);
+    }
+
+    // Forward the gossip if necessary.
+    if (should_forward) {
+        assert(ttl > 0);
+        uint64_t blacklist[GOSSIP_OUTDEGREE + 1] = { lane.id }; // do not unicast back to sender
+        size_t   blacklist_size                  = 1;
+        for (size_t i = 0; i < GOSSIP_OUTDEGREE; i++) {
+            const gossip_peer_t* const peer = gossip_random_peer_except(cy, ts, blacklist_size, blacklist);
+            if (peer == NULL) {
+                break; // no (more) peers
+            }
+            blacklist[blacklist_size++] = peer->id; // do not unicast to the same peer twice
+            const cy_lane_t peer_lane   = { .id = peer->id, .p2p = peer->p2p, .prio = lane.prio };
+            ON_ASYNC_ERROR_IF(cy, NULL, send_gossip_unicast(cy, ts, ttl - 1U, NULL, peer_lane)); // TODO topic helper
+        }
     }
 }
 
@@ -1780,7 +1984,7 @@ static void* wkv_cb_topic_scout_response(const wkv_event_t evt)
     const bool broadcast_soon = (cy->gossip_next <= (ctx->now + (KILO * 100))) && //
                                 (LIST_TAIL(cy->list_gossip, cy_topic_t, list_gossip) == topic);
     if (!broadcast_soon) {
-        ON_ASYNC_ERROR_IF(cy, topic, send_gossip(cy, ctx->now, topic, NULL, &ctx->lane));
+        ON_ASYNC_ERROR_IF(cy, topic, send_gossip_unicast(cy, ctx->now, 0, topic, ctx->lane));
     }
     return NULL;
 }
@@ -3211,6 +3415,12 @@ cy_t* cy_new(cy_platform_t* const platform)
     // the first publication. This allows listen-only nodes to avoid transmitting anything.
     cy->gossip_next   = HEAT_DEATH;
     cy->gossip_period = GOSSIP_PERIOD_DEFAULT;
+    for (size_t i = 0; i < GOSSIP_DEDUP_CAPACITY; i++) {
+        cy->gossip_dedup[i].last_seen = BIG_BANG;
+    }
+    for (size_t i = 0; i < GOSSIP_PEER_COUNT; i++) {
+        cy->gossip_peers[i].last_seen = BIG_BANG;
+    }
 
     // Set up the broadcast subject readers/writers.
     const uint32_t broad_id = cy_broadcast_subject_id(platform);
@@ -3269,7 +3479,7 @@ static cy_err_t gossip_poll(cy_t* const cy, const cy_us_t now)
         if (topic != NULL) {
             topic_ensure_subscribed(topic); // use this opportunity to repair the subscription if broken
             schedule_gossip(topic);         // reschedule even if failed -- some other node might pick up the gossip
-            res = send_gossip(cy, now, topic, cy->broad_writer, NULL); // broadcast gossip
+            res = send_gossip_broadcast(cy, now, topic);
         }
         cy->gossip_next = now + dither_int(cy, cy->gossip_period, cy->gossip_period / 8);
     }
@@ -3532,7 +3742,7 @@ void cy_on_message(cy_platform_t* const             platform,
                              (uintmax_t)lane.id,
                              (uintmax_t)cy->platform->subject_id_modulus);
                 }
-                on_gossip(cy, message.timestamp, hash, evictions, lage, str_empty, &topic, lane);
+                on_gossip(cy, message.timestamp, 0, hash, evictions, lage, str_empty, &topic, lane, gossip_inline);
             } else {
                 topic = cy_topic_find_by_hash(cy, hash);
             }
@@ -3621,22 +3831,24 @@ void cy_on_message(cy_platform_t* const             platform,
         }
 #endif
         case header_gossip: {
-            if (header_read < 15) {
+            if (header_read < 18) {
                 goto bad_message;
             }
             char           name_buf[CY_TOPIC_NAME_MAX + 1];
-            const cy_str_t name = { .len = header[14], .str = name_buf };
+            const cy_str_t name = { .len = header[17], .str = name_buf };
             if ((name.len > CY_TOPIC_NAME_MAX) ||
-                (cy_message_read(message.content, 15, name.len, (byte_t*)name_buf) != name.len)) {
+                (cy_message_read(message.content, 18, name.len, (byte_t*)name_buf) != name.len)) {
                 goto bad_message;
             }
-            const int8_t lage = (int8_t)header[1];
+            const int8_t lage = (int8_t)header[4];
             if ((lage < LAGE_MIN) || (lage > LAGE_MAX)) {
                 goto bad_message;
             }
-            const uint64_t hash      = deserialize_u64(&header[2]);
-            const uint32_t evictions = deserialize_u32(&header[10]);
-            on_gossip(cy, message.timestamp, hash, evictions, lage, name, NULL, lane);
+            const uint_fast8_t    ttl       = header[1];
+            const uint64_t        hash      = deserialize_u64(&header[5]);
+            const uint32_t        evictions = deserialize_u32(&header[13]);
+            const gossip_origin_t origin    = (subject_reader == NULL) ? gossip_unicast : gossip_broadcast;
+            on_gossip(cy, message.timestamp, ttl, hash, evictions, lage, name, NULL, lane, origin);
             break;
         }
 

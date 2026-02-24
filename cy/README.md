@@ -109,14 +109,21 @@ uint16 tag              # Chosen by the responder arbitrarily for ack correlatio
 
 This is broadcast at a constant rate and may also be unicast ad-hoc when consensus needs repair (optional); see the section on CRDT gossips. Broadcast is the ultimate last-resort baseline for eventual convergence where all nodes MUST participate, while unicasting is an option.
 
+The TTL field is decremented every time the gossip is forwarded to gossip peers to prevent cycles. Broadcast gossips MUST have zero TTL.
+
+The TTL is only the last line of defence against cycles; each forwarding node must keep a short list of recently seen gossips to prevent redundant transmissions early.
+
 ```bash
 uint6 type
 void2
+uint8 ttl               # Must be zero for broadcast gossips.
+void16
+# offset 4
 int8   topic_log_age    # floor(log2(topic_age)) if topic_age>0 else -1
 uint64 topic_hash
 uint32 topic_evictions
 utf8[<=CY_TOPIC_NAME_MAX] topic_name  # Has 1 byte length prefix. The name is normalized and nonempty.
-# Total size is 15 bytes + topic name length.
+# Total size is 18 bytes + topic name length.
 ```
 
 #### Type 8 (topic discovery scout)
