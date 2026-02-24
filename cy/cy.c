@@ -933,6 +933,11 @@ static topic_repr_t topic_repr(const cy_topic_t* const topic)
 
 #endif
 
+// Topics are never destroyed synchronously to avoid potential state loss in the platform layer if the application
+// publishes and/or subscribes intermittently. Instead, once all publishers and subscribers are gone, the topic
+// is demoted to implicit, and will be eventually retired in retire_expired_implicit_topics().
+static void topic_destroy(cy_topic_t* const topic);
+
 // Models the interest of a remote subscriber in data that we publish on a topic.
 // Entries survive as long as we receive acks from the remote, allowing some configurable consecutive loss slack.
 //
@@ -1086,16 +1091,6 @@ static int32_t cavl_comp_topic_subject_id(const void* const user, const cy_tree_
 }
 
 static bool topic_has_subscribers(const cy_topic_t* const topic) { return topic->couplings != NULL; }
-
-// Topics are never destroyed synchronously to avoid potential state loss in the platform layer if the application
-// publishes and/or subscribes intermittently. Instead, once all publishers and subscribers are gone, the topic
-// is demoted to implicit, and will be eventually retired in retire_expired_implicit_topics().
-static void topic_destroy(cy_topic_t* const topic)
-{
-    (void)topic;
-    assert(topic != NULL);
-    // TODO implement
-}
 
 static int_fast8_t topic_lage(const cy_topic_t* const topic, const cy_us_t now)
 {
@@ -2657,7 +2652,7 @@ static void subscriber_invoke(cy_subscriber_t* const subscriber, const cy_arriva
 // It is used for deduplication of reliable messages received from that remote; duplications occur when the remote
 // doesn't receive (enough) acks and is trying to retransmit while we already have the message from prior attempts.
 // Stale instances are removed on timeout.
-typedef struct
+typedef struct dedup_t
 {
     cy_tree_t        index_remote_id; // For lookup when new reliable messages received.
     cy_list_member_t list_recency;    // For removal of old entries when a remote ceases publishing.
@@ -3400,6 +3395,66 @@ cy_err_t cy_respond(cy_breadcrumb_t* const breadcrumb, const cy_us_t deadline, c
 // =====================================================================================================================
 //                                                  NODE & TOPIC
 // =====================================================================================================================
+
+static void topic_destroy(cy_topic_t* const topic)
+{
+    assert((topic != NULL) && (topic->cy != NULL));
+    assert(topic->pub_count == 0);
+    assert(topic->pub_futures_by_tag == NULL);
+    assert(topic->couplings == NULL); // removed when unsubscribed
+    cy_t* const cy = topic->cy;
+    CY_TRACE(cy, "🗑️ %s", topic_repr(topic).str);
+
+    // Remove subject reader/writer.
+    if (topic->sub_reader != NULL) {
+        cy->platform->vtable->subject_reader_destroy(cy->platform, topic->sub_reader);
+        topic->sub_reader = NULL;
+    }
+    if (topic->pub_writer != NULL) {
+        cy->platform->vtable->subject_writer_destroy(cy->platform, topic->pub_writer);
+        topic->pub_writer = NULL;
+    }
+
+    // Remove subscriber associations.
+    while (topic->assoc_by_remote_id != NULL) {
+        association_t* const ass = CAVL2_TO_OWNER(cavl2_min(topic->assoc_by_remote_id), association_t, index_remote_id);
+        assert(ass != NULL);
+        assert(ass->pending_count == 0);
+        association_forget(topic, ass);
+    }
+    assert(topic->assoc_count == 0);
+
+    // Remove message deduplication states.
+    while (topic->sub_index_dedup_by_remote_id != NULL) {
+        dedup_t* const dd = CAVL2_TO_OWNER(cavl2_min(topic->sub_index_dedup_by_remote_id), dedup_t, index_remote_id);
+        assert(dd != NULL);
+        dedup_destroy(dd, topic);
+    }
+    assert(topic->sub_list_dedup_by_recency.head == NULL);
+    assert(topic->sub_list_dedup_by_recency.tail == NULL);
+
+    // Delist and deindex.
+    if (cy->topic_iter == topic) {
+        cy->topic_iter = cy_topic_iter_next(topic);
+    }
+    delist(&cy->list_implicit, &topic->list_implicit);
+    delist(&cy->list_gossip, &topic->list_gossip);
+    delist(&cy->list_gossip_urgent, &topic->list_gossip_urgent);
+    //
+    cavl2_remove_if(&cy->topics_by_subject_id, &topic->index_subject_id);
+    assert(cavl2_is_inserted(cy->topics_by_hash, &topic->index_hash));
+    cavl2_remove(&cy->topics_by_hash, &topic->index_hash);
+    //
+    if (topic->index_name != NULL) {
+        wkv_del(&cy->topics_by_name, topic->index_name);
+        topic->index_name = NULL;
+    }
+
+    // Free the memory.
+    mem_free(cy, topic->name);
+    topic->name = NULL;
+    mem_free(cy, topic);
+}
 
 static bool is_prime_u32(const uint32_t n)
 {
