@@ -102,8 +102,8 @@ typedef struct cy_list_t
     cy_list_member_t* tail; ///< NULL if list empty
 } cy_list_t;
 
-/// Maintain a short randomly-selected list of neighbors that can be used to send/forward unicast gossips.
-/// We only use a subset of these to actually forward.
+/// Maintain a short randomly-selected list of neighbors that can be used to send/forward unicast epidemic gossips.
+/// We only use GOSSIP_OUTDEGREE of these to actually forward at a time.
 /// See HyParView et al. but greatly simplified.
 #define GOSSIP_PEER_COUNT 8
 typedef struct
@@ -113,11 +113,16 @@ typedef struct
     cy_us_t          last_seen; ///< BIG_BANG initially.
 } gossip_peer_t;
 
+/// Each unicast epidemic gossip will be forwarded to at most this many unique remote peers.
+#define GOSSIP_OUTDEGREE 2
+
 /// When a new broadcast gossip arrives, we update the peer set with this probability.
-/// If it's too large, we lose gossip diversity in large networks, prioritizing the most recently heard nodes.
+/// If it's too large, we lose gossip diversity in large networks, prioritizing the most recently heard nodes,
+/// which also increases burden on those nodes. If it's too small, then a newly appeared node may take a long time
+/// to be picked up by other nodes, so it may be excluded from epidemic gossips for a while.
 #define GOSSIP_PEER_REPLACEMENT_PROBABILITY_RECIPROCAL 64
 
-/// We store recent gossips to avoid unnecessary forwarding.
+/// We store recent epidemic gossips to avoid unnecessary forwarding.
 #define GOSSIP_DEDUP_CAPACITY 16
 typedef struct
 {
@@ -130,17 +135,13 @@ static uint64_t gossip_dedup_hash(const uint64_t hash, const uint32_t evictions,
 {
     // This hash is fast to compute and is good enough because the topic hash itself is high-entropy.
     // We could also use rapidhash64 shall the need arise but I don't see the point right now.
-    const uint64_t other = evictions | (uint64_t)(log_age + (int64_t)(1ULL << 56U));
+    const uint64_t other = (((uint64_t)evictions) << 16U) | (uint64_t)(log_age + (int64_t)(1ULL << 56U));
     return hash ^ other;
 }
 
-/// Every gossip is forwarded at most this many times to avoid loops.
+/// Every epidemic gossip is forwarded at most this many times to avoid loops; forwarding stops early on duplicates.
 /// This value may be larger for larger dedup capacities although there's no strict relationship, it's probabilistic.
-/// Ideally all nodes should agree on this but it's not essential.
 #define GOSSIP_TTL (1 * GOSSIP_DEDUP_CAPACITY)
-
-/// Each unicast gossip will be forwarded to at most this many unique remote peers.
-#define GOSSIP_OUTDEGREE 2
 
 struct cy_t
 {
@@ -1747,16 +1748,15 @@ static void gossip_begin(cy_t* const cy)
     }
 }
 
-/// Process incoming gossip message related to a known local topic (same hash).
-/// Check for subject-ID divergences.
-static void on_gossip_known_topic(cy_t* const       cy,
+/// Process incoming gossip message related to a known local topic (same hash). Check for subject-ID divergences.
+/// The return value indicates whether we won arbitration against the gossip if there was a conflict (false if not).
+static bool on_gossip_known_topic(cy_t* const       cy,
                                   const cy_us_t     ts,
                                   cy_topic_t* const mine,
                                   const uint32_t    evictions,
-                                  const int8_t      lage,
-                                  const cy_lane_t   lane)
+                                  const int8_t      lage)
 {
-    (void)lane;
+    bool result = false;
     implicit_animate(mine, ts);
     const int_fast8_t mine_lage = topic_lage(mine, ts);
     if (mine->evictions != evictions) {
@@ -1789,26 +1789,27 @@ static void on_gossip_known_topic(cy_t* const       cy,
             topic_merge_lage(mine, ts, lage);
             topic_allocate(mine, evictions, ts);
         }
+        result = win;
     } else {
         schedule_gossip(mine);         // suppress next gossip -- the network just heard about it
         topic_ensure_subscribed(mine); // use this opportunity to repair the subscription if broken
     }
     topic_merge_lage(mine, ts, lage);
+    return result;
 }
 
 /// We received a gossip message for a topic that is unknown to us. Check for subject-ID collisions.
-static void on_gossip_unknown_topic(cy_t* const     cy,
-                                    const cy_us_t   ts,
-                                    const uint64_t  hash,
-                                    const uint32_t  evictions,
-                                    const int8_t    lage,
-                                    const cy_lane_t lane)
+/// The return value indicates whether we won arbitration against the gossip if there was a conflict (false if not).
+static bool on_gossip_unknown_topic(cy_t* const    cy,
+                                    const cy_us_t  ts,
+                                    const uint64_t hash,
+                                    const uint32_t evictions,
+                                    const int8_t   lage)
 {
-    (void)lane;
     cy_topic_t* const mine =
       topic_find_by_subject_id(cy, topic_subject_id_impl(hash, evictions, cy->platform->subject_id_modulus));
     if (mine == NULL) {
-        return; // We are not using this subject-ID, no collision.
+        return false; // We are not using this subject-ID, no collision.
     }
     assert(topic_subject_id(mine) == topic_subject_id_impl(hash, evictions, cy->platform->subject_id_modulus));
     const bool win = left_wins(mine, ts, lage, hash);
@@ -1839,6 +1840,7 @@ static void on_gossip_unknown_topic(cy_t* const     cy,
     } else {
         topic_allocate(mine, mine->evictions + 1U, ts);
     }
+    return win;
 }
 
 static gossip_peer_t* gossip_peer_oldest(cy_t* const cy)
@@ -1931,18 +1933,14 @@ typedef enum
 
 /// The central dispatch of incoming gossips.
 /// This process may spawn new topics, so when receiving messages, keep in mind that the topic set may be changed.
-/// The name may be empty when invoked from message-attached piggyback gossips (there's no name available).
-///
-/// We don't care how gossips are delivered -- broadcast, P2P, or by pigeon; the processing logic is always the same.
-/// This is in general true for the presentation layer design -- delivery method mostly does not matter.
-///
+/// The name may be empty when invoked from message-attached inline gossips (there's no name available).
 /// The out_topic, if not NULL, is updated with the local topic pointer if one is known or freshly created.
 static void on_gossip(cy_t* const           cy,
                       const cy_us_t         ts,
                       const uint_fast8_t    ttl,
                       const uint64_t        hash,
-                      const uint32_t        evictions,
-                      const int8_t          lage,
+                      uint32_t              evictions,
+                      int8_t                lage,
                       const cy_str_t        name,
                       cy_topic_t** const    out_topic,
                       const cy_lane_t       lane,
@@ -1983,13 +1981,25 @@ static void on_gossip(cy_t* const           cy,
     // Process the gossip. The dedup is updated for all gossips except inline.
     bool should_forward = (origin != gossip_inline) && //
                           gossip_dedup_update(cy, ts, gossip_dedup_hash(hash, evictions, lage)) && (ttl > 0);
-    // TODO suppress forwarding below if obsolete (if the gossip lost arbitration).
-    // TODO POLICY: if the topic is known, and we need to forward, simply re-gossip it (no forwarding).
-    // TODO POLICY: if the topic is unknown, and we need to forward, only do so if we didn't win arbitration.
-    if (mine != NULL) { // We have this topic! Check if we have consensus on the subject-ID.
-        on_gossip_known_topic(cy, ts, mine, evictions, lage, lane);
-    } else { // We don't know this topic; check for a subject-ID collision and do auto-subscription.
-        on_gossip_unknown_topic(cy, ts, hash, evictions, lage, lane);
+    if (mine != NULL) {
+        // We have this topic! Check if we have consensus on the subject-ID.
+        // If there is a divergence and we win arbitration, the gossip can no longer be forwarded -- it is obsolete.
+        // Instead, we will send our new urgent gossip.
+        // The TTL is reset by this action but this is natural since it's a new gossip.
+        // It is also possible that the log-age of the received gossip is too old, which we will update.
+        const bool local_won = on_gossip_known_topic(cy, ts, mine, evictions, lage);
+        should_forward       = should_forward && !local_won;
+        assert((!local_won) || (cy->list_gossip_urgent.tail != NULL));
+        evictions = mine->evictions;
+        lage      = topic_lage(mine, ts); // Already merged the received gossip with the local age.
+    } else {
+        // We don't know this topic; check for a subject-ID collision.
+        // If there is a collision and we win arbitration, the gossip can no longer be forwarded -- it is obsolete.
+        // Instead, we will send our new urgent gossip.
+        // The TTL is reset by this action but this is natural since it's a new gossip.
+        const bool local_won = on_gossip_unknown_topic(cy, ts, hash, evictions, lage);
+        should_forward       = should_forward && !local_won;
+        assert((!local_won) || (cy->list_gossip_urgent.tail != NULL));
     }
 
     // Forward the gossip if necessary.
@@ -3529,6 +3539,11 @@ static cy_err_t gossip_poll(cy_t* const cy, const cy_us_t now)
             topic_ensure_subscribed(topic); // use this opportunity to repair the subscription if broken
             schedule_gossip(topic);         // reschedule even if failed -- some other node might pick up the gossip
             res = send_gossip_broadcast(cy, now, topic);
+            // Remember the freshly transmitted gossip to break cycles if/when we hear it back through epidemics.
+            if (res == CY_OK) {
+                (void)gossip_dedup_update(
+                  cy, now, gossip_dedup_hash(topic->hash, topic->evictions, topic_lage(topic, now)));
+            }
         }
         cy->gossip_next = now + dither_int(cy, cy->gossip_period, cy->gossip_period / 8);
     } else if (cy->list_gossip_urgent.tail != NULL) {
@@ -3545,6 +3560,12 @@ static cy_err_t gossip_poll(cy_t* const cy, const cy_us_t now)
             blacklist[blacklist_size++] = peer->id; // do not unicast to the same peer twice
             const cy_lane_t lane        = { .id = peer->id, .p2p = peer->p2p, .prio = cy_prio_nominal };
             res                         = send_gossip_unicast(cy, now, GOSSIP_TTL, topic, lane);
+        }
+        // Remember the freshly transmitted gossip to break cycles if/when we hear it back through epidemics.
+        // Only if we actually sent anything, though.
+        if ((res == CY_OK) && (blacklist_size > 0)) {
+            (void)gossip_dedup_update(
+              cy, now, gossip_dedup_hash(topic->hash, topic->evictions, topic_lage(topic, now)));
         }
     } else {
         (void)0; // nothing to do this cycle, come back later

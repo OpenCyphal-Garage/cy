@@ -107,7 +107,7 @@ uint16 tag              # Chosen by the responder arbitrarily for ack correlatio
 
 #### Type 7 (topic allocation CRDT gossip)
 
-This is broadcast at a constant rate and may also be unicast ad-hoc when consensus needs repair (optional); see the section on CRDT gossips. Broadcast is the ultimate last-resort baseline for eventual convergence where all nodes MUST participate, while unicasting is an option.
+This is broadcast at a constant rate and may also be epidemic unicast ad-hoc when consensus needs repair to speed up the repair process. Broadcast is the ultimate last-resort baseline for eventual convergence where all nodes MUST participate, while epidemic unicasting is an option.
 
 The TTL field is decremented every time the gossip is forwarded to gossip peers to prevent cycles. Broadcast gossips MUST have zero TTL.
 
@@ -139,28 +139,16 @@ utf8[<=CY_TOPIC_NAME_MAX] pattern  # Has 1 byte length prefix. The pattern is ap
 
 ### CRDT gossips
 
-The topic to subject-ID mapping is done via a CRDT described in the formal specification/verification model. For the CRDT to function, nodes must periodically exchange their states with each other. The simplest approach is to regularly broadcast all CRDT state of each node or a part of it, the limit case of the latter being a single topic per message with a scheduler choosing which topic to gossip next. The next topic to gossip is that which has recently seen conflicts/divergences, then the one whose gossips haven't been observed the longest.
+The topic to subject-ID mapping is done via a CRDT described in the formal specification/verification model. For the CRDT to function, nodes must periodically exchange their states with each other. A simple and robust approach is to regularly broadcast all CRDT state of each node or a part of it, the limit case of the latter being a single topic per message with a scheduler choosing which topic to gossip next. The next topic to gossip is that which has recently seen conflicts/divergences, then the one whose gossips haven't been observed the longest.
 
-The gossip rate is constant on a large time interval, but short-term it is variable due to intentional dithering, which is introduced to enable duplicate gossip suppression, similar to GAAP/ZMAAP. Removal of duplicates speeds up topic discovery and consensus repair.
+The broadcast gossip rate is constant on a large time interval, but short-term it is variable due to intentional dithering, which is introduced to enable duplicate gossip suppression, similar to GAAP/ZMAAP. Removal of duplicates speeds up topic discovery and consensus repair.
 
-#### Rejected ideas
+While broadcast gossips are robust, they are inherently slow. To improve CRDT repair time, Cyphal v1.1 includes epidemic unicast gossips, roughly derived from Cyclon/HyParView etc. Each node holds a randomly chosen set of remotes that are likely to be currently online, called "gossip peers"; the gossip peer set is refreshed stochastically, with the parameters chosen to scale well up to ~1000 nodes on the network. When consensus needs repair, the affected topics are scheduled to be broadcast-gossiped at the next opportunity (the broadcast rate is fixed so all we can do is to alter the schedule not the rate), and epidemic unicast gossips of the affected topics are emitted immediately to a randomly chosen small subset of the gossip peers (typ. 2 peers only) with some positive TTL (typ. ~16). Every peer upon reception of epidemic gossips will update its own CRDT state and forward the gossips unless they lost arbitration to local state, in which new gossips with the newer CRDT state will be emitted instead.
 
-One improvement to speed up convergence would be to publish irregular gossips when conflicts or divergences occur, but this creates variable bandwidth usage and processing load on other nodes, which is undesirable in real-time networks. Any traffic variability on the broadcast subject is a problem because every node has to process messages from that subject, which may include resource-limited nodes.
-
-Another idea is to immediately unicast an updated gossip on collision or divergence back to the node that sent a divergent gossip to speed up propagation, but this also causes burstiness because the number of such immediate unicast responses may be large (number of nodes in the network minus one in the worst case).
-
-We could consider letting topic publishers multicast updated gossips on the old subject of their topic, such that all subscribers follow immediately; it is easy to see that this also causes burstiness in topics with many publishers.
-
-#### Incomplete ideas
-
-More sophisticated designs have been considered but eventually led nowhere so far. They may still have some potential though. First, refer to prior works:
+#### Prior art
 
 - [HyParView](https://asc.di.fct.unl.pt/~jleitao/pdf/dsn07-leitao.pdf)
 - [Epidemic broadcast trees](https://asc.di.fct.unl.pt/~jleitao/pdf/srds07-leitao.pdf)
 - [Gossip-based peer sampling](https://www.inf.u-szeged.hu/~jelasity/cikkek/tocs05.pdf)
 - [Cyclon](https://www.cs.unibo.it/babaoglu/courses/csns/resources/tutorials/cyclon.pdf)
 - [Chord](https://en.wikipedia.org/wiki/Chord_%28peer-to-peer%29)
-
-One is to let each node remember the node ID of the last node to gossip a topic provided that the ID is higher than their own and is the lowest seen; if none seen, remember the minimum seen ID. This orders nodes by ID into a singly-linked ring. A doubly-linked ring can be built by extending this principle. Then immediate gossips concerning a topic can be unicast directly to the ring neighbors (in addition to fixed-rate broadcasting), which can speed up repair. The problem is that this doesn't really solve burstiness as the number of nodes gossiping a topic may be low compared to the nodes that are aware of it (due to duplicate gossip suppression and the fact that only publishers provide inline gossips with published messages).
-
-Peer sampling is interesting: each node has a small list of N clique members that receive every urgent gossip immediately (this does not replace fixed-rate broadcast gossips but augments them). When a node has at least one clique slot available, it advertises that in the gossips it publishes, soliciting connections from others with empty slots. Bidirectional connection is verified with every received gossip. Urgent gossips are unicast immediately to all confirmed bidirectional connections.
