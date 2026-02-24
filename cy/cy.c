@@ -1660,7 +1660,7 @@ static cy_err_t send_gossip_raw(const cy_t* const          cy,
                                 cy_subject_writer_t* const writer,
                                 const cy_lane_t* const     lane)
 {
-    assert(cy->gossip_next < HEAT_DEATH); // Must begin_gossip() beforehand.
+    assert(cy->gossip_next < HEAT_DEATH); // Must gossip_begin() beforehand.
     if ((writer == NULL) && (lane == NULL)) {
         return CY_OK; // Early exit to avoid unnecessary serialization.
     }
@@ -1936,6 +1936,7 @@ static void gossip_epidemic_forward(cy_t* const        cy,
                                     const cy_lane_t    lane)
 {
     assert(original_ttl > 0);
+    gossip_begin(cy);
     const uint_fast8_t ttl                             = original_ttl - 1U;
     uint64_t           blacklist[GOSSIP_OUTDEGREE + 1] = { lane.id }; // do not unicast back to sender
     size_t             blacklist_size                  = 1;
@@ -3557,6 +3558,7 @@ static cy_err_t gossip_poll(cy_t* const cy, const cy_us_t now)
         }
         cy->gossip_next = now + dither_int(cy, cy->gossip_period, cy->gossip_period / 8);
     } else if (cy->list_gossip_urgent.tail != NULL) {
+        gossip_begin(cy);
         cy_topic_t* const topic = LIST_TAIL(cy->list_gossip_urgent, cy_topic_t, list_gossip_urgent);
         delist(&cy->list_gossip_urgent, &topic->list_gossip_urgent); // Delist regardless of outcome.
         // Unicast epidemic gossips to each peer individually.
