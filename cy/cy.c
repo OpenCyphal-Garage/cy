@@ -1905,6 +1905,7 @@ static gossip_peer_t* gossip_random_peer_except(cy_t* const           cy,
                 return &cy->gossip_peers[i];
             }
         }
+        assert(false);
     }
     return NULL;
 }
