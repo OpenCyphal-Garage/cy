@@ -146,9 +146,6 @@ typedef struct cy_platform_vtable_t
 
     // === MISC ===
 
-    /// How the local node is seen by others. Usually this value is globally unique and unchanging (e.g., EUI-64).
-    uint64_t (*my_id)(const cy_platform_t*);
-
     /// Returns the current monotonic time in microseconds. The initial time shall be non-negative.
     cy_us_t (*now)(cy_platform_t*);
 
