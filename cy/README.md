@@ -83,9 +83,10 @@ The ack priority level must match that of the original message.
 ```bash
 uint6 type
 void2
+void8
 uint64 tag              # From the acknowledged message.
 uint64 topic_hash       # From the acknowledged message.
-# Total size 17 bytes.
+# Total size 18 bytes.
 ```
 
 #### Types 3 (best-effort response), 4 (reliable response), 5 (response ack), 6 (response nack)
@@ -99,10 +100,11 @@ The (n)ack priority level must match that of the original response.
 ```bash
 uint6 type
 void2
+void8
 uint64 message_tag      # The tag of the published message this response pertains to.
 uint48 seqno            # Incremented starting from zero for each response to this message; used for streaming.
 uint16 tag              # Chosen by the responder arbitrarily for ack correlation, if needed.
-# Header size 17 bytes. Payload follows, unless ACK.
+# Header size 18 bytes. Payload follows, unless ACK.
 ```
 
 #### Type 7 (topic allocation CRDT gossip)
@@ -116,8 +118,9 @@ The TTL is only the last line of defence against cycles; each forwarding node mu
 ```bash
 uint6 type
 void2
+void8
 uint8 ttl               # Must be zero for broadcast gossips.
-void16
+uint8 incompatibility   # Transmit zero; ignore message if this is not zero.
 # offset 4
 int8   topic_log_age    # floor(log2(topic_age)) if topic_age>0 else -1
 uint64 topic_hash
@@ -133,8 +136,10 @@ This is typically broadcast to let every node check if it has any matching topic
 ```bash
 uint6 type
 void2
+void64
+uint64 incompatibility  # Transmit zero; ignore message if this is not zero.
 utf8[<=CY_TOPIC_NAME_MAX] pattern  # Has 1 byte length prefix. The pattern is applied to normalized names.
-# Total size is 2 bytes + pattern length.
+# Total size is 18 bytes + pattern length.
 ```
 
 ### CRDT gossips

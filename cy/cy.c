@@ -215,11 +215,10 @@ struct cy_t
         }                                                  \
     } while (0)
 
-/// The maximum header size is needed to calculate the extent correctly.
-/// It is added to the serialized message size.
+/// The maximum header size is needed to calculate the extent correctly. It is added to the serialized message size.
 /// Later revisions of the protocol may increase this size, although it is best to avoid it if possible.
-/// This does not apply to messages that don't carry payload (e.g., gossips may be larger than this).
-#define HEADER_MAX_BYTES 18U
+/// This does not apply to messages that don't carry payload.
+#define HEADER_BYTES 18U
 
 /// Chosen rather arbitrarily ensuring that the gossip certainly fits.
 /// Does not affect normal messages since they are not broadcast.
@@ -1302,7 +1301,7 @@ static void topic_ensure_subscribed(cy_topic_t* const topic) // TODO rename, inv
     const uint32_t subject_id = topic_subject_id(topic);
     if ((topic->couplings != NULL) && (topic->sub_reader == NULL)) { // A subject reader is needed but missing!
         const size_t extent = subscription_extent_w_overhead(topic);
-        assert(extent >= HEADER_MAX_BYTES);
+        assert(extent >= HEADER_BYTES);
         topic->sub_reader = cy->platform->vtable->subject_reader_new(cy->platform, subject_id, extent);
         CY_TRACE(topic->cy,
                  "🗞️ %s S%08jx extent=%zu result=%p",
@@ -1420,7 +1419,8 @@ static void topic_allocate(cy_topic_t* const topic, const uint32_t new_evictions
         topic_ensure_subscribed(topic);
 
         // Ensure the change is announced to the network.
-        // We use urgent gossip even when nothing is repaired (clean new allocation) to check for conflicts.
+        // We use urgent gossip even when nothing is repaired (clean new allocation) to check for conflicts
+        // and to allow pattern subscribers to subscribe.
         schedule_gossip_urgent(topic);
 
         // Re-allocate the defeated topic with incremented eviction counter.
@@ -1660,16 +1660,17 @@ static cy_err_t send_gossip_raw(const cy_t* const          cy,
                                 cy_subject_writer_t* const writer,
                                 const cy_lane_t* const     lane)
 {
+    assert(cy->gossip_next < HEAT_DEATH); // Must begin_gossip() beforehand.
     if ((writer == NULL) && (lane == NULL)) {
         return CY_OK; // Early exit to avoid unnecessary serialization.
     }
-    byte_t           buf[18 + CY_TOPIC_NAME_MAX];
-    const cy_bytes_t message = { .size = 18 + name.len, .data = buf };
+    byte_t           buf[HEADER_BYTES + CY_TOPIC_NAME_MAX];
+    const cy_bytes_t message = { .size = HEADER_BYTES + name.len, .data = buf };
     byte_t*          ptr     = buf;
     *ptr++                   = header_gossip;
+    *ptr++                   = 0;
     *ptr++                   = (byte_t)((writer == NULL) ? ttl : 0);
-    *ptr++                   = 0;
-    *ptr++                   = 0;
+    *ptr++                   = 0; // incompatibility
     *ptr++                   = (byte_t)lage;
     ptr                      = serialize_u64(ptr, hash);
     ptr                      = serialize_u32(ptr, evictions);
@@ -1724,11 +1725,12 @@ static cy_err_t send_gossip_unicast(const cy_t* const       cy,
 static cy_err_t do_send_scout(const cy_t* const cy, const cy_us_t now, const cy_str_t pattern)
 {
     assert(pattern.len <= CY_TOPIC_NAME_MAX);
-    byte_t buf[2 + CY_TOPIC_NAME_MAX];
+    byte_t buf[HEADER_BYTES + CY_TOPIC_NAME_MAX];
     buf[0] = header_scout;
-    buf[1] = (byte_t)pattern.len;
-    memcpy(&buf[2], pattern.str, pattern.len);
-    const cy_bytes_t message = { .size = 2 + pattern.len, .data = buf };
+    memset(&buf[1], 0, HEADER_BYTES - 2);
+    buf[HEADER_BYTES - 1U] = (byte_t)pattern.len;
+    memcpy(&buf[HEADER_BYTES], pattern.str, pattern.len);
+    const cy_bytes_t message = { .size = HEADER_BYTES + pattern.len, .data = buf };
     const cy_us_t    dead    = now + cy->gossip_period;
     return cy->platform->vtable->subject_writer_send(cy->platform, cy->broad_writer, dead, cy_prio_nominal, message);
 }
@@ -2104,7 +2106,7 @@ cy_publisher_t* cy_advertise_client(cy_t* const cy, const cy_str_t name, const s
         assert(pub->topic != NULL);
         pub->topic->pub_count++;
         delist(&cy->list_implicit, &pub->topic->list_implicit);
-        const size_t response_extent_with_header = response_extent + HEADER_MAX_BYTES;
+        const size_t response_extent_with_header = response_extent + HEADER_BYTES;
         if (response_extent_with_header > cy->p2p_extent) {
             // Currently, we only increase the extent and leave it at the max. Ideally we should also shrink it when
             // publishers are destroyed. One way to do it without scanning all publishers is to round up the extent
@@ -3144,7 +3146,7 @@ static bool on_message(cy_t* const           cy,
 }
 
 /// This is linear complexity but we expect to have few subscribers per topic, so it is acceptable.
-/// The returned value is at least HEADER_MAX_BYTES large.
+/// The returned value is at least large enough for the header.
 static size_t subscription_extent_w_overhead(const cy_topic_t* const topic)
 {
     size_t total = 0;
@@ -3171,7 +3173,7 @@ static size_t subscription_extent_w_overhead(const cy_topic_t* const topic)
         cpl   = cpl->next;
     }
     CY_TRACE(topic->cy, "📬 %s extent=%zu", topic_repr(topic).str, total);
-    return total + HEADER_MAX_BYTES;
+    return total + HEADER_BYTES;
 }
 
 /// Returns non-NULL on OOM, which aborts the traversal early.
@@ -3358,9 +3360,9 @@ static cy_err_t do_respond(cy_breadcrumb_t* const breadcrumb, const cy_us_t dead
 
     // Compose the header. The tag is zero since we don't expect any ack.
     assert(breadcrumb->seqno < (SEQNO48_MASK - 1U)); // Sanity check; this value is not practically reachable.
-    byte_t header[17];
-    header[0] = (byte_t)header_rsp_be;
-    (void)serialize_u64(serialize_u64(&header[1], breadcrumb->message_tag), breadcrumb->seqno++);
+    byte_t header[HEADER_BYTES] = { 0 };
+    header[0]                   = (byte_t)header_rsp_be;
+    (void)serialize_u64(serialize_u64(&header[2], breadcrumb->message_tag), breadcrumb->seqno++);
     const cy_bytes_t headed_message = { .size = sizeof(header), .data = header, .next = &message };
 
     // Send the P2P response.
@@ -3468,7 +3470,7 @@ cy_t* cy_new(cy_platform_t* const platform)
     cy->request_futures_by_tag  = NULL;
     cy->response_futures_by_tag = NULL;
 
-    cy->p2p_extent = HEADER_MAX_BYTES + 1024U; // Arbitrary initial size; will be refined when publishers are created.
+    cy->p2p_extent = HEADER_BYTES + 1024U; // Arbitrary initial size; will be refined when publishers are created.
     cy->platform->vtable->p2p_extent_set(platform, cy->p2p_extent);
 
     cy->ts_started             = platform->vtable->now(platform);
@@ -3729,22 +3731,15 @@ static void on_message_ack(cy_t* const       cy,
     }
 }
 
-#if 0 // NOLINT(readability-avoid-unconditional-preprocessor-if)
-static void on_response_ack(cy_t* const cy, response_future_t* const future, const bool positive)
-{
-    //
-}
-#endif
-
 static void send_message_ack(cy_t* const     cy,
                              const cy_lane_t lane,
                              const uint64_t  tag,
                              const uint64_t  topic_hash,
                              const cy_us_t   deadline)
 {
-    byte_t header[17];
-    header[0] = (byte_t)header_msg_ack;
-    (void)serialize_u64(serialize_u64(&header[1], tag), topic_hash);
+    byte_t header[HEADER_BYTES] = { 0 };
+    header[0]                   = (byte_t)header_msg_ack;
+    (void)serialize_u64(serialize_u64(&header[2], tag), topic_hash);
     const cy_err_t err = cy->platform->vtable->p2p_send(cy->platform, //
                                                         &lane,
                                                         deadline,
@@ -3767,9 +3762,9 @@ static void send_response_ack(cy_t* const     cy,
                               const bool      positive,
                               const cy_us_t   deadline)
 {
-    byte_t header[17];
-    header[0] = (byte_t)(positive ? header_rsp_ack : header_rsp_nack);
-    (void)serialize_u64(serialize_u64(&header[1], message_tag), (seqno & SEQNO48_MASK) | ((uint64_t)tag << 48U));
+    byte_t header[HEADER_BYTES] = { 0 };
+    header[0]                   = (byte_t)(positive ? header_rsp_ack : header_rsp_nack);
+    (void)serialize_u64(serialize_u64(&header[2], message_tag), (seqno & SEQNO48_MASK) | ((uint64_t)tag << 48U));
     const cy_err_t err = cy->platform->vtable->p2p_send(cy->platform, //
                                                         &lane,
                                                         deadline,
@@ -3801,11 +3796,11 @@ void cy_on_message(cy_platform_t* const             platform,
     cy_t* const cy = platform->cy;
     assert((cy != NULL) && (message.timestamp >= 0));
     assert(message.content->refcount == 1);
-    byte_t       header[HEADER_MAX_BYTES] = { 0 };
-    const size_t header_read              = cy_message_read(message.content, 0, HEADER_MAX_BYTES, header);
-    if (header_read < 1) {
+    byte_t header[HEADER_BYTES] = { 0 };
+    if (cy_message_read(message.content, 0, HEADER_BYTES, header) != HEADER_BYTES) {
         goto bad_message;
     }
+    message_skip(message.content, HEADER_BYTES);
     const header_type_t type = header[0] & HEADER_TYPE_MASK;
 
     // This is the central entry point for all incoming messages. It's complex but there's an advantage to keeping the
@@ -3813,11 +3808,6 @@ void cy_on_message(cy_platform_t* const             platform,
     switch (type) {
         case header_msg_be:
         case header_msg_rel: {
-            static const size_t header_size = 18;
-            if (header_read < header_size) {
-                goto bad_message;
-            }
-            message_skip(message.content, header_size);
             const uint64_t hash  = deserialize_u64(&header[10]);
             cy_topic_t*    topic = NULL; // Avoid double lookup, let on_gossip() do the lookup.
             if (subject_reader != NULL) {
@@ -3854,11 +3844,8 @@ void cy_on_message(cy_platform_t* const             platform,
         }
 
         case header_msg_ack: {
-            if (header_read < 17) {
-                goto bad_message;
-            }
-            const uint64_t    tag   = deserialize_u64(&header[1]);
-            const uint64_t    hash  = deserialize_u64(&header[9]);
+            const uint64_t    tag   = deserialize_u64(&header[2]);
+            const uint64_t    hash  = deserialize_u64(&header[10]);
             cy_topic_t* const topic = cy_topic_find_by_hash(cy, hash);
             if (topic != NULL) {
                 on_message_ack(cy, topic, tag, message.timestamp, lane);
@@ -3872,74 +3859,22 @@ void cy_on_message(cy_platform_t* const             platform,
             break;
         }
 
-#if 0 // NOLINT(readability-avoid-unconditional-preprocessor-if)
-        case header_rsp_be:
-        case header_rsp_rel: {
-            const uint64_t          message_tag = deserialize_u56(&header[1]);
-            const uint64_t          seqno_tag   = deserialize_u64(&header[8]);
-            const uint16_t          tag         = (seqno_tag >> 48U) & 0xFFFFU;
-            const uint64_t          seqno       = seqno_tag & SEQNO48_MASK;
-            request_future_t* const future =
-              (request_future_t*)future_index_lookup(&cy->request_futures_by_tag, message_tag);
-            if (type == header_rsp_rel) {
-                /// A known ambiguity exists if the server sends a reliable response that is accepted, but the
-                /// first positive-ack is lost; the server will retransmit the response, but the client application
-                /// may no longer be listening if it only needed a single response; the second response will be a
-                /// nack instead of a pack. If this becomes a problem, store a short list of recently
-                /// positively-acked responses in the Cy state.
-                send_response_ack(cy,
-                                  lane,
-                                  message_tag,
-                                  seqno,
-                                  tag,
-                                  future != NULL,
-                                  message.timestamp + ACK_TX_TIMEOUT);
-            }
-            if (future != NULL) {
-                on_response(cy, p2p_context, lane.id, future, seqno, tag, message);
-            } else {
-                CY_TRACE(cy,
-                         "⚠️ Orphan response from %016jx for request tag %016jx",
-                         (uintmax_t)lane.id,
-                         (uintmax_t)message_tag);
-            }
-            break;
-        }
-
-        case header_rsp_ack:
-        case header_rsp_nack: {
-            const uint64_t message_tag = deserialize_u56(&header[1]);
-            const uint64_t seqno_tag   = deserialize_u64(&header[8]);
-            const uint64_t key = rapidhash((uint64_t[3]){ remote_id, message_tag, seqno_tag }, 24); // local transform
-            response_future_t* const future =
-              (response_future_t*)future_index_lookup(&cy->response_futures_by_tag, key);
-            if (future != NULL) {
-                on_response_ack(cy, future, type == header_rsp_ack);
-            } else {
-                CY_TRACE(cy,
-                         "⚠️ Orphan response %s from %016jx for key %016jx",
-                         (type == header_rsp_ack) ? "ACK" : "NACK",
-                         (uintmax_t)remote_id,
-                         (uintmax_t)key);
-            }
-            break;
-        }
-#endif
         case header_gossip: {
-            if (header_read < 18) {
+            const byte_t incompatibility = header[3];
+            if (incompatibility != 0) {
                 goto bad_message;
             }
             char           name_buf[CY_TOPIC_NAME_MAX + 1];
-            const cy_str_t name = { .len = header[17], .str = name_buf };
+            const cy_str_t name = { .len = header[HEADER_BYTES - 1U], .str = name_buf };
             if ((name.len > CY_TOPIC_NAME_MAX) ||
-                (cy_message_read(message.content, 18, name.len, (byte_t*)name_buf) != name.len)) {
+                (cy_message_read(message.content, 0, name.len, (byte_t*)name_buf) != name.len)) {
                 goto bad_message;
             }
             const int8_t lage = (int8_t)header[4];
             if ((lage < LAGE_MIN) || (lage > LAGE_MAX)) {
                 goto bad_message;
             }
-            const uint_fast8_t    ttl       = header[1];
+            const uint_fast8_t    ttl       = header[2];
             const uint64_t        hash      = deserialize_u64(&header[5]);
             const uint32_t        evictions = deserialize_u32(&header[13]);
             const gossip_origin_t origin    = (subject_reader == NULL) ? gossip_unicast : gossip_broadcast;
@@ -3948,10 +3883,14 @@ void cy_on_message(cy_platform_t* const             platform,
         }
 
         case header_scout: {
+            const uint64_t incompatibility = deserialize_u64(&header[9]);
+            if (incompatibility != 0) {
+                goto bad_message;
+            }
             char           name_buf[CY_TOPIC_NAME_MAX + 1];
-            const cy_str_t name = { .len = header[1], .str = name_buf };
-            if ((header_read < 2) || (name.len == 0) || (name.len > CY_TOPIC_NAME_MAX) ||
-                (cy_message_read(message.content, 2, name.len, (byte_t*)name_buf) != name.len)) {
+            const cy_str_t name = { .len = header[HEADER_BYTES - 1U], .str = name_buf };
+            if ((name.len == 0) || (name.len > CY_TOPIC_NAME_MAX) ||
+                (cy_message_read(message.content, 0, name.len, (byte_t*)name_buf) != name.len)) {
                 goto bad_message;
             }
             on_scout(cy, message.timestamp, name, lane);
