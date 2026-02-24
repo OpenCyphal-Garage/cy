@@ -1979,10 +1979,12 @@ static void on_gossip(cy_t* const           cy,
         const cy_us_t        last_seen_threshold = ts - (GOSSIP_PERIOD_DEFAULT * 2);
         gossip_peer_t* const oldest              = gossip_peer_oldest(cy);
         if (oldest->last_seen < last_seen_threshold) { // have empty or stale entries, update unconditionally.
-            this_peer     = oldest;
+            this_peer = oldest;
+            CY_TRACE(cy, "🧑‍🤝‍🧑 N%016jx <-- N%016jx", (uintmax_t)this_peer->id, (uintmax_t)lane.id);
             this_peer->id = lane.id;
         } else if (chance(cy, GOSSIP_PEER_REPLACEMENT_PROBABILITY_RECIPROCAL)) { // random replacement, low prob
-            this_peer     = &cy->gossip_peers[choice(cy, GOSSIP_PEER_COUNT)];
+            this_peer = &cy->gossip_peers[choice(cy, GOSSIP_PEER_COUNT)];
+            CY_TRACE(cy, "🧑‍🤝‍🧑 N%016jx <-- N%016jx", (uintmax_t)this_peer->id, (uintmax_t)lane.id);
             this_peer->id = lane.id;
         } else {
             assert(this_peer == NULL);
