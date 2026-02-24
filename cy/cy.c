@@ -119,11 +119,10 @@ typedef struct
 // Each unicast epidemic gossip will be forwarded to at most this many unique remote peers.
 #define GOSSIP_OUTDEGREE 2
 
-// When a new broadcast gossip arrives, we update the peer set with this probability.
-// If it's too large, we lose gossip diversity in large networks, prioritizing the most recently heard nodes,
-// which also increases burden on those nodes. If it's too small, then a newly appeared node may take a long time
-// to be picked up by other nodes, so it may be excluded from epidemic gossips for a while.
-#define GOSSIP_PEER_REPLACEMENT_PROBABILITY_RECIPROCAL 64
+// When a gossip arrives, we update the peer set with this probability after time gating (see replacement moratorium).
+// If it's too large, we lose gossip diversity, prioritizing the most recently heard nodes.
+// If it's too small, a newly appeared node may take a long time to be picked up by other nodes.
+#define GOSSIP_PEER_REPLACEMENT_PROBABILITY_RECIPROCAL 8
 
 // We store recent epidemic gossips to avoid unnecessary forwarding.
 #define GOSSIP_DEDUP_CAPACITY 16
@@ -195,10 +194,17 @@ struct cy_t
     cy_subject_writer_t* broad_writer;
 
     // Topic allocation CRDT gossip states.
+    //
     // The dedup list is used to suppress redundant unicast gossips, which happen when multiple nodes initiate repair.
+    //
     // The gossip peers is a stochastic set of some presumably-live peers that we forward unicast gossips to.
+    // It is filled deterministically until there are no empty/stale slots; from that point it is randomly updated
+    // (a simplification compared to shuffling in HyParView etc) based on random chance gated by randomized time
+    // intervals, referred to as replacement moratoriums. The randomized gating makes the replacement behavior less
+    // dependent on the number of online nodes publishing gossips and their frequencies.
     cy_us_t        gossip_period;
     cy_us_t        gossip_next;
+    cy_us_t        gossip_peer_replacement_moratorium_until;
     gossip_dedup_t gossip_dedup[GOSSIP_DEDUP_CAPACITY];
     gossip_peer_t  gossip_peers[GOSSIP_PEER_COUNT];
 
@@ -1991,10 +1997,14 @@ static void on_gossip(cy_t* const           cy,
             this_peer = oldest;
             CY_TRACE(cy, "🧑‍🤝‍🧑 N%016jx <-- N%016jx", (uintmax_t)this_peer->id, (uintmax_t)lane.id);
             this_peer->id = lane.id;
-        } else if ((origin == gossip_broadcast) && chance(cy, GOSSIP_PEER_REPLACEMENT_PROBABILITY_RECIPROCAL)) {
+        } else if ((ts >= cy->gossip_peer_replacement_moratorium_until) &&
+                   chance(cy, GOSSIP_PEER_REPLACEMENT_PROBABILITY_RECIPROCAL)) {
             this_peer = &cy->gossip_peers[choice(cy, GOSSIP_PEER_COUNT)];
             CY_TRACE(cy, "🧑‍🤝‍🧑 N%016jx <-- N%016jx", (uintmax_t)this_peer->id, (uintmax_t)lane.id);
             this_peer->id = lane.id;
+            // Randomized cooldown avoids phase-locking replacement opportunities to fixed broadcast phases.
+            const cy_us_t moratorium                     = GOSSIP_PERIOD_DEFAULT / 2;
+            cy->gossip_peer_replacement_moratorium_until = ts + dither_int(cy, moratorium, moratorium);
         } else {
             assert(this_peer == NULL);
         }
@@ -3486,8 +3496,9 @@ cy_t* cy_new(cy_platform_t* const platform)
 
     // Initially, the gossip scheduling logic is disabled, because the first gossip is sent together with
     // the first publication. This allows listen-only nodes to avoid transmitting anything.
-    cy->gossip_next   = HEAT_DEATH;
-    cy->gossip_period = GOSSIP_PERIOD_DEFAULT;
+    cy->gossip_next                              = HEAT_DEATH;
+    cy->gossip_period                            = GOSSIP_PERIOD_DEFAULT;
+    cy->gossip_peer_replacement_moratorium_until = BIG_BANG;
     for (size_t i = 0; i < GOSSIP_DEDUP_CAPACITY; i++) {
         cy->gossip_dedup[i].last_seen = BIG_BANG;
     }
