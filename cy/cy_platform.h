@@ -1,15 +1,15 @@
-///                            ____                   ______            __          __
-///                           / __ `____  ___  ____  / ____/_  ______  / /_  ____  / /
-///                          / / / / __ `/ _ `/ __ `/ /   / / / / __ `/ __ `/ __ `/ /
-///                         / /_/ / /_/ /  __/ / / / /___/ /_/ / /_/ / / / / /_/ / /
-///                         `____/ .___/`___/_/ /_/`____/`__, / .___/_/ /_/`__,_/_/
-///                             /_/                     /____/_/
-///
-/// Platform-side API of the Cy library.
-/// The application is not intended to have access to this header; this is only for the platform layer implementation.
-/// Applications should only include cy.h.
-///
-/// Copyright (c) Pavel Kirienko <pavel@opencyphal.org>
+//                            ____                   ______            __          __
+//                           / __ `____  ___  ____  / ____/_  ______  / /_  ____  / /
+//                          / / / / __ `/ _ `/ __ `/ /   / / / / __ `/ __ `/ __ `/ /
+//                         / /_/ / /_/ /  __/ / / / /___/ /_/ / /_/ / / / / /_/ / /
+//                         `____/ .___/`___/_/ /_/`____/`__, / .___/_/ /_/`__,_/_/
+//                             /_/                     /____/_/
+//
+// Platform-side API of the Cy library.
+// The application is not intended to have access to this header; this is only for the platform layer implementation.
+// Applications should only include cy.h.
+//
+// Copyright (c) Pavel Kirienko <pavel@opencyphal.org>
 
 #pragma once
 

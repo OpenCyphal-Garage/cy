@@ -1,14 +1,14 @@
-///                            ____                   ______            __          __
-///                           / __ `____  ___  ____  / ____/_  ______  / /_  ____  / /
-///                          / / / / __ `/ _ `/ __ `/ /   / / / / __ `/ __ `/ __ `/ /
-///                         / /_/ / /_/ /  __/ / / / /___/ /_/ / /_/ / / / / /_/ / /
-///                         `____/ .___/`___/_/ /_/`____/`__, / .___/_/ /_/`__,_/_/
-///                             /_/                     /____/_/
-///
-/// A Cy platform layer for POSIX-like OSes using standard BSD sockets and libUDPard for Cyphal over UDP.
-/// It can be adapted to other socket-based APIs with minimal changes (mostly confined to udp_wrapper.c).
-///
-/// Copyright (c) Pavel Kirienko <pavel@opencyphal.org>
+//                            ____                   ______            __          __
+//                           / __ `____  ___  ____  / ____/_  ______  / /_  ____  / /
+//                          / / / / __ `/ _ `/ __ `/ /   / / / / __ `/ __ `/ __ `/ /
+//                         / /_/ / /_/ /  __/ / / / /___/ /_/ / /_/ / / / / /_/ / /
+//                         `____/ .___/`___/_/ /_/`____/`__, / .___/_/ /_/`__,_/_/
+//                             /_/                     /____/_/
+//
+// A Cy platform layer for POSIX-like OSes using standard BSD sockets and libUDPard for Cyphal over UDP.
+// It can be adapted to other socket-based APIs with minimal changes (mostly confined to udp_wrapper.c).
+//
+// Copyright (c) Pavel Kirienko <pavel@opencyphal.org>
 
 #pragma once
 

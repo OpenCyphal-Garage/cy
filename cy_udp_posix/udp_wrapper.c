@@ -1,12 +1,12 @@
-/// This software is distributed under the terms of the MIT License.
-/// Copyright (C) OpenCyphal Development Team  <opencyphal.org>
-/// Copyright Amazon.com Inc. or its affiliates.
-/// SPDX-License-Identifier: MIT
-/// Author: Pavel Kirienko <pavel@opencyphal.org>
+// This software is distributed under the terms of the MIT License.
+// Copyright (C) OpenCyphal Development Team  <opencyphal.org>
+// Copyright Amazon.com Inc. or its affiliates.
+// SPDX-License-Identifier: MIT
+// Author: Pavel Kirienko <pavel@opencyphal.org>
 
 #include "udp_wrapper.h"
 
-/// Enable SO_REUSEPORT.
+// Enable SO_REUSEPORT.
 #ifndef _DEFAULT_SOURCE // NOLINT(*-reserved-identifier,*-dcl37-c,*-dcl51-cpp)
 #define _DEFAULT_SOURCE // NOLINT(*-reserved-identifier,*-dcl37-c,*-dcl51-cpp)
 #endif
@@ -23,10 +23,10 @@
 #include <limits.h>
 #include <string.h>
 
-/// This is the value recommended by the Cyphal/UDP specification.
+// This is the value recommended by the Cyphal/UDP specification.
 #define OVERRIDE_TTL 16
 
-/// RFC 2474.
+// RFC 2474.
 #define DSCP_MAX 63
 
 #ifndef __APPLE__
@@ -43,7 +43,7 @@ static bool is_multicast(const uint32_t address)
     return (address & 0xF0000000UL) == 0xE0000000UL; // NOLINT(*-magic-numbers)
 }
 
-/// Zero on error, otherwise the interface index. Zero is not a valid interface index.
+// Zero on error, otherwise the interface index. Zero is not a valid interface index.
 static size_t get_local_iface_index(const uint32_t local_iface_address)
 {
     const uint32_t  addr_be = htonl(local_iface_address);

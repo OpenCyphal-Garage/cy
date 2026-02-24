@@ -10,12 +10,12 @@
 #define PATH_MAX 2048
 #define DATA_MAX 4096
 
-/// Request schema:
-///     uint64           read_offset
-///     utf8[<=PATH_MAX] file_path
-/// Response schema:
-///     uint32           errno
-///     byte[<=DATA_MAX] data
+// Request schema:
+//     uint64           read_offset
+//     utf8[<=PATH_MAX] file_path
+// Response schema:
+//     uint32           errno
+//     byte[<=DATA_MAX] data
 static void on_file_read_msg(cy_subscriber_t* const subscriber, cy_arrival_t* const arv)
 {
     (void)subscriber;

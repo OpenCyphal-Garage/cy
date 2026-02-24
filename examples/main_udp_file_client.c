@@ -25,8 +25,8 @@ typedef struct file_read_response_t
     uint8_t  data[DATA_MAX];
 } file_read_response_t;
 
-/// Command line arguments: namespace, file name.
-/// The read file will be written into stdout as-is.
+// Command line arguments: namespace, file name.
+// The read file will be written into stdout as-is.
 int main(const int argc, char* argv[])
 {
     if (argc < 2) {
