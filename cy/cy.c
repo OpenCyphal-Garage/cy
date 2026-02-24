@@ -1924,6 +1924,31 @@ static bool gossip_dedup_update(cy_t* const cy, const cy_us_t now, const uint64_
     return true;
 }
 
+static void gossip_epidemic_forward(cy_t* const        cy,
+                                    const cy_us_t      ts,
+                                    const uint_fast8_t original_ttl,
+                                    const uint64_t     hash,
+                                    const uint32_t     evictions,
+                                    const int_fast8_t  lage,
+                                    const cy_str_t     name,
+                                    const cy_lane_t    lane)
+{
+    assert(original_ttl > 0);
+    const uint_fast8_t ttl                             = original_ttl - 1U;
+    uint64_t           blacklist[GOSSIP_OUTDEGREE + 1] = { lane.id }; // do not unicast back to sender
+    size_t             blacklist_size                  = 1;
+    for (size_t i = 0; i < GOSSIP_OUTDEGREE; i++) {
+        const gossip_peer_t* const peer = gossip_random_peer_except(cy, ts, blacklist_size, blacklist);
+        if (peer == NULL) {
+            break; // no (more) peers
+        }
+        blacklist[blacklist_size++] = peer->id; // do not unicast to the same peer twice
+        const cy_lane_t peer_lane   = { .id = peer->id, .p2p = peer->p2p, .prio = lane.prio };
+        const cy_err_t  err         = send_gossip_raw(cy, ts, ttl, hash, evictions, lage, name, NULL, &peer_lane);
+        ON_ASYNC_ERROR_IF(cy, NULL, err);
+    }
+}
+
 typedef enum
 {
     gossip_broadcast,
@@ -1939,8 +1964,8 @@ static void on_gossip(cy_t* const           cy,
                       const cy_us_t         ts,
                       const uint_fast8_t    ttl,
                       const uint64_t        hash,
-                      uint32_t              evictions,
-                      int8_t                lage,
+                      const uint32_t        evictions,
+                      const int_fast8_t     lage,
                       const cy_str_t        name,
                       cy_topic_t** const    out_topic,
                       const cy_lane_t       lane,
@@ -1983,41 +2008,22 @@ static void on_gossip(cy_t* const           cy,
                           gossip_dedup_update(cy, ts, gossip_dedup_hash(hash, evictions, lage)) && (ttl > 0);
     if (mine != NULL) {
         // We have this topic! Check if we have consensus on the subject-ID.
-        // If there is a divergence and we win arbitration, the gossip can no longer be forwarded -- it is obsolete.
-        // Instead, we will send our new urgent gossip.
-        // The TTL is reset by this action but this is natural since it's a new gossip.
-        // It is also possible that the log-age of the received gossip is too old, which we will update.
+        // If there is a divergence and we win arbitration, the gossip can no longer be forwarded -- it is obsolete;
+        // instead, we will send our new urgent gossip. This resets TTL but this is natural since it's a new gossip.
         const bool local_won = on_gossip_known_topic(cy, ts, mine, evictions, lage);
-        should_forward       = should_forward && !local_won;
+        if (should_forward && !local_won) {
+            gossip_epidemic_forward(cy, ts, ttl, hash, mine->evictions, topic_lage(mine, ts), name, lane);
+        }
         assert((!local_won) || (cy->list_gossip_urgent.tail != NULL));
-        evictions = mine->evictions;
-        lage      = topic_lage(mine, ts); // Already merged the received gossip with the local age.
     } else {
         // We don't know this topic; check for a subject-ID collision.
-        // If there is a collision and we win arbitration, the gossip can no longer be forwarded -- it is obsolete.
-        // Instead, we will send our new urgent gossip.
-        // The TTL is reset by this action but this is natural since it's a new gossip.
+        // If there is a collision and we win arbitration, the gossip can no longer be forwarded -- it is obsolete;
+        // instead, we will send our new urgent gossip. This resets TTL but this is natural since it's a new gossip.
         const bool local_won = on_gossip_unknown_topic(cy, ts, hash, evictions, lage);
-        should_forward       = should_forward && !local_won;
-        assert((!local_won) || (cy->list_gossip_urgent.tail != NULL));
-    }
-
-    // Forward the gossip if necessary.
-    if (should_forward) {
-        assert(ttl > 0);
-        uint64_t blacklist[GOSSIP_OUTDEGREE + 1] = { lane.id }; // do not unicast back to sender
-        size_t   blacklist_size                  = 1;
-        for (size_t i = 0; i < GOSSIP_OUTDEGREE; i++) {
-            const gossip_peer_t* const peer = gossip_random_peer_except(cy, ts, blacklist_size, blacklist);
-            if (peer == NULL) {
-                break; // no (more) peers
-            }
-            blacklist[blacklist_size++] = peer->id; // do not unicast to the same peer twice
-            const cy_lane_t peer_lane   = { .id = peer->id, .p2p = peer->p2p, .prio = lane.prio };
-            const cy_err_t  err =
-              send_gossip_raw(cy, ts, (uint_fast8_t)(ttl - 1U), hash, evictions, lage, name, NULL, &peer_lane);
-            ON_ASYNC_ERROR_IF(cy, NULL, err);
+        if (should_forward && !local_won) {
+            gossip_epidemic_forward(cy, ts, ttl, hash, evictions, lage, name, lane);
         }
+        assert((!local_won) || (cy->list_gossip_urgent.tail != NULL));
     }
 }
 
