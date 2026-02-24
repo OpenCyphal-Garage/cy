@@ -45,7 +45,7 @@ struct test_platform_t final
     std::array<unsigned char, 19> last_multicast{};
 
     std::size_t                   p2p_count{ 0U };
-    std::array<unsigned char, 17> last_p2p{};
+    std::array<unsigned char, 18> last_p2p{};
     std::size_t                   p2p_extent{ 0U };
     bool                          fail_next_p2p_send{ false };
 };
@@ -235,13 +235,13 @@ void callback_capture_bind(cy_future_t* const fut, callback_capture_t& capture)
 
 cy_message_t* make_ack_message(test_platform_t* const self, const std::uint64_t tag, const std::uint64_t topic_hash)
 {
-    std::array<unsigned char, 17> wire{};
+    std::array<unsigned char, 18> wire{};
     wire[0] = 2U;
     for (std::size_t i = 0U; i < 8U; i++) {
-        wire.at(1U + i) = static_cast<unsigned char>((tag >> (i * 8U)) & 0xFFU);
+        wire.at(2U + i) = static_cast<unsigned char>((tag >> (i * 8U)) & 0xFFU);
     }
     for (std::size_t i = 0U; i < 8U; i++) {
-        wire.at(9U + i) = static_cast<unsigned char>((topic_hash >> (i * 8U)) & 0xFFU);
+        wire.at(10U + i) = static_cast<unsigned char>((topic_hash >> (i * 8U)) & 0xFFU);
     }
     return cy_test_message_make(&self->message_heap, wire.data(), wire.size());
 }

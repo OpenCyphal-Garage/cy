@@ -1869,6 +1869,8 @@ static gossip_peer_t* gossip_peer_find(cy_t* const cy, const uint64_t id)
     return NULL;
 }
 
+static_assert(GOSSIP_PEER_COUNT <= 64, "GOSSIP_PEER_COUNT is too large for an uint64_t bitmap");
+
 /// Find a non-stale random peer to gossip to whose ID is not in the list. NULL if no suitable peer found.
 static gossip_peer_t* gossip_random_peer_except(cy_t* const           cy,
                                                 const cy_us_t         now,
@@ -1876,8 +1878,7 @@ static gossip_peer_t* gossip_random_peer_except(cy_t* const           cy,
                                                 const uint64_t* const blacklist)
 {
     const cy_us_t last_seen_threshold = now - (GOSSIP_PERIOD_DEFAULT * 2); // older peers not eligible.
-    static_assert(GOSSIP_PEER_COUNT <= 64, "GOSSIP_PEER_COUNT is too large");
-    uint64_t eligible_map = 0;
+    uint64_t      eligible_map        = 0;
     for (size_t i = 0; i < GOSSIP_PEER_COUNT; i++) {
         if (cy->gossip_peers[i].last_seen < last_seen_threshold) {
             continue; // too old
@@ -1940,7 +1941,7 @@ static void gossip_epidemic_forward(cy_t* const        cy,
 {
     assert(original_ttl > 0);
     gossip_begin(cy);
-    const uint_fast8_t ttl                             = original_ttl - 1U;
+    const uint_fast8_t ttl                             = (uint_fast8_t)(original_ttl - 1U);
     uint64_t           blacklist[GOSSIP_OUTDEGREE + 1] = { lane.id }; // do not unicast back to sender
     size_t             blacklist_size                  = 1;
     for (size_t i = 0; i < GOSSIP_OUTDEGREE; i++) {
