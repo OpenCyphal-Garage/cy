@@ -128,9 +128,10 @@ typedef struct
 /// Some arbitrary implementation-specific hash, not seen on the wire, can be changed at will.
 static uint64_t gossip_dedup_hash(const uint64_t hash, const uint32_t evictions, const int_fast8_t log_age)
 {
-    const uint64_t other = evictions | (uint64_t)(log_age + 0x100000000LL);
-    // return rapidhash((uint64_t[2]){ hash,  other}, 16);
-    return hash ^ other; // Simple and good enough because the topic hash itself is high-entropy.
+    // This hash is fast to compute and is good enough because the topic hash itself is high-entropy.
+    // We could also use rapidhash64 shall the need arise but I don't see the point right now.
+    const uint64_t other = evictions | (uint64_t)(log_age + (int64_t)(1ULL << 56U));
+    return hash ^ other;
 }
 
 /// Every gossip is forwarded at most this many times to avoid loops.
@@ -162,8 +163,9 @@ struct cy_t
     cy_tree_t* topics_by_subject_id; // All except pinned, since they do not collide. May be empty.
 
     /// Topic lists for ordering.
-    cy_list_t list_implicit; ///< Most recently animated topic is at the head.
-    cy_list_t list_gossip;   ///< Gossip queue. Newest added at the head.
+    cy_list_t list_implicit;      ///< Most recently animated topic is at the head.
+    cy_list_t list_gossip;        ///< Gossip queue. Newest added at the head.
+    cy_list_t list_gossip_urgent; ///< Same but for unicast gossips.
 
     /// When a gossip is received, its topic name will be compared against the patterns,
     /// and if a match is found, a new subscription will be constructed automatically; if a new topic instance
@@ -249,10 +251,25 @@ static int64_t min_i64(const int64_t a, const int64_t b) { return (a < b) ? a : 
 static cy_us_t later(const cy_us_t a, const cy_us_t b) { return max_i64(a, b); }
 static cy_us_t sooner(const cy_us_t a, const cy_us_t b) { return min_i64(a, b); }
 
-static byte_t popcount(const uint64_t x) { return (byte_t)__builtin_popcountll(x); }
+/// Number of non-zero bits in [0,64].
+static byte_t popcount(const uint64_t x)
+{
+#if defined(__GNUC__) || defined(__clang__) || defined(__CC_ARM)
+    return (byte_t)__builtin_popcountll(x);
+#else
+#error "No known intrinsics available; please provide fallback emulation"
+#endif
+}
 
-/// Number of leading zeros in [0,64].
-static byte_t clz64(const uint64_t x) { return (x > 0) ? (byte_t)__builtin_clzll(x) : 64; }
+/// Number of leading zeros in [0,64]. No special casing for zero argument -- returns 64.
+static byte_t clz64(const uint64_t x)
+{
+#if defined(__GNUC__) || defined(__clang__) || defined(__CC_ARM)
+    return (x > 0) ? (byte_t)__builtin_clzll(x) : 64;
+#else
+#error "No known intrinsics available; please provide fallback emulation"
+#endif
+}
 
 /// Returns -1 if the argument is zero to allow contiguous comparison.
 static int_fast8_t log2_floor(const uint64_t x) { return (int_fast8_t)(63 - (int_fast8_t)clz64(x)); }
@@ -812,8 +829,9 @@ struct cy_topic_t
     wkv_node_t* index_name;
 
     /// All lists that this topic is a member of. Lists are used for ordering with fast constant-time insertion/removal.
-    cy_list_member_t list_implicit; ///< Last animated topic is at the end of the list.
-    cy_list_member_t list_gossip;   ///< Gossip queue. Add to the head, fetch from the tail.
+    cy_list_member_t list_implicit;      ///< Last animated topic is at the end of the list.
+    cy_list_member_t list_gossip;        ///< Gossip queue. Add to the head, fetch from the tail.
+    cy_list_member_t list_gossip_urgent; ///< Same but for unicast gossips.
 
     cy_t* cy;
 
@@ -1147,8 +1165,14 @@ static void schedule_gossip(cy_topic_t* const topic)
     }
 }
 
-/// Like schedule_gossip(), but moves the topic to be gossiped out of order.
-static void schedule_gossip_soon(cy_topic_t* const topic) { enlist_tail(&topic->cy->list_gossip, &topic->list_gossip); }
+/// Like schedule_gossip(), but moves the topic to be gossiped out of order,
+/// and schedules an immediate unicast gossip on next poll (gossips never sent from the current stack frame).
+/// This is safe to invoke multiple times on the same topic.
+static void schedule_gossip_urgent(cy_topic_t* const topic)
+{
+    enlist_tail(&topic->cy->list_gossip, &topic->list_gossip);               // move to the tail to prioritize
+    enlist_head(&topic->cy->list_gossip_urgent, &topic->list_gossip_urgent); // still FIFO here, already urgent
+}
 
 /// Parses the hexadecimal hash override suffix if present and valid. Example: "sensors/temperature#1a2b".
 static bool parse_hash_override(const cy_str_t s, uint64_t* const out)
@@ -1395,8 +1419,8 @@ static void topic_allocate(cy_topic_t* const topic, const uint32_t new_evictions
         topic_ensure_subscribed(topic);
 
         // Ensure the change is announced to the network.
-        // Schedule ordinary broadcast; that will happen eventually but it may not be soon.
-        schedule_gossip_soon(topic);
+        // We use urgent gossip even when nothing is repaired (clean new allocation) to check for conflicts.
+        schedule_gossip_urgent(topic);
 
         // Re-allocate the defeated topic with incremented eviction counter.
         if (that != NULL) {
@@ -1437,11 +1461,12 @@ static cy_err_t topic_new(cy_t* const        cy,
     if (topic == NULL) {
         return CY_ERR_MEMORY;
     }
-    topic->index_hash       = TREE_NULL;
-    topic->index_subject_id = TREE_NULL;
-    topic->index_name       = NULL;
-    topic->list_implicit    = LIST_MEMBER_NULL;
-    topic->list_gossip      = LIST_MEMBER_NULL;
+    topic->index_hash         = TREE_NULL;
+    topic->index_subject_id   = TREE_NULL;
+    topic->index_name         = NULL;
+    topic->list_implicit      = LIST_MEMBER_NULL;
+    topic->list_gossip        = LIST_MEMBER_NULL;
+    topic->list_gossip_urgent = LIST_MEMBER_NULL;
 
     topic->cy   = cy;
     topic->name = mem_alloc(cy, resolved_name.len + 1);
@@ -1737,8 +1762,7 @@ static void on_gossip_known_topic(cy_t* const       cy,
             // because the remote will have to move to catch up with us anyway, thus resolving the collision.
             // See https://github.com/OpenCyphal-Garage/cy/issues/28 and AcceptGossip() in Core.tla.
             gossip_begin(cy);
-            schedule_gossip_soon(mine);
-            // ON_ASYNC_ERROR_IF(cy, mine, send_gossip(cy, ts, mine, NULL, &lane));
+            schedule_gossip_urgent(mine);
         } else {
             assert((mine_lage <= lage) && ((mine_lage < lage) || (mine->evictions < evictions)));
             assert(mine_lage <= lage);
@@ -1791,8 +1815,7 @@ static void on_gossip_unknown_topic(cy_t* const     cy,
     // Everyone needs to publish their own new allocation and then we will pick max eviction counter of all.
     if (win) {
         gossip_begin(cy);
-        schedule_gossip_soon(mine);
-        // ON_ASYNC_ERROR_IF(cy, mine, send_gossip(cy, ts, mine, NULL, &lane));
+        schedule_gossip_urgent(mine);
     } else {
         topic_allocate(mine, mine->evictions + 1U, ts);
     }
@@ -3388,8 +3411,9 @@ cy_t* cy_new(cy_platform_t* const platform)
     cy->topics_by_hash       = NULL;
     cy->topics_by_subject_id = NULL;
 
-    cy->list_implicit = LIST_EMPTY;
-    cy->list_gossip   = LIST_EMPTY;
+    cy->list_implicit      = LIST_EMPTY;
+    cy->list_gossip        = LIST_EMPTY;
+    cy->list_gossip_urgent = LIST_EMPTY;
 
     wkv_init(&cy->subscribers_by_name, &wkv_realloc);
     cy->subscribers_by_name.context = cy;
@@ -3474,6 +3498,9 @@ cy_err_t cy_namespace_set(cy_t* const cy, const cy_str_t name_space) { return na
 static cy_err_t gossip_poll(cy_t* const cy, const cy_us_t now)
 {
     cy_err_t res = CY_OK;
+    // Process ordinary slow gossips first. It may seem counterintuitive but they are higher-priority than unicast
+    // gossips because they have a much wider reach. We only send at most a single gossip per poll.
+    // We could add a basic randomized rate-limit for urgent gossips here as well if needed to manage throughput.
     if (now >= cy->gossip_next) {
         cy_topic_t* const topic = LIST_TAIL(cy->list_gossip, cy_topic_t, list_gossip);
         if (topic != NULL) {
@@ -3482,6 +3509,23 @@ static cy_err_t gossip_poll(cy_t* const cy, const cy_us_t now)
             res = send_gossip_broadcast(cy, now, topic);
         }
         cy->gossip_next = now + dither_int(cy, cy->gossip_period, cy->gossip_period / 8);
+    } else if (cy->list_gossip_urgent.tail != NULL) {
+        cy_topic_t* const topic = LIST_TAIL(cy->list_gossip_urgent, cy_topic_t, list_gossip_urgent);
+        delist(&cy->list_gossip_urgent, &topic->list_gossip_urgent); // Delist regardless of outcome.
+        // Unicast epidemic gossips to each peer individually.
+        uint64_t blacklist[GOSSIP_OUTDEGREE] = { 0 };
+        size_t   blacklist_size              = 0;
+        for (size_t i = 0; (i < GOSSIP_OUTDEGREE) && (res == CY_OK); i++) { // Stop at first failure.
+            const gossip_peer_t* const peer = gossip_random_peer_except(cy, now, blacklist_size, blacklist);
+            if (peer == NULL) {
+                break; // no (more) peers
+            }
+            blacklist[blacklist_size++] = peer->id; // do not unicast to the same peer twice
+            const cy_lane_t lane        = { .id = peer->id, .p2p = peer->p2p, .prio = cy_prio_nominal };
+            res                         = send_gossip_unicast(cy, now, GOSSIP_TTL, topic, lane);
+        }
+    } else {
+        (void)0; // nothing to do this cycle, come back later
     }
     return res;
 }
