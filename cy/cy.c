@@ -77,6 +77,9 @@ struct cy_tree_t
 
 #define GOSSIP_PERIOD_DEFAULT (3 * MEGA)
 
+/// This limits the gossip poll rate, which should be rather high-frequency to avoid delaying epidemic gossips.
+#define SPIN_BLOCK_MAX (5 * KILO)
+
 /// Soft states associated with a remote node publishing on a topic or P2P will be discarded when stale for this long.
 #define SESSION_LIFETIME (60 * MEGA)
 
@@ -3618,10 +3621,10 @@ cy_err_t cy_spin_until(cy_t* const cy, const cy_us_t deadline)
     if (cy == NULL) {
         return CY_ERR_ARGUMENT;
     }
-    cy_us_t  now = 0;
+    cy_us_t  now = 0; // First run will return immediately to poll() asap.
     cy_err_t err = CY_OK;
     do {
-        const cy_us_t wait_deadline = sooner(deadline, cy->gossip_next);
+        const cy_us_t wait_deadline = sooner(sooner(deadline, cy->gossip_next), now + SPIN_BLOCK_MAX);
         err                         = cy->platform->vtable->spin(cy->platform, wait_deadline);
         if (err == CY_OK) {
             err = poll(cy, &now);

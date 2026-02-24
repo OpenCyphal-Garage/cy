@@ -142,6 +142,7 @@ typedef struct cy_platform_vtable_t
     /// If the deadline is in the past, update the event loop once without blocking and return.
     /// The cy_on_message() callback will be invoked from this function.
     /// This is the only platform function that is allowed to block.
+    /// May return additional error codes, which will be forwarded to the application as-is.
     cy_err_t (*spin)(cy_platform_t*, cy_us_t deadline);
 
     // === MISC ===
