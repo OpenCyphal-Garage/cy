@@ -1649,27 +1649,29 @@ static cy_topic_t* topic_subscribe_if_matching(cy_t* const       cy,
 /// The priority is taken from the lane if available, otherwise nominal.
 /// The caller can provide writer and/or lane; the gossip will be sent over all provided resources;
 /// if none given, does nothing and returns success.
-static cy_err_t send_gossip(const cy_t* const          cy,
-                            const cy_us_t              now,
-                            const uint_fast8_t         ttl,
-                            const cy_topic_t* const    topic,
-                            cy_subject_writer_t* const writer,
-                            const cy_lane_t* const     lane)
+static cy_err_t send_gossip_raw(const cy_t* const          cy,
+                                const cy_us_t              now,
+                                const uint_fast8_t         ttl,
+                                const uint64_t             hash,
+                                const uint32_t             evictions,
+                                const int_fast8_t          lage,
+                                const cy_str_t             name,
+                                cy_subject_writer_t* const writer,
+                                const cy_lane_t* const     lane)
 {
     if ((writer == NULL) && (lane == NULL)) {
         return CY_OK; // Early exit to avoid unnecessary serialization.
     }
     byte_t           buf[18 + CY_TOPIC_NAME_MAX];
-    const cy_str_t   name    = cy_topic_name(topic);
     const cy_bytes_t message = { .size = 18 + name.len, .data = buf };
     byte_t*          ptr     = buf;
     *ptr++                   = header_gossip;
     *ptr++                   = (byte_t)((writer == NULL) ? ttl : 0);
     *ptr++                   = 0;
     *ptr++                   = 0;
-    *ptr++                   = (byte_t)topic_lage(topic, now);
-    ptr                      = serialize_u64(ptr, topic->hash);
-    ptr                      = serialize_u32(ptr, topic->evictions);
+    *ptr++                   = (byte_t)lage;
+    ptr                      = serialize_u64(ptr, hash);
+    ptr                      = serialize_u32(ptr, evictions);
     *ptr++                   = (byte_t)name.len;
     memcpy(ptr, name.str, name.len);
     const cy_prio_t                   priority = (lane == NULL) ? cy_prio_nominal : lane->prio;
@@ -1685,18 +1687,36 @@ static cy_err_t send_gossip(const cy_t* const          cy,
     return err;
 }
 
+/// Only for fixed-rate periodic broadcasts over the dedicated broadcast subject.
 static cy_err_t send_gossip_broadcast(const cy_t* const cy, const cy_us_t now, const cy_topic_t* const topic)
 {
-    return send_gossip(cy, now, 0, topic, cy->broad_writer, NULL);
+    return send_gossip_raw(cy, //
+                           now,
+                           0,
+                           topic->hash,
+                           topic->evictions,
+                           topic_lage(topic, now),
+                           cy_topic_name(topic),
+                           cy->broad_writer,
+                           NULL);
 }
 
+/// For epidemic gossips and for scout responses.
 static cy_err_t send_gossip_unicast(const cy_t* const       cy,
                                     const cy_us_t           now,
                                     const uint_fast8_t      ttl,
                                     const cy_topic_t* const topic,
                                     const cy_lane_t         lane)
 {
-    return send_gossip(cy, now, ttl, topic, NULL, &lane);
+    return send_gossip_raw(cy, //
+                           now,
+                           ttl,
+                           topic->hash,
+                           topic->evictions,
+                           topic_lage(topic, now),
+                           cy_topic_name(topic),
+                           NULL,
+                           &lane);
 }
 
 /// The bottom-level scout transmission function. Scouts are always broadcast.
@@ -1984,7 +2004,9 @@ static void on_gossip(cy_t* const           cy,
             }
             blacklist[blacklist_size++] = peer->id; // do not unicast to the same peer twice
             const cy_lane_t peer_lane   = { .id = peer->id, .p2p = peer->p2p, .prio = lane.prio };
-            ON_ASYNC_ERROR_IF(cy, NULL, send_gossip_unicast(cy, ts, ttl - 1U, NULL, peer_lane)); // TODO topic helper
+            const cy_err_t  err =
+              send_gossip_raw(cy, ts, (uint_fast8_t)(ttl - 1U), hash, evictions, lage, name, NULL, &peer_lane);
+            ON_ASYNC_ERROR_IF(cy, NULL, err);
         }
     }
 }

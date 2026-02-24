@@ -128,7 +128,7 @@ utf8[<=CY_TOPIC_NAME_MAX] topic_name  # Has 1 byte length prefix. The name is no
 
 #### Type 8 (topic discovery scout)
 
-This is typically broadcast to let every node check if it has any matching topics. On match, responses are sent as the ordinary CRDT gossip message. Responses are usually unicast, but this is not required; the only requirement is that the requester should be likely to receive them.
+This is typically broadcast to let every node check if it has any matching topics. On match, responses are sent as the ordinary CRDT gossip message with zero TTL. Responses are usually unicast, but this is not required; the only requirement is that the requester should be likely to receive them.
 
 ```bash
 uint6 type
