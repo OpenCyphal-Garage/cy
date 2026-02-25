@@ -200,6 +200,9 @@ cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t deadline, const cy_
 /// retransmission, ack deduplication, and related bookkeeping are hidden from the application.
 /// The application will observe future failure if no subscriber confirms reception before the deadline.
 ///
+/// The first publication on a topic will assume success upon arrival of the first acknowledgement; the association set
+/// will be built in the background following the first publication; all subsequent publications will use & update it.
+///
 /// API for querying the tracked associations and per-remote delivery success may be added in the future since it is
 /// expected that some applications would benefit from the knowledge of which specific remotes accept their data.
 ///

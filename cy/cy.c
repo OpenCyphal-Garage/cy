@@ -1463,6 +1463,8 @@ static void topic_allocate(cy_topic_t* const topic, const uint32_t new_evictions
             topic_allocate(that, that->evictions + 1U, now);
         }
     } else {
+        // This is a tail call when tracing is disabled so we assume it to be optimized as such.
+        // Still, a better solution is to refactor this into a loop to avoid dependency on the optimization.
         topic_allocate(topic, new_evictions + 1U, now);
     }
 
