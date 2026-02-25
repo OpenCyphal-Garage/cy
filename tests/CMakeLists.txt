@@ -120,6 +120,11 @@ cy_gen_test_intrusive_matrix(test_intrusive_topic_allocation
         src/helpers.c
         platform_stubs/guarded_heap.c
 )
+cy_gen_test_intrusive_matrix(test_intrusive_topic_allocate_exhaustive
+        src/test_intrusive_topic_allocate_exhaustive.c
+        src/helpers.c
+        platform_stubs/guarded_heap.c
+)
 
 # API TESTS.
 # These tests only have access to the public API and are written in modern C++.
