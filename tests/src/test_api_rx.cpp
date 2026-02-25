@@ -323,6 +323,9 @@ void test_api_reliable_duplicate_acked_once_to_application()
     TEST_ASSERT_EQUAL_UINT8(header_msg_ack, static_cast<std::uint8_t>(platform.last_p2p[0] & 63U));
     TEST_ASSERT_EQUAL_size_t(0, cy_test_message_live_count());
 
+    cy_unsubscribe(sub);
+    TEST_ASSERT_EQUAL_UINT8(CY_OK, cy_spin_once(platform.cy));
+
     platform_deinit(&platform);
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&platform.message_heap));
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&platform.message_heap));
@@ -357,6 +360,9 @@ void test_api_ordered_subscriber_timeout_flush()
     TEST_ASSERT_EQUAL_UINT64(8U, capture.tags[0]);
     TEST_ASSERT_EQUAL_UINT64(9U, capture.tags[1]);
     TEST_ASSERT_EQUAL_size_t(0, cy_test_message_live_count());
+
+    cy_unsubscribe(sub);
+    TEST_ASSERT_EQUAL_UINT8(CY_OK, cy_spin_once(platform.cy));
 
     platform_deinit(&platform);
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&platform.message_heap));

@@ -3710,8 +3710,51 @@ cy_t* cy_new(cy_platform_t* const platform)
 
 void cy_destroy(cy_t* const cy)
 {
-    cy->platform->cy = NULL; // Unlink the platform in case it needs to be reused.
-    // TODO implement
+    if (cy == NULL) {
+        return;
+    }
+
+    // Ensure the user has cleaned up beforehand.
+    // We are unable to destroy user-owner objects like publishers/subscribers/futures because we don't own them.
+    assert(wkv_is_empty(&cy->subscribers_by_name));
+    assert(wkv_is_empty(&cy->subscribers_by_pattern));
+
+    // Remove global subject reader & writer.
+    if (cy->broad_reader != NULL) {
+        cy->platform->vtable->subject_reader_destroy(cy->platform, cy->broad_reader);
+        cy->broad_reader = NULL;
+    }
+    if (cy->broad_writer != NULL) {
+        cy->platform->vtable->subject_writer_destroy(cy->platform, cy->broad_writer);
+        cy->broad_writer = NULL;
+    }
+
+    // Unlink the platform in case it needs to be reused.
+    // Do this early such that callback paths cannot observe a half-destroyed instance through platform->cy.
+    cy_platform_t* const platform = cy->platform;
+    if (platform != NULL) {
+        platform->cy = NULL;
+    }
+
+    // There may still be implicit topics left, but they must have no user-owned entities attached anymore.
+    while (cy->topics_by_hash != NULL) {
+        cy_topic_t* const topic = cy_topic_iter_first(cy);
+        assert(topic != NULL);
+        assert(topic->pub_futures_by_tag == NULL); // Caller must destroy futures.
+        assert(topic->pub_count == 0);             // Caller must destroy publishers.
+        assert(topic->couplings == NULL);          // Caller must destroy subscribers.
+        assert(validate_is_implicit(topic));
+        topic_destroy(topic);
+    }
+    assert(wkv_is_empty(&cy->topics_by_name));
+
+    // Cleanup done, release the memory.
+    mem_free(cy, (void*)cy->home.str);
+    cy->home = str_empty;
+    mem_free(cy, (void*)cy->ns.str);
+    cy->ns = str_empty;
+
+    mem_free(cy, cy);
 }
 
 void cy_async_error_handler_set(cy_t* const cy, const cy_async_error_handler_t handler)

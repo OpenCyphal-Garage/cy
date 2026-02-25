@@ -161,25 +161,17 @@ static void fixture_init(fixture_t* const self)
 static void fixture_deinit(fixture_t* const self)
 {
     if (self->cy != NULL) {
-        while (self->cy->topics_by_hash != NULL) {
-            cy_topic_t* const topic = cy_topic_iter_first(self->cy);
-            TEST_ASSERT_NOT_NULL(topic);
-            topic->pub_count = 0U;
-            topic_destroy(topic);
+        TEST_ASSERT_TRUE(wkv_is_empty(&self->cy->subscribers_by_name));
+        TEST_ASSERT_TRUE(wkv_is_empty(&self->cy->subscribers_by_pattern));
+        TEST_ASSERT_NULL(self->cy->request_futures_by_tag);
+        TEST_ASSERT_NULL(self->cy->response_futures_by_tag);
+        for (cy_topic_t* topic = cy_topic_iter_first(self->cy); topic != NULL; topic = cy_topic_iter_next(topic)) {
+            TEST_ASSERT_EQUAL_UINT32(0U, topic->pub_count);
+            TEST_ASSERT_NULL(topic->pub_futures_by_tag);
+            TEST_ASSERT_NULL(topic->couplings);
         }
-        if (self->cy->broad_reader != NULL) {
-            self->vtable.subject_reader_destroy(&self->platform, self->cy->broad_reader);
-            self->cy->broad_reader = NULL;
-        }
-        if (self->cy->broad_writer != NULL) {
-            self->vtable.subject_writer_destroy(&self->platform, self->cy->broad_writer);
-            self->cy->broad_writer = NULL;
-        }
-        mem_free(self->cy, (void*)self->cy->home.str);
-        mem_free(self->cy, (void*)self->cy->ns.str);
-        self->vtable.realloc(&self->platform, self->cy, 0U);
-        self->platform.cy = NULL;
-        self->cy          = NULL;
+        cy_destroy(self->cy);
+        self->cy = NULL;
     }
     TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&self->heap));
     TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&self->heap));
@@ -222,6 +214,191 @@ static void assert_subject_index_unique(const cy_t* const cy)
         first = false;
         p     = cavl2_next_greater(p);
     }
+}
+
+typedef struct
+{
+    cy_future_t base;
+    bool        done;
+    cy_tree_t** index_owner;
+    size_t*     cancel_count;
+    size_t*     finalize_count;
+} fake_future_t;
+
+static cy_future_status_t fake_future_status(const cy_future_t* const base)
+{
+    const fake_future_t* const self = (const fake_future_t*)base;
+    return self->done ? cy_future_success : cy_future_pending;
+}
+
+static size_t fake_future_result(cy_future_t* const base, const size_t storage_size, void* const storage)
+{
+    (void)base;
+    (void)storage_size;
+    (void)storage;
+    return 0U;
+}
+
+static void fake_future_cancel(cy_future_t* const base)
+{
+    fake_future_t* const self = (fake_future_t*)base;
+    self->done                = true;
+    if (self->cancel_count != NULL) {
+        (*self->cancel_count)++;
+    }
+}
+
+static void fake_future_timeout(cy_future_t* const base, const cy_us_t now)
+{
+    (void)base;
+    (void)now;
+}
+
+static void fake_future_finalize(cy_future_t* const base)
+{
+    fake_future_t* const self = (fake_future_t*)base;
+    if ((self->index_owner != NULL) && cavl2_is_inserted(*self->index_owner, &self->base.index)) {
+        cavl2_remove(self->index_owner, &self->base.index);
+    }
+    if (self->finalize_count != NULL) {
+        (*self->finalize_count)++;
+    }
+}
+
+static const cy_future_vtable_t fake_future_vtable = { .status   = fake_future_status,
+                                                       .result   = fake_future_result,
+                                                       .cancel   = fake_future_cancel,
+                                                       .timeout  = fake_future_timeout,
+                                                       .finalize = fake_future_finalize };
+
+static fake_future_t* make_fake_future(cy_t* const       cy,
+                                       size_t* const     cancel_count,
+                                       size_t* const     finalize_count,
+                                       const bool        done,
+                                       const uint64_t    key,
+                                       cy_tree_t** const index)
+{
+    fake_future_t* const out = (fake_future_t*)future_new(cy, &fake_future_vtable, sizeof(fake_future_t));
+    if (out != NULL) {
+        out->done           = done;
+        out->index_owner    = index;
+        out->cancel_count   = cancel_count;
+        out->finalize_count = finalize_count;
+        TEST_ASSERT_TRUE(future_index_insert(&out->base, index, key));
+    }
+    return out;
+}
+
+static void test_cy_destroy_null_is_noop(void) { cy_destroy(NULL); }
+
+static void test_cy_destroy_empty_instance_cleans_all_resources(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+    TEST_ASSERT_TRUE(fix.platform.cy == fix.cy);
+
+    cy_destroy(fix.cy);
+    fix.cy = NULL;
+
+    TEST_ASSERT_NULL(fix.platform.cy);
+    TEST_ASSERT_EQUAL_size_t(1U, fix.subject_reader_destroy_count);
+    TEST_ASSERT_EQUAL_size_t(1U, fix.subject_writer_destroy_count);
+    fixture_deinit(&fix);
+}
+
+static void test_cy_destroy_after_user_unsubscribes_and_spins(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    static const char* const topic_name = "destroy/deferred/subscriber/*";
+    cy_subscriber_t* const   sub        = cy_subscribe(fix.cy, cy_str(topic_name), 128U);
+    TEST_ASSERT_NOT_NULL(sub);
+    TEST_ASSERT_FALSE(wkv_is_empty(&fix.cy->subscribers_by_name));
+    TEST_ASSERT_FALSE(wkv_is_empty(&fix.cy->subscribers_by_pattern));
+
+    cy_unsubscribe(sub); // Deferred destruction event is now pending.
+    TEST_ASSERT_FALSE(wkv_is_empty(&fix.cy->subscribers_by_name));
+    TEST_ASSERT_FALSE(wkv_is_empty(&fix.cy->subscribers_by_pattern));
+
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(fix.cy));
+    TEST_ASSERT_TRUE(wkv_is_empty(&fix.cy->subscribers_by_name));
+    TEST_ASSERT_TRUE(wkv_is_empty(&fix.cy->subscribers_by_pattern));
+
+    cy_destroy(fix.cy);
+    fix.cy = NULL;
+
+    TEST_ASSERT_NULL(fix.platform.cy);
+    TEST_ASSERT_EQUAL_size_t(1U, fix.subject_reader_destroy_count); // broadcast reader only
+    TEST_ASSERT_EQUAL_size_t(1U, fix.subject_writer_destroy_count); // broadcast writer
+    fixture_deinit(&fix);
+}
+
+static void test_cy_destroy_after_user_destroys_futures(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    cy_topic_t* const topic =
+      fixture_make_topic(&fix, "destroy/futures/topic", UINT64_C(0x1000000000000B00), 0U, LAGE_MIN);
+    TEST_ASSERT_NOT_NULL(topic);
+
+    size_t cancel_topic      = 0U;
+    size_t finalize_topic    = 0U;
+    size_t cancel_request    = 0U;
+    size_t finalize_request  = 0U;
+    size_t cancel_response   = 0U;
+    size_t finalize_response = 0U;
+
+    fake_future_t* const fut_topic =
+      make_fake_future(fix.cy, &cancel_topic, &finalize_topic, false, UINT64_C(0xA001), &topic->pub_futures_by_tag);
+    fake_future_t* const fut_request = make_fake_future(
+      fix.cy, &cancel_request, &finalize_request, false, UINT64_C(0xA002), &fix.cy->request_futures_by_tag);
+    fake_future_t* const fut_response = make_fake_future(
+      fix.cy, &cancel_response, &finalize_response, true, UINT64_C(0xA003), &fix.cy->response_futures_by_tag);
+    TEST_ASSERT_NOT_NULL(fut_topic);
+    TEST_ASSERT_NOT_NULL(fut_request);
+    TEST_ASSERT_NOT_NULL(fut_response);
+
+    cy_future_destroy(&fut_topic->base);
+    cy_future_destroy(&fut_request->base);
+    cy_future_destroy(&fut_response->base);
+    TEST_ASSERT_NULL(topic->pub_futures_by_tag);
+    TEST_ASSERT_NULL(fix.cy->request_futures_by_tag);
+    TEST_ASSERT_NULL(fix.cy->response_futures_by_tag);
+
+    cy_destroy(fix.cy);
+    fix.cy = NULL;
+
+    TEST_ASSERT_NULL(fix.platform.cy);
+    TEST_ASSERT_EQUAL_size_t(1U, cancel_topic);
+    TEST_ASSERT_EQUAL_size_t(1U, finalize_topic);
+    TEST_ASSERT_EQUAL_size_t(1U, cancel_request);
+    TEST_ASSERT_EQUAL_size_t(1U, finalize_request);
+    TEST_ASSERT_EQUAL_size_t(0U, cancel_response); // already materialized
+    TEST_ASSERT_EQUAL_size_t(1U, finalize_response);
+    fixture_deinit(&fix);
+}
+
+static void test_cy_destroy_handles_missing_broadcast_handles(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    TEST_ASSERT_NOT_NULL(fix.cy->broad_reader);
+    TEST_ASSERT_NOT_NULL(fix.cy->broad_writer);
+    fix.vtable.subject_reader_destroy(&fix.platform, fix.cy->broad_reader);
+    fix.cy->broad_reader = NULL;
+    fix.vtable.subject_writer_destroy(&fix.platform, fix.cy->broad_writer);
+    fix.cy->broad_writer = NULL;
+
+    cy_destroy(fix.cy);
+    fix.cy = NULL;
+
+    TEST_ASSERT_NULL(fix.platform.cy);
+    TEST_ASSERT_EQUAL_size_t(1U, fix.subject_reader_destroy_count);
+    TEST_ASSERT_EQUAL_size_t(1U, fix.subject_writer_destroy_count);
+    fixture_deinit(&fix);
 }
 
 static void test_topic_new_rejects_invalid_name(void)
@@ -384,6 +561,8 @@ static void test_on_gossip_known_topic_divergence_paths(void)
     schedule_gossip(t2);
     TEST_ASSERT_FALSE(on_gossip_known_topic(fix.cy, 70 * MEGA, t1, t1->evictions, topic_lage(t1, 70 * MEGA)));
     TEST_ASSERT_TRUE(fix.cy->list_gossip.head == &t1->list_gossip);
+    t1->pub_count = 0U;
+    t2->pub_count = 0U;
     fixture_deinit(&fix);
 }
 
@@ -546,6 +725,11 @@ void tearDown(void) {}
 int main(void)
 {
     UNITY_BEGIN();
+    RUN_TEST(test_cy_destroy_null_is_noop);
+    RUN_TEST(test_cy_destroy_empty_instance_cleans_all_resources);
+    RUN_TEST(test_cy_destroy_after_user_unsubscribes_and_spins);
+    RUN_TEST(test_cy_destroy_after_user_destroys_futures);
+    RUN_TEST(test_cy_destroy_handles_missing_broadcast_handles);
     RUN_TEST(test_topic_new_rejects_invalid_name);
     RUN_TEST(test_topic_new_error_oom_topic_object);
     RUN_TEST(test_topic_new_error_oom_topic_name);

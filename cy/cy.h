@@ -439,6 +439,9 @@ cy_t* cy_new(cy_platform_t* const platform);
 
 /// Cy will clean up all resources obtained from the platform, such as memory and readers/writers, but will not
 /// destroy the platform instance itself; the application is responsible for that.
+///
+/// The caller MUST ensure that all user-owned objects referencing this Cy instance are destroyed beforehand
+/// (such as publishers, subscribers, futures, etc).
 void cy_destroy(cy_t* const cy);
 
 /// The async error handler is used to report errors occurring in Cy asynchronously with API invocations,

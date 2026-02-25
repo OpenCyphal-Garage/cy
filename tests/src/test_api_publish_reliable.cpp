@@ -1370,6 +1370,9 @@ void test_send_message_ack_error_path()
     TEST_ASSERT_EQUAL_size_t(p2p_count_before + 2U, platform.p2p_count);
     TEST_ASSERT_FALSE(platform.fail_next_p2p_send);
 
+    cy_unsubscribe(sub);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
+
     test_end(platform);
 }
 
