@@ -519,6 +519,56 @@ static void test_topic_new_error_duplicate_hash_rolls_back_name_index(void)
     fixture_deinit(&fix);
 }
 
+static void test_topic_new_pinned_starts_implicit_and_not_gossiped(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    const uint64_t    pinned_hash = UINT64_C(0x120);
+    cy_topic_t* const topic       = fixture_make_topic(&fix, "topic/new/pinned/implicit", pinned_hash, 0U, LAGE_MIN);
+    TEST_ASSERT_TRUE(is_pinned(topic->hash));
+    TEST_ASSERT_TRUE(topic_validate_is_implicit(topic));
+    TEST_ASSERT_TRUE(is_implicit(topic));
+    TEST_ASSERT_TRUE(fix.cy->list_implicit.head == &topic->list_implicit);
+    TEST_ASSERT_NULL(topic_find_by_subject_id(fix.cy, (uint32_t)pinned_hash));
+    TEST_ASSERT_FALSE(is_listed(&fix.cy->list_gossip, &topic->list_gossip));
+    TEST_ASSERT_FALSE(is_listed(&fix.cy->list_gossip_urgent, &topic->list_gossip_urgent));
+
+    schedule_gossip_urgent(topic);
+    TEST_ASSERT_FALSE(is_listed(&fix.cy->list_gossip, &topic->list_gossip));
+    TEST_ASSERT_FALSE(is_listed(&fix.cy->list_gossip_urgent, &topic->list_gossip_urgent));
+    fixture_deinit(&fix);
+}
+
+static void test_pinned_topic_sync_implicit_transitions_without_gossip(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    cy_topic_t* const topic = fixture_make_topic(&fix, "topic/pinned/sync", UINT64_C(0x121), 0U, LAGE_MIN);
+    TEST_ASSERT_TRUE(is_pinned(topic->hash));
+    TEST_ASSERT_TRUE(is_implicit(topic));
+
+    topic->pub_count = 1U;
+    topic_sync_implicit(topic);
+    TEST_ASSERT_FALSE(topic_validate_is_implicit(topic));
+    TEST_ASSERT_FALSE(is_implicit(topic));
+    TEST_ASSERT_FALSE(is_listed(&fix.cy->list_gossip, &topic->list_gossip));
+    TEST_ASSERT_FALSE(is_listed(&fix.cy->list_gossip_urgent, &topic->list_gossip_urgent));
+    schedule_gossip(topic);
+    schedule_gossip_urgent(topic);
+    TEST_ASSERT_FALSE(is_listed(&fix.cy->list_gossip, &topic->list_gossip));
+    TEST_ASSERT_FALSE(is_listed(&fix.cy->list_gossip_urgent, &topic->list_gossip_urgent));
+
+    topic->pub_count = 0U;
+    topic_sync_implicit(topic);
+    TEST_ASSERT_TRUE(topic_validate_is_implicit(topic));
+    TEST_ASSERT_TRUE(is_implicit(topic));
+    TEST_ASSERT_FALSE(is_listed(&fix.cy->list_gossip, &topic->list_gossip));
+    TEST_ASSERT_FALSE(is_listed(&fix.cy->list_gossip_urgent, &topic->list_gossip_urgent));
+    fixture_deinit(&fix);
+}
+
 static void test_left_wins_and_topic_merge_lage(void)
 {
     fixture_t fix;
@@ -737,6 +787,8 @@ int main(void)
     RUN_TEST(test_topic_new_error_oom_name_index_node);
     RUN_TEST(test_topic_new_error_duplicate_name);
     RUN_TEST(test_topic_new_error_duplicate_hash_rolls_back_name_index);
+    RUN_TEST(test_topic_new_pinned_starts_implicit_and_not_gossiped);
+    RUN_TEST(test_pinned_topic_sync_implicit_transitions_without_gossip);
     RUN_TEST(test_left_wins_and_topic_merge_lage);
     RUN_TEST(test_on_gossip_known_topic_divergence_paths);
     RUN_TEST(test_on_gossip_unknown_topic_collision_paths);
