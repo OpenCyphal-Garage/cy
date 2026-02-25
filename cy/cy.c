@@ -1307,7 +1307,9 @@ static cy_topic_t* topic_find_by_subject_id(const cy_t* const cy, const uint32_t
     return topic;
 }
 
-static cy_err_t topic_ensure_subject_writer(cy_topic_t* const topic)
+// Subject writers are created lazily and never destroyed until the topic is finalized.
+// This avoids state loss on the platform side if the application opts to publish intermittently.
+static cy_err_t topic_sync_subject_writer(cy_topic_t* const topic)
 {
     if (topic->pub_writer == NULL) {
         cy_t* const    cy         = topic->cy;
@@ -1323,8 +1325,10 @@ static cy_err_t topic_ensure_subject_writer(cy_topic_t* const topic)
 
 static size_t subscription_extent_w_overhead(const cy_topic_t* const topic);
 
-// If a subscription is needed but there is no subject reader, this function will attempt to create one.
-static void topic_ensure_subscribed(cy_topic_t* const topic) // TODO rename, invoke from cy_unsubscribe()
+// If subscribers exist but there is no subject reader, this function will attempt to create one.
+// Similarly, if no subscribers exist but there is a subject reader, it will be destroyed.
+// We cannot keep an unused reader alive because it will feed data from the network which may be disruptive.
+static void topic_sync_subject_reader(cy_topic_t* const topic)
 {
     cy_t* const    cy         = topic->cy;
     const uint32_t subject_id = topic_subject_id(topic);
@@ -1445,7 +1449,7 @@ static void topic_allocate(cy_topic_t* const topic, const uint32_t new_evictions
         (void)self;
 
         // The subject reader, if needed, must be created eagerly. If not needed it will be destroyed here.
-        topic_ensure_subscribed(topic);
+        topic_sync_subject_reader(topic);
 
         // Ensure the change is announced to the network.
         // We use urgent gossip even when nothing is repaired (clean new allocation) to check for conflicts
@@ -1671,7 +1675,7 @@ static cy_topic_t* topic_subscribe_if_matching(cy_t* const       cy,
         return NULL;
     }
     // Create the transport subscription once at the end, considering the parameters from all subscribers.
-    topic_ensure_subscribed(topic);
+    topic_sync_subject_reader(topic);
     return topic;
 }
 
@@ -1829,8 +1833,8 @@ static bool on_gossip_known_topic(cy_t* const       cy,
         }
         result = win;
     } else {
-        schedule_gossip(mine);         // suppress next gossip -- the network just heard about it
-        topic_ensure_subscribed(mine); // use this opportunity to repair the subscription if broken
+        schedule_gossip(mine);           // suppress next gossip -- the network just heard about it
+        topic_sync_subject_reader(mine); // use this opportunity to repair the subscription if broken
     }
     topic_merge_lage(mine, ts, lage);
     return result;
@@ -2198,7 +2202,7 @@ static cy_err_t do_publish_impl(cy_publisher_t* const  pub,
     // and it may fail to be created at the time of reallocation, so we'd have to retry anyway.
     // The subject writer is a very lightweight entity that is super cheap to construct (constant complexity expected)
     // so this is not expected to be a problem.
-    const cy_err_t err = topic_ensure_subject_writer(topic);
+    const cy_err_t err = topic_sync_subject_writer(topic);
     if (err != CY_OK) {
         return err;
     }
@@ -3245,7 +3249,7 @@ static void* wkv_cb_couple_new_subscription(const wkv_event_t evt)
             cy->platform->vtable->subject_reader_destroy(cy->platform, topic->sub_reader);
             topic->sub_reader = NULL;
         }
-        topic_ensure_subscribed(topic);
+        topic_sync_subject_reader(topic);
     }
     return (CY_OK == res) ? NULL : "";
 }
@@ -3415,7 +3419,7 @@ static void topic_decouple_subscriber_root(cy_topic_t* const topic, const subscr
             cpl = &this->next;
         }
     }
-    topic_ensure_subscribed(topic);
+    topic_sync_subject_reader(topic);
     topic_sync_implicit(topic); // topics are destroyed lazily to avoid premature state loss
 }
 
@@ -3786,8 +3790,8 @@ static void gossip_poll(cy_t* const cy, const cy_us_t now)
     if (now >= cy->gossip_next) {
         cy_topic_t* const topic = LIST_TAIL(cy->list_gossip, cy_topic_t, list_gossip);
         if (topic != NULL) {
-            topic_ensure_subscribed(topic); // use this opportunity to repair the subscription if broken
-            schedule_gossip(topic);         // reschedule even if failed -- some other node might pick up the gossip
+            topic_sync_subject_reader(topic); // use this opportunity to repair the subscription if broken
+            schedule_gossip(topic);           // reschedule even if failed -- some other node might pick up the gossip
             const cy_err_t res = send_gossip_broadcast(cy, now, topic);
             ON_ASYNC_ERROR_IF(cy, topic, res);
             // Remember the freshly transmitted gossip to break cycles if/when we hear it back through epidemics.
