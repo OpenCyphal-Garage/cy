@@ -224,6 +224,125 @@ static void assert_subject_index_unique(const cy_t* const cy)
     }
 }
 
+static void test_topic_new_rejects_invalid_name(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    cy_topic_t  fake  = { 0 };
+    cy_topic_t* topic = &fake;
+    TEST_ASSERT_EQUAL_INT(CY_ERR_NAME,
+                          topic_new(fix.cy, &topic, (cy_str_t){ .len = 0U, .str = "" }, UINT64_C(0x101), 0U, LAGE_MIN));
+    TEST_ASSERT_NULL(topic);
+
+    char overlong[CY_TOPIC_NAME_MAX + 2U];
+    memset(overlong, 'a', sizeof(overlong));
+    overlong[sizeof(overlong) - 1U] = '\0';
+
+    topic = &fake;
+    TEST_ASSERT_EQUAL_INT(
+      CY_ERR_NAME,
+      topic_new(
+        fix.cy, &topic, (cy_str_t){ .len = CY_TOPIC_NAME_MAX + 1U, .str = overlong }, UINT64_C(0x102), 0U, LAGE_MIN));
+    TEST_ASSERT_NULL(topic);
+    TEST_ASSERT_EQUAL_size_t(0U, cavl_count(fix.cy->topics_by_hash));
+    fixture_deinit(&fix);
+}
+
+static void test_topic_new_error_oom_topic_object(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+    fix.fail_alloc_size  = sizeof(cy_topic_t);
+    fix.fail_alloc_count = 1U;
+
+    cy_topic_t  fake = { 0 };
+    cy_topic_t* out  = &fake;
+    TEST_ASSERT_EQUAL_INT(CY_ERR_MEMORY,
+                          topic_new(fix.cy, &out, cy_str("topic/new/oom/topic-object"), UINT64_C(0x110), 0U, LAGE_MIN));
+    TEST_ASSERT_NULL(out);
+    TEST_ASSERT_EQUAL_size_t(0U, cavl_count(fix.cy->topics_by_hash));
+    TEST_ASSERT_NULL(cy_topic_find_by_name(fix.cy, cy_str("topic/new/oom/topic-object")));
+    fixture_deinit(&fix);
+}
+
+static void test_topic_new_error_oom_topic_name(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    static const char* const name = "topic/new/oom/topic-name";
+    fix.fail_alloc_size           = strlen(name) + 1U;
+    fix.fail_alloc_count          = 1U;
+
+    cy_topic_t  fake = { 0 };
+    cy_topic_t* out  = &fake;
+    TEST_ASSERT_EQUAL_INT(CY_ERR_MEMORY, topic_new(fix.cy, &out, cy_str(name), UINT64_C(0x111), 0U, LAGE_MIN));
+    TEST_ASSERT_NULL(out);
+    TEST_ASSERT_EQUAL_size_t(0U, cavl_count(fix.cy->topics_by_hash));
+    TEST_ASSERT_NULL(cy_topic_find_by_name(fix.cy, cy_str(name)));
+    fixture_deinit(&fix);
+}
+
+static void test_topic_new_error_oom_name_index_node(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    static const char* const name = "topic/new/oom/name-index";
+    fix.fail_alloc_count          = 3U; // topic object, topic name, then WKV node for topics_by_name
+
+    cy_topic_t  fake = { 0 };
+    cy_topic_t* out  = &fake;
+    TEST_ASSERT_EQUAL_INT(CY_ERR_MEMORY, topic_new(fix.cy, &out, cy_str(name), UINT64_C(0x112), 0U, LAGE_MIN));
+    TEST_ASSERT_NULL(out);
+    TEST_ASSERT_EQUAL_size_t(0U, cavl_count(fix.cy->topics_by_hash));
+    TEST_ASSERT_NULL(cy_topic_find_by_name(fix.cy, cy_str(name)));
+    fixture_deinit(&fix);
+}
+
+static void test_topic_new_error_duplicate_name(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    static const char* const name = "topic/new/error/dup-name";
+    const uint64_t           hash = topic_hash(cy_str(name));
+    cy_topic_t* const        mine = fixture_make_topic(&fix, name, hash, 0U, LAGE_MIN);
+    TEST_ASSERT_NOT_NULL(mine);
+
+    cy_topic_t* out = mine;
+    TEST_ASSERT_EQUAL_INT(CY_ERR_NAME, topic_new(fix.cy, &out, cy_str(name), hash, 0U, LAGE_MIN));
+    TEST_ASSERT_NULL(out);
+    TEST_ASSERT_TRUE(cy_topic_find_by_name(fix.cy, cy_str(name)) == mine);
+    TEST_ASSERT_EQUAL_size_t(1U, cavl_count(fix.cy->topics_by_hash));
+    fixture_deinit(&fix);
+}
+
+static void test_topic_new_error_duplicate_hash_rolls_back_name_index(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    static const char* const existing_name = "topic/new/error/dup-hash/existing";
+    static const char* const failing_name  = "topic/new/error/dup-hash/failing";
+    static const uint64_t    hash          = UINT64_C(0x130);
+
+    cy_topic_t* const mine = fixture_make_topic(&fix, existing_name, hash, 0U, LAGE_MIN);
+    TEST_ASSERT_NOT_NULL(mine);
+
+    cy_topic_t* out = mine;
+    TEST_ASSERT_EQUAL_INT(CY_ERR_NAME, topic_new(fix.cy, &out, cy_str(failing_name), hash, 0U, LAGE_MIN));
+    TEST_ASSERT_NULL(out);
+    const wkv_node_t* const existing_node = wkv_get(&fix.cy->topics_by_name, cy_str(existing_name));
+    TEST_ASSERT_NOT_NULL(existing_node);
+    TEST_ASSERT_TRUE(existing_node->value == mine);
+    TEST_ASSERT_NULL(wkv_get(&fix.cy->topics_by_name, cy_str(failing_name)));
+    TEST_ASSERT_TRUE(cy_topic_find_by_hash(fix.cy, hash) == mine);
+    TEST_ASSERT_EQUAL_size_t(1U, cavl_count(fix.cy->topics_by_hash));
+    fixture_deinit(&fix);
+}
+
 static void test_left_wins_and_topic_merge_lage(void)
 {
     fixture_t fix;
@@ -427,6 +546,12 @@ void tearDown(void) {}
 int main(void)
 {
     UNITY_BEGIN();
+    RUN_TEST(test_topic_new_rejects_invalid_name);
+    RUN_TEST(test_topic_new_error_oom_topic_object);
+    RUN_TEST(test_topic_new_error_oom_topic_name);
+    RUN_TEST(test_topic_new_error_oom_name_index_node);
+    RUN_TEST(test_topic_new_error_duplicate_name);
+    RUN_TEST(test_topic_new_error_duplicate_hash_rolls_back_name_index);
     RUN_TEST(test_left_wins_and_topic_merge_lage);
     RUN_TEST(test_on_gossip_known_topic_divergence_paths);
     RUN_TEST(test_on_gossip_unknown_topic_collision_paths);

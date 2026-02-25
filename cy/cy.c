@@ -1460,7 +1460,9 @@ static cy_err_t topic_new(cy_t* const        cy,
                           const uint32_t     evictions,
                           const int_fast8_t  lage)
 {
-    // TODO error handling is broken
+    if (out_topic != NULL) {
+        *out_topic = NULL;
+    }
     if ((resolved_name.len == 0) || (resolved_name.len > CY_TOPIC_NAME_MAX)) {
         return CY_ERR_NAME;
     }
@@ -1468,6 +1470,7 @@ static cy_err_t topic_new(cy_t* const        cy,
     if (topic == NULL) {
         return CY_ERR_MEMORY;
     }
+    cy_err_t err              = CY_ERR_MEMORY;
     topic->index_hash         = TREE_NULL;
     topic->index_subject_id   = TREE_NULL;
     topic->index_name         = NULL;
@@ -1478,7 +1481,7 @@ static cy_err_t topic_new(cy_t* const        cy,
     topic->cy   = cy;
     topic->name = mem_alloc(cy, resolved_name.len + 1);
     if (topic->name == NULL) {
-        goto oom;
+        goto fail;
     }
     memcpy(topic->name, resolved_name.str, resolved_name.len);
     topic->name[resolved_name.len] = '\0';
@@ -1507,17 +1510,23 @@ static cy_err_t topic_new(cy_t* const        cy,
 
     topic->user_context = CY_USER_CONTEXT_EMPTY;
 
-    // Insert the new topic into the name and hash indexes. TODO ensure uniqueness.
+    // Insert the new topic into the name and hash indexes.
     topic->index_name = wkv_set(&cy->topics_by_name, resolved_name);
     if (topic->index_name == NULL) {
-        goto oom;
+        goto fail;
     }
-    assert(topic->index_name->value == NULL); // Cannot invoke this if such topic already exists!
+    if (topic->index_name->value != NULL) {
+        topic->index_name = NULL; // The node belongs to an existing topic, we must not alter it.
+        err               = CY_ERR_NAME;
+        goto fail;
+    }
     topic->index_name->value = topic;
     const cy_tree_t* const res_tree =
       cavl2_find_or_insert(&cy->topics_by_hash, &topic->hash, &cavl_comp_topic_hash, topic, &cavl2_trivial_factory);
-    assert(res_tree == &topic->index_hash); // Cannot invoke this if such topic already exists!
-    (void)res_tree;
+    if (res_tree != &topic->index_hash) {
+        err = CY_ERR_NAME;
+        goto fail;
+    }
 
     // Ensure the topic is in the gossip index. This is needed for allocation.
     // This does not apply to pinned topics, which are never gossiped.
@@ -1541,9 +1550,16 @@ static cy_err_t topic_new(cy_t* const        cy,
     CY_TRACE(cy, "✨ %s topic_count=%zu", topic_repr(topic).str, cavl_count(cy->topics_by_hash));
     return 0;
 
-oom: // TODO correct deinitialization
+fail:
+    if ((topic->index_name != NULL) && (topic->index_name->value == topic)) {
+        topic->index_name->value = NULL;
+        wkv_del(&cy->topics_by_name, topic->index_name);
+        topic->index_name = NULL;
+    }
+    mem_free(cy, topic->name);
+    topic->name = NULL;
     mem_free(cy, topic);
-    return CY_ERR_NAME;
+    return err;
 }
 
 static cy_err_t topic_ensure(cy_t* const cy, cy_topic_t** const out_topic, const cy_str_t resolved_name)
