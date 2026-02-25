@@ -14,6 +14,8 @@ Use Clang-Format to format the code when done editing.
 
 Refer to the CI workflow files and `CMakeLists.txt` for the recommended practices on how to build and run the test suite.
 
+The `tools/` directory in the project root contains various utilities that can be helpful for testing and verification. In particular, there is a tool that generates topic names that collide in the subject-ID space, which can be used for testing the correctness of the collision resolution behavior of the consensus protocol.
+
 For coverage measurement, enable CMake option `COVERAGE`, build and run the tests, then build the `coverage` target to generate the report:
 
 ```bash
