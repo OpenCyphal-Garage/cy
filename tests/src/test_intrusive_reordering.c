@@ -424,6 +424,40 @@ static void test_reordering_late_after_timeout(void)
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&env.fixture.heap));
 }
 
+/// Regression: a delayed older tag may linearize to a wrapped high value. It must be dropped as late, not treated
+/// as a huge forward jump that triggers resequencing.
+static void test_reordering_backward_underflow_is_late_drop(void)
+{
+    reorder_env_t env;
+    reorder_env_init(&env);
+
+    for (uint64_t tag = 5U; tag <= 15U; tag++) {
+        TEST_ASSERT_TRUE(push_message(&env, tag, (cy_us_t)tag, 0xA0U));
+    }
+    TEST_ASSERT_EQUAL_size_t(11, env.capture.count);
+    TEST_ASSERT_EQUAL_UINT64(4U, env.rr.tag_baseline);
+    TEST_ASSERT_EQUAL_UINT64(11U, env.rr.last_ejected_lin_tag);
+    TEST_ASSERT_EQUAL_size_t(0, env.rr.interned_count);
+
+    const uint64_t baseline_before = env.rr.tag_baseline;
+    const uint64_t last_before     = env.rr.last_ejected_lin_tag;
+
+    TEST_ASSERT_FALSE(push_message(&env, 3U, 200, 0xB0U));
+    TEST_ASSERT_EQUAL_size_t(11, env.capture.count);
+    TEST_ASSERT_EQUAL_UINT64(baseline_before, env.rr.tag_baseline);
+    TEST_ASSERT_EQUAL_UINT64(last_before, env.rr.last_ejected_lin_tag);
+    TEST_ASSERT_EQUAL_size_t(0, env.rr.interned_count);
+
+    TEST_ASSERT_TRUE(push_message(&env, 16U, 201, 0xC0U));
+    TEST_ASSERT_EQUAL_size_t(12, env.capture.count);
+    TEST_ASSERT_EQUAL_UINT64(16U, env.capture.tags[11]);
+    TEST_ASSERT_EQUAL_size_t(0, env.rr.interned_count);
+
+    reorder_env_cleanup(&env);
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&env.fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&env.fixture.heap));
+}
+
 /// Capacity overflow triggers resequencing: if a message is too far ahead, all interned messages are ejected
 /// and the state is reset. The resequenced message must NOT be ejected immediately because we don't know
 /// whether older siblings are about to arrive (see the comment in reordering_resequence).
@@ -938,6 +972,7 @@ int main(void)
     RUN_TEST(test_reordering_first_arrival_timeout_without_older);
     RUN_TEST(test_reordering_head_of_line_change_rearms_timeout);
     RUN_TEST(test_reordering_late_after_timeout);
+    RUN_TEST(test_reordering_backward_underflow_is_late_drop);
     RUN_TEST(test_reordering_capacity_overflow_resequence);
     RUN_TEST(test_reordering_capacity_overflow_can_fast_path_after_eject_all);
     RUN_TEST(test_reordering_overflow_sparse_stepwise_shift_without_resequence);

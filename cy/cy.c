@@ -2980,6 +2980,18 @@ static bool reordering_push(reordering_t* const   self,
         return false;
     }
 
+    // A wrapped linearized value means this tag is behind the current baseline. Such delayed old messages must be
+    // dropped as late; otherwise they may be misclassified as huge forward jumps and trigger bad resequencing.
+    if (lin_tag > INT64_MAX) {
+        CY_TRACE(cy,
+                 "🔢 LATE/BACKWARD: N%016jx tag=%016jx lin_tag=%016jx last_ejected_lin_tag=%016jx",
+                 (uintmax_t)self->remote_id,
+                 (uintmax_t)tag,
+                 (uintmax_t)lin_tag,
+                 (uintmax_t)self->last_ejected_lin_tag);
+        return false;
+    }
+
     // If the message is too far ahead, either the remote has restarted or we are just holding too many old messages.
     // Either way we will need to move the window a little to the right, which we do now.
     // We move it only by the bare minimum amount to minimize losses to forced ejections.

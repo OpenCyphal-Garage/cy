@@ -755,6 +755,7 @@ void test_api_pubsub_e2e_c07_ordered_buffer_capacity_stress_large_jump_backfill(
     for (const std::uint64_t seq : hot_sequences) {
         TEST_ASSERT_TRUE((seq >= 1U) && (seq <= 30U));
     }
+    assert_ordered_strictly_increasing(hot_capture, hot_pub_id);
 
     assert_unordered_complete_unique(cold_capture, cold_pub_id, 1U, 12U);
     assert_ordered_strictly_increasing(cold_capture, cold_pub_id);
