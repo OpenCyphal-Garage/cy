@@ -1116,7 +1116,7 @@ static bool left_wins(const cy_topic_t* const left, const cy_us_t now, const int
 }
 
 // A first-principles check to see if the topic is implicit. Scans all couplings, slow.
-static bool validate_is_implicit(const cy_topic_t* const topic)
+static bool topic_validate_is_implicit(const cy_topic_t* const topic)
 {
     if (topic->pub_count > 0) {
         return false;
@@ -1136,6 +1136,26 @@ static bool is_implicit(const cy_topic_t* const topic)
     return is_listed(&topic->cy->list_implicit, &topic->list_implicit);
 }
 
+// Automatically adds/removes it into the implicit list as needed, and manages gossiping commencement.
+static void topic_sync_implicit(cy_topic_t* const topic)
+{
+    const bool implicit = topic_validate_is_implicit(topic);
+    if (implicit != is_implicit(topic)) { // do not enlist if already there to avoid moving it
+        if (implicit) {
+            enlist_head(&topic->cy->list_implicit, &topic->list_implicit);
+            // Do not remove from the gossip list; it will be naturally pushed out of there eventually.
+            CY_TRACE(topic->cy, "🧛 %s demoted to implicit", topic_repr(topic).str);
+        } else {
+            delist(&topic->cy->list_implicit, &topic->list_implicit);
+            if (!is_pinned(topic->hash)) {
+                enlist_head(&topic->cy->list_gossip, &topic->list_gossip); // begin gossiping
+            }
+            CY_TRACE(topic->cy, "🧛 %s promoted to explicit", topic_repr(topic).str);
+        }
+    }
+    assert(implicit == is_implicit(topic));
+}
+
 // Move the topic to the head of the doubly-linked list of implicit topics.
 // The oldest implicit topic will be eventually pushed to the tail of the list.
 static void implicit_animate(cy_topic_t* const topic, const cy_us_t now)
@@ -1151,7 +1171,7 @@ static void retire_expired_implicit_topics(cy_t* const cy, const cy_us_t now)
 {
     cy_topic_t* const topic = LIST_TAIL(cy->list_implicit, cy_topic_t, list_implicit);
     if (topic != NULL) {
-        assert(is_implicit(topic) && validate_is_implicit(topic));
+        assert(is_implicit(topic) && topic_validate_is_implicit(topic));
         if ((topic->ts_animated + cy->implicit_topic_timeout) < now) {
             CY_TRACE(cy, "⚰️ %s", topic_repr(topic).str);
             topic_destroy(topic);
@@ -1174,10 +1194,13 @@ static void schedule_gossip(cy_topic_t* const topic)
 // Like schedule_gossip(), but moves the topic to be gossiped out of order,
 // and schedules an immediate unicast gossip on next poll (gossips never sent from the current stack frame).
 // This is safe to invoke multiple times on the same topic.
+// Does nothing on pinned topics.
 static void schedule_gossip_urgent(cy_topic_t* const topic)
 {
-    enlist_tail(&topic->cy->list_gossip, &topic->list_gossip);               // move to the tail to prioritize
-    enlist_head(&topic->cy->list_gossip_urgent, &topic->list_gossip_urgent); // still FIFO here, already urgent
+    if (!is_pinned(topic->hash)) {
+        enlist_tail(&topic->cy->list_gossip, &topic->list_gossip);               // move to the tail to prioritize
+        enlist_head(&topic->cy->list_gossip_urgent, &topic->list_gossip_urgent); // still FIFO here, already urgent
+    }
 }
 
 // Parses the hexadecimal hash override suffix if present and valid. Example: "sensors/temperature#1a2b".
@@ -1528,8 +1551,9 @@ static cy_err_t topic_new(cy_t* const        cy,
         goto fail;
     }
 
-    // Ensure the topic is in the gossip index. This is needed for allocation.
-    // This does not apply to pinned topics, which are never gossiped.
+    // Initially, all topics are considered implicit until proven otherwise. See topic_sync_implicit().
+    enlist_head(&cy->list_implicit, &topic->list_implicit);
+
     if (!is_pinned(topic->hash)) {
         // Allocate a subject-ID for the topic and insert it into the subject index tree.
         // Pinned topics all have canonical names, and we have already ascertained that the name is unique,
@@ -1537,15 +1561,9 @@ static cy_err_t topic_new(cy_t* const        cy,
         // Remember that topics arbitrate locally the same way they do externally, meaning that adding a new local topic
         // may displace another local one.
         topic_allocate(topic, topic->evictions, now);
-        if (out_topic != NULL) {
-            *out_topic = topic;
-        }
-        // Initially, all non-pinned topics are considered implicit until proven otherwise.
-        enlist_head(&cy->list_implicit, &topic->list_implicit);
-    } else {
-        if (out_topic != NULL) {
-            *out_topic = topic;
-        }
+    }
+    if (out_topic != NULL) {
+        *out_topic = topic;
     }
     CY_TRACE(cy, "✨ %s topic_count=%zu", topic_repr(topic).str, cavl_count(cy->topics_by_hash));
     return 0;
@@ -1606,12 +1624,7 @@ static cy_err_t topic_couple(cy_topic_t* const         topic,
             cpl->substitutions[i] = (cy_substitution_t){ .str = s->str, .ordinal = s->ordinal };
             s                     = s->next;
         }
-        // If this is a verbatim subscriber, the topic is no (longer) implicit.
-        if ((subr->index_pattern == NULL) && is_implicit(topic)) {
-            delist(&topic->cy->list_implicit, &topic->list_implicit);
-            enlist_head(&topic->cy->list_gossip, &topic->list_gossip);
-            CY_TRACE(topic->cy, "🧛 %s promoted to explicit", topic_repr(topic).str);
-        }
+        topic_sync_implicit(topic);
     }
     return (cpl == NULL) ? CY_ERR_MEMORY : CY_OK;
 }
@@ -1714,6 +1727,7 @@ static cy_err_t send_gossip_raw(const cy_t* const          cy,
 // Only for fixed-rate periodic broadcasts over the dedicated broadcast subject.
 static cy_err_t send_gossip_broadcast(const cy_t* const cy, const cy_us_t now, const cy_topic_t* const topic)
 {
+    assert(!is_pinned(topic->hash));
     return send_gossip_raw(cy, //
                            now,
                            0,
@@ -2134,7 +2148,8 @@ cy_publisher_t* cy_advertise_client(cy_t* const cy, const cy_str_t name, const s
     if (res == CY_OK) {
         assert(pub->topic != NULL);
         pub->topic->pub_count++;
-        delist(&cy->list_implicit, &pub->topic->list_implicit);
+        topic_sync_implicit(pub->topic);
+        assert(!is_implicit(pub->topic));
         const size_t response_extent_with_header = response_extent + HEADER_BYTES;
         if (response_extent_with_header > cy->p2p_extent) {
             // Currently, we only increase the extent and leave it at the max. Ideally we should also shrink it when
@@ -2581,11 +2596,8 @@ void cy_unadvertise(cy_publisher_t* const pub)
     assert(!is_implicit(topic));
     assert(topic->pub_count > 0);
     topic->pub_count--;
-    if (validate_is_implicit(topic)) { // topics are destroyed lazily via garbage collection to avoid state loss
-        enlist_head(&topic->cy->list_implicit, &topic->list_implicit);
-        assert(is_implicit(topic));
-        CY_TRACE(topic->cy, "🧛 %s demoted to implicit", topic_repr(topic).str);
-    }
+    assert(!is_implicit(pub->topic));
+    topic_sync_implicit(topic); // topics are destroyed lazily via garbage collection to avoid state loss
 
     // Bye bye.
     mem_free(topic->cy, pub);
@@ -3392,26 +3404,19 @@ void cy_subscriber_name(const cy_subscriber_t* const self, char* const out_name)
 static void topic_decouple_subscriber_root(cy_topic_t* const topic, const subscriber_root_t* const root)
 {
     assert((topic != NULL) && (root != NULL));
-    cy_t* const           cy      = topic->cy;
-    bool                  changed = false;
-    cy_topic_coupling_t** cpl     = &topic->couplings;
+    const cy_t* const     cy  = topic->cy;
+    cy_topic_coupling_t** cpl = &topic->couplings;
     while (*cpl != NULL) {
         cy_topic_coupling_t* const this = *cpl;
         if (this->root == root) {
-            *cpl    = this->next;
-            changed = true;
+            *cpl = this->next;
             mem_free(cy, this);
         } else {
             cpl = &this->next;
         }
     }
-    if (changed) {
-        topic_ensure_subscribed(topic);
-        if (validate_is_implicit(topic) && !is_implicit(topic)) { // topics are destroyed lazily
-            enlist_head(&cy->list_implicit, &topic->list_implicit);
-            CY_TRACE(cy, "🧛 %s demoted to implicit", topic_repr(topic).str);
-        }
-    }
+    topic_ensure_subscribed(topic);
+    topic_sync_implicit(topic); // topics are destroyed lazily to avoid premature state loss
 }
 
 static void subscriber_destroy_delayed(olga_t* const olga, olga_event_t* const event, const int64_t now)
@@ -3743,7 +3748,7 @@ void cy_destroy(cy_t* const cy)
         assert(topic->pub_futures_by_tag == NULL); // Caller must destroy futures.
         assert(topic->pub_count == 0);             // Caller must destroy publishers.
         assert(topic->couplings == NULL);          // Caller must destroy subscribers.
-        assert(validate_is_implicit(topic));
+        assert(is_implicit(topic));
         topic_destroy(topic);
     }
     assert(wkv_is_empty(&cy->topics_by_name));

@@ -194,8 +194,7 @@ static cy_topic_t* fixture_make_explicit_topic(fixture_t* const self, const char
 {
     cy_topic_t* const topic = fixture_make_topic(self, name, hash, 0U, LAGE_MIN);
     topic->pub_count        = 1U;
-    delist(&self->cy->list_implicit, &topic->list_implicit);
-    schedule_gossip(topic);
+    topic_sync_implicit(topic);
     return topic;
 }
 
@@ -563,6 +562,8 @@ static void test_on_gossip_known_topic_divergence_paths(void)
     TEST_ASSERT_TRUE(fix.cy->list_gossip.head == &t1->list_gossip);
     t1->pub_count = 0U;
     t2->pub_count = 0U;
+    topic_sync_implicit(t1);
+    topic_sync_implicit(t2);
     fixture_deinit(&fix);
 }
 
