@@ -1,0 +1,439 @@
+#include <cy.c> // NOLINT(bugprone-suspicious-include)
+#include <unity.h>
+#include "guarded_heap.h"
+#include <string.h>
+
+typedef struct
+{
+    cy_subject_writer_t base;
+} test_subject_writer_t;
+
+typedef struct
+{
+    cy_subject_reader_t base;
+    size_t              extent;
+} test_subject_reader_t;
+
+typedef struct
+{
+    cy_platform_t        platform;
+    cy_platform_vtable_t vtable;
+    guarded_heap_t       heap;
+    cy_t*                cy;
+    cy_us_t              now;
+
+    size_t fail_alloc_count;
+    size_t fail_alloc_size;
+
+    size_t subject_reader_destroy_count;
+    size_t subject_writer_destroy_count;
+    size_t async_error_count;
+} fixture_t;
+
+static fixture_t* fixture_from(cy_platform_t* const platform) { return (fixture_t*)platform; }
+
+static cy_us_t fixture_now(cy_platform_t* const platform) { return fixture_from(platform)->now; }
+
+static void* fixture_realloc(cy_platform_t* const platform, void* const ptr, const size_t size)
+{
+    fixture_t* const self = fixture_from(platform);
+    if ((ptr == NULL) && (size > 0U) && (self->fail_alloc_count > 0U) &&
+        ((self->fail_alloc_size == 0U) || (self->fail_alloc_size == size))) {
+        self->fail_alloc_count--;
+        return NULL;
+    }
+    return guarded_heap_realloc(&self->heap, ptr, size);
+}
+
+static uint64_t fixture_random(cy_platform_t* const platform)
+{
+    (void)platform;
+    return UINT64_C(0xA5A5A5A55A5A5A5A);
+}
+
+static cy_subject_writer_t* fixture_subject_writer_new(cy_platform_t* const platform, const uint32_t subject_id)
+{
+    fixture_t* const             self = fixture_from(platform);
+    test_subject_writer_t* const out  = (test_subject_writer_t*)guarded_heap_alloc(&self->heap, sizeof(*out));
+    if (out != NULL) {
+        out->base.subject_id = subject_id;
+    }
+    return (out != NULL) ? &out->base : NULL;
+}
+
+static void fixture_subject_writer_destroy(cy_platform_t* const platform, cy_subject_writer_t* const writer)
+{
+    fixture_t* const self = fixture_from(platform);
+    self->subject_writer_destroy_count++;
+    guarded_heap_free(&self->heap, writer);
+}
+
+static cy_err_t fixture_subject_writer_send(cy_platform_t* const       platform,
+                                            cy_subject_writer_t* const writer,
+                                            const cy_us_t              deadline,
+                                            const cy_prio_t            priority,
+                                            const cy_bytes_t           message)
+{
+    (void)platform;
+    (void)writer;
+    (void)deadline;
+    (void)priority;
+    (void)message;
+    return CY_OK;
+}
+
+static cy_subject_reader_t* fixture_subject_reader_new(cy_platform_t* const platform,
+                                                       const uint32_t       subject_id,
+                                                       const size_t         extent)
+{
+    fixture_t* const             self = fixture_from(platform);
+    test_subject_reader_t* const out  = (test_subject_reader_t*)guarded_heap_alloc(&self->heap, sizeof(*out));
+    if (out != NULL) {
+        out->base.subject_id = subject_id;
+        out->extent          = extent;
+    }
+    return (out != NULL) ? &out->base : NULL;
+}
+
+static void fixture_subject_reader_destroy(cy_platform_t* const platform, cy_subject_reader_t* const reader)
+{
+    fixture_t* const self = fixture_from(platform);
+    self->subject_reader_destroy_count++;
+    guarded_heap_free(&self->heap, reader);
+}
+
+static cy_err_t fixture_p2p_send(cy_platform_t* const   platform,
+                                 const cy_lane_t* const lane,
+                                 const cy_us_t          deadline,
+                                 const cy_bytes_t       message)
+{
+    (void)platform;
+    (void)lane;
+    (void)deadline;
+    (void)message;
+    return CY_OK;
+}
+
+static void fixture_p2p_extent_set(cy_platform_t* const platform, const size_t extent)
+{
+    (void)platform;
+    (void)extent;
+}
+
+static cy_err_t fixture_spin(cy_platform_t* const platform, const cy_us_t deadline)
+{
+    (void)platform;
+    (void)deadline;
+    return CY_OK;
+}
+
+static void fixture_on_async_error(cy_t* const cy, cy_topic_t* const topic, const cy_err_t error, const uint16_t line)
+{
+    (void)topic;
+    (void)error;
+    (void)line;
+    fixture_t* const self = fixture_from(cy->platform);
+    self->async_error_count++;
+}
+
+static void fixture_init(fixture_t* const self)
+{
+    memset(self, 0, sizeof(*self));
+    guarded_heap_init(&self->heap, UINT64_C(0xCAFEBABE12345678));
+    self->platform.vtable               = &self->vtable;
+    self->platform.subject_id_modulus   = (uint32_t)CY_SUBJECT_ID_MODULUS_17bit;
+    self->vtable.subject_writer_new     = fixture_subject_writer_new;
+    self->vtable.subject_writer_destroy = fixture_subject_writer_destroy;
+    self->vtable.subject_writer_send    = fixture_subject_writer_send;
+    self->vtable.subject_reader_new     = fixture_subject_reader_new;
+    self->vtable.subject_reader_destroy = fixture_subject_reader_destroy;
+    self->vtable.p2p_send               = fixture_p2p_send;
+    self->vtable.p2p_extent_set         = fixture_p2p_extent_set;
+    self->vtable.spin                   = fixture_spin;
+    self->vtable.now                    = fixture_now;
+    self->vtable.realloc                = fixture_realloc;
+    self->vtable.random                 = fixture_random;
+    self->cy                            = cy_new(&self->platform);
+    TEST_ASSERT_NOT_NULL(self->cy);
+    cy_async_error_handler_set(self->cy, fixture_on_async_error);
+}
+
+static void fixture_deinit(fixture_t* const self)
+{
+    if (self->cy != NULL) {
+        while (self->cy->topics_by_hash != NULL) {
+            cy_topic_t* const topic = cy_topic_iter_first(self->cy);
+            TEST_ASSERT_NOT_NULL(topic);
+            topic->pub_count = 0U;
+            topic_destroy(topic);
+        }
+        if (self->cy->broad_reader != NULL) {
+            self->vtable.subject_reader_destroy(&self->platform, self->cy->broad_reader);
+            self->cy->broad_reader = NULL;
+        }
+        if (self->cy->broad_writer != NULL) {
+            self->vtable.subject_writer_destroy(&self->platform, self->cy->broad_writer);
+            self->cy->broad_writer = NULL;
+        }
+        mem_free(self->cy, (void*)self->cy->home.str);
+        mem_free(self->cy, (void*)self->cy->ns.str);
+        self->vtable.realloc(&self->platform, self->cy, 0U);
+        self->platform.cy = NULL;
+        self->cy          = NULL;
+    }
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&self->heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&self->heap));
+}
+
+static cy_topic_t* fixture_make_topic(fixture_t* const  self,
+                                      const char* const name,
+                                      const uint64_t    hash,
+                                      const uint32_t    evictions,
+                                      const int_fast8_t lage)
+{
+    cy_topic_t*    topic = NULL;
+    const cy_err_t er    = topic_new(self->cy, &topic, cy_str(name), hash, evictions, lage);
+    TEST_ASSERT_EQUAL_INT(CY_OK, er);
+    TEST_ASSERT_NOT_NULL(topic);
+    return topic;
+}
+
+static cy_topic_t* fixture_make_explicit_topic(fixture_t* const self, const char* const name, const uint64_t hash)
+{
+    cy_topic_t* const topic = fixture_make_topic(self, name, hash, 0U, LAGE_MIN);
+    topic->pub_count        = 1U;
+    delist(&self->cy->list_implicit, &topic->list_implicit);
+    schedule_gossip(topic);
+    return topic;
+}
+
+static void assert_subject_index_unique(const cy_t* const cy)
+{
+    uint32_t   prev  = 0U;
+    bool       first = true;
+    cy_tree_t* p     = cavl2_min(cy->topics_by_subject_id);
+    while (p != NULL) {
+        const cy_topic_t* const topic = CAVL2_TO_OWNER(p, cy_topic_t, index_subject_id);
+        const uint32_t          sid   = topic_subject_id(topic);
+        if (!first) {
+            TEST_ASSERT_TRUE(sid > prev);
+        }
+        prev  = sid;
+        first = false;
+        p     = cavl2_next_greater(p);
+    }
+}
+
+static void test_left_wins_and_topic_merge_lage(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+    const uint64_t    base = UINT64_C(0x1000000000000100);
+    cy_topic_t* const mine = fixture_make_topic(&fix, "alloc/leftwins", base, 0U, LAGE_MIN);
+    topic_merge_lage(mine, 10 * MEGA, 5);
+    TEST_ASSERT_TRUE(left_wins(mine, 10 * MEGA, 1, base + 1U));
+    TEST_ASSERT_TRUE(left_wins(mine, 10 * MEGA, 5, base + 2U));
+    TEST_ASSERT_FALSE(left_wins(mine, 10 * MEGA, 5, base - 1U));
+
+    const cy_us_t origin_before = mine->ts_origin;
+    topic_merge_lage(mine, 10 * MEGA, 1);
+    TEST_ASSERT_TRUE(mine->ts_origin <= origin_before);
+    fixture_deinit(&fix);
+}
+
+static void test_on_gossip_known_topic_divergence_paths(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+    const uint64_t    h1 = UINT64_C(0x1000000000000200);
+    const uint64_t    h2 = UINT64_C(0x1000000000000300);
+    cy_topic_t* const t1 = fixture_make_explicit_topic(&fix, "alloc/divergence/a", h1);
+    cy_topic_t* const t2 = fixture_make_explicit_topic(&fix, "alloc/divergence/b", h2);
+
+    topic_merge_lage(t1, 50 * MEGA, 5);
+    const uint32_t ev_before = t1->evictions;
+    TEST_ASSERT_TRUE(on_gossip_known_topic(fix.cy, 50 * MEGA, t1, ev_before + 1U, 1));
+    TEST_ASSERT_EQUAL_UINT32(ev_before, t1->evictions);
+    TEST_ASSERT_TRUE(is_listed(&fix.cy->list_gossip_urgent, &t1->list_gossip_urgent));
+
+    topic_merge_lage(t2, 60 * MEGA, 1);
+    TEST_ASSERT_FALSE(on_gossip_known_topic(fix.cy, 60 * MEGA, t2, t2->evictions + 3U, 8));
+    TEST_ASSERT_EQUAL_UINT32(3U, t2->evictions);
+    TEST_ASSERT_TRUE(topic_lage(t2, 60 * MEGA) >= 4);
+
+    schedule_gossip(t1);
+    schedule_gossip(t2);
+    TEST_ASSERT_FALSE(on_gossip_known_topic(fix.cy, 70 * MEGA, t1, t1->evictions, topic_lage(t1, 70 * MEGA)));
+    TEST_ASSERT_TRUE(fix.cy->list_gossip.head == &t1->list_gossip);
+    fixture_deinit(&fix);
+}
+
+static void test_on_gossip_unknown_topic_collision_paths(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+    const uint64_t    base   = UINT64_C(0x1000000000000400);
+    const uint64_t    remote = base + (uint64_t)fix.cy->platform->subject_id_modulus;
+    cy_topic_t* const mine   = fixture_make_topic(&fix, "alloc/collision", base, 0U, LAGE_MIN);
+    topic_merge_lage(mine, 100 * MEGA, 4);
+
+    TEST_ASSERT_TRUE(on_gossip_unknown_topic(fix.cy, 100 * MEGA, remote, mine->evictions, 1));
+    TEST_ASSERT_TRUE(is_listed(&fix.cy->list_gossip_urgent, &mine->list_gossip_urgent));
+
+    const uint32_t before = mine->evictions;
+    TEST_ASSERT_FALSE(on_gossip_unknown_topic(fix.cy, 110 * MEGA, remote, before, 8));
+    TEST_ASSERT_TRUE(mine->evictions > before);
+    fixture_deinit(&fix);
+}
+
+static void test_topic_allocate_recursive_chain_converges_and_writer_transfers(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+    const uint64_t p    = (uint64_t)fix.cy->platform->subject_id_modulus;
+    const uint64_t base = UINT64_C(0x1000000000000500);
+
+    cy_topic_t* const t1 = fixture_make_topic(&fix, "alloc/chain/1", base, 0U, LAGE_MIN);
+    cy_topic_t* const t2 = fixture_make_topic(&fix, "alloc/chain/2", base + p, 0U, LAGE_MIN);
+    cy_topic_t* const t3 = fixture_make_topic(&fix, "alloc/chain/3", base + (2U * p), 0U, LAGE_MIN);
+
+    assert_subject_index_unique(fix.cy);
+    TEST_ASSERT_NOT_EQUAL(topic_subject_id(t1), topic_subject_id(t2));
+    TEST_ASSERT_NOT_EQUAL(topic_subject_id(t1), topic_subject_id(t3));
+    TEST_ASSERT_NOT_EQUAL(topic_subject_id(t2), topic_subject_id(t3));
+
+    t2->pub_writer = fixture_subject_writer_new(&fix.platform, topic_subject_id(t2));
+    TEST_ASSERT_NOT_NULL(t2->pub_writer);
+    topic_merge_lage(t1, 200 * MEGA, 8);
+    topic_merge_lage(t2, 200 * MEGA, 1);
+    topic_allocate(t1, t2->evictions, 200 * MEGA); // force collision with displaced t2
+    TEST_ASSERT_NOT_NULL(t1->pub_writer);
+    TEST_ASSERT_NULL(t2->pub_writer);
+    assert_subject_index_unique(fix.cy);
+    fixture_deinit(&fix);
+}
+
+static void test_topic_destroy_removes_indexes_and_lists_and_handles(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+    const uint64_t    h                            = UINT64_C(0x1000000000000600);
+    cy_topic_t* const topic                        = fixture_make_explicit_topic(&fix, "destroy/indexes", h);
+    const uint64_t    hash                         = topic->hash;
+    const uint32_t    sid                          = topic_subject_id(topic);
+    char              name[CY_TOPIC_NAME_MAX + 1U] = { 0 };
+    memcpy(name, topic->name, cy_topic_name(topic).len);
+
+    schedule_gossip_urgent(topic);
+    topic->pub_writer = fixture_subject_writer_new(&fix.platform, sid);
+    topic->sub_reader = fixture_subject_reader_new(&fix.platform, sid, 123U);
+    TEST_ASSERT_NOT_NULL(topic->pub_writer);
+    TEST_ASSERT_NOT_NULL(topic->sub_reader);
+
+    topic->pub_count = 0U;
+    topic_destroy(topic);
+    TEST_ASSERT_NULL(cy_topic_find_by_hash(fix.cy, hash));
+    TEST_ASSERT_NULL(cy_topic_find_by_name(fix.cy, cy_str(name)));
+    TEST_ASSERT_NULL(topic_find_by_subject_id(fix.cy, sid));
+    TEST_ASSERT_EQUAL_size_t(1U, fix.subject_writer_destroy_count);
+    TEST_ASSERT_EQUAL_size_t(1U, fix.subject_reader_destroy_count);
+    fixture_deinit(&fix);
+}
+
+static void test_topic_destroy_clears_associations_and_dedup(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+    const uint64_t    h     = UINT64_C(0x1000000000000700);
+    cy_topic_t* const topic = fixture_make_topic(&fix, "destroy/states", h, 0U, LAGE_MIN);
+
+    association_factory_context_t fac1 = { .topic = topic, .remote_id = UINT64_C(1) };
+    association_factory_context_t fac2 = { .topic = topic, .remote_id = UINT64_C(2) };
+    TEST_ASSERT_NOT_NULL(cavl2_find_or_insert(
+      &topic->assoc_by_remote_id, &fac1.remote_id, association_cavl_compare, &fac1, association_cavl_factory));
+    TEST_ASSERT_NOT_NULL(cavl2_find_or_insert(
+      &topic->assoc_by_remote_id, &fac2.remote_id, association_cavl_compare, &fac2, association_cavl_factory));
+    TEST_ASSERT_EQUAL_size_t(2U, topic->assoc_count);
+
+    dedup_factory_context_t dctx1 = { .owner = topic, .remote_id = UINT64_C(11), .tag = UINT64_C(22), .now = 1000 };
+    dedup_factory_context_t dctx2 = { .owner = topic, .remote_id = UINT64_C(12), .tag = UINT64_C(23), .now = 1000 };
+    TEST_ASSERT_NOT_NULL(cavl2_find_or_insert(
+      &topic->sub_index_dedup_by_remote_id, &dctx1.remote_id, dedup_cavl_compare, &dctx1, dedup_factory));
+    TEST_ASSERT_NOT_NULL(cavl2_find_or_insert(
+      &topic->sub_index_dedup_by_remote_id, &dctx2.remote_id, dedup_cavl_compare, &dctx2, dedup_factory));
+    dedup_t* const dd1 = CAVL2_TO_OWNER(
+      cavl2_find(topic->sub_index_dedup_by_remote_id, &dctx1.remote_id, dedup_cavl_compare), dedup_t, index_remote_id);
+    dedup_t* const dd2 = CAVL2_TO_OWNER(
+      cavl2_find(topic->sub_index_dedup_by_remote_id, &dctx2.remote_id, dedup_cavl_compare), dedup_t, index_remote_id);
+    TEST_ASSERT_NOT_NULL(dd1);
+    TEST_ASSERT_NOT_NULL(dd2);
+    dedup_update(dd1, topic, dctx1.tag, 1000);
+    dedup_update(dd2, topic, dctx2.tag, 1001);
+    TEST_ASSERT_NOT_NULL(topic->sub_list_dedup_by_recency.head);
+    TEST_ASSERT_NOT_NULL(topic->sub_index_dedup_by_remote_id);
+
+    topic_destroy(topic);
+    fixture_deinit(&fix);
+}
+
+static void test_topic_destroy_error_rollback_like_path_on_coupling_oom(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+    const uint64_t    h                            = UINT64_C(0x1000000000000800);
+    cy_topic_t* const topic                        = fixture_make_topic(&fix, "destroy/rollback", h, 0U, LAGE_MIN);
+    const uint64_t    hash                         = topic->hash;
+    const uint32_t    sid                          = topic_subject_id(topic);
+    char              name[CY_TOPIC_NAME_MAX + 1U] = { 0 };
+    memcpy(name, topic->name, cy_topic_name(topic).len);
+
+    subscriber_root_t root                = { 0 };
+    wkv_node_t        pattern_node        = { 0 };
+    root.cy                               = fix.cy;
+    root.index_pattern                    = &pattern_node; // non-NULL means pattern root
+    static const wkv_substitution_t subst = { .str = { .len = 1U, .str = "x" }, .ordinal = 0U, .next = NULL };
+
+    fix.fail_alloc_size  = sizeof(cy_topic_coupling_t) + sizeof(cy_substitution_t);
+    fix.fail_alloc_count = 1U;
+    TEST_ASSERT_EQUAL_INT(CY_ERR_MEMORY, topic_couple(topic, &root, 1U, &subst));
+
+    topic_destroy(topic);
+    TEST_ASSERT_NULL(cy_topic_find_by_hash(fix.cy, hash));
+    TEST_ASSERT_NULL(cy_topic_find_by_name(fix.cy, cy_str(name)));
+    TEST_ASSERT_NULL(topic_find_by_subject_id(fix.cy, sid));
+    fixture_deinit(&fix);
+}
+
+static void test_topic_destroy_updates_topic_iter_safely(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+    const uint64_t    h1   = UINT64_C(0x1000000000000900);
+    const uint64_t    h2   = UINT64_C(0x1000000000000A00);
+    cy_topic_t* const t1   = fixture_make_topic(&fix, "destroy/iter/1", h1, 0U, LAGE_MIN);
+    cy_topic_t* const t2   = fixture_make_topic(&fix, "destroy/iter/2", h2, 0U, LAGE_MIN);
+    cy_topic_t* const next = cy_topic_iter_next(t1);
+    fix.cy->topic_iter     = t1;
+    topic_destroy(t1);
+    TEST_ASSERT_TRUE(fix.cy->topic_iter == next);
+    TEST_ASSERT_NOT_NULL(cy_topic_find_by_hash(fix.cy, t2->hash));
+    fixture_deinit(&fix);
+}
+
+void setUp(void) {}
+
+void tearDown(void) {}
+
+int main(void)
+{
+    UNITY_BEGIN();
+    RUN_TEST(test_left_wins_and_topic_merge_lage);
+    RUN_TEST(test_on_gossip_known_topic_divergence_paths);
+    RUN_TEST(test_on_gossip_unknown_topic_collision_paths);
+    RUN_TEST(test_topic_allocate_recursive_chain_converges_and_writer_transfers);
+    RUN_TEST(test_topic_destroy_removes_indexes_and_lists_and_handles);
+    RUN_TEST(test_topic_destroy_clears_associations_and_dedup);
+    RUN_TEST(test_topic_destroy_error_rollback_like_path_on_coupling_oom);
+    RUN_TEST(test_topic_destroy_updates_topic_iter_safely);
+    return UNITY_END();
+}

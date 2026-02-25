@@ -20,6 +20,11 @@ struct arrival_capture_t
     std::array<unsigned char, 16> first_payload_byte{};
 };
 
+struct self_unsub_capture_t
+{
+    std::size_t count{ 0U };
+};
+
 struct test_subject_writer_t
 {
     cy_subject_writer_t base{};
@@ -189,6 +194,23 @@ extern "C" void on_arrival_capture(cy_subscriber_t* const sub, const cy_arrival_
     cap->first_payload_byte.at(idx) = first;
 }
 
+extern "C" void on_arrival_self_unsub(cy_subscriber_t* const sub, const cy_arrival_t arrival)
+{
+    (void)arrival;
+    self_unsub_capture_t* const cap = static_cast<self_unsub_capture_t*>(cy_subscriber_context(sub).ptr[0]);
+    TEST_ASSERT_NOT_NULL(cap);
+    cap->count++;
+    cy_unsubscribe(sub);
+}
+
+extern "C" void on_arrival_count_only(cy_subscriber_t* const sub, const cy_arrival_t arrival)
+{
+    (void)arrival;
+    self_unsub_capture_t* const cap = static_cast<self_unsub_capture_t*>(cy_subscriber_context(sub).ptr[0]);
+    TEST_ASSERT_NOT_NULL(cap);
+    cap->count++;
+}
+
 void platform_init(test_platform_t* const self)
 {
     *self = test_platform_t{};
@@ -340,6 +362,75 @@ void test_api_ordered_subscriber_timeout_flush()
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&platform.message_heap));
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&platform.message_heap));
 }
+
+void test_api_unsubscribe_from_own_callback_is_deferred_and_safe()
+{
+    test_platform_t platform{};
+    platform_init(&platform);
+    cy_test_message_reset_counters();
+
+    self_unsub_capture_t   capture{};
+    cy_subscriber_t* const sub = cy_subscribe(platform.cy, cy_str("rx/unsub/self"), 256U);
+    TEST_ASSERT_NOT_NULL(sub);
+
+    cy_user_context_t context = CY_USER_CONTEXT_EMPTY;
+    context.ptr[0]            = &capture;
+    cy_subscriber_context_set(sub, context);
+    cy_subscriber_callback_set(sub, on_arrival_self_unsub);
+
+    const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("rx/unsub/self"));
+    TEST_ASSERT_NOT_NULL(topic);
+
+    dispatch_message(&platform, topic, header_msg_best_effort, 100U, 0xA1U, 100, 0x11U);
+    TEST_ASSERT_EQUAL_size_t(1U, capture.count);
+
+    // Deferred destruction executes from the event loop.
+    TEST_ASSERT_EQUAL_UINT8(CY_OK, cy_spin_once(platform.cy));
+
+    // After deferred destruction, the callback shall no longer be invoked.
+    dispatch_message(&platform, topic, header_msg_best_effort, 101U, 0xA1U, 101, 0x22U);
+    TEST_ASSERT_EQUAL_size_t(1U, capture.count);
+    TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_live_count());
+
+    platform_deinit(&platform);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&platform.message_heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&platform.message_heap));
+}
+
+void test_api_unsubscribe_effect_is_applied_on_spin()
+{
+    test_platform_t platform{};
+    platform_init(&platform);
+    cy_test_message_reset_counters();
+
+    self_unsub_capture_t   capture{};
+    cy_subscriber_t* const sub = cy_subscribe(platform.cy, cy_str("rx/unsub/deferred"), 256U);
+    TEST_ASSERT_NOT_NULL(sub);
+
+    cy_user_context_t context = CY_USER_CONTEXT_EMPTY;
+    context.ptr[0]            = &capture;
+    cy_subscriber_context_set(sub, context);
+    cy_subscriber_callback_set(sub, on_arrival_count_only);
+
+    const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("rx/unsub/deferred"));
+    TEST_ASSERT_NOT_NULL(topic);
+
+    cy_unsubscribe(sub);
+
+    // Deferred unsubscribe: still callable until the deferred event is executed.
+    dispatch_message(&platform, topic, header_msg_best_effort, 200U, 0xA2U, 100, 0x31U);
+    TEST_ASSERT_EQUAL_size_t(1U, capture.count);
+
+    TEST_ASSERT_EQUAL_UINT8(CY_OK, cy_spin_once(platform.cy));
+
+    dispatch_message(&platform, topic, header_msg_best_effort, 201U, 0xA2U, 101, 0x32U);
+    TEST_ASSERT_EQUAL_size_t(1U, capture.count);
+    TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_live_count());
+
+    platform_deinit(&platform);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&platform.message_heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&platform.message_heap));
+}
 } // namespace
 
 extern "C" void setUp()
@@ -356,5 +447,7 @@ int main()
     RUN_TEST(test_api_malformed_header_drops_message);
     RUN_TEST(test_api_reliable_duplicate_acked_once_to_application);
     RUN_TEST(test_api_ordered_subscriber_timeout_flush);
+    RUN_TEST(test_api_unsubscribe_from_own_callback_is_deferred_and_safe);
+    RUN_TEST(test_api_unsubscribe_effect_is_applied_on_spin);
     return UNITY_END();
 }

@@ -110,6 +110,16 @@ cy_gen_test_intrusive_matrix(test_intrusive_publish_reliable
         src/helpers.c
         platform_stubs/guarded_heap.c
 )
+cy_gen_test_intrusive_matrix(test_intrusive_gossip
+        src/test_intrusive_gossip.c
+        src/helpers.c
+        platform_stubs/guarded_heap.c
+)
+cy_gen_test_intrusive_matrix(test_intrusive_topic_allocation
+        src/test_intrusive_topic_allocation.c
+        src/helpers.c
+        platform_stubs/guarded_heap.c
+)
 
 # API TESTS.
 # These tests only have access to the public API and are written in modern C++.
@@ -129,6 +139,22 @@ cy_gen_test_arch_matrix(test_api_name 11 "CY_CONFIG_TRACE=1"
 )
 cy_gen_test_arch_matrix(test_api_publish_reliable 11 "CY_CONFIG_TRACE=1"
         src/test_api_publish_reliable.cpp
+        ${CMAKE_SOURCE_DIR}/cy/cy.c
+        src/helpers.c
+        src/cy_trace.c
+        platform_stubs/guarded_heap.c
+        platform_stubs/message.c
+)
+cy_gen_test_arch_matrix(test_api_gossip 11 "CY_CONFIG_TRACE=1"
+        src/test_api_gossip.cpp
+        ${CMAKE_SOURCE_DIR}/cy/cy.c
+        src/helpers.c
+        src/cy_trace.c
+        platform_stubs/guarded_heap.c
+        platform_stubs/message.c
+)
+cy_gen_test_arch_matrix(test_api_gossip_sim 11 "CY_CONFIG_TRACE=1"
+        src/test_api_gossip_sim.cpp
         ${CMAKE_SOURCE_DIR}/cy/cy.c
         src/helpers.c
         src/cy_trace.c
