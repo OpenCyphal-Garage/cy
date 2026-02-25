@@ -27,3 +27,7 @@ Update docs/examples when public API behavior changes.
 - Keep code compact and add brief comments before non-obvious logic.
 - Treat warnings as errors and keep compatibility with strict warning flags.
 - Module entities are prefixed with the module name; e.g., `foo.h` contains `foo_bar`, `foo_baz_t`, `FOO_QUX`. Module-local statics must not be prefixed to keep things brief.
+
+## Behavioral policies
+
+When using subagents to implement tests, always instruct them to summarize their findings concerning the correctness of the tested code and its possible limitations at the end of their run. At the end of the turn, provide a summary of the findings reported by the agents.
