@@ -242,3 +242,25 @@ cy_gen_test_arch_matrix(test_api_pubsub_e2e_lifecycle 11 "CY_CONFIG_TRACE=1"
         platform_stubs/guarded_heap.c
         platform_stubs/message.c
 )
+cy_gen_test_arch_matrix(test_api_pubsub_e2e_platform_failures 11 "CY_CONFIG_TRACE=1"
+        src/test_api_pubsub_e2e_platform_failures.cpp
+        src/e2e_sim_net.cpp
+        src/e2e_faults.cpp
+        src/e2e_test_utils.cpp
+        ${CMAKE_SOURCE_DIR}/cy/cy.c
+        src/helpers.c
+        src/cy_trace.c
+        platform_stubs/guarded_heap.c
+        platform_stubs/message.c
+)
+cy_gen_test_arch_matrix(test_api_consensus_e2e_multinode 11 "CY_CONFIG_TRACE=1"
+        src/test_api_consensus_e2e_multinode.cpp
+        src/e2e_sim_net.cpp
+        src/e2e_faults.cpp
+        src/e2e_test_utils.cpp
+        ${CMAKE_SOURCE_DIR}/cy/cy.c
+        src/helpers.c
+        src/cy_trace.c
+        platform_stubs/guarded_heap.c
+        platform_stubs/message.c
+)

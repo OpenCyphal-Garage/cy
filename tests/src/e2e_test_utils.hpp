@@ -31,6 +31,12 @@ std::array<unsigned char, 12> app_payload_pack(std::uint32_t publisher_id, std::
 bool                          app_payload_unpack(const unsigned char* bytes, std::size_t size, app_payload_t& out);
 bool                          app_payload_unpack(const std::vector<unsigned char>& bytes, app_payload_t& out);
 
+/// Generalized deterministic event-loop step for all nodes at the same timestamp.
+cy_err_t drive_round_all(sim_net_t& net, cy_us_t now);
+
+/// Generalized deterministic event-loop step where each node has its own current time.
+cy_err_t drive_round_vector(sim_net_t& net, const std::vector<cy_us_t>& now_by_node);
+
 /// One deterministic event-loop step:
 /// deliver due -> spin node A -> spin node B -> deliver due.
 cy_err_t drive_round(sim_net_t& net);
@@ -49,6 +55,7 @@ void assert_no_queued_frames(const sim_net_t& net);
 void assert_no_live_messages();
 void assert_node_heap_clean(const sim_net_t& net, std::size_t node_index);
 void assert_all_heaps_clean(const sim_net_t& net);
+void assert_all_node_heaps_clean(const sim_net_t& net);
 void assert_quiescent(const sim_net_t& net);
 
 } // namespace e2e

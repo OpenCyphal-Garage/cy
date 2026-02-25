@@ -80,28 +80,66 @@ bool app_payload_unpack(const std::vector<unsigned char>& bytes, app_payload_t& 
     return app_payload_unpack(bytes.data(), bytes.size(), out);
 }
 
+cy_err_t drive_round_all(sim_net_t& net, const cy_us_t now)
+{
+    const std::size_t count = sim_net_node_count(net);
+    if (count == 0U) {
+        return CY_ERR_ARGUMENT;
+    }
+    return drive_round_vector(net, std::vector<cy_us_t>(count, now));
+}
+
+cy_err_t drive_round_vector(sim_net_t& net, const std::vector<cy_us_t>& now_by_node)
+{
+    const std::size_t count = sim_net_node_count(net);
+    if ((count == 0U) || (now_by_node.size() != count)) {
+        return CY_ERR_ARGUMENT;
+    }
+
+    cy_us_t now_limit = now_by_node.front();
+    for (std::size_t i = 0U; i < count; i++) {
+        sim_net_node_now_set(net, i, now_by_node.at(i));
+        now_limit = std::max(now_limit, now_by_node.at(i));
+    }
+
+    sim_net_deliver_due(net, now_limit);
+    for (std::size_t i = 0U; i < count; i++) {
+        const cy_err_t err = sim_net_spin_node(net, i);
+        if (err != CY_OK) {
+            return err;
+        }
+    }
+    sim_net_deliver_due(net, now_limit);
+    return CY_OK;
+}
+
 cy_err_t drive_round(sim_net_t& net)
 {
-    return drive_round(net, sim_net_node_now(net, sim_node_a), sim_net_node_now(net, sim_node_b));
+    const std::size_t count = sim_net_node_count(net);
+    if (count == 0U) {
+        return CY_ERR_ARGUMENT;
+    }
+    if (count == 1U) {
+        return drive_round_all(net, sim_net_node_now(net, 0U));
+    }
+    std::vector<cy_us_t> now_by_node(count, 0);
+    for (std::size_t i = 0U; i < count; i++) {
+        now_by_node.at(i) = sim_net_node_now(net, i);
+    }
+    return drive_round_vector(net, now_by_node);
 }
 
 cy_err_t drive_round(sim_net_t& net, const cy_us_t now_a, const cy_us_t now_b)
 {
-    sim_net_node_now_set(net, sim_node_a, now_a);
-    sim_net_node_now_set(net, sim_node_b, now_b);
-
-    const cy_us_t now = (now_a > now_b) ? now_a : now_b;
-    sim_net_deliver_due(net, now);
-    const cy_err_t err_a = sim_net_spin_node(net, sim_node_a);
-    if (err_a != CY_OK) {
-        return err_a;
+    const std::size_t count = sim_net_node_count(net);
+    if (count < 2U) {
+        return CY_ERR_ARGUMENT;
     }
-    const cy_err_t err_b = sim_net_spin_node(net, sim_node_b);
-    if (err_b != CY_OK) {
-        return err_b;
-    }
-    sim_net_deliver_due(net, now);
-    return CY_OK;
+    const cy_us_t        fallback = std::max(now_a, now_b);
+    std::vector<cy_us_t> now_by_node(count, fallback);
+    now_by_node.at(sim_node_a) = now_a;
+    now_by_node.at(sim_node_b) = now_b;
+    return drive_round_vector(net, now_by_node);
 }
 
 cy_err_t drive_until(sim_net_t&                   net,
@@ -115,7 +153,7 @@ cy_err_t drive_until(sim_net_t&                   net,
     }
     cy_us_t now = start_time;
     for (std::size_t i = 0U; i < max_rounds; i++) {
-        const cy_err_t err = drive_round(net, now, now);
+        const cy_err_t err = drive_round_all(net, now);
         if (err != CY_OK) {
             return err;
         }
@@ -135,7 +173,8 @@ invariant_counters_t invariant_snapshot(const sim_net_t& net)
     out.queued_frames         = sim_net_pending_frames(net);
     out.async_errors          = sim_net_async_errors(net).size();
 
-    for (std::size_t i = 0U; i < sim_node_count; i++) {
+    const std::size_t sample_count = std::min<std::size_t>(sim_node_count, sim_net_node_count(net));
+    for (std::size_t i = 0U; i < sample_count; i++) {
         out.core_heap_fragments.at(i)    = guarded_heap_allocated_fragments(&sim_net_core_heap(net, i));
         out.core_heap_bytes.at(i)        = guarded_heap_allocated_bytes(&sim_net_core_heap(net, i));
         out.message_heap_fragments.at(i) = guarded_heap_allocated_fragments(&sim_net_message_heap(net, i));
@@ -152,17 +191,20 @@ void assert_no_live_messages() { TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_li
 
 void assert_node_heap_clean(const sim_net_t& net, const std::size_t node_index)
 {
-    assert(node_index < sim_node_count);
+    assert(node_index < sim_net_node_count(net));
     TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&sim_net_core_heap(net, node_index)));
     TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&sim_net_core_heap(net, node_index)));
     TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&sim_net_message_heap(net, node_index)));
     TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&sim_net_message_heap(net, node_index)));
 }
 
-void assert_all_heaps_clean(const sim_net_t& net)
+void assert_all_heaps_clean(const sim_net_t& net) { assert_all_node_heaps_clean(net); }
+
+void assert_all_node_heaps_clean(const sim_net_t& net)
 {
-    assert_node_heap_clean(net, sim_node_a);
-    assert_node_heap_clean(net, sim_node_b);
+    for (std::size_t i = 0U; i < sim_net_node_count(net); i++) {
+        assert_node_heap_clean(net, i);
+    }
 }
 
 void assert_quiescent(const sim_net_t& net)

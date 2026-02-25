@@ -16,10 +16,16 @@ constexpr std::uint8_t header_gossip    = 7U;
 constexpr std::uint8_t header_scout     = 8U;
 constexpr std::size_t  header_size      = 18U;
 constexpr std::size_t  max_fault_copies = 1024U;
-constexpr std::size_t  registry_size    = 8U;
+constexpr std::size_t  registry_size    = 64U;
 
-std::array<sim_net_t*, registry_size> g_registry{};          // NOLINT(*-non-const-global-variables)
-std::size_t                           g_registry_count = 0U; // NOLINT(*-non-const-global-variables)
+struct registry_entry_t final
+{
+    const cy_t* cy{ nullptr };
+    sim_net_t*  net{ nullptr };
+    std::size_t node_index{ 0U };
+};
+
+std::array<registry_entry_t, registry_size> g_registry{}; // NOLINT(*-non-const-global-variables)
 
 sim_node_t* node_from(cy_platform_t* const platform)
 {
@@ -45,22 +51,12 @@ const sim_subject_reader_t* find_reader(const sim_node_t& node, const std::uint3
 
 std::size_t find_node_index_by_id(const sim_net_t& net, const std::uint64_t node_id)
 {
-    for (std::size_t i = 0U; i < sim_node_count; i++) {
+    for (std::size_t i = 0U; i < net.nodes.size(); i++) {
         if (net.nodes.at(i).node_id == node_id) {
             return i;
         }
     }
-    return sim_node_count;
-}
-
-std::size_t find_node_index_by_cy(const sim_net_t& net, const cy_t* const cy)
-{
-    for (std::size_t i = 0U; i < sim_node_count; i++) {
-        if (net.nodes.at(i).cy == cy) {
-            return i;
-        }
-    }
-    return sim_node_count;
+    return net.nodes.size();
 }
 
 bool flatten_fragments(const cy_bytes_t message, std::vector<unsigned char>& out)
@@ -172,37 +168,36 @@ void frame_parse(frame_info_t& frame)
     }
 }
 
-bool registry_insert(sim_net_t* const net)
+bool registry_insert(sim_net_t* const net, const std::size_t node_index, const cy_t* const cy)
 {
-    if (g_registry_count >= g_registry.size()) {
+    auto* existing_it = std::ranges::find(g_registry, cy, &registry_entry_t::cy);
+    if (existing_it != g_registry.end()) {
+        existing_it->net        = net;
+        existing_it->node_index = node_index;
+        return true;
+    }
+    auto* free_it = std::ranges::find(g_registry, nullptr, &registry_entry_t::cy);
+    if (free_it == g_registry.end()) {
         return false;
     }
-    g_registry.at(g_registry_count++) = net;
+    free_it->cy         = cy;
+    free_it->net        = net;
+    free_it->node_index = node_index;
     return true;
 }
 
 void registry_remove(const sim_net_t* const net)
 {
-    for (std::size_t i = 0U; i < g_registry_count; i++) {
-        if (g_registry.at(i) != net) {
-            continue;
-        }
-        for (std::size_t j = i + 1U; j < g_registry_count; j++) {
-            g_registry.at(j - 1U) = g_registry.at(j);
-        }
-        g_registry.at(g_registry_count - 1U) = nullptr;
-        g_registry_count--;
-        break;
-    }
+    std::ranges::replace_if(
+      g_registry, [net](const registry_entry_t& entry) { return entry.net == net; }, registry_entry_t{});
 }
 
-sim_net_t* registry_find_by_cy(const cy_t* const cy)
+const registry_entry_t* registry_find_by_cy(const cy_t* const cy)
 {
-    for (std::size_t i = 0U; i < g_registry_count; i++) {
-        sim_net_t* const net = g_registry.at(i);
-        if ((net != nullptr) && (find_node_index_by_cy(*net, cy) < sim_node_count)) {
-            return net;
-        }
+    auto* it = std::ranges::find_if(
+      g_registry, [cy](const registry_entry_t& entry) { return (entry.cy == cy) && (entry.net != nullptr); });
+    if (it != g_registry.end()) {
+        return it;
     }
     return nullptr;
 }
@@ -248,6 +243,33 @@ bool queue_push(sim_net_t& net, const queued_frame_t& frame)
     return true;
 }
 
+bool op_fault_capture_push(sim_net_t& net, const op_fault_capture_t& capture)
+{
+    try {
+        net.op_fault_captures.push_back(capture);
+    } catch (const std::bad_alloc&) {
+        return false;
+    }
+    return true;
+}
+
+op_fault_effect_t op_fault_evaluate_and_capture(sim_node_t& self, op_info_t op)
+{
+    sim_net_t& net = *self.network;
+    op.sequence    = ++net.next_operation_sequence;
+
+    const op_fault_effect_t effect =
+      (net.op_faults != nullptr) ? op_fault_plan_evaluate(*net.op_faults, op) : op_fault_effect_t{};
+
+    op_fault_capture_t capture{};
+    capture.op         = op;
+    capture.failed     = effect.fail;
+    capture.error      = effect.error;
+    capture.spin_delay = effect.spin_delay;
+    (void)op_fault_capture_push(net, capture);
+    return effect;
+}
+
 cy_err_t enqueue_frame(sim_node_t&                       src,
                        const std::size_t                 dst_index,
                        const bool                        p2p,
@@ -267,8 +289,9 @@ cy_err_t enqueue_frame(sim_node_t&                       src,
     base.wire         = wire;
     frame_parse(base);
 
-    const fault_effect_t effect = (net.faults != nullptr) ? fault_plan_evaluate(*net.faults, base) : fault_effect_t{};
-    const std::size_t    copies = effect.drop ? 1U : std::min<std::size_t>(max_fault_copies, 1U + effect.duplicates);
+    const fault_effect_t effect =
+      (net.frame_faults != nullptr) ? fault_plan_evaluate(*net.frame_faults, base) : fault_effect_t{};
+    const std::size_t copies = effect.drop ? 1U : std::min<std::size_t>(max_fault_copies, 1U + effect.duplicates);
 
     for (std::size_t copy_index = 0U; copy_index < copies; copy_index++) {
         frame_info_t item = base;
@@ -304,7 +327,7 @@ cy_err_t enqueue_subject(sim_node_t&                       src,
     const bool       is_broadcast = subject_id == cy_broadcast_subject_id(&src.platform);
 
     cy_err_t result = CY_OK;
-    for (std::size_t i = 0U; i < sim_node_count; i++) {
+    for (std::size_t i = 0U; i < net.nodes.size(); i++) {
         if (i == src.index) {
             continue;
         }
@@ -326,7 +349,7 @@ cy_err_t enqueue_p2p(sim_node_t&                       src,
 {
     const sim_net_t&  net = *src.network;
     const std::size_t ix  = find_node_index_by_id(net, destination_node_id);
-    if (ix >= sim_node_count) {
+    if (ix >= net.nodes.size()) {
         return CY_OK;
     }
     return enqueue_frame(src, ix, true, 0U, priority, wire);
@@ -390,11 +413,24 @@ extern "C" cy_err_t sim_subject_writer_send(cy_platform_t* const       platform,
                                             const cy_prio_t            priority,
                                             const cy_bytes_t           message)
 {
-    (void)deadline;
     if (writer == nullptr) {
         return CY_ERR_ARGUMENT;
     }
-    sim_node_t* const          self = node_from(platform);
+    sim_node_t* const self = node_from(platform);
+
+    op_info_t op{};
+    op.node_index                     = self->index;
+    op.kind                           = op_kind_t::subject_send;
+    op.now                            = self->now;
+    op.deadline                       = deadline;
+    op.has_subject_id                 = true;
+    op.subject_id                     = writer->subject_id;
+    op.priority                       = priority;
+    const op_fault_effect_t op_effect = op_fault_evaluate_and_capture(*self, op);
+    if (op_effect.fail) {
+        return op_effect.error;
+    }
+
     std::vector<unsigned char> wire;
     if (!flatten_fragments(message, wire)) {
         return CY_ERR_ARGUMENT;
@@ -440,11 +476,24 @@ extern "C" cy_err_t sim_p2p_send(cy_platform_t* const   platform,
                                  const cy_us_t          deadline,
                                  const cy_bytes_t       message)
 {
-    (void)deadline;
     if (lane == nullptr) {
         return CY_ERR_ARGUMENT;
     }
-    sim_node_t* const          self = node_from(platform);
+    sim_node_t* const self = node_from(platform);
+
+    op_info_t op{};
+    op.node_index                     = self->index;
+    op.kind                           = op_kind_t::p2p_send;
+    op.now                            = self->now;
+    op.deadline                       = deadline;
+    op.has_lane_id                    = true;
+    op.lane_id                        = lane->id;
+    op.priority                       = lane->prio;
+    const op_fault_effect_t op_effect = op_fault_evaluate_and_capture(*self, op);
+    if (op_effect.fail) {
+        return op_effect.error;
+    }
+
     std::vector<unsigned char> wire;
     if (!flatten_fragments(message, wire)) {
         return CY_ERR_ARGUMENT;
@@ -461,8 +510,21 @@ extern "C" void sim_p2p_extent_set(cy_platform_t* const platform, const std::siz
 
 extern "C" cy_err_t sim_spin(cy_platform_t* const platform, const cy_us_t deadline)
 {
-    (void)platform;
-    (void)deadline;
+    sim_node_t* const self = node_from(platform);
+
+    op_info_t op{};
+    op.node_index = self->index;
+    op.kind       = op_kind_t::spin;
+    op.now        = self->now;
+    op.deadline   = deadline;
+
+    const op_fault_effect_t op_effect = op_fault_evaluate_and_capture(*self, op);
+    if (op_effect.spin_delay > 0) {
+        self->now = saturating_add(self->now, op_effect.spin_delay);
+    }
+    if (op_effect.fail) {
+        return op_effect.error;
+    }
     return CY_OK;
 }
 
@@ -486,26 +548,43 @@ extern "C" void sim_on_async_error(cy_t* const         cy,
                                    const cy_err_t      error,
                                    const std::uint16_t line_number)
 {
-    sim_net_t* const net = registry_find_by_cy(cy);
-    if (net == nullptr) {
+    const registry_entry_t* const entry = registry_find_by_cy(cy);
+    if (entry == nullptr) {
         return;
     }
-    const std::size_t node_index = find_node_index_by_cy(*net, cy);
-    capture_async_error(
-      *net, node_index, error, line_number, topic != nullptr, (topic != nullptr) ? cy_topic_hash(topic) : 0U);
+    capture_async_error(*entry->net,
+                        entry->node_index,
+                        error,
+                        line_number,
+                        topic != nullptr,
+                        (topic != nullptr) ? cy_topic_hash(topic) : 0U);
 }
 
 } // namespace
 
 cy_err_t sim_net_init(sim_net_t& self, const std::uint32_t subject_id_modulus, const std::uint64_t random_seed_base)
 {
-    self                    = sim_net_t{};
-    self.subject_id_modulus = subject_id_modulus;
-    if (!registry_insert(&self)) {
-        return CY_ERR_CAPACITY;
+    sim_net_config_t config{};
+    config.node_count         = sim_node_count;
+    config.subject_id_modulus = subject_id_modulus;
+    config.random_seed_base   = random_seed_base;
+    return sim_net_init_ex(self, config);
+}
+
+cy_err_t sim_net_init_ex(sim_net_t& self, const sim_net_config_t& config)
+{
+    if (config.node_count == 0U) {
+        return CY_ERR_ARGUMENT;
     }
 
-    for (std::size_t i = 0U; i < sim_node_count; i++) {
+    self                    = sim_net_t{};
+    self.subject_id_modulus = config.subject_id_modulus;
+    try {
+        self.nodes.resize(config.node_count);
+    } catch (const std::bad_alloc&) {
+        return CY_ERR_MEMORY;
+    }
+    for (std::size_t i = 0U; i < self.nodes.size(); i++) {
         sim_node_t& node = self.nodes.at(i);
         node             = sim_node_t{};
 
@@ -516,7 +595,7 @@ cy_err_t sim_net_init(sim_net_t& self, const std::uint32_t subject_id_modulus, c
         node.index        = i;
         node.node_id      = i + 1U;
         node.now          = 0;
-        node.random_state = random_seed_base + (i * UINT64_C(0x9E3779B97F4A7C15));
+        node.random_state = config.random_seed_base + (i * UINT64_C(0x9E3779B97F4A7C15));
 
         node.vtable.subject_writer_new     = sim_subject_writer_new;
         node.vtable.subject_writer_destroy = sim_subject_writer_destroy;
@@ -531,13 +610,17 @@ cy_err_t sim_net_init(sim_net_t& self, const std::uint32_t subject_id_modulus, c
         node.vtable.random                 = sim_random;
 
         node.platform.cy                 = nullptr;
-        node.platform.subject_id_modulus = subject_id_modulus;
+        node.platform.subject_id_modulus = config.subject_id_modulus;
         node.platform.vtable             = &node.vtable;
 
         node.cy = cy_new(&node.platform);
         if (node.cy == nullptr) {
             sim_net_deinit(self);
             return CY_ERR_MEMORY;
+        }
+        if (!registry_insert(&self, i, node.cy)) {
+            sim_net_deinit(self);
+            return CY_ERR_CAPACITY;
         }
         cy_async_error_handler_set(node.cy, sim_on_async_error);
     }
@@ -546,8 +629,8 @@ cy_err_t sim_net_init(sim_net_t& self, const std::uint32_t subject_id_modulus, c
 
 void sim_net_deinit(sim_net_t& self)
 {
-    for (std::size_t i = 0U; i < sim_node_count; i++) {
-        sim_node_t& node = self.nodes.at(i);
+    registry_remove(&self);
+    for (sim_node_t& node : self.nodes) {
         if (node.cy != nullptr) {
             cy_destroy(node.cy);
             node.cy = nullptr;
@@ -556,57 +639,67 @@ void sim_net_deinit(sim_net_t& self)
         node.network = nullptr;
     }
     self.queue.clear();
-    self.faults = nullptr;
-    registry_remove(&self);
+    self.frame_faults = nullptr;
+    self.op_faults    = nullptr;
 }
 
-void sim_net_faults_set(sim_net_t& self, const fault_plan_t* const faults) { self.faults = faults; }
+void sim_net_faults_set(sim_net_t& self, const fault_plan_t* const frame_faults) { self.frame_faults = frame_faults; }
+
+void sim_net_faults_set(sim_net_t& self, const fault_plan_t* const frame_faults, const op_fault_plan_t* const op_faults)
+{
+    self.frame_faults = frame_faults;
+    self.op_faults    = op_faults;
+}
+
+void sim_net_op_faults_set(sim_net_t& self, const op_fault_plan_t* const op_faults) { self.op_faults = op_faults; }
 
 cy_t* sim_net_cy(sim_net_t& self, const std::size_t node_index)
 {
-    assert(node_index < sim_node_count);
+    assert(node_index < self.nodes.size());
     return self.nodes.at(node_index).cy;
 }
 
 const cy_t* sim_net_cy(const sim_net_t& self, const std::size_t node_index)
 {
-    assert(node_index < sim_node_count);
+    assert(node_index < self.nodes.size());
     return self.nodes.at(node_index).cy;
 }
 
 cy_platform_t* sim_net_platform(sim_net_t& self, const std::size_t node_index)
 {
-    assert(node_index < sim_node_count);
+    assert(node_index < self.nodes.size());
     return &self.nodes.at(node_index).platform;
 }
 
 const cy_platform_t* sim_net_platform(const sim_net_t& self, const std::size_t node_index)
 {
-    assert(node_index < sim_node_count);
+    assert(node_index < self.nodes.size());
     return &self.nodes.at(node_index).platform;
 }
 
 void sim_net_node_now_set(sim_net_t& self, const std::size_t node_index, const cy_us_t now)
 {
-    assert(node_index < sim_node_count);
+    assert(node_index < self.nodes.size());
     self.nodes.at(node_index).now = now;
 }
 
 cy_us_t sim_net_node_now(const sim_net_t& self, const std::size_t node_index)
 {
-    assert(node_index < sim_node_count);
+    assert(node_index < self.nodes.size());
     return self.nodes.at(node_index).now;
 }
 
 std::uint64_t sim_net_node_id(const sim_net_t& self, const std::size_t node_index)
 {
-    assert(node_index < sim_node_count);
+    assert(node_index < self.nodes.size());
     return self.nodes.at(node_index).node_id;
 }
 
+std::size_t sim_net_node_count(const sim_net_t& self) { return self.nodes.size(); }
+
 cy_err_t sim_net_spin_node(sim_net_t& self, const std::size_t node_index)
 {
-    assert(node_index < sim_node_count);
+    assert(node_index < self.nodes.size());
     return cy_spin_once(self.nodes.at(node_index).cy);
 }
 
@@ -648,33 +741,39 @@ const std::vector<frame_capture_t>& sim_net_captures(const sim_net_t& self) { re
 
 const std::vector<async_error_capture_t>& sim_net_async_errors(const sim_net_t& self) { return self.async_errors; }
 
+const std::vector<op_fault_capture_t>& sim_net_op_fault_captures(const sim_net_t& self)
+{
+    return self.op_fault_captures;
+}
+
 void sim_net_clear_captures(sim_net_t& self)
 {
     self.captures.clear();
     self.async_errors.clear();
+    self.op_fault_captures.clear();
 }
 
 guarded_heap_t& sim_net_core_heap(sim_net_t& self, const std::size_t node_index)
 {
-    assert(node_index < sim_node_count);
+    assert(node_index < self.nodes.size());
     return self.nodes.at(node_index).core_heap;
 }
 
 const guarded_heap_t& sim_net_core_heap(const sim_net_t& self, const std::size_t node_index)
 {
-    assert(node_index < sim_node_count);
+    assert(node_index < self.nodes.size());
     return self.nodes.at(node_index).core_heap;
 }
 
 guarded_heap_t& sim_net_message_heap(sim_net_t& self, const std::size_t node_index)
 {
-    assert(node_index < sim_node_count);
+    assert(node_index < self.nodes.size());
     return self.nodes.at(node_index).message_heap;
 }
 
 const guarded_heap_t& sim_net_message_heap(const sim_net_t& self, const std::size_t node_index)
 {
-    assert(node_index < sim_node_count);
+    assert(node_index < self.nodes.size());
     return self.nodes.at(node_index).message_heap;
 }
 

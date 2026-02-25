@@ -2685,6 +2685,7 @@ static void subscriber_invoke(cy_subscriber_t* const subscriber, const cy_arriva
 // --------------------------------------------------------------------------------------------------------------------
 // RELIABLE MESSAGE DEDUPLICATION TO MITIGATE ACK LOSS
 
+// TODO double this using two side-by-side uint64_t bitmaps.
 #define DEDUP_HISTORY 64U
 
 // An instance is kept per remote node that publishes messages on a given topic, or P2P.
