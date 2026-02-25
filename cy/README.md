@@ -157,3 +157,9 @@ While broadcast gossips are robust, they are inherently slow. To improve CRDT re
 - [Gossip-based peer sampling](https://www.inf.u-szeged.hu/~jelasity/cikkek/tocs05.pdf)
 - [Cyclon](https://www.cs.unibo.it/babaoglu/courses/csns/resources/tutorials/cyclon.pdf)
 - [Chord](https://en.wikipedia.org/wiki/Chord_%28peer-to-peer%29)
+
+## Security/threat model
+
+All nodes are trusted and there are no malicious actors. The protocol is designed to be robust against network faults and adverse conditions, but not against intentional attacks.
+
+Security features are likely to be introduced as optional extensions of the protocol at a later stage, once the core has stabilized. Feedback, suggestions, and feature requests are welcome on the [OpenCyphal Forum](https://forum.opencyphal.org).
