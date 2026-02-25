@@ -161,3 +161,61 @@ cy_gen_test_arch_matrix(test_api_gossip_sim 11 "CY_CONFIG_TRACE=1"
         platform_stubs/guarded_heap.c
         platform_stubs/message.c
 )
+
+# END-TO-END API TESTS.
+# Shared simulation/fault/utils infrastructure is linked into each section target.
+cy_gen_test_arch_matrix(test_api_pubsub_e2e_baseline 11 "CY_CONFIG_TRACE=1"
+        src/test_api_pubsub_e2e_baseline.cpp
+        src/e2e_sim_net.cpp
+        src/e2e_faults.cpp
+        src/e2e_test_utils.cpp
+        ${CMAKE_SOURCE_DIR}/cy/cy.c
+        src/helpers.c
+        src/cy_trace.c
+        platform_stubs/guarded_heap.c
+        platform_stubs/message.c
+)
+cy_gen_test_arch_matrix(test_api_pubsub_e2e_reliable_loss 11 "CY_CONFIG_TRACE=1"
+        src/test_api_pubsub_e2e_reliable_loss.cpp
+        src/e2e_sim_net.cpp
+        src/e2e_faults.cpp
+        src/e2e_test_utils.cpp
+        ${CMAKE_SOURCE_DIR}/cy/cy.c
+        src/helpers.c
+        src/cy_trace.c
+        platform_stubs/guarded_heap.c
+        platform_stubs/message.c
+)
+cy_gen_test_arch_matrix(test_api_pubsub_e2e_reordering 11 "CY_CONFIG_TRACE=1"
+        src/test_api_pubsub_e2e_reordering.cpp
+        src/e2e_sim_net.cpp
+        src/e2e_faults.cpp
+        src/e2e_test_utils.cpp
+        ${CMAKE_SOURCE_DIR}/cy/cy.c
+        src/helpers.c
+        src/cy_trace.c
+        platform_stubs/guarded_heap.c
+        platform_stubs/message.c
+)
+cy_gen_test_arch_matrix(test_api_pubsub_e2e_migration 11 "CY_CONFIG_TRACE=1"
+        src/test_api_pubsub_e2e_migration.cpp
+        src/e2e_sim_net.cpp
+        src/e2e_faults.cpp
+        src/e2e_test_utils.cpp
+        ${CMAKE_SOURCE_DIR}/cy/cy.c
+        src/helpers.c
+        src/cy_trace.c
+        platform_stubs/guarded_heap.c
+        platform_stubs/message.c
+)
+cy_gen_test_arch_matrix(test_api_pubsub_e2e_lifecycle 11 "CY_CONFIG_TRACE=1"
+        src/test_api_pubsub_e2e_lifecycle.cpp
+        src/e2e_sim_net.cpp
+        src/e2e_faults.cpp
+        src/e2e_test_utils.cpp
+        ${CMAKE_SOURCE_DIR}/cy/cy.c
+        src/helpers.c
+        src/cy_trace.c
+        platform_stubs/guarded_heap.c
+        platform_stubs/message.c
+)
