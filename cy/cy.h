@@ -387,6 +387,8 @@ void cy_subscriber_callback_set(cy_subscriber_t* const self, const cy_subscriber
 void cy_subscriber_name(const cy_subscriber_t* const self, char* const out_name);
 
 /// No effect if the subscriber pointer is NULL.
+/// Destruction will happen asynchronously at the next event loop update (see spin()).
+/// This is done to enable safe destruction from within a callback.
 void cy_unsubscribe(cy_subscriber_t* const self);
 
 /// If streaming responses are used, streaming should continue only as long as the response futures materialize to

@@ -17,6 +17,7 @@
 #include "cy.h"
 #include "cy_platform.h"
 #include <stdint.h>
+#include <wild_key_value.h>
 
 // Configure cavl2.h. Key definitions must be provided before including the header.
 #define CAVL2_RELATION int32_t
@@ -2612,6 +2613,10 @@ struct cy_subscriber_t
 
     cy_user_context_t        user_context;
     cy_subscriber_callback_t callback;
+
+    // This is currently only used for delayed destruction.
+    // It is wasteful because it takes ~40 bytes, but simplifies the destruction logic.
+    olga_event_t event;
 };
 
 static cy_breadcrumb_t make_breadcrumb(const cy_topic_t* const topic, const cy_lane_t lane, const uint64_t message_tag)
@@ -3305,6 +3310,7 @@ static cy_subscriber_t* subscribe(cy_t* const cy, const cy_str_t name, subscribe
     sub->params        = params;
     sub->user_context  = CY_USER_CONTEXT_EMPTY;
     sub->callback      = subscriber_callback_default;
+    sub->event         = OLGA_EVENT_INIT;
     const cy_err_t res = ensure_subscriber_root(cy, resolved, &sub->root);
     if (res != CY_OK) {
         mem_free(cy, sub);
@@ -3367,11 +3373,100 @@ void cy_subscriber_name(const cy_subscriber_t* const self, char* const out_name)
     wkv_get_key(&self->root->cy->subscribers_by_name, self->root->index_name, out_name);
 }
 
+static void topic_decouple_subscriber_root(cy_topic_t* const topic, const subscriber_root_t* const root)
+{
+    assert((topic != NULL) && (root != NULL));
+    cy_t* const           cy      = topic->cy;
+    bool                  changed = false;
+    cy_topic_coupling_t** cpl     = &topic->couplings;
+    while (*cpl != NULL) {
+        cy_topic_coupling_t* const this = *cpl;
+        if (this->root == root) {
+            *cpl    = this->next;
+            changed = true;
+            mem_free(cy, this);
+        } else {
+            cpl = &this->next;
+        }
+    }
+    if (changed) {
+        topic_ensure_subscribed(topic);
+        if (validate_is_implicit(topic) && !is_implicit(topic)) { // topics are destroyed lazily
+            enlist_head(&cy->list_implicit, &topic->list_implicit);
+            CY_TRACE(cy, "🧛 %s demoted to implicit", topic_repr(topic).str);
+        }
+    }
+}
+
+static void subscriber_destroy_delayed(olga_t* const olga, olga_event_t* const event, const int64_t now)
+{
+    (void)now;
+    cy_t* const              cy   = olga->user;
+    cy_subscriber_t* const   self = event->user;
+    subscriber_root_t* const root = self->root;
+    assert((root != NULL) && (root->cy == cy));
+
+#if CY_CONFIG_TRACE
+    char name[CY_TOPIC_NAME_MAX + 1];
+    cy_subscriber_name(self, name);
+    CY_TRACE(cy, "🗑️ %s", name);
+#endif
+
+    // Suppress callbacks from reordering_eject() et al that may occur during finalization.
+    self->callback = subscriber_callback_default;
+
+    // Drop all pending ordered messages first because the states keep pointers into topic couplings.
+    while (self->index_reordering_by_remote_id != NULL) {
+        reordering_t* const rr = CAVL2_TO_OWNER(cavl2_min(self->index_reordering_by_remote_id), reordering_t, index);
+        assert(rr != NULL);
+        reordering_destroy(rr);
+    }
+    assert(self->list_reordering_by_recency.head == NULL);
+    assert(self->list_reordering_by_recency.tail == NULL);
+
+    // Delist this subscriber from the root.
+    cy_subscriber_t** sub = &root->head;
+    while ((*sub != NULL) && (*sub != self)) {
+        sub = &(*sub)->next;
+    }
+    assert(*sub == self);
+    if (*sub == self) {
+        *sub = self->next;
+    }
+    self->next = NULL;
+
+    // If this was the last subscriber under the root, destroy all couplings and the root itself.
+    if (root->head == NULL) {
+        for (cy_topic_t* topic = cy_topic_iter_first(cy); topic != NULL;) {
+            cy_topic_t* const next = cy_topic_iter_next(topic);
+            topic_decouple_subscriber_root(topic, root); // may demote the topic to implicit for later destruction
+            topic = next;
+        }
+        if (root->index_pattern != NULL) {
+            wkv_del(&cy->subscribers_by_pattern, root->index_pattern);
+            root->index_pattern = NULL;
+        }
+        if (root->index_name != NULL) {
+            wkv_del(&cy->subscribers_by_name, root->index_name);
+            root->index_name = NULL;
+        }
+        mem_free(cy, root);
+    }
+
+    mem_free(cy, self);
+}
+
 void cy_unsubscribe(cy_subscriber_t* const self)
 {
-    // TODO: Do not destroy the subscriber immediately; schedule an olga event instead with zero deferral timeout.
-    //   This will allow unsubscribing from within a callback. We'll need a test for that.
-    (void)self;
+    if ((self != NULL) && (self->root != NULL) && (self->root->cy != NULL)) {
+        cy_t* const cy = self->root->cy;
+#if CY_CONFIG_TRACE
+        char name[CY_TOPIC_NAME_MAX + 1];
+        cy_subscriber_name(self, name);
+        CY_TRACE(cy, "🗑️ %s", name);
+#endif
+        olga_defer(&cy->olga, 0, self, subscriber_destroy_delayed, &self->event);
+    }
 }
 
 static cy_err_t do_respond(cy_breadcrumb_t* const breadcrumb, const cy_us_t deadline, const cy_bytes_t message)
