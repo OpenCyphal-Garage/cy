@@ -24,6 +24,8 @@ typedef struct
 
     size_t fail_alloc_count;
     size_t fail_alloc_size;
+    bool   fail_subject_writer_new;
+    bool   fail_subject_reader_new;
 
     size_t subject_reader_destroy_count;
     size_t subject_writer_destroy_count;
@@ -53,8 +55,11 @@ static uint64_t fixture_random(cy_platform_t* const platform)
 
 static cy_subject_writer_t* fixture_subject_writer_new(cy_platform_t* const platform, const uint32_t subject_id)
 {
-    fixture_t* const             self = fixture_from(platform);
-    test_subject_writer_t* const out  = (test_subject_writer_t*)guarded_heap_alloc(&self->heap, sizeof(*out));
+    fixture_t* const self = fixture_from(platform);
+    if (self->fail_subject_writer_new) {
+        return NULL;
+    }
+    test_subject_writer_t* const out = (test_subject_writer_t*)guarded_heap_alloc(&self->heap, sizeof(*out));
     if (out != NULL) {
         out->base.subject_id = subject_id;
     }
@@ -86,8 +91,11 @@ static cy_subject_reader_t* fixture_subject_reader_new(cy_platform_t* const plat
                                                        const uint32_t       subject_id,
                                                        const size_t         extent)
 {
-    fixture_t* const             self = fixture_from(platform);
-    test_subject_reader_t* const out  = (test_subject_reader_t*)guarded_heap_alloc(&self->heap, sizeof(*out));
+    fixture_t* const self = fixture_from(platform);
+    if (self->fail_subject_reader_new) {
+        return NULL;
+    }
+    test_subject_reader_t* const out = (test_subject_reader_t*)guarded_heap_alloc(&self->heap, sizeof(*out));
     if (out != NULL) {
         out->base.subject_id = subject_id;
         out->extent          = extent;
@@ -586,6 +594,104 @@ static void test_left_wins_and_topic_merge_lage(void)
     fixture_deinit(&fix);
 }
 
+static void test_topic_merge_lage_crdt_properties_commutative_associative_idempotent(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+    const cy_us_t now      = 300 * MEGA;
+    const cy_us_t baseline = now - (pow2us(1) * MEGA);
+
+    cy_topic_t* const c1 = fixture_make_topic(&fix, "alloc/crdt/comm/a", UINT64_C(0x1000000000001110), 0U, LAGE_MIN);
+    cy_topic_t* const c2 = fixture_make_topic(&fix, "alloc/crdt/comm/b", UINT64_C(0x1000000000001120), 0U, LAGE_MIN);
+    c1->ts_origin        = baseline;
+    c2->ts_origin        = baseline;
+    topic_merge_lage(c1, now, 4);
+    topic_merge_lage(c1, now, 7);
+    topic_merge_lage(c2, now, 7);
+    topic_merge_lage(c2, now, 4);
+    TEST_ASSERT_EQUAL_INT64((int64_t)c1->ts_origin, (int64_t)c2->ts_origin);
+
+    cy_topic_t* const a1 = fixture_make_topic(&fix, "alloc/crdt/assoc/a", UINT64_C(0x1000000000001130), 0U, LAGE_MIN);
+    cy_topic_t* const a2 = fixture_make_topic(&fix, "alloc/crdt/assoc/b", UINT64_C(0x1000000000001140), 0U, LAGE_MIN);
+    a1->ts_origin        = baseline;
+    a2->ts_origin        = baseline;
+    topic_merge_lage(a1, now, 3);
+    topic_merge_lage(a1, now, 6);
+    topic_merge_lage(a1, now, 2);
+    topic_merge_lage(a2, now, 6);
+    topic_merge_lage(a2, now, 2);
+    topic_merge_lage(a2, now, 3);
+    TEST_ASSERT_EQUAL_INT64((int64_t)a1->ts_origin, (int64_t)a2->ts_origin);
+
+    cy_topic_t* const i1 = fixture_make_topic(&fix, "alloc/crdt/idem/a", UINT64_C(0x1000000000001150), 0U, LAGE_MIN);
+    i1->ts_origin        = baseline;
+    topic_merge_lage(i1, now, 5);
+    const cy_us_t once = i1->ts_origin;
+    topic_merge_lage(i1, now, 5);
+    TEST_ASSERT_EQUAL_INT64((int64_t)once, (int64_t)i1->ts_origin);
+    fixture_deinit(&fix);
+}
+
+static void test_on_gossip_known_topic_equal_lage_prefers_higher_evictions(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    const cy_us_t now = 120 * MEGA;
+
+    cy_topic_t* const topic_win =
+      fixture_make_explicit_topic(&fix, "alloc/divergence/eviction-win", UINT64_C(0x1000000000001160));
+    topic_merge_lage(topic_win, now, 5);
+    topic_allocate(topic_win, 6U, now);
+    TEST_ASSERT_EQUAL_UINT32(6U, topic_win->evictions);
+    TEST_ASSERT_TRUE(on_gossip_known_topic(fix.cy, now, topic_win, 5U, topic_lage(topic_win, now)));
+    TEST_ASSERT_EQUAL_UINT32(6U, topic_win->evictions);
+    TEST_ASSERT_TRUE(is_listed(&fix.cy->list_gossip_urgent, &topic_win->list_gossip_urgent));
+
+    cy_topic_t* const topic_lose =
+      fixture_make_explicit_topic(&fix, "alloc/divergence/eviction-lose", UINT64_C(0x1000000000001170));
+    topic_merge_lage(topic_lose, now, 5);
+    topic_allocate(topic_lose, 6U, now);
+    TEST_ASSERT_FALSE(on_gossip_known_topic(fix.cy, now, topic_lose, 9U, topic_lage(topic_lose, now)));
+    TEST_ASSERT_EQUAL_UINT32(9U, topic_lose->evictions);
+
+    topic_win->pub_count  = 0U;
+    topic_lose->pub_count = 0U;
+    topic_sync_implicit(topic_win);
+    topic_sync_implicit(topic_lose);
+
+    assert_subject_index_unique(fix.cy);
+    fixture_deinit(&fix);
+}
+
+static void test_topic_allocate_reader_recovery_after_subject_reader_oom(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    cy_subscriber_t* const sub = cy_subscribe(fix.cy, cy_str("alloc/reader/oom"), 64U);
+    TEST_ASSERT_NOT_NULL(sub);
+    cy_topic_t* const topic = cy_topic_find_by_name(fix.cy, cy_str("alloc/reader/oom"));
+    TEST_ASSERT_NOT_NULL(topic);
+    TEST_ASSERT_NOT_NULL(topic->sub_reader);
+
+    const uint32_t sid_before   = topic_subject_id(topic);
+    fix.fail_subject_reader_new = true;
+    topic_allocate(topic, topic->evictions + 1U, 200 * MEGA);
+    TEST_ASSERT_TRUE(topic_subject_id(topic) != sid_before);
+    TEST_ASSERT_NULL(topic->sub_reader);
+    TEST_ASSERT_TRUE(fix.async_error_count > 0U);
+    assert_subject_index_unique(fix.cy);
+
+    fix.fail_subject_reader_new = false;
+    topic_sync_subject_reader(topic);
+    TEST_ASSERT_NOT_NULL(topic->sub_reader);
+
+    cy_unsubscribe(sub);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(fix.cy));
+    fixture_deinit(&fix);
+}
+
 static void test_on_gossip_known_topic_divergence_paths(void)
 {
     fixture_t fix;
@@ -790,6 +896,9 @@ int main(void)
     RUN_TEST(test_topic_new_pinned_starts_implicit_and_not_gossiped);
     RUN_TEST(test_pinned_topic_sync_implicit_transitions_without_gossip);
     RUN_TEST(test_left_wins_and_topic_merge_lage);
+    RUN_TEST(test_topic_merge_lage_crdt_properties_commutative_associative_idempotent);
+    RUN_TEST(test_on_gossip_known_topic_equal_lage_prefers_higher_evictions);
+    RUN_TEST(test_topic_allocate_reader_recovery_after_subject_reader_oom);
     RUN_TEST(test_on_gossip_known_topic_divergence_paths);
     RUN_TEST(test_on_gossip_unknown_topic_collision_paths);
     RUN_TEST(test_topic_allocate_recursive_chain_converges_and_writer_transfers);

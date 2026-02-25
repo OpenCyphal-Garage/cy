@@ -564,6 +564,64 @@ void test_api_gossip_sim_sixteen_node_convergence_with_churn_like_delivery()
     }
     network_deinit(net);
 }
+
+void test_api_gossip_sim_stale_replay_after_convergence_keeps_subject_id_stable()
+{
+    sim_network_t net{};
+    network_init(net, 8U, 6U, 40'000);
+
+    static const char* const       topic_name = "sim/gossip/replay/stable/topic";
+    std::array<cy_publisher_t*, 8> pubs{};
+    for (std::size_t i = 0U; i < net.node_count; i++) {
+        pubs.at(i) = cy_advertise(net.nodes.at(i).cy, cy_str(topic_name));
+        TEST_ASSERT_NOT_NULL(pubs.at(i));
+    }
+
+    const cy_topic_t* const topic0 = cy_topic_find_by_name(net.nodes.at(0).cy, cy_str(topic_name));
+    TEST_ASSERT_NOT_NULL(topic0);
+    const std::uint64_t hash = cy_topic_hash(topic0);
+
+    for (std::size_t i = 0U; i < net.node_count; i++) {
+        inject_gossip(net.nodes.at(i),
+                      UINT64_C(0x9000) + i,
+                      6U,
+                      static_cast<std::int8_t>(8 + (i % 2U)),
+                      hash,
+                      static_cast<std::uint32_t>(5U + (i % 3U)),
+                      topic_name,
+                      3'000'000 + static_cast<cy_us_t>(i));
+    }
+    network_run(net, 3'000'000, 36'000'000, 100'000);
+
+    std::array<std::uint32_t, 8> subject_id_before{};
+    for (std::size_t i = 0U; i < net.node_count; i++) {
+        net.nodes.at(i).now     = 36'100'000 + static_cast<cy_us_t>(i);
+        subject_id_before.at(i) = publish_and_get_subject_id(net.nodes.at(i), pubs.at(i), hash);
+    }
+    for (std::size_t i = 1U; i < net.node_count; i++) {
+        TEST_ASSERT_EQUAL_UINT32(subject_id_before.at(0), subject_id_before.at(i));
+    }
+
+    for (std::size_t i = 0U; i < net.node_count; i++) {
+        inject_gossip(
+          net.nodes.at(i), UINT64_C(0xA000) + i, 6U, 0, hash, 0U, topic_name, 36'200'000 + static_cast<cy_us_t>(i));
+    }
+    network_run(net, 36'200'000, 48'000'000, 100'000);
+
+    std::array<std::uint32_t, 8> subject_id_after{};
+    for (std::size_t i = 0U; i < net.node_count; i++) {
+        net.nodes.at(i).now    = 48'100'000 + static_cast<cy_us_t>(i);
+        subject_id_after.at(i) = publish_and_get_subject_id(net.nodes.at(i), pubs.at(i), hash);
+    }
+    for (std::size_t i = 0U; i < net.node_count; i++) {
+        TEST_ASSERT_EQUAL_UINT32(subject_id_before.at(0), subject_id_after.at(i));
+    }
+
+    for (cy_publisher_t* const pub : pubs) {
+        cy_unadvertise(pub);
+    }
+    network_deinit(net);
+}
 } // namespace
 
 extern "C" void setUp()
@@ -579,5 +637,6 @@ int main()
     UNITY_BEGIN();
     RUN_TEST(test_api_gossip_sim_two_node_convergence_with_drop_and_reorder);
     RUN_TEST(test_api_gossip_sim_sixteen_node_convergence_with_churn_like_delivery);
+    RUN_TEST(test_api_gossip_sim_stale_replay_after_convergence_keeps_subject_id_stable);
     return UNITY_END();
 }

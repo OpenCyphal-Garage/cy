@@ -336,6 +336,22 @@ static void test_gossip_dedup_first_duplicate_and_expiry(void)
     fixture_deinit(&fix);
 }
 
+static void test_gossip_dedup_expiry_boundary_is_strictly_greater_than_period(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    const uint64_t h1 = gossip_dedup_hash(UINT64_C(0x1001), 1U, 1);
+    TEST_ASSERT_TRUE(gossip_dedup_update(fix.cy, 10000, h1));
+    TEST_ASSERT_FALSE(gossip_dedup_update(fix.cy, 10000 + GOSSIP_PERIOD_DEFAULT, h1));
+
+    const uint64_t h2 = gossip_dedup_hash(UINT64_C(0x1002), 2U, 2);
+    TEST_ASSERT_TRUE(gossip_dedup_update(fix.cy, 20000, h2));
+    TEST_ASSERT_TRUE(gossip_dedup_update(fix.cy, 20000 + GOSSIP_PERIOD_DEFAULT + 1, h2));
+
+    fixture_deinit(&fix);
+}
+
 static void test_gossip_dedup_capacity_eviction_replaces_oldest(void)
 {
     fixture_t fix;
@@ -469,6 +485,34 @@ static void test_on_gossip_peer_fill_update_and_replacement_policy(void)
                   gossip_unicast);
         TEST_ASSERT_NULL(gossip_peer_find(fix.cy, UINT64_C(8888)));
     }
+    fixture_deinit(&fix);
+}
+
+static void test_on_gossip_peer_replacement_moratorium_boundary_inclusive(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+    const cy_us_t ts_base = GOSSIP_PERIOD_DEFAULT * 10;
+
+    for (size_t i = 0U; i < GOSSIP_PEER_COUNT; i++) {
+        fixture_set_peer(&fix, i, UINT64_C(2000) + (uint64_t)i, ts_base);
+    }
+    fix.cy->gossip_peer_replacement_moratorium_until = ts_base + 1000;
+
+    const uint64_t seq[] = { 0U, 0U, 0U, 0U, 0U }; // chance=true, deterministic slot/dither
+    fixture_set_random_sequence(&fix, seq, sizeof(seq) / sizeof(seq[0]));
+    on_gossip(fix.cy,
+              ts_base + 1000,
+              1U,
+              UINT64_C(0xC001),
+              0U,
+              0,
+              str_empty,
+              NULL,
+              make_lane(UINT64_C(7777), 0x77U),
+              gossip_unicast);
+    TEST_ASSERT_NOT_NULL(gossip_peer_find(fix.cy, UINT64_C(7777)));
+
     fixture_deinit(&fix);
 }
 
@@ -631,11 +675,13 @@ int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_gossip_dedup_first_duplicate_and_expiry);
+    RUN_TEST(test_gossip_dedup_expiry_boundary_is_strictly_greater_than_period);
     RUN_TEST(test_gossip_dedup_capacity_eviction_replaces_oldest);
     RUN_TEST(test_gossip_dedup_update_on_send_prevents_immediate_reforward);
     RUN_TEST(test_gossip_random_peer_except_filters_stale_blacklisted_and_empty);
     RUN_TEST(test_gossip_random_peer_except_deterministic_selection_sanity);
     RUN_TEST(test_on_gossip_peer_fill_update_and_replacement_policy);
+    RUN_TEST(test_on_gossip_peer_replacement_moratorium_boundary_inclusive);
     RUN_TEST(test_on_gossip_ttl_zero_and_duplicate_are_not_forwarded);
     RUN_TEST(test_on_gossip_forward_decrements_ttl_blacklists_sender_and_limits_fanout);
     RUN_TEST(test_on_gossip_local_win_suppresses_forward_and_schedules_urgent);

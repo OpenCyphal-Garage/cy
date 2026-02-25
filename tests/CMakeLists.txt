@@ -164,6 +164,29 @@ cy_gen_test_arch_matrix(test_api_gossip_sim 11 "CY_CONFIG_TRACE=1"
 
 # END-TO-END API TESTS.
 # Shared simulation/fault/utils infrastructure is linked into each section target.
+# All tests listed here are mandatory and always executed by default.
+cy_gen_test_arch_matrix(test_api_consensus_edge_matrix 11 "CY_CONFIG_TRACE=1"
+        src/test_api_consensus_edge_matrix.cpp
+        src/e2e_sim_net.cpp
+        src/e2e_faults.cpp
+        src/e2e_test_utils.cpp
+        ${CMAKE_SOURCE_DIR}/cy/cy.c
+        src/helpers.c
+        src/cy_trace.c
+        platform_stubs/guarded_heap.c
+        platform_stubs/message.c
+)
+cy_gen_test_arch_matrix(test_api_consensus_model_based 11 "CY_CONFIG_TRACE=1"
+        src/test_api_consensus_model_based.cpp
+        src/e2e_sim_net.cpp
+        src/e2e_faults.cpp
+        src/e2e_test_utils.cpp
+        ${CMAKE_SOURCE_DIR}/cy/cy.c
+        src/helpers.c
+        src/cy_trace.c
+        platform_stubs/guarded_heap.c
+        platform_stubs/message.c
+)
 cy_gen_test_arch_matrix(test_api_pubsub_e2e_baseline 11 "CY_CONFIG_TRACE=1"
         src/test_api_pubsub_e2e_baseline.cpp
         src/e2e_sim_net.cpp
