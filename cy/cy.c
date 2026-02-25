@@ -3189,14 +3189,23 @@ static size_t subscription_extent_w_overhead(const cy_topic_t* const topic)
 }
 
 // Returns non-NULL on OOM, which aborts the traversal early.
+// The topology is:
+//      topic [1] --> [*] coupling [*] --> [1] subscriber_root [1] --> [*] subscriber
 static void* wkv_cb_couple_new_subscription(const wkv_event_t evt)
 {
     const cy_subscriber_t* const sub   = (cy_subscriber_t*)evt.context;
     cy_topic_t* const            topic = (cy_topic_t*)evt.node->value;
     cy_t* const                  cy    = topic->cy;
+
+    // Traverse the couplings of this topic, check if the topic is already coupled with the root of this subscriber.
+    bool coupled = false;
+    for (const cy_topic_coupling_t* cpl = topic->couplings; (cpl != NULL) && !coupled; cpl = cpl->next) {
+        coupled = cpl->root == sub->root;
+    }
+
     // Sample the old parameters before the new coupling is created to decide if we need to refresh the subject reader.
     const size_t   extent_old = (topic->sub_reader != NULL) ? subscription_extent_w_overhead(topic) : 0;
-    const cy_err_t res        = topic_couple(topic, sub->root, evt.substitution_count, evt.substitutions);
+    const cy_err_t res = coupled ? CY_OK : topic_couple(topic, sub->root, evt.substitution_count, evt.substitutions);
     if (res == CY_OK) {
         if ((topic->sub_reader != NULL) && (subscription_extent_w_overhead(topic) > extent_old)) {
             CY_TRACE(cy, "🚧 %s subject reader refresh", topic_repr(topic).str);

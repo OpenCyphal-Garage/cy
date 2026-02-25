@@ -302,15 +302,15 @@ direction LR
     class subscriber {
         +callback
     }
-    class pending_response {
+    class future {
         +callback
     }
     cy "1" o-- "*" _topic
     cy "1" o-- "*" _subscriber_root
-    cy "1" --> "*" pending_response
+    cy "1" --> "*" future
     _topic "1" o-- "*" _coupling
     _topic "1" <-- "*" publisher
-    publisher "1" <-- "*" pending_response
+    publisher "1" <-- "*" future
     _coupling "*" --> "1" _subscriber_root
     _subscriber_root "1" o-- "*" subscriber
     note "Automatically managed private entities are prefixed with '_'"
