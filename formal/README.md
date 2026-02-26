@@ -1,4 +1,4 @@
-# Formal proof and model-based verification
+# Formal specification and verification
 
 For the formal proof write-up refer to **[PROOF.md](./PROOF.md)**.
 

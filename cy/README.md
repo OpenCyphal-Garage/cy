@@ -28,7 +28,7 @@ These are very basic functions that result in a very compact transport interface
 
 ## Session layer
 
-For the description of the CRDT consensus algorithm and the topic allocation protocol, please refer to the formal verification model in `/formal_verification`.
+For the description of the CRDT consensus algorithm and the topic allocation protocol, please refer to the formal specifications in `/formal`.
 
 The transport delivers deduplicated messages, but duplication due to retransmission in case of lost acks may still occur (for the transport such messages are seen as distinct). To mitigate, additional deduplication is performed at the session layer only for reliable messages based on their 64-bit unique tags.
 
