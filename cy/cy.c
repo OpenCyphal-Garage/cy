@@ -133,6 +133,9 @@ typedef struct
     cy_us_t  last_seen; // Drives LRU eviction policy.
 } gossip_dedup_t;
 
+// Duplicates that haven't been seen for this long are no longer considered duplicates. Can be adjusted freely.
+#define GOSSIP_DEDUP_TIMEOUT (GOSSIP_PERIOD_DEFAULT / 2)
+
 // Some arbitrary implementation-specific hash, not seen on the wire, can be changed at will.
 static uint64_t gossip_dedup_hash(const uint64_t hash, const uint32_t evictions, const int_fast8_t log_age)
 {
@@ -1886,25 +1889,32 @@ static gossip_peer_t* gossip_random_peer_except(cy_t* const           cy,
     return NULL;
 }
 
-// Consults with the dedup hash, updates it, and informs the caller if the gossip is OK to forward:
-// true if ok to forward, false if should be dropped.
-static bool gossip_dedup_update(cy_t* const cy, const cy_us_t now, const uint64_t gossip_hash)
+// Returns either an existing entry with the given gossip hash, or the least recently seen entry with different hash.
+// Does not mutate the entry, which is important when the cache needs to be queried before a fallible transmit,
+// otherwise there's risk of evicting an entry and then not using it, which is wasteful.
+static gossip_dedup_t* gossip_dedup_match_or_lru(cy_t* const cy, const uint64_t gossip_hash)
 {
-    const cy_us_t   last_seen_threshold = now - GOSSIP_PERIOD_DEFAULT; // just to minimize false positives & skip empty
-    gossip_dedup_t* oldest              = cy->gossip_dedup;
+    gossip_dedup_t* oldest = cy->gossip_dedup;
     for (size_t i = 0; i < GOSSIP_DEDUP_CAPACITY; i++) {
         if (cy->gossip_dedup[i].hash == gossip_hash) {
-            const bool result             = cy->gossip_dedup[i].last_seen < last_seen_threshold;
-            cy->gossip_dedup[i].last_seen = now;
-            return result;
+            return &cy->gossip_dedup[i];
         }
         if (oldest->last_seen > cy->gossip_dedup[i].last_seen) {
             oldest = &cy->gossip_dedup[i];
         }
     }
-    oldest->hash      = gossip_hash;
-    oldest->last_seen = now;
-    return true;
+    return oldest;
+}
+
+static bool gossip_dedup_is_fresh(const gossip_dedup_t* const self, const uint64_t gossip_hash, const cy_us_t now)
+{
+    return (self->hash != gossip_hash) || (self->last_seen < (now - GOSSIP_DEDUP_TIMEOUT));
+}
+
+static void gossip_dedup_update(gossip_dedup_t* const self, const uint64_t gossip_hash, const cy_us_t now)
+{
+    self->hash      = gossip_hash;
+    self->last_seen = now;
 }
 
 static void gossip_epidemic_forward(cy_t* const        cy,
@@ -1991,7 +2001,10 @@ static void on_gossip(cy_t* const        cy,
     }
 
     // Process the gossip. Note that broadcast gossips count in dedup tracking -- no point re-forwarding that.
-    const bool should_forward = gossip_dedup_update(cy, ts, gossip_dedup_hash(hash, evictions, lage)) && (ttl > 0);
+    const uint64_t        dedup_hash     = gossip_dedup_hash(hash, evictions, lage);
+    gossip_dedup_t* const dedup          = gossip_dedup_match_or_lru(cy, dedup_hash);
+    const bool            should_forward = gossip_dedup_is_fresh(dedup, dedup_hash, ts) && (ttl > 0);
+    gossip_dedup_update(dedup, dedup_hash, ts);
     if (mine != NULL) {
         // We have this topic! Check if we have consensus on the subject-ID.
         // If there is a divergence and we win arbitration, the gossip can no longer be forwarded -- it is obsolete;
@@ -2041,7 +2054,7 @@ static void* wkv_cb_topic_scout_response(const wkv_event_t evt)
 // asking node; either way the node will receive it. This flexibility allows resource-constrained nodes to handle
 // this the easier way. If we only have a few topics, we don't even need to do anything here since by virtue of
 // having few topics their gossip rate will be high, so the remote will hear about them soon enough.
-// This, scout handling is essentially only useful in many-topic nodes, and in general-purpose implementations.
+// Thus, scout handling is essentially only useful in many-topic nodes, and in general-purpose implementations.
 static void on_scout(cy_t* const cy, cy_us_t ts, const cy_str_t name, const cy_lane_t lane)
 {
     CY_TRACE(cy, "📢 '%.*s'", STRFMT_ARG(name));
@@ -3755,9 +3768,10 @@ static void gossip_poll(cy_t* const cy, const cy_us_t now)
             const cy_err_t res = send_gossip_broadcast(cy, now, topic);
             ON_ASYNC_ERROR_IF(cy, topic, res);
             // Remember the freshly transmitted gossip to break cycles if/when we hear it back through epidemics.
+            // Obviously there is no deduplication on broadcast path because it is redundant by design.
             if (res == CY_OK) {
-                (void)gossip_dedup_update(
-                  cy, now, gossip_dedup_hash(topic->hash, topic->evictions, topic_lage(topic, now)));
+                const uint64_t dedup_hash = gossip_dedup_hash(topic->hash, topic->evictions, topic_lage(topic, now));
+                gossip_dedup_update(gossip_dedup_match_or_lru(cy, dedup_hash), dedup_hash, now);
             }
         }
         cy->gossip_next = now + dither_int(cy, cy->gossip_period, cy->gossip_period / 8);
@@ -3765,26 +3779,31 @@ static void gossip_poll(cy_t* const cy, const cy_us_t now)
         gossip_begin(cy);
         cy_topic_t* const topic = LIST_TAIL(cy->list_gossip_urgent, cy_topic_t, list_gossip_urgent);
         delist(&cy->list_gossip_urgent, &topic->list_gossip_urgent); // Delist regardless of outcome.
-        // Unicast epidemic gossips to each peer individually.
+        const uint64_t        dedup_hash = gossip_dedup_hash(topic->hash, topic->evictions, topic_lage(topic, now));
+        gossip_dedup_t* const dedup      = gossip_dedup_match_or_lru(cy, dedup_hash);
+        // Unicast epidemic gossips to each randomly drawn peer individually.
         // If no eligible remotes are available, silently drop the gossip, fallback to fixed-rate broadcast.
-        uint64_t blacklist[GOSSIP_OUTDEGREE] = { 0 };
-        size_t   blacklist_size              = 0;
-        bool     need_dedup                  = false;
-        for (size_t i = 0; i < GOSSIP_OUTDEGREE; i++) {
-            const gossip_peer_t* const peer = gossip_random_peer_except(cy, now, blacklist_size, blacklist);
-            if (peer == NULL) {
-                break; // no (more) peers
+        // Remember the gossip to break cycles if/when we hear it back through epidemics again soon,
+        // or if we encounter another need to repair -- don't initiate same repair again, it takes time to propagate
+        // (i.e., we use the dedup cache for rate limiting also).
+        if (gossip_dedup_is_fresh(dedup, dedup_hash, now)) {
+            uint64_t blacklist[GOSSIP_OUTDEGREE] = { 0 };
+            size_t   blacklist_size              = 0;
+            bool     succeeded                   = false;
+            for (size_t i = 0; i < GOSSIP_OUTDEGREE; i++) {
+                const gossip_peer_t* const peer = gossip_random_peer_except(cy, now, blacklist_size, blacklist);
+                if (peer == NULL) {
+                    break; // no (more) peers
+                }
+                blacklist[blacklist_size++] = peer->id; // do not unicast to the same peer twice
+                const cy_lane_t lane        = { .id = peer->id, .p2p = peer->p2p, .prio = cy_prio_nominal };
+                const cy_err_t  res         = send_gossip_unicast(cy, now, GOSSIP_TTL, topic, lane);
+                ON_ASYNC_ERROR_IF(cy, topic, res);
+                succeeded = succeeded || (res == CY_OK); // At least one success is enough.
             }
-            blacklist[blacklist_size++] = peer->id; // do not unicast to the same peer twice
-            const cy_lane_t lane        = { .id = peer->id, .p2p = peer->p2p, .prio = cy_prio_nominal };
-            const cy_err_t  res         = send_gossip_unicast(cy, now, GOSSIP_TTL, topic, lane);
-            ON_ASYNC_ERROR_IF(cy, topic, res);
-            need_dedup = need_dedup || (res == CY_OK);
-        }
-        // Remember the freshly transmitted gossip to break cycles if/when we hear it back through epidemics.
-        if (need_dedup) {
-            (void)gossip_dedup_update(
-              cy, now, gossip_dedup_hash(topic->hash, topic->evictions, topic_lage(topic, now)));
+            if (succeeded) {
+                gossip_dedup_update(dedup, dedup_hash, now);
+            }
         }
     } else {
         (void)0; // nothing to do this cycle, come back later
