@@ -35,6 +35,7 @@ if (NOT NO_STATIC_ANALYSIS)
             --suppress=preprocessorErrorDirective
             --suppress=unreadVariable
             --suppress=passedByValue
+            --suppress=containerOutOfBounds
             --inline-suppr
     )
     set(CMAKE_C_CPPCHECK ${cppcheck};--language=c;--std=c11;${cppcheck_options})

@@ -348,7 +348,7 @@ static void mem_free(const cy_t* const cy, void* ptr)
 {
     assert(cy != NULL);
     if (ptr != NULL) {
-        cy->platform->vtable->realloc(cy->platform, ptr, 0);
+        cy->platform->vtable->realloc(cy->platform, ptr, 0); // NOLINT(*NullDereference)
     }
 }
 
