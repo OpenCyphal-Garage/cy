@@ -242,12 +242,18 @@ void callback_capture_bind(cy_future_t* const fut, callback_capture_t& capture)
     cy_future_context_set(fut, ctx);
 }
 
-cy_message_t* make_ack_message(test_platform_t* const self, const std::uint64_t tag, const std::uint64_t topic_hash)
+cy_message_t* make_ack_message_with_incompatibility(test_platform_t* const self,
+                                                    const std::uint64_t    tag,
+                                                    const std::uint64_t    topic_hash,
+                                                    const std::uint32_t    incompatibility)
 {
     // ACK wire header layout:
-    // [0] type, [8..15] topic hash, [16..23] tag.
+    // [0] type, [4..7] incompatibility, [8..15] topic hash, [16..23] tag.
     std::array<unsigned char, header_bytes> wire{};
     wire[0] = 2U;
+    for (std::size_t i = 0U; i < 4U; i++) {
+        wire.at(4U + i) = static_cast<unsigned char>((incompatibility >> (i * 8U)) & 0xFFU);
+    }
     for (std::size_t i = 0U; i < 8U; i++) {
         wire.at(8U + i) = static_cast<unsigned char>((topic_hash >> (i * 8U)) & 0xFFU);
     }
@@ -257,6 +263,11 @@ cy_message_t* make_ack_message(test_platform_t* const self, const std::uint64_t 
     return cy_test_message_make(&self->message_heap, wire.data(), wire.size());
 }
 
+cy_message_t* make_ack_message(test_platform_t* const self, const std::uint64_t tag, const std::uint64_t topic_hash)
+{
+    return make_ack_message_with_incompatibility(self, tag, topic_hash, 0U);
+}
+
 void dispatch_ack(test_platform_t* const self,
                   const std::uint64_t    tag,
                   const std::uint64_t    topic_hash,
@@ -264,6 +275,24 @@ void dispatch_ack(test_platform_t* const self,
                   const cy_us_t          timestamp)
 {
     cy_message_t* const msg = make_ack_message(self, tag, topic_hash);
+    TEST_ASSERT_NOT_NULL(msg);
+
+    cy_message_ts_t message{};
+    message.timestamp = timestamp;
+    message.content   = msg;
+
+    const cy_lane_t lane = { .id = remote_id, .p2p = { { 0 } }, .prio = cy_prio_nominal };
+    cy_on_message(&self->platform, lane, nullptr, message);
+}
+
+void dispatch_ack_with_incompatibility(test_platform_t* const self,
+                                       const std::uint64_t    tag,
+                                       const std::uint64_t    topic_hash,
+                                       const std::uint64_t    remote_id,
+                                       const cy_us_t          timestamp,
+                                       const std::uint32_t    incompatibility)
+{
+    cy_message_t* const msg = make_ack_message_with_incompatibility(self, tag, topic_hash, incompatibility);
     TEST_ASSERT_NOT_NULL(msg);
 
     cy_message_ts_t message{};
@@ -1496,6 +1525,55 @@ void test_ack_invalid_seqno_ignored()
     test_end(platform);
 }
 
+void test_ack_incompatibility_rejected()
+{
+    test_platform_t platform{};
+    test_begin(platform);
+
+    static const char* const topic_name = "reliable/ack_incompatibility_rejected";
+    cy_publisher_t* const    pub        = setup_publisher(platform, topic_name);
+
+    const cy_bytes_t    msg  = { .size = 1U, .data = "\xBC", .next = nullptr };
+    cy_future_t* const  fut  = cy_publish_reliable(pub, platform.now + 1'000'000, msg);
+    const std::uint64_t tag  = captured_tag(platform);
+    const std::uint64_t hash = topic_hash_for(platform, topic_name);
+    TEST_ASSERT_NOT_NULL(fut);
+
+    dispatch_ack_with_incompatibility(&platform, tag, hash, UINT64_C(0xA2A2), platform.now, 1U);
+    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut));
+    dispatch_ack(&platform, tag, hash, UINT64_C(0xA2A2), platform.now);
+    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut));
+
+    cy_future_destroy(fut);
+    cy_unadvertise(pub);
+    test_end(platform);
+}
+
+void test_ack_orphan_topic_hash_is_ignored()
+{
+    test_platform_t platform{};
+    test_begin(platform);
+
+    static const char* const topic_name = "reliable/ack_orphan_topic_hash_is_ignored";
+    cy_publisher_t* const    pub        = setup_publisher(platform, topic_name);
+
+    const cy_bytes_t    msg         = { .size = 1U, .data = "\xBD", .next = nullptr };
+    cy_future_t* const  fut         = cy_publish_reliable(pub, platform.now + 1'000'000, msg);
+    const std::uint64_t tag         = captured_tag(platform);
+    const std::uint64_t hash        = topic_hash_for(platform, topic_name);
+    const std::uint64_t orphan_hash = hash + UINT64_C(0x100000);
+    TEST_ASSERT_NOT_NULL(fut);
+
+    dispatch_ack(&platform, tag, orphan_hash, UINT64_C(0xA3A3), platform.now);
+    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut));
+    dispatch_ack(&platform, tag, hash, UINT64_C(0xA3A3), platform.now);
+    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut));
+
+    cy_future_destroy(fut);
+    cy_unadvertise(pub);
+    test_end(platform);
+}
+
 void test_send_message_ack_error_path()
 {
     test_platform_t platform{};
@@ -1760,6 +1838,8 @@ int main()
     RUN_TEST(test_duplicate_ack_while_pending);
     RUN_TEST(test_ack_future_seqno_ignored);
     RUN_TEST(test_ack_invalid_seqno_ignored);
+    RUN_TEST(test_ack_incompatibility_rejected);
+    RUN_TEST(test_ack_orphan_topic_hash_is_ignored);
     RUN_TEST(test_send_message_ack_error_path);
     RUN_TEST(test_oom_future_alloc);
     RUN_TEST(test_oom_bitmap_alloc);

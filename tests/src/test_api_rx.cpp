@@ -261,16 +261,38 @@ void dispatch_message(test_platform_t* const  self,
 {
     std::array<unsigned char, header_bytes + 1U> wire{};
     make_message_header(wire.data(), type, tag, cy_topic_hash(topic));
-    wire[header_bytes]      = payload_byte;
-    cy_message_t* const msg = cy_test_message_make(&self->message_heap, wire.data(), wire.size());
+    wire[header_bytes]       = payload_byte;
+    const cy_lane_t     lane = { .id = remote_id, .p2p = { { 0 } }, .prio = cy_prio_nominal };
+    cy_message_t* const msg  = cy_test_message_make(&self->message_heap, wire.data(), wire.size());
     TEST_ASSERT_NOT_NULL(msg);
 
     cy_message_ts_t message{};
     message.timestamp = timestamp;
     message.content   = msg;
-
-    const cy_lane_t lane = { .id = remote_id, .p2p = { { 0 } }, .prio = cy_prio_nominal };
     cy_on_message(&self->platform, lane, nullptr, message);
+}
+
+void dispatch_raw(test_platform_t* const     self,
+                  const unsigned char* const wire,
+                  const std::size_t          wire_size,
+                  const cy_lane_t            lane,
+                  const cy_subject_reader_t* reader,
+                  const cy_us_t              timestamp)
+{
+    cy_message_t* const msg = cy_test_message_make(&self->message_heap, wire, wire_size);
+    TEST_ASSERT_NOT_NULL(msg);
+
+    cy_message_ts_t message{};
+    message.timestamp = timestamp;
+    message.content   = msg;
+    cy_on_message(&self->platform, lane, reader, message);
+}
+
+std::uint32_t compute_subject_id(const std::uint64_t hash, const std::uint32_t evictions, const std::uint32_t modulus)
+{
+    const std::uint64_t offset =
+      (hash + (static_cast<std::uint64_t>(evictions) * static_cast<std::uint64_t>(evictions))) % modulus;
+    return CY_SUBJECT_ID_PINNED_MAX + 1U + static_cast<std::uint32_t>(offset);
 }
 
 void test_api_malformed_header_drops_message()
@@ -295,6 +317,184 @@ void test_api_malformed_header_drops_message()
     platform_deinit(&platform);
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&platform.message_heap));
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&platform.message_heap));
+}
+
+void test_api_inline_msg_rejects_nonzero_incompatibility()
+{
+    test_platform_t platform{};
+    platform_init(&platform);
+    cy_test_message_reset_counters();
+
+    self_unsub_capture_t   capture{};
+    cy_subscriber_t* const sub = cy_subscribe(platform.cy, cy_str("rx/inline/incompat"), 256U);
+    TEST_ASSERT_NOT_NULL(sub);
+    cy_user_context_t context = CY_USER_CONTEXT_EMPTY;
+    context.ptr[0]            = &capture;
+    cy_subscriber_context_set(sub, context);
+    cy_subscriber_callback_set(sub, on_arrival_count_only);
+
+    const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("rx/inline/incompat"));
+    TEST_ASSERT_NOT_NULL(topic);
+    std::array<unsigned char, header_bytes + 1U> wire{};
+    make_message_header(wire.data(), header_msg_best_effort, UINT64_C(101), cy_topic_hash(topic));
+    wire[2]              = 1U; // incompatibility
+    wire[header_bytes]   = 0x11U;
+    const cy_lane_t lane = { .id = UINT64_C(0x901), .p2p = { { 0 } }, .prio = cy_prio_nominal };
+
+    dispatch_raw(&platform, wire.data(), wire.size(), lane, nullptr, 200);
+    TEST_ASSERT_EQUAL_size_t(0U, capture.count);
+    TEST_ASSERT_EQUAL_size_t(0U, platform.p2p_count);
+
+    cy_unsubscribe(sub);
+    TEST_ASSERT_EQUAL_UINT8(CY_OK, cy_spin_once(platform.cy));
+    platform_deinit(&platform);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&platform.message_heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&platform.message_heap));
+}
+
+void test_api_inline_msg_rejects_pinned_hash_nonzero_evictions()
+{
+    test_platform_t platform{};
+    platform_init(&platform);
+    cy_test_message_reset_counters();
+
+    self_unsub_capture_t   capture{};
+    cy_subscriber_t* const sub = cy_subscribe(platform.cy, cy_str("#0005"), 256U);
+    TEST_ASSERT_NOT_NULL(sub);
+    cy_user_context_t context = CY_USER_CONTEXT_EMPTY;
+    context.ptr[0]            = &capture;
+    cy_subscriber_context_set(sub, context);
+    cy_subscriber_callback_set(sub, on_arrival_count_only);
+
+    const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("#0005"));
+    TEST_ASSERT_NOT_NULL(topic);
+    TEST_ASSERT_TRUE(cy_topic_hash(topic) <= CY_SUBJECT_ID_PINNED_MAX);
+
+    std::array<unsigned char, header_bytes + 1U> wire{};
+    make_message_header(wire.data(), header_msg_best_effort, UINT64_C(102), cy_topic_hash(topic));
+    wire[4]              = 1U; // evictions in little-endian u32 field [4..7]
+    wire[header_bytes]   = 0x22U;
+    const cy_lane_t lane = { .id = UINT64_C(0x902), .p2p = { { 0 } }, .prio = cy_prio_nominal };
+
+    dispatch_raw(&platform, wire.data(), wire.size(), lane, nullptr, 201);
+    TEST_ASSERT_EQUAL_size_t(0U, capture.count);
+    TEST_ASSERT_EQUAL_size_t(0U, platform.p2p_count);
+
+    cy_unsubscribe(sub);
+    TEST_ASSERT_EQUAL_UINT8(CY_OK, cy_spin_once(platform.cy));
+    platform_deinit(&platform);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&platform.message_heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&platform.message_heap));
+}
+
+void test_api_inline_msg_rejects_multicast_subject_mismatch()
+{
+    test_platform_t platform{};
+    platform_init(&platform);
+    cy_test_message_reset_counters();
+
+    self_unsub_capture_t   capture{};
+    cy_subscriber_t* const sub = cy_subscribe(platform.cy, cy_str("rx/inline/mismatch"), 256U);
+    TEST_ASSERT_NOT_NULL(sub);
+    cy_user_context_t context = CY_USER_CONTEXT_EMPTY;
+    context.ptr[0]            = &capture;
+    cy_subscriber_context_set(sub, context);
+    cy_subscriber_callback_set(sub, on_arrival_count_only);
+
+    const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("rx/inline/mismatch"));
+    TEST_ASSERT_NOT_NULL(topic);
+    const std::uint64_t       hash     = cy_topic_hash(topic);
+    const std::uint32_t       modulus  = platform.platform.subject_id_modulus;
+    const std::uint32_t       expected = compute_subject_id(hash, 0U, modulus);
+    const std::uint32_t       max_sid  = CY_SUBJECT_ID_MAX(modulus);
+    const std::uint32_t       mismatch = (expected < max_sid) ? (expected + 1U) : (expected - 1U);
+    const cy_subject_reader_t reader   = { .subject_id = mismatch };
+
+    std::array<unsigned char, header_bytes + 1U> wire{};
+    make_message_header(wire.data(), header_msg_best_effort, UINT64_C(103), hash);
+    wire[header_bytes]   = 0x33U;
+    const cy_lane_t lane = { .id = UINT64_C(0x903), .p2p = { { 0 } }, .prio = cy_prio_nominal };
+
+    dispatch_raw(&platform, wire.data(), wire.size(), lane, &reader, 202);
+    TEST_ASSERT_EQUAL_size_t(0U, capture.count);
+    TEST_ASSERT_EQUAL_size_t(0U, platform.p2p_count);
+
+    cy_unsubscribe(sub);
+    TEST_ASSERT_EQUAL_UINT8(CY_OK, cy_spin_once(platform.cy));
+    platform_deinit(&platform);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&platform.message_heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&platform.message_heap));
+}
+
+void test_api_inline_msg_p2p_skips_subject_consistency_check()
+{
+    test_platform_t platform{};
+    platform_init(&platform);
+    cy_test_message_reset_counters();
+
+    arrival_capture_t      capture{};
+    cy_subscriber_t* const sub = cy_subscribe(platform.cy, cy_str("rx/inline/p2p/consistency"), 256U);
+    TEST_ASSERT_NOT_NULL(sub);
+    cy_user_context_t context = CY_USER_CONTEXT_EMPTY;
+    context.ptr[0]            = &capture;
+    cy_subscriber_context_set(sub, context);
+    cy_subscriber_callback_set(sub, on_arrival_capture);
+
+    const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("rx/inline/p2p/consistency"));
+    TEST_ASSERT_NOT_NULL(topic);
+    std::array<unsigned char, header_bytes + 1U> wire{};
+    make_message_header(wire.data(), header_msg_best_effort, UINT64_C(104), cy_topic_hash(topic));
+    wire[4]              = 1U; // mismatched evictions would alter multicast subject mapping
+    wire[header_bytes]   = 0x44U;
+    const cy_lane_t lane = { .id = UINT64_C(0x904), .p2p = { { 0 } }, .prio = cy_prio_nominal };
+
+    dispatch_raw(&platform, wire.data(), wire.size(), lane, nullptr, 203);
+    TEST_ASSERT_EQUAL_size_t(1U, capture.count);
+    TEST_ASSERT_EQUAL_UINT64(UINT64_C(104), capture.tags[0]);
+    TEST_ASSERT_EQUAL_size_t(0U, platform.p2p_count);
+
+    cy_unsubscribe(sub);
+    TEST_ASSERT_EQUAL_UINT8(CY_OK, cy_spin_once(platform.cy));
+    platform_deinit(&platform);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&platform.message_heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&platform.message_heap));
+}
+
+void test_api_inline_msg_unknown_topic_collision_path_smoke()
+{
+    test_platform_t platform{};
+    platform_init(&platform);
+    cy_test_message_reset_counters();
+
+    self_unsub_capture_t   capture{};
+    cy_subscriber_t* const sub = cy_subscribe(platform.cy, cy_str("rx/inline/collision/local"), 256U);
+    TEST_ASSERT_NOT_NULL(sub);
+    cy_user_context_t context = CY_USER_CONTEXT_EMPTY;
+    context.ptr[0]            = &capture;
+    cy_subscriber_context_set(sub, context);
+    cy_subscriber_callback_set(sub, on_arrival_count_only);
+
+    const cy_topic_t* const local_topic = cy_topic_find_by_name(platform.cy, cy_str("rx/inline/collision/local"));
+    TEST_ASSERT_NOT_NULL(local_topic);
+    const std::uint32_t modulus     = platform.platform.subject_id_modulus;
+    const std::uint64_t remote_hash = cy_topic_hash(local_topic) + static_cast<std::uint64_t>(modulus);
+    TEST_ASSERT_NULL(cy_topic_find_by_hash(platform.cy, remote_hash));
+    const cy_subject_reader_t reader = { .subject_id = compute_subject_id(remote_hash, 0U, modulus) };
+
+    std::array<unsigned char, header_bytes + 1U> wire{};
+    make_message_header(wire.data(), header_msg_best_effort, UINT64_C(105), remote_hash);
+    wire[header_bytes]   = 0x55U;
+    const cy_lane_t lane = { .id = UINT64_C(0x905), .p2p = { { 0 } }, .prio = cy_prio_nominal };
+
+    dispatch_raw(&platform, wire.data(), wire.size(), lane, &reader, 204);
+    TEST_ASSERT_EQUAL_size_t(0U, capture.count);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
+
+    cy_unsubscribe(sub);
+    TEST_ASSERT_EQUAL_UINT8(CY_OK, cy_spin_once(platform.cy));
+    platform_deinit(&platform);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&platform.message_heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&platform.message_heap));
 }
 
 void test_api_reliable_duplicate_acked_once_to_application()
@@ -452,6 +652,11 @@ int main()
 {
     UNITY_BEGIN();
     RUN_TEST(test_api_malformed_header_drops_message);
+    RUN_TEST(test_api_inline_msg_rejects_nonzero_incompatibility);
+    RUN_TEST(test_api_inline_msg_rejects_pinned_hash_nonzero_evictions);
+    RUN_TEST(test_api_inline_msg_rejects_multicast_subject_mismatch);
+    RUN_TEST(test_api_inline_msg_p2p_skips_subject_consistency_check);
+    RUN_TEST(test_api_inline_msg_unknown_topic_collision_path_smoke);
     RUN_TEST(test_api_reliable_duplicate_acked_once_to_application);
     RUN_TEST(test_api_ordered_subscriber_timeout_flush);
     RUN_TEST(test_api_unsubscribe_from_own_callback_is_deferred_and_safe);

@@ -330,6 +330,86 @@ void test_api_gossip_parser_rejects_incompatibility_and_invalid_lage_and_truncat
     platform_deinit(p);
 }
 
+void test_api_gossip_parser_rejects_gossip_incompatibility_u32()
+{
+    test_platform_t p{};
+    platform_init(p);
+    cy_test_message_reset_counters();
+    const cy_lane_t lane = { .id = 21U, .p2p = { { 0 } }, .prio = cy_prio_nominal };
+
+    std::array<unsigned char, 256> wire{};
+    const std::size_t              full_size =
+      make_gossip_header(wire.data(), wire.size(), 1U, 0, UINT64_C(0x1000000000000033), 0U, cy_str("api/gossip/inc"));
+    TEST_ASSERT_TRUE(full_size > 0U);
+    wire[4] = 1U; // incompatibility in little-endian u32 field at [4..7]
+    dispatch_raw(p, wire, full_size, lane, nullptr, 104);
+    TEST_ASSERT_EQUAL_size_t(0U, p.p2p_send_count);
+    TEST_ASSERT_EQUAL_size_t(0U, p.subject_send_count);
+    platform_deinit(p);
+}
+
+void test_api_gossip_parser_rejects_pinned_hash_with_nonzero_evictions()
+{
+    test_platform_t p{};
+    platform_init(p);
+    cy_test_message_reset_counters();
+    const cy_lane_t lane = { .id = 22U, .p2p = { { 0 } }, .prio = cy_prio_nominal };
+
+    dispatch_gossip(p, lane, nullptr, 1U, 0, UINT64_C(1234), 1U, "api/gossip/pinned/reject", 105);
+    TEST_ASSERT_EQUAL_size_t(0U, p.p2p_send_count);
+    TEST_ASSERT_NULL(cy_topic_find_by_hash(p.cy, UINT64_C(1234)));
+    platform_deinit(p);
+}
+
+void test_api_scout_parser_rejects_empty_and_truncated_pattern()
+{
+    test_platform_t p{};
+    platform_init(p);
+    cy_test_message_reset_counters();
+    const cy_lane_t lane = { .id = 23U, .p2p = { { 0 } }, .prio = cy_prio_nominal };
+
+    dispatch_scout(p, lane, 0U, "", 106);
+    TEST_ASSERT_EQUAL_size_t(0U, p.p2p_send_count);
+
+    std::array<unsigned char, 256> wire{};
+    const std::size_t              full_size = make_scout_header(wire.data(), wire.size(), 0U, cy_str("abc"));
+    TEST_ASSERT_TRUE(full_size > 0U);
+    dispatch_raw(p, wire, header_bytes + 1U, lane, nullptr, 107);
+    TEST_ASSERT_EQUAL_size_t(0U, p.p2p_send_count);
+    TEST_ASSERT_EQUAL_size_t(0U, p.subject_send_count);
+    platform_deinit(p);
+}
+
+void test_api_gossip_invalid_frame_does_not_seed_peer_sampler()
+{
+    test_platform_t p{};
+    platform_init(p);
+    cy_test_message_reset_counters();
+
+    const cy_subject_reader_t broad_reader = { .subject_id = cy_broadcast_subject_id(&p.platform) };
+    dispatch_gossip(p,
+                    cy_lane_t{ .id = 31U, .p2p = { { 0 } }, .prio = cy_prio_nominal },
+                    &broad_reader,
+                    1U,
+                    0,
+                    UINT64_C(0x1000000000000044),
+                    0U,
+                    "api/gossip/invalid/nopeer",
+                    108);
+
+    dispatch_gossip(p,
+                    cy_lane_t{ .id = 32U, .p2p = { { 0 } }, .prio = cy_prio_nominal },
+                    nullptr,
+                    3U,
+                    0,
+                    UINT64_C(0x1000000000000045),
+                    0U,
+                    "api/gossip/valid/nopeer",
+                    109);
+    TEST_ASSERT_EQUAL_size_t(0U, p.p2p_send_count);
+    platform_deinit(p);
+}
+
 void test_api_scout_match_triggers_gossip_response_and_fields_are_correct()
 {
     test_platform_t p{};
@@ -481,6 +561,10 @@ int main()
     UNITY_BEGIN();
     RUN_TEST(test_api_gossip_parser_rejects_broadcast_nonzero_ttl);
     RUN_TEST(test_api_gossip_parser_rejects_incompatibility_and_invalid_lage_and_truncation);
+    RUN_TEST(test_api_gossip_parser_rejects_gossip_incompatibility_u32);
+    RUN_TEST(test_api_gossip_parser_rejects_pinned_hash_with_nonzero_evictions);
+    RUN_TEST(test_api_scout_parser_rejects_empty_and_truncated_pattern);
+    RUN_TEST(test_api_gossip_invalid_frame_does_not_seed_peer_sampler);
     RUN_TEST(test_api_scout_match_triggers_gossip_response_and_fields_are_correct);
     RUN_TEST(test_api_scout_broadcast_soon_optimization_suppresses_unicast);
     RUN_TEST(test_api_repair_smoke_duplicate_suppression_and_unknown_topic_no_autocreate);
