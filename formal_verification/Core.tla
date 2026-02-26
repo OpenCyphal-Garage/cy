@@ -28,9 +28,9 @@
 \* evictions are static on a quiescent network, even relatively narrow representations (e.g., 32 bit) may suffice.
 \*
 \* The subject-ID assigned to a topic is defined as some function of its hash and eviction count. One possible way
-\* to define the function is:
+\* to define the function is, assuming 64-bit unsigned arithmetics:
 \*
-\*      subject_id = 8187 + ((hash + evictions**2) % 57349)
+\*      subject_id = 8192 + ((hash + evictions**2) % 8380403)
 \*
 \* For the background on the subject of open addressing schemes and why the specific values were chosen this way, see:
 \* - https://en.wikipedia.org/wiki/Quadratic_probing
