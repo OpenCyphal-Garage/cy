@@ -31,3 +31,5 @@ Update docs/examples when public API behavior changes.
 ## Behavioral policies
 
 When using subagents to implement tests, always instruct them to summarize their findings concerning the correctness of the tested code and its possible limitations at the end of their run. At the end of the turn, provide a summary of the findings reported by the agents.
+
+When asked to implement a test case, assume by default that the code being tested is not behaviorally correct. The initial step is to review the logic under the given assumptions (explicit or implicit, if any) and to prove otherwise. If the code does not appear to be correct, refuse to test it and provide evidence of its defects.
