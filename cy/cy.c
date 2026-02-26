@@ -2249,7 +2249,7 @@ typedef struct
 
     bool done;
     bool acknowledged;
-    bool compromised; // At least one attempt could not be sent due to error or premature cancellation.
+    bool compromised; // Not all attempts could be completed due to scheduler lag, send error, or cancellation.
 
     // Retransmission states.
     const cy_bytes_t* data;
@@ -2367,17 +2367,24 @@ static void publish_future_timeout(cy_future_t* const base, const cy_us_t schedu
     cy_topic_t* const       topic = self->owner->topic;
     cy_t* const             cy    = topic->cy;
 
+    // If we are supposed to try more attempts (data not yet destroyed) but we are already near the deadline,
+    // it means that there is a strong scheduler lag that prevented us from completing some of the attempts fully,
+    // and we can no longer rely on reachability information. We may still transmit but with only a short ACK timeout.
+    self->compromised = self->compromised || ((self->data != NULL) && (now >= (self->deadline - self->ack_timeout)));
+
     // Check completion.
     assert(!self->done);
-    if (self->data == NULL) {             // This is the final poll.
-        assert(now >= self->deadline);    // Ensure correct scheduling.
-        publish_future_materialize(self); // The future may be successful depending on received acks.
+    if ((self->data == NULL) || (now >= self->deadline)) { // This is the final poll.
+        publish_future_materialize(self);                  // The future may be successful depending on received acks.
         return;
     }
 
-    self->ack_timeout *= 2; // exponential backoff
-    const cy_us_t ack_deadline = self->ack_timeout + now;
+    // Compute next deadline and decide if it's going to be the last attempt based on the remaining time.
+    assert(now < self->deadline);
+    self->ack_timeout *= 2;                                                       // exponential backoff
+    const cy_us_t ack_deadline = sooner(self->ack_timeout + now, self->deadline); // manage possible scheduler lag
     const bool    last_attempt = publish_future_is_last_attempt(ack_deadline, self->ack_timeout, self->deadline);
+    assert(ack_deadline > now);
 
     // We can use multicast throughout, but it may be inefficient if we only need to reach few remaining subscribers.
     // This is not a correctness issue because each subscriber will receive our message at most once per attempt,

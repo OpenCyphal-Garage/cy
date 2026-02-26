@@ -192,7 +192,11 @@ cy_publisher_t* cy_advertise_client(cy_t* const cy, const cy_str_t name, const s
 cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t deadline, const cy_bytes_t message);
 
 /// Publish a reliable one-way message.
-/// Reliable messages consume more memory for associated states and are a greater burden on the network and nodes.
+///
+/// Reliable messages consume more memory for associated states and are a greater burden on the network and nodes
+/// compared to best-effort messages. A best-effort message is simply sent out to the network expecting the transport
+/// to deliver it to all interested parties (do its best, no guarantees). A reliable message requires every recipient
+/// to unicast an acknowledgement back to the publisher, which may create nontrivial traffic on high-fanout topics.
 ///
 /// The session layer tracks remote subscribers (called associations) using a simple stateless protocol and
 /// ensures that all live subscribers confirm message reception, retransmitting as necessary, switching between
@@ -203,10 +207,9 @@ cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t deadline, const cy_
 /// The first publication on a topic will assume success upon arrival of the first acknowledgement; the association set
 /// will be built in the background following the first publication; all subsequent publications will use & update it.
 ///
-/// API for querying the tracked associations and per-remote delivery success may be added in the future since it is
-/// expected that some applications would benefit from the knowledge of which specific remotes accept their data.
-///
-/// Currently, the future result is not defined (only success/failure).
+/// TODO API for querying the tracked associations and per-remote delivery success may be added in the future since it
+///   is expected that some applications would benefit from the knowledge of which specific remotes accept their data.
+///   Currently, the future result is not defined (only success/failure).
 cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadline, const cy_bytes_t message);
 
 /// Future result of a request message that expects a response.
