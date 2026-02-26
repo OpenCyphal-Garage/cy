@@ -63,7 +63,7 @@ DSDL notation is used to define the headers. Void fields are sent zero and ignor
 
 One thing to note is that each message on a subject carries its own CRDT gossip state, which allows instant consensus synchronization without waiting for the next gossip broadcast. The topic hash and the age-logarithm-floor are included directly in the header while the evictions counter is derived from the subject-ID. The consensus data is only relevant if the message is published on a subject; if sent P2P, then the eviction count cannot be reconstructed as there is no subject-ID known, so the consensus data is ignored by the receiver.
 
-The message tags must be unique across reboots to avoid misattribution; for that, they are randomly initialized and incremented with every published message to enable ordering reconstruction and loss detection. Message tags can be initialized using PRNG with a good seed; the API docs provide examples how this could be achieved (easily) on an embedded system without a hardware TRNG.
+The message tags must be unique across reboots to avoid misattribution; for that, they are randomly initialized and incremented with every published message to enable ordering reconstruction and loss detection. Message tags can be initialized using PRNG with a good seed; the API docs provide examples how this could be achieved (easily) on an embedded system without a hardware TRNG. It follows that tags can (and do) wrap around.
 
 ```bash
 uint6 type
