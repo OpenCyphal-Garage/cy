@@ -4021,18 +4021,23 @@ void cy_on_message(cy_platform_t* const             platform,
             if ((incompatibility != 0) || (lage < LAGE_MIN) || (lage > LAGE_MAX)) {
                 goto bad_message;
             }
-            // Not doing gossip_peer_update() because it may be taxing to do it on every message. May reconsider.
-            const uint32_t    evictions = deserialize_u32(&header[4]);
-            const uint64_t    hash      = deserialize_u64(&header[8]);
+            // Deserialize and validate the message.
+            const uint32_t evictions = deserialize_u32(&header[4]);
+            const uint64_t hash      = deserialize_u64(&header[8]);
+            if (is_pinned(hash) && evictions != 0) {
+                CY_TRACE(cy, "🫣 Inline CRDT gossip with nonzero evictions on a pinned subject");
+                goto bad_message;
+            }
             cy_topic_t* const topic     = cy_topic_find_by_hash(cy, hash);
             const uint32_t    sid_max   = CY_SUBJECT_ID_MAX(cy->platform->subject_id_modulus);
             const bool        multicast = (subject_reader != NULL) && (subject_reader->subject_id <= sid_max);
-            // Simple consistency checks.
             if (multicast && (topic_subject_id_impl(hash, evictions, cy->platform->subject_id_modulus) !=
                               subject_reader->subject_id)) {
                 CY_TRACE(cy, "🫣 Inline CRDT gossip inconsistent with chosen subject, suspect publisher malfunction");
-                goto bad_message; // Codex, ensure coverage in a dedicated test case, remind me about this.
+                goto bad_message;
             }
+            // Peer sampler update might be a little taxing, may reconsider or speed it up.
+            gossip_peer_update(cy, message.timestamp, lane); // Update only on valid messages.
             // Process the message if the topic is known.
             if (topic != NULL) {
                 assert((topic->sub_reader == NULL) || (topic_subject_id(topic) == topic->sub_reader->subject_id));
