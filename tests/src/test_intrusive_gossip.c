@@ -738,6 +738,70 @@ static void test_gossip_poll_urgent_path_and_unique_unicast(void)
     fixture_deinit(&fix);
 }
 
+static void test_gossip_poll_urgent_rate_limit_same_topic_requeue(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+    const cy_us_t t0 = 3000000;
+    fixture_set_now(&fix, t0);
+
+    cy_topic_t* const topic = fixture_make_explicit_topic(&fix, "gossip/poll/urgent/rate-limit/requeue", 0U);
+    topic_merge_lage(topic, t0, 20);        // keep log-age stable over the short test interval
+    fix.cy->gossip_next = t0 + (10 * MEGA); // keep urgent path selected
+    fixture_set_peer(&fix, 0U, UINT64_C(10), t0);
+    fixture_set_peer(&fix, 1U, UINT64_C(20), t0);
+    fixture_set_peer(&fix, 2U, UINT64_C(30), t0);
+
+    schedule_gossip_urgent(topic);
+    gossip_poll(fix.cy, t0);
+    const size_t first = fix.p2p_send_count;
+    TEST_ASSERT_EQUAL_size_t(GOSSIP_OUTDEGREE, first);
+
+    schedule_gossip_urgent(topic);
+    gossip_poll(fix.cy, t0 + 1);
+    TEST_ASSERT_EQUAL_size_t(first, fix.p2p_send_count); // same fault requeued too soon => rate-limited
+
+    schedule_gossip_urgent(topic);
+    gossip_poll(fix.cy, t0 + GOSSIP_DEDUP_TIMEOUT);
+    TEST_ASSERT_EQUAL_size_t(first, fix.p2p_send_count); // strict boundary: still not fresh
+
+    schedule_gossip_urgent(topic);
+    gossip_poll(fix.cy, t0 + GOSSIP_DEDUP_TIMEOUT + 1);
+    TEST_ASSERT_EQUAL_size_t(first + GOSSIP_OUTDEGREE, fix.p2p_send_count);
+    fixture_deinit(&fix);
+}
+
+static void test_gossip_poll_urgent_rate_limit_repeated_fault_detection(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+    const cy_us_t t0 = 5000000;
+    fixture_set_now(&fix, t0);
+
+    cy_topic_t* const topic = fixture_make_explicit_topic(&fix, "gossip/poll/urgent/rate-limit/fault", 5U);
+    topic_merge_lage(topic, t0, 20);        // keep log-age stable; we want "same fault" hash throughout
+    fix.cy->gossip_next = t0 + (10 * MEGA); // keep urgent path selected
+    fixture_set_peer(&fix, 0U, UINT64_C(10), t0);
+    fixture_set_peer(&fix, 1U, UINT64_C(20), t0);
+    fixture_set_peer(&fix, 2U, UINT64_C(30), t0);
+
+    // Same incoming divergence repeatedly: local wins each time, so the same repair gossip is requested repeatedly.
+    const cy_lane_t lane = make_lane(UINT64_C(999), 0x99U);
+    fixture_on_gossip(&fix, t0, 4U, topic->hash, 4U, 0, str_empty, NULL, lane);
+    gossip_poll(fix.cy, t0);
+    const size_t first = fix.p2p_send_count;
+    TEST_ASSERT_EQUAL_size_t(GOSSIP_OUTDEGREE, first);
+
+    fixture_on_gossip(&fix, t0 + 1, 4U, topic->hash, 4U, 0, str_empty, NULL, lane);
+    gossip_poll(fix.cy, t0 + 1);
+    TEST_ASSERT_EQUAL_size_t(first, fix.p2p_send_count); // repeated same fault within timeout => no new epidemic send
+
+    fixture_on_gossip(&fix, t0 + GOSSIP_DEDUP_TIMEOUT + 1, 4U, topic->hash, 4U, 0, str_empty, NULL, lane);
+    gossip_poll(fix.cy, t0 + GOSSIP_DEDUP_TIMEOUT + 1);
+    TEST_ASSERT_EQUAL_size_t(first + GOSSIP_OUTDEGREE, fix.p2p_send_count); // allowed again after timeout
+    fixture_deinit(&fix);
+}
+
 static void test_gossip_poll_urgent_drop_when_no_eligible_and_dedup_on_success_only(void)
 {
     fixture_t fix;
@@ -761,6 +825,67 @@ static void test_gossip_poll_urgent_drop_when_no_eligible_and_dedup_on_success_o
     fix.fail_p2p_send = false;
     gossip_poll(fix.cy, 5002);
     TEST_ASSERT_TRUE(dedup_seen_count(&fix) > 0U);
+    fixture_deinit(&fix);
+}
+
+static void test_gossip_poll_urgent_failed_epidemic_does_not_rate_limit_retry(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+    const cy_us_t t0 = 6000000;
+    fixture_set_now(&fix, t0);
+
+    cy_topic_t* const topic = fixture_make_explicit_topic(&fix, "gossip/poll/urgent/fail/no-cache", 0U);
+    topic_merge_lage(topic, t0, 20);        // keep log-age stable over the short test interval
+    fix.cy->gossip_next = t0 + (10 * MEGA); // keep urgent path selected
+    fixture_set_peer(&fix, 0U, UINT64_C(10), t0);
+    fixture_set_peer(&fix, 1U, UINT64_C(20), t0);
+    fixture_set_peer(&fix, 2U, UINT64_C(30), t0);
+
+    schedule_gossip_urgent(topic);
+    fix.fail_p2p_send = true;
+    gossip_poll(fix.cy, t0);
+    TEST_ASSERT_EQUAL_size_t(GOSSIP_OUTDEGREE, fix.p2p_send_count); // attempted but failed
+    TEST_ASSERT_EQUAL_size_t(0U, dedup_seen_count(&fix));           // failed epidemic must not update dedup cache
+
+    schedule_gossip_urgent(topic);
+    fix.fail_p2p_send = false;
+    gossip_poll(fix.cy, t0 + 1);
+    TEST_ASSERT_EQUAL_size_t(2U * GOSSIP_OUTDEGREE, fix.p2p_send_count); // immediate retry allowed
+    TEST_ASSERT_TRUE(dedup_seen_count(&fix) > 0U);
+
+    schedule_gossip_urgent(topic);
+    gossip_poll(fix.cy, t0 + 2);
+    TEST_ASSERT_EQUAL_size_t(2U * GOSSIP_OUTDEGREE, fix.p2p_send_count); // now rate-limited by successful send
+    fixture_deinit(&fix);
+}
+
+static void test_gossip_poll_urgent_suppressed_if_same_gossip_was_broadcast_just_now(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+    const cy_us_t t0 = 7000000;
+    fixture_set_now(&fix, t0);
+
+    cy_topic_t* const topic = fixture_make_explicit_topic(&fix, "gossip/poll/urgent/after-broadcast", 0U);
+    topic_merge_lage(topic, t0, 20); // keep log-age stable across timeout checks
+    fix.cy->gossip_next = t0;        // force broadcast on first poll
+    fixture_set_peer(&fix, 0U, UINT64_C(10), t0);
+    fixture_set_peer(&fix, 1U, UINT64_C(20), t0);
+    fixture_set_peer(&fix, 2U, UINT64_C(30), t0);
+
+    gossip_poll(fix.cy, t0);
+    TEST_ASSERT_EQUAL_size_t(1U, fix.subject_send_count);
+    TEST_ASSERT_EQUAL_size_t(0U, fix.p2p_send_count);
+
+    schedule_gossip_urgent(topic);
+    gossip_poll(fix.cy, t0 + 1);
+    TEST_ASSERT_EQUAL_size_t(1U, fix.subject_send_count);
+    TEST_ASSERT_EQUAL_size_t(0U, fix.p2p_send_count); // immediate epidemic resend would be redundant, so suppressed
+
+    schedule_gossip_urgent(topic);
+    gossip_poll(fix.cy, t0 + GOSSIP_DEDUP_TIMEOUT + 1);
+    TEST_ASSERT_EQUAL_size_t(GOSSIP_OUTDEGREE, fix.p2p_send_count); // resend allowed once dedup timeout elapsed
     fixture_deinit(&fix);
 }
 
@@ -814,7 +939,11 @@ int main(void)
     RUN_TEST(test_on_scout_broadcast_soon_and_unicast_paths);
     RUN_TEST(test_gossip_poll_broadcast_path_due_and_dedup_success_only);
     RUN_TEST(test_gossip_poll_urgent_path_and_unique_unicast);
+    RUN_TEST(test_gossip_poll_urgent_rate_limit_same_topic_requeue);
+    RUN_TEST(test_gossip_poll_urgent_rate_limit_repeated_fault_detection);
     RUN_TEST(test_gossip_poll_urgent_drop_when_no_eligible_and_dedup_on_success_only);
+    RUN_TEST(test_gossip_poll_urgent_failed_epidemic_does_not_rate_limit_retry);
+    RUN_TEST(test_gossip_poll_urgent_suppressed_if_same_gossip_was_broadcast_just_now);
     RUN_TEST(test_gossip_poll_urgent_failed_send_does_not_evict_existing_dedup_entries);
     return UNITY_END();
 }
