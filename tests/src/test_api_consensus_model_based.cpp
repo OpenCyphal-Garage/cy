@@ -16,8 +16,9 @@
 
 namespace {
 
-constexpr cy_us_t step_us             = 1'000;
-constexpr cy_us_t publish_deadline_us = 250'000;
+constexpr cy_us_t step_us                    = 1'000;
+constexpr cy_us_t publish_deadline_us        = 250'000;
+constexpr cy_us_t topic_discovery_timeout_us = 8'000'000;
 
 struct arrival_sample_t final
 {
@@ -225,7 +226,7 @@ void run_seed_case(const std::uint64_t seed)
     TEST_ASSERT_NOT_NULL(pub_b);
 
     cy_us_t now = 0;
-    TEST_ASSERT_TRUE(wait_until_topics_known(net, now, topic_a_name, topic_b_name, 1'500'000));
+    TEST_ASSERT_TRUE(wait_until_topics_known(net, now, topic_a_name, topic_b_name, topic_discovery_timeout_us));
 
     for (std::uint64_t seq = 1U; seq <= 32U; seq++) {
         set_now(net, now);

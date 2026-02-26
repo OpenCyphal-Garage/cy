@@ -134,7 +134,7 @@ typedef struct
 } gossip_dedup_t;
 
 // Duplicates that haven't been seen for this long are no longer considered duplicates. Can be adjusted freely.
-#define GOSSIP_DEDUP_TIMEOUT (GOSSIP_PERIOD_DEFAULT / 2)
+#define GOSSIP_DEDUP_TIMEOUT (1 * MEGA)
 
 // Some arbitrary implementation-specific hash, not seen on the wire, can be changed at will.
 static uint64_t gossip_dedup_hash(const uint64_t hash, const uint32_t evictions, const int_fast8_t log_age)
@@ -148,7 +148,7 @@ static uint64_t gossip_dedup_hash(const uint64_t hash, const uint32_t evictions,
 
 // Every epidemic gossip is forwarded at most this many times to avoid loops; forwarding stops early on duplicates.
 // This value may be larger for larger dedup capacities although there's no strict relationship, it's probabilistic.
-#define GOSSIP_TTL (1 * GOSSIP_DEDUP_CAPACITY)
+#define GOSSIP_TTL 16
 
 struct cy_t
 {
