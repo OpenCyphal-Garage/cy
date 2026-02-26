@@ -926,7 +926,7 @@ static void topic_destroy(cy_topic_t* const topic);
 // Models the interest of a remote subscriber in data that we publish on a topic.
 // Entries survive as long as we receive acks from the remote, allowing some configurable consecutive loss slack.
 //
-// This DOES NOT represent deliverability of of any particular message, but rather represents the EXPECTATION that
+// This DOES NOT represent deliverability of any particular message, but rather represents the EXPECTATION that
 // future messages on this topic will likely be acknowledged by this remote. One practical implication is that given
 // multiple pending deliveries, the association may survive as long as at least one of them is acknowledged.
 //
@@ -2906,10 +2906,10 @@ static void reordering_resequence(reordering_t* const self, const uint64_t tag)
     self->last_ejected_lin_tag = 0;
 }
 
-// When a new message is received, let the reordering managed decide if it can be ejected or it needs to be interned.
+// When a new message is received, let the reordering manager decide if it can be ejected or it needs to be interned.
 // Returns true if the message is accepted (either ejected or interned) and should be acknowledged (because the
 // application will eventually see it); false if this is a late drop and should not be acknowledged.
-// This is only intended for use when the reordering window is non-negative, otherwise no reordering managed is needed.
+// This is only intended for use when the reordering window is non-negative, otherwise no reordering manager is needed.
 static bool reordering_push(reordering_t* const   self,
                             const uint64_t        tag,
                             const cy_prio_t       priority,

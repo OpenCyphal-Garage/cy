@@ -41,7 +41,7 @@ typedef struct cy_message_vtable_t
     /// The effect is incremental if invoked more than once.
     void (*skip)(cy_message_t*, size_t offset);
 
-    /// The implementation must add add the skip offset to the requested offset and adjust the size accordingly.
+    /// The implementation must add the skip offset to the requested offset and adjust the size accordingly.
     /// The implementation must limit the size if the requested range exceeds the available message size.
     /// The return value is the number of bytes copied to the output buffer after adjusting the offset and size for
     /// the skip and bounds.
