@@ -1,11 +1,11 @@
-///                            ____                   ______            __          __
-///                           / __ `____  ___  ____  / ____/_  ______  / /_  ____  / /
-///                          / / / / __ `/ _ `/ __ `/ /   / / / / __ `/ __ `/ __ `/ /
-///                         / /_/ / /_/ /  __/ / / / /___/ /_/ / /_/ / / / / /_/ / /
-///                         `____/ .___/`___/_/ /_/`____/`__, / .___/_/ /_/`__,_/_/
-///                             /_/                     /____/_/
-///
-/// Copyright (c) Pavel Kirienko <pavel@opencyphal.org>
+//                            ____                   ______            __          __
+//                           / __ `____  ___  ____  / ____/_  ______  / /_  ____  / /
+//                          / / / / __ `/ _ `/ __ `/ /   / / / / __ `/ __ `/ __ `/ /
+//                         / /_/ / /_/ /  __/ / / / /___/ /_/ / /_/ / / / / /_/ / /
+//                         `____/ .___/`___/_/ /_/`____/`__, / .___/_/ /_/`__,_/_/
+//                             /_/                     /____/_/
+//
+// Copyright (c) Pavel Kirienko <pavel@opencyphal.org>
 
 // Blanket-disable the const ptr warning because we have a lot of vtable functions here.
 // ReSharper disable CppParameterMayBeConstPtrOrRef
@@ -34,8 +34,8 @@
 #error CY_UDP_POSIX_IFACE_COUNT_MAX != UDPARD_IFACE_COUNT_MAX
 #endif
 
-/// Maximum expected incoming datagram size. If larger jumbo frames are expected, this value should be increased.
-/// Frames are always resized to the actual data size immediately after reading.
+// Maximum expected incoming datagram size. If larger jumbo frames are expected, this value should be increased.
+// Frames are always resized to the actual data size immediately after reading.
 #ifndef CY_UDP_SOCKET_READ_BUFFER_SIZE
 #define CY_UDP_SOCKET_READ_BUFFER_SIZE 2000
 #endif
@@ -53,14 +53,14 @@ typedef struct cy_udp_posix_t
     udpard_rx_t      udpard_rx;
     udpard_rx_port_t p2p_port;
 
-    udp_wrapper_t sock[CY_UDP_POSIX_IFACE_COUNT_MAX]; ///< All TX and P2P RX.
+    udp_wrapper_t sock[CY_UDP_POSIX_IFACE_COUNT_MAX]; // All TX and P2P RX.
     uint32_t      local_ip[CY_UDP_POSIX_IFACE_COUNT_MAX];
     uint16_t      local_tx_port[CY_UDP_POSIX_IFACE_COUNT_MAX];
-    uint16_t      iface_bitmap; ///< Bitmap of valid interfaces based on local_ip[].
+    uint16_t      iface_bitmap; // Bitmap of valid interfaces based on local_ip[].
 
     cy_udp_posix_stats_t stats;
 
-    /// Doubly-linked unordered list of all live subject readers.
+    // Doubly-linked unordered list of all live subject readers.
     subject_reader_t* reader_head;
     subject_reader_t* reader_tail;
 } cy_udp_posix_t;
@@ -178,7 +178,7 @@ static size_t v_message_read(const cy_message_t* const base, const size_t offset
     return result;
 }
 
-/// Specialization for single-fragment messages.
+// Specialization for single-fragment messages.
 static size_t v_message_read_1(const cy_message_t* const base, const size_t offset, const size_t size, void* const dest)
 {
     message_t* const self = (message_t*)base;
@@ -223,12 +223,12 @@ static cy_message_t* make_message(cy_udp_posix_t* const owner, const size_t size
 // ---------------------------------------------------------------------------------------------------------------------
 // SUBJECT WRITER
 
-/// NB: Once constructed, Cy will keep writers alive as long as possible even if the application doesn't need one to
-/// avoid losing the transfer-ID state.
+// NB: Once constructed, Cy will keep writers alive as long as possible even if the application doesn't need one to
+// avoid losing the transfer-ID state.
 struct subject_writer_t
 {
     cy_subject_writer_t base;
-    uint64_t            next_transfer_id; ///< Random-initialized at the time of creation.
+    uint64_t            next_transfer_id; // Random-initialized at the time of creation.
     udpard_udpip_ep_t   endpoints[UDPARD_IFACE_COUNT_MAX];
 };
 
@@ -310,18 +310,18 @@ struct subject_reader_t
     udpard_rx_port_t port;
     udp_wrapper_t    sock[CY_UDP_POSIX_IFACE_COUNT_MAX];
 
-    /// The history is only used with stateless subscriptions to reject the most obvious duplicates.
-    /// It is essentially optional, but it is expected to save quite a bit of processing on the broadcast subject.
+    // The history is only used with stateless subscriptions to reject the most obvious duplicates.
+    // It is essentially optional, but it is expected to save quite a bit of processing on the broadcast subject.
     uint64_t history[2];
 
-    /// All readers are kept in a list.
-    /// Currently we need this for the poll() call; but perhaps we should switch to epoll()?
+    // All readers are kept in a list.
+    // Currently we need this for the poll() call; but perhaps we should switch to epoll()?
     subject_reader_t* prev;
     subject_reader_t* next;
 };
 
-/// We use the same handler for both subject messages and P2P messages, since they both use the same ingestion callback.
-/// The difference here is that P2P messages have no associated reader instance.
+// We use the same handler for both subject messages and P2P messages, since they both use the same ingestion callback.
+// The difference here is that P2P messages have no associated reader instance.
 static void v_on_msg(udpard_rx_t* const rx, udpard_rx_port_t* const port, const udpard_rx_transfer_t tr)
 {
     cy_udp_posix_t* const owner = rx->user;
@@ -778,7 +778,7 @@ cy_platform_t* cy_udp_posix_new(const uint64_t uid,
         return NULL;
     }
     self->base.cy                 = NULL;
-    self->base.subject_id_modulus = CY_SUBJECT_ID_MODULUS_23bit; ///< Maximum for IPv4, limited by MAC layer multicast
+    self->base.subject_id_modulus = CY_SUBJECT_ID_MODULUS_23bit; // Maximum for IPv4, limited by MAC layer multicast
     self->base.vtable             = &platform_vtable;
 
     // We could use block pool allocators here if preferred.

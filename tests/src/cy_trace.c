@@ -17,16 +17,26 @@ void cy_trace(cy_t* const         cy, // cppcheck-suppress constParameterPointer
     file_name             = (file_name == NULL) ? strrchr(file, '\\') : file_name;
     file_name             = (file_name != NULL) ? (file_name + 1) : file;
 
+    // Update the longest seen file name and function name.
+    static _Thread_local int longest_file_name = 15;
+    static _Thread_local int longest_func_name = 30;
+    const int                file_name_length  = (int)strlen(file_name);
+    const int                func_name_length  = (int)strlen(func);
+    longest_file_name = (longest_file_name > file_name_length) ? longest_file_name : file_name_length;
+    longest_func_name = (longest_func_name > func_name_length) ? longest_func_name : func_name_length;
+
     // Print the header.
     static const int32_t mega = 1000000;
     static const int32_t kilo = 1000;
     (void)fprintf(stderr, //
-                  "CY_TRACE(%p) %06jd.%03jd %s:%04ju:%s: ",
+                  "CY_TRACE(%p) %06jd.%03jd %*s:%04ju:%-*s ",
                   (void*)cy,
                   (intmax_t)(now / mega),
                   (intmax_t)((now % mega) / kilo),
+                  longest_file_name,
                   file_name,
                   (uintmax_t)line,
+                  longest_func_name,
                   func);
 
     // Print the message.

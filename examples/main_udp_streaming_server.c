@@ -25,7 +25,7 @@ typedef struct
 typedef struct
 {
     // Constant stream parameters.
-    uint64_t        stream_id; ///< Precomputed for fast lookup; STREAM_ID_UNUSED if unused.
+    uint64_t        stream_id; // Precomputed for fast lookup; STREAM_ID_UNUSED if unused.
     cy_breadcrumb_t breadcrumb;
     cy_us_t         period_us;
 

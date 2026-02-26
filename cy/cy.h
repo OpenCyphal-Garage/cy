@@ -1,15 +1,15 @@
-///                            ____                   ______            __          __
-///                           / __ `____  ___  ____  / ____/_  ______  / /_  ____  / /
-///                          / / / / __ `/ _ `/ __ `/ /   / / / / __ `/ __ `/ __ `/ /
-///                         / /_/ / /_/ /  __/ / / / /___/ /_/ / /_/ / / / / /_/ / /
-///                         `____/ .___/`___/_/ /_/`____/`__, / .___/_/ /_/`__,_/_/
-///                             /_/                     /____/_/
-///
-/// A robust lightweight real-time decentralized pub/sub for embedded systems and robotics.
-/// See the README.md for details.
-///
-/// Source: https://github.com/OpenCyphal-Garage/cy
-/// Copyright (c) Pavel Kirienko <pavel@opencyphal.org>
+//                            ____                   ______            __          __
+//                           / __ `____  ___  ____  / ____/_  ______  / /_  ____  / /
+//                          / / / / __ `/ _ `/ __ `/ /   / / / / __ `/ __ `/ __ `/ /
+//                         / /_/ / /_/ /  __/ / / / /___/ /_/ / /_/ / / / / /_/ / /
+//                         `____/ .___/`___/_/ /_/`____/`__, / .___/_/ /_/`__,_/_/
+//                             /_/                     /____/_/
+//
+// A robust lightweight real-time decentralized pub/sub for embedded systems and robotics.
+// See the README.md for details.
+//
+// Source: https://github.com/OpenCyphal-Garage/cy
+// Copyright (c) Pavel Kirienko <pavel@opencyphal.org>
 
 #pragma once
 
@@ -192,7 +192,11 @@ cy_publisher_t* cy_advertise_client(cy_t* const cy, const cy_str_t name, const s
 cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t deadline, const cy_bytes_t message);
 
 /// Publish a reliable one-way message.
-/// Reliable messages consume more memory for associated states and are a greater burden on the network and nodes.
+///
+/// Reliable messages consume more memory for associated states and are a greater burden on the network and nodes
+/// compared to best-effort messages. A best-effort message is simply sent out to the network expecting the transport
+/// to deliver it to all interested parties (do its best, no guarantees). A reliable message requires every recipient
+/// to unicast an acknowledgement back to the publisher, which may create nontrivial traffic on high-fanout topics.
 ///
 /// The session layer tracks remote subscribers (called associations) using a simple stateless protocol and
 /// ensures that all live subscribers confirm message reception, retransmitting as necessary, switching between
@@ -200,10 +204,12 @@ cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t deadline, const cy_
 /// retransmission, ack deduplication, and related bookkeeping are hidden from the application.
 /// The application will observe future failure if no subscriber confirms reception before the deadline.
 ///
-/// API for querying the tracked associations and per-remote delivery success may be added in the future since it is
-/// expected that some applications would benefit from the knowledge of which specific remotes accept their data.
+/// The first publication on a topic will assume success upon arrival of the first acknowledgement; the association set
+/// will be built in the background following the first publication; all subsequent publications will use & update it.
 ///
-/// Currently, the future result is not defined (only success/failure).
+/// TODO API for querying the tracked associations and per-remote delivery success may be added in the future since it
+///   is expected that some applications would benefit from the knowledge of which specific remotes accept their data.
+///   Currently, the future result is not defined (only success/failure).
 cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadline, const cy_bytes_t message);
 
 /// Future result of a request message that expects a response.
@@ -387,6 +393,8 @@ void cy_subscriber_callback_set(cy_subscriber_t* const self, const cy_subscriber
 void cy_subscriber_name(const cy_subscriber_t* const self, char* const out_name);
 
 /// No effect if the subscriber pointer is NULL.
+/// Destruction will happen asynchronously at the next event loop update (see spin()).
+/// This is done to enable safe destruction from within a callback.
 void cy_unsubscribe(cy_subscriber_t* const self);
 
 /// If streaming responses are used, streaming should continue only as long as the response futures materialize to
@@ -437,15 +445,19 @@ cy_t* cy_new(cy_platform_t* const platform);
 
 /// Cy will clean up all resources obtained from the platform, such as memory and readers/writers, but will not
 /// destroy the platform instance itself; the application is responsible for that.
+///
+/// The caller MUST ensure that all user-owned objects referencing this Cy instance are destroyed beforehand
+/// (such as publishers, subscribers, futures, etc).
 void cy_destroy(cy_t* const cy);
 
-/// The async error handler is used to report errors occurring in Cy asynchronously with API invocations.
+/// The async error handler is used to report errors occurring in Cy asynchronously with API invocations,
+/// and in a few minor cases may also be invoked synchronously with some API calls.
 /// In particular, it is used for topic resubscription errors occurring in response to consensus updates,
 /// and also in cases where Cy is unable to create an implicit subscription on pattern match due to lack of memory.
 ///
 /// Normally, the error handler does not need to do anything specific aside from perhaps logging the error or updating
 /// relevant performance counters. Cy will keep attempting to repeat the failing operation continuously until it
-/// succeeds or the condition requiring the operation is lifted.
+/// succeeds or the condition requiring the operation is lifted, unless the operation is not mandatory for correctness.
 ///
 /// Since Cy is a single-file library, the line number uniquely identifies the error site.
 /// The topic pointer may be NULL depending on the nature of the error.
@@ -465,8 +477,8 @@ cy_err_t cy_home_set(cy_t* const cy, const cy_str_t home);
 cy_err_t cy_namespace_set(cy_t* const cy, const cy_str_t name_space);
 
 /// This function must be invoked periodically to ensure liveness.
-/// The returned value indicates the success of the gossip publication, if any took place, or zero.
-/// Transient failures normally should be logged & ignored.
+/// The returned value indicates the success of the platform spin().
+/// Gossips are published from this function; their failures, if any, are reported via the async error handler.
 /// The function will return not later than the specified deadline. It may return early.
 cy_err_t               cy_spin_until(cy_t* const cy, const cy_us_t deadline);
 static inline cy_err_t cy_spin_once(cy_t* const cy) { return cy_spin_until(cy, 0); }

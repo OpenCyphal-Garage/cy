@@ -110,17 +110,35 @@ cy_gen_test_intrusive_matrix(test_intrusive_publish_reliable
         src/helpers.c
         platform_stubs/guarded_heap.c
 )
+cy_gen_test_intrusive_matrix(test_intrusive_gossip
+        src/test_intrusive_gossip.c
+        src/helpers.c
+        platform_stubs/guarded_heap.c
+)
+cy_gen_test_intrusive_matrix(test_intrusive_topic_allocation
+        src/test_intrusive_topic_allocation.c
+        src/helpers.c
+        platform_stubs/guarded_heap.c
+)
+cy_gen_test_intrusive_matrix(test_intrusive_topic_allocate_exhaustive
+        src/test_intrusive_topic_allocate_exhaustive.c
+        src/helpers.c
+        platform_stubs/guarded_heap.c
+)
 
 # API TESTS.
 # These tests only have access to the public API and are written in modern C++.
 # They should be preferred over intrusive tests whenever possible.
-cy_gen_test_arch_matrix(test_api_rx 11 "CY_CONFIG_TRACE=1"
-        src/test_api_rx.cpp
+set(cy_api_common_sources
         ${CMAKE_SOURCE_DIR}/cy/cy.c
         src/helpers.c
         src/cy_trace.c
         platform_stubs/guarded_heap.c
         platform_stubs/message.c
+)
+cy_gen_test_arch_matrix(test_api_rx 11 "CY_CONFIG_TRACE=1"
+        src/test_api_rx.cpp
+        ${cy_api_common_sources}
 )
 cy_gen_test_arch_matrix(test_api_name 11 "CY_CONFIG_TRACE=1"
         src/test_api_name.cpp
@@ -129,9 +147,59 @@ cy_gen_test_arch_matrix(test_api_name 11 "CY_CONFIG_TRACE=1"
 )
 cy_gen_test_arch_matrix(test_api_publish_reliable 11 "CY_CONFIG_TRACE=1"
         src/test_api_publish_reliable.cpp
-        ${CMAKE_SOURCE_DIR}/cy/cy.c
-        src/helpers.c
-        src/cy_trace.c
-        platform_stubs/guarded_heap.c
-        platform_stubs/message.c
+        ${cy_api_common_sources}
+)
+cy_gen_test_arch_matrix(test_api_gossip 11 "CY_CONFIG_TRACE=1"
+        src/test_api_gossip.cpp
+        ${cy_api_common_sources}
+)
+cy_gen_test_arch_matrix(test_api_gossip_sim 11 "CY_CONFIG_TRACE=1"
+        src/test_api_gossip_sim.cpp
+        ${cy_api_common_sources}
+)
+
+# END-TO-END API TESTS.
+# Shared simulation/fault/utils infrastructure is linked into each section target.
+# All tests listed here are mandatory and always executed by default.
+set(cy_api_e2e_common_sources
+        src/e2e_sim_net.cpp
+        src/e2e_faults.cpp
+        src/e2e_test_utils.cpp
+        ${cy_api_common_sources}
+)
+cy_gen_test_arch_matrix(test_api_consensus_edge_matrix 11 "CY_CONFIG_TRACE=1"
+        src/test_api_consensus_edge_matrix.cpp
+        ${cy_api_e2e_common_sources}
+)
+cy_gen_test_arch_matrix(test_api_consensus_model_based 11 "CY_CONFIG_TRACE=1"
+        src/test_api_consensus_model_based.cpp
+        ${cy_api_e2e_common_sources}
+)
+cy_gen_test_arch_matrix(test_api_pubsub_e2e_baseline 11 "CY_CONFIG_TRACE=1"
+        src/test_api_pubsub_e2e_baseline.cpp
+        ${cy_api_e2e_common_sources}
+)
+cy_gen_test_arch_matrix(test_api_pubsub_e2e_reliable_loss 11 "CY_CONFIG_TRACE=1"
+        src/test_api_pubsub_e2e_reliable_loss.cpp
+        ${cy_api_e2e_common_sources}
+)
+cy_gen_test_arch_matrix(test_api_pubsub_e2e_reordering 11 "CY_CONFIG_TRACE=1"
+        src/test_api_pubsub_e2e_reordering.cpp
+        ${cy_api_e2e_common_sources}
+)
+cy_gen_test_arch_matrix(test_api_pubsub_e2e_migration 11 "CY_CONFIG_TRACE=1"
+        src/test_api_pubsub_e2e_migration.cpp
+        ${cy_api_e2e_common_sources}
+)
+cy_gen_test_arch_matrix(test_api_pubsub_e2e_lifecycle 11 "CY_CONFIG_TRACE=1"
+        src/test_api_pubsub_e2e_lifecycle.cpp
+        ${cy_api_e2e_common_sources}
+)
+cy_gen_test_arch_matrix(test_api_pubsub_e2e_platform_failures 11 "CY_CONFIG_TRACE=1"
+        src/test_api_pubsub_e2e_platform_failures.cpp
+        ${cy_api_e2e_common_sources}
+)
+cy_gen_test_arch_matrix(test_api_consensus_e2e_multinode 11 "CY_CONFIG_TRACE=1"
+        src/test_api_consensus_e2e_multinode.cpp
+        ${cy_api_e2e_common_sources}
 )

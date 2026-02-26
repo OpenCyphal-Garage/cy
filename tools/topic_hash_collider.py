@@ -3,34 +3,52 @@
 This utility is used to generate a topic name whose preferred subject-ID allocation is identical to that
 of the given topic name.
 Usage:
-    ./topic_hash_collider.py /abc/def
+    ./topic_hash_collider.py 8380403 /abc/def
 """
 
-import sys
 import random
 import string
+import sys
+
 from rapidhash import rapidhash
 
 ALPHABET = string.ascii_letters + string.digits
 PINNED_SUBJECT_ID_MAX = 2**13 - 1
 
 
-def topic_hash(topic_name: str) -> int:
-    if len(topic_name) == 5 and topic_name.startswith("#"):
-        try:
-            numeric = int(topic_name[1:], 16)
-        except ValueError:
-            pass
+def parse_hash_override(topic_name: str) -> int | None:
+    """
+    Equivalent to parse_hash_override() in cy.c:
+    parses trailing "#"+1..16 lowercase hex digits as hash override.
+    """
+    out = 0
+    end = len(topic_name)
+    for i in range(min(len(topic_name), 17)):
+        ch = topic_name[end - (i + 1)]
+        if ch == "#":
+            return out if i > 0 else None
+        if "0" <= ch <= "9":
+            digit = ord(ch) - ord("0")
+        elif "a" <= ch <= "f":
+            digit = ord(ch) - ord("a") + 10
         else:
-            if 0 <= numeric <= PINNED_SUBJECT_ID_MAX:
-                return numeric
+            break
+        out |= digit << (i * 4)
+    return None
+
+
+def topic_hash(topic_name: str) -> int:
+    override = parse_hash_override(topic_name)
+    if override is not None:
+        return override
     return rapidhash(topic_name.encode())
 
 
 def preferred_subject_id(modulus: int, h: int) -> int:
+    """Assumes zero evictions (hence preferred)."""
     if h <= PINNED_SUBJECT_ID_MAX:  # This is a pinned topic.
         return h
-    return PINNED_SUBJECT_ID_MAX + h % modulus
+    return PINNED_SUBJECT_ID_MAX + 1 + (h % modulus)
 
 
 def find_subject_id_collision(subject_id_modulus: int, topic_name: str, *, suffix_len: int) -> dict[str, int | str]:
@@ -40,7 +58,7 @@ def find_subject_id_collision(subject_id_modulus: int, topic_name: str, *, suffi
     prefix = topic_name
     target_subject_id = preferred_subject_id(subject_id_modulus, target_hash)
     while True:
-        suffix = ''.join(random.choice(ALPHABET) for _ in range(suffix_len))
+        suffix = "".join(random.choice(ALPHABET) for _ in range(suffix_len))
         candidate = prefix + suffix
         candidate_hash = topic_hash(candidate)
         if preferred_subject_id(subject_id_modulus, candidate_hash) == target_subject_id:
@@ -52,10 +70,32 @@ def find_subject_id_collision(subject_id_modulus: int, topic_name: str, *, suffi
             }
 
 
+def is_prime(n: int) -> bool:
+    if (n <= 2) or ((n & 1) == 0):
+        return n == 2
+    d = 3
+    while d <= (n // d):
+        if (n % d) == 0:
+            return False
+        d += 2
+    return True
+
+
+def is_valid_subject_id_modulus(modulus: int) -> bool:
+    return is_prime(modulus) and (modulus % 4 == 3)
+
+
 def main() -> None:
     if len(sys.argv) < 3:
-        sys.exit(f"Usage: {sys.argv[0]} <subject-ID-modulus> <topic-name> [suffix-len]")
+        sys.exit(
+            f"""
+Usage: {sys.argv[0]} <subject-ID-modulus> <topic-name> [suffix-len]
+For subject-ID modulus refer to CY_SUBJECT_ID_MODULUS_32bit etc.
+""".strip()
+        )
     subject_id_modulus = int(sys.argv[1], 0)
+    if not is_valid_subject_id_modulus(subject_id_modulus):
+        sys.exit(f"Invalid subject-ID modulus: {subject_id_modulus}")
     original = sys.argv[2]
     try:
         suffix_len = int(sys.argv[3])
@@ -69,9 +109,10 @@ def main() -> None:
     psid = preferred_subject_id(subject_id_modulus, ho)
     assert psid == preferred_subject_id(subject_id_modulus, hc)
     print(
-        f"hash_original:  0x{ho:016x}",
-        f"hash_collision: 0x{hc:016x}",
-        f"name_collision: {nc!r}",
+        f"hash_original:        0x{ho:016x}",
+        f"hash_collision:       0x{hc:016x}",
+        f"name_original:        {original!r}",
+        f"name_collision:       {nc!r}",
         f"preferred_subject_id: 0x{psid:08x}",
         sep="\n",
     )

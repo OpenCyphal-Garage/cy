@@ -1,19 +1,20 @@
-///                            ____                   ______            __          __
-///                           / __ `____  ___  ____  / ____/_  ______  / /_  ____  / /
-///                          / / / / __ `/ _ `/ __ `/ /   / / / / __ `/ __ `/ __ `/ /
-///                         / /_/ / /_/ /  __/ / / / /___/ /_/ / /_/ / / / / /_/ / /
-///                         `____/ .___/`___/_/ /_/`____/`__, / .___/_/ /_/`__,_/_/
-///                             /_/                     /____/_/
-///
-/// Platform-side API of the Cy library.
-/// The application is not intended to have access to this header; this is only for the platform layer implementation.
-/// Applications should only include cy.h.
-///
-/// Copyright (c) Pavel Kirienko <pavel@opencyphal.org>
+//                            ____                   ______            __          __
+//                           / __ `____  ___  ____  / ____/_  ______  / /_  ____  / /
+//                          / / / / __ `/ _ `/ __ `/ /   / / / / __ `/ __ `/ __ `/ /
+//                         / /_/ / /_/ /  __/ / / / /___/ /_/ / /_/ / / / / /_/ / /
+//                         `____/ .___/`___/_/ /_/`____/`__, / .___/_/ /_/`__,_/_/
+//                             /_/                     /____/_/
+//
+// Platform-side API of the Cy library.
+// The application is not intended to have access to this header; this is only for the platform layer implementation.
+// Applications should only include cy.h.
+//
+// Copyright (c) Pavel Kirienko <pavel@opencyphal.org>
 
 #pragma once
 
 #include "cy.h"
+#include <stdint.h>
 
 /// See the subject_id_modulus for details.
 #define CY_SUBJECT_ID_MODULUS_17bit 122867UL     ///< Suitable for all Cyphal transports.
@@ -40,7 +41,7 @@ typedef struct cy_message_vtable_t
     /// The effect is incremental if invoked more than once.
     void (*skip)(cy_message_t*, size_t offset);
 
-    /// The implementation must add add the skip offset to the requested offset and adjust the size accordingly.
+    /// The implementation must add the skip offset to the requested offset and adjust the size accordingly.
     /// The implementation must limit the size if the requested range exceeds the available message size.
     /// The return value is the number of bytes copied to the output buffer after adjusting the offset and size for
     /// the skip and bounds.
@@ -85,9 +86,9 @@ struct cy_platform_t
     ///
     /// The modulus shall be a prime number because the subject-ID function uses a quadratic probing strategy:
     ///     subject_id = CY_SUBJECT_ID_PINNED_MAX + 1 + ((hash + evictions^2) mod modulus)
+    /// Where 64-bit unsigned arithmetics is assumed (in particular, (hash + evictions^2) must wrap at 2**64).
     /// Further, to enable fast reconstruction of the eviction count from the subject-ID, we impose an additional
-    /// constraint that subject_id_modulus mod 4 == 3. The suitability of the modulus is checked at initialization.
-    /// See topic_evictions_from_subject_id() for the reconstruction algorithm.
+    /// constraint that subject_id_modulus mod 4 == 3.
     ///
     /// See https://en.wikipedia.org/wiki/Quadratic_probing
     /// See https://github.com/OpenCyphal-Garage/cy/issues/12#issuecomment-3577831960
@@ -141,6 +142,7 @@ typedef struct cy_platform_vtable_t
     /// If the deadline is in the past, update the event loop once without blocking and return.
     /// The cy_on_message() callback will be invoked from this function.
     /// This is the only platform function that is allowed to block.
+    /// May return additional error codes, which will be forwarded to the application as-is.
     cy_err_t (*spin)(cy_platform_t*, cy_us_t deadline);
 
     // === MISC ===

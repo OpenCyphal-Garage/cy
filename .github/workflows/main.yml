@@ -1,5 +1,5 @@
 name: Main Workflow
-on: [ push, pull_request ]
+on: [push, pull_request]
 env:
   LLVM_VERSION: 20
 
@@ -9,7 +9,7 @@ jobs:
     container: ghcr.io/opencyphal/toolshed:ts24.4.3
     strategy:
       matrix:
-        toolchain: [ "clang", "gcc" ]
+        toolchain: ["clang", "gcc"]
         include:
           - toolchain: gcc
             c-compiler: gcc
@@ -41,7 +41,7 @@ jobs:
     container: ghcr.io/opencyphal/toolshed:ts24.4.3
     strategy:
       matrix:
-        toolchain: [ "clang", "gcc" ]
+        toolchain: ["clang", "gcc"]
         include:
           - toolchain: gcc
             c-compiler: gcc
@@ -93,11 +93,16 @@ jobs:
             --xml-pretty \
             --output "$GITHUB_WORKSPACE/build/coverage/cy.cobertura.xml" \
             --print-summary
-      - uses: coverallsapp/github-action@v2
+      - id: coveralls_upload
+        uses: coverallsapp/github-action@v2
+        continue-on-error: true
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           file: build/coverage/cy.cobertura.xml
           format: cobertura
+      - if: ${{ steps.coveralls_upload.outcome == 'failure' }}
+        run: |
+          echo "::warning::Coveralls upload failed (likely Coveralls API issue). Continuing without failing CI."
       - uses: actions/upload-artifact@v4
         with:
           name: coverage-report
@@ -109,7 +114,7 @@ jobs:
       flags: -Wall -Wextra -pedantic -Wconversion -Wtype-limits -Wfatal-errors
     strategy:
       matrix:
-        std: [ "c11" ]
+        std: ["c11"]
     steps:
       - uses: actions/checkout@v4
       # language=bash

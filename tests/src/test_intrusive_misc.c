@@ -273,16 +273,6 @@ static void test_bytes_dup_oom_before_first_chunk(void)
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&fixture.heap));
 }
 
-static size_t bitmap_clz_reference(const bitmap_t* const bitmap, const size_t count)
-{
-    for (size_t i = 0U; i < count; i++) {
-        if (bitmap_test(bitmap, i)) {
-            return i;
-        }
-    }
-    return count;
-}
-
 static void test_bitmap_clz_basic(void)
 {
     bitmap_t bm[3] = { 0, 0, 0 };

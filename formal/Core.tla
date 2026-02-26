@@ -17,17 +17,20 @@
 \*
 \* The allocation protocol does not operate on topic names directly, substituting them with numerical hashes instead.
 \* The application layer is expected to attach names to hashes but this is of no relevance to the core protocol.
-\* From the standpoint of the protocol, "topic name" and "topic hash" can be used interchangeably.
+\* From the standpoint of the core allocation protocol, "topic name" and "topic hash" can be used interchangeably.
 \*
 \* Each allocation entry contains three fields: the topic hash, the topic eviction count, and the topic age.
 \* A pair of entries can be compared to each other to determine if the pair constitutes a collision
 \* (different names, same subject) or a divergence (same name, different subjects);
 \* other comparison outcomes are of no interest.
 \*
-\* The subject-ID assigned to a topic is defined as some function of its hash and eviction count. One possible way
-\* to define the function is:
+\* The eviction count is used as a Lamport clock and hence implementations ensure that it cannot overflow. Since
+\* evictions are static on a quiescent network, even relatively narrow representations (e.g., 32 bit) may suffice.
 \*
-\*      subject_id = 8187 + ((hash + evictions**2) % 57349)
+\* The subject-ID assigned to a topic is defined as some function of its hash and eviction count. One possible way
+\* to define the function is, assuming 64-bit unsigned arithmetics:
+\*
+\*      subject_id = 8192 + ((hash + evictions**2) % 8380403)
 \*
 \* For the background on the subject of open addressing schemes and why the specific values were chosen this way, see:
 \* - https://en.wikipedia.org/wiki/Quadratic_probing
