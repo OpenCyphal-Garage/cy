@@ -9,7 +9,7 @@ extern "C"
 {
 #endif
 
-void make_message_header(unsigned char out[18], uint8_t type, uint64_t tag, uint64_t topic_hash);
+void make_message_header(unsigned char out[24], uint8_t type, uint64_t tag, uint64_t topic_hash);
 
 size_t make_gossip_header(unsigned char* out,
                           size_t         out_size,

@@ -728,17 +728,17 @@ static void test_on_gossip_unknown_topic_collision_paths(void)
 {
     fixture_t fix;
     fixture_init(&fix);
-    const uint64_t    base   = UINT64_C(0x1000000000000400);
-    const uint64_t    remote = base + (uint64_t)fix.cy->platform->subject_id_modulus;
-    cy_topic_t* const mine   = fixture_make_topic(&fix, "alloc/collision", base, 0U, LAGE_MIN);
-    const uint32_t    sid    = topic_subject_id(mine);
+    const uint64_t    base             = UINT64_C(0x1000000000000400);
+    const uint64_t    remote           = base + (uint64_t)fix.cy->platform->subject_id_modulus;
+    cy_topic_t* const mine             = fixture_make_topic(&fix, "alloc/collision", base, 0U, LAGE_MIN);
+    const uint32_t    remote_evictions = 0U;
     topic_merge_lage(mine, 100 * MEGA, 4);
 
-    TEST_ASSERT_TRUE(on_gossip_unknown_topic(fix.cy, 100 * MEGA, remote, sid, 1));
+    TEST_ASSERT_TRUE(on_gossip_unknown_topic(fix.cy, 100 * MEGA, remote, remote_evictions, 1));
     TEST_ASSERT_TRUE(is_listed(&fix.cy->list_gossip_urgent, &mine->list_gossip_urgent));
 
     const uint32_t before = mine->evictions;
-    TEST_ASSERT_FALSE(on_gossip_unknown_topic(fix.cy, 110 * MEGA, remote, sid, 8));
+    TEST_ASSERT_FALSE(on_gossip_unknown_topic(fix.cy, 110 * MEGA, remote, remote_evictions, 8));
     TEST_ASSERT_TRUE(mine->evictions > before);
     fixture_deinit(&fix);
 }

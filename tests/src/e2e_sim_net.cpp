@@ -14,7 +14,7 @@ namespace {
 constexpr std::uint8_t header_type_mask = 63U;
 constexpr std::uint8_t header_gossip    = 7U;
 constexpr std::uint8_t header_scout     = 8U;
-constexpr std::size_t  header_size      = 18U;
+constexpr std::size_t  header_size      = 24U;
 constexpr std::size_t  max_fault_copies = 1024U;
 constexpr std::size_t  registry_size    = 64U;
 
@@ -127,7 +127,7 @@ std::size_t effective_header_size(const frame_info_t& frame)
             if (frame.wire.size() < header_size) {
                 return frame.wire.size();
             }
-            const std::size_t name_len = frame.wire.at(17U);
+            const std::size_t name_len = frame.wire.at(23U);
             const std::size_t end      = header_size + name_len;
             return (end <= frame.wire.size()) ? end : frame.wire.size();
         }
@@ -147,18 +147,15 @@ void frame_parse(frame_info_t& frame)
     if (frame.wire.size() >= header_size) {
         if (frame.header_type <= 6U) {
             frame.has_tag = true;
-            frame.tag     = read_u64(frame.wire, 2U);
+            frame.tag     = read_u64(frame.wire, 16U);
         }
-        if (frame.header_type <= 2U) {
+        if ((frame.header_type <= 2U) || (frame.header_type == header_gossip)) {
             frame.has_topic_hash = true;
-            frame.topic_hash     = read_u64(frame.wire, 10U);
-        } else if (frame.header_type == header_gossip) {
-            frame.has_topic_hash = true;
-            frame.topic_hash     = read_u64(frame.wire, 4U);
+            frame.topic_hash     = read_u64(frame.wire, 8U);
         }
-    } else if ((frame.header_type == header_gossip) && (frame.wire.size() >= 12U)) {
+    } else if ((frame.header_type == header_gossip) && (frame.wire.size() >= 16U)) {
         frame.has_topic_hash = true;
-        frame.topic_hash     = read_u64(frame.wire, 4U);
+        frame.topic_hash     = read_u64(frame.wire, 8U);
     }
 
     const std::size_t hdr_size = effective_header_size(frame);

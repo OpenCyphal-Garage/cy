@@ -12,6 +12,7 @@ namespace {
 constexpr std::uint8_t header_msg_best_effort = 0U;
 constexpr std::uint8_t header_msg_reliable    = 1U;
 constexpr std::uint8_t header_msg_ack         = 2U;
+constexpr std::size_t  header_bytes           = 24U;
 
 struct arrival_capture_t
 {
@@ -258,9 +259,9 @@ void dispatch_message(test_platform_t* const  self,
                       const cy_us_t           timestamp,
                       const unsigned char     payload_byte)
 {
-    std::array<unsigned char, 19> wire{};
+    std::array<unsigned char, header_bytes + 1U> wire{};
     make_message_header(wire.data(), type, tag, cy_topic_hash(topic));
-    wire[18]                = payload_byte;
+    wire[header_bytes]      = payload_byte;
     cy_message_t* const msg = cy_test_message_make(&self->message_heap, wire.data(), wire.size());
     TEST_ASSERT_NOT_NULL(msg);
 

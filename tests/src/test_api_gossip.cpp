@@ -10,6 +10,7 @@
 
 namespace {
 constexpr std::uint8_t header_gossip = 7U;
+constexpr std::size_t  header_bytes  = 24U;
 
 struct test_subject_writer_t
 {
@@ -324,7 +325,7 @@ void test_api_gossip_parser_rejects_incompatibility_and_invalid_lage_and_truncat
     const std::size_t              full_size = make_gossip_header(
       wire.data(), wire.size(), 1U, 0, UINT64_C(0x1000000000000002), 0U, cy_str("api/gossip/truncated"));
     TEST_ASSERT_TRUE(full_size > 0U);
-    dispatch_raw(p, wire, 18U, lane, nullptr, 103); // name length in header, but payload omitted
+    dispatch_raw(p, wire, header_bytes - 6U, lane, nullptr, 103); // name length in header, but payload omitted
     TEST_ASSERT_EQUAL_size_t(0U, p.p2p_send_count);
     platform_deinit(p);
 }
@@ -353,8 +354,8 @@ void test_api_scout_match_triggers_gossip_response_and_fields_are_correct()
     const send_capture_t& c = p.captures.at(p.capture_count - 1U);
     TEST_ASSERT_TRUE(c.p2p);
     TEST_ASSERT_EQUAL_UINT8(header_gossip, capture_type(c));
-    TEST_ASSERT_EQUAL_UINT64(cy_topic_hash(topic), capture_u64(c, 4U));
-    TEST_ASSERT_EQUAL_UINT8(0U, c.data[1]); // scout response TTL is zero
+    TEST_ASSERT_EQUAL_UINT64(cy_topic_hash(topic), capture_u64(c, 8U));
+    TEST_ASSERT_EQUAL_UINT8(0U, c.data[2]); // scout response TTL is zero
 
     cy_unadvertise(pub);
     platform_deinit(p);

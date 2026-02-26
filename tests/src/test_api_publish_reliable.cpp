@@ -10,7 +10,8 @@
 #include <limits>
 
 namespace {
-constexpr cy_us_t ACK_TIMEOUT = 100'000;
+constexpr cy_us_t     ACK_TIMEOUT  = 100'000;
+constexpr std::size_t header_bytes = 24U;
 
 struct test_subject_writer_t
 {
@@ -38,20 +39,20 @@ struct test_platform_t final
     std::size_t fail_after{ std::numeric_limits<std::size_t>::max() };
     std::size_t new_alloc_count{ 0U };
 
-    std::size_t                   multicast_count{ 0U };
-    std::size_t                   reliable_multicast_count{ 0U };
-    bool                          fail_next_reliable_multicast{ false };
-    std::uint32_t                 last_multicast_subject_id{ 0U };
-    std::array<unsigned char, 19> last_multicast{};
-    cy_us_t                       last_multicast_deadline{ 0 };
-    cy_us_t                       last_reliable_multicast_deadline{ 0 };
+    std::size_t                                  multicast_count{ 0U };
+    std::size_t                                  reliable_multicast_count{ 0U };
+    bool                                         fail_next_reliable_multicast{ false };
+    std::uint32_t                                last_multicast_subject_id{ 0U };
+    std::array<unsigned char, header_bytes + 1U> last_multicast{};
+    cy_us_t                                      last_multicast_deadline{ 0 };
+    cy_us_t                                      last_reliable_multicast_deadline{ 0 };
 
-    std::size_t                   p2p_count{ 0U };
-    std::array<unsigned char, 18> last_p2p{};
-    std::size_t                   p2p_extent{ 0U };
-    bool                          fail_next_p2p_send{ false };
-    cy_us_t                       last_p2p_deadline{ 0 };
-    cy_us_t                       last_reliable_p2p_deadline{ 0 };
+    std::size_t                             p2p_count{ 0U };
+    std::array<unsigned char, header_bytes> last_p2p{};
+    std::size_t                             p2p_extent{ 0U };
+    bool                                    fail_next_p2p_send{ false };
+    cy_us_t                                 last_p2p_deadline{ 0 };
+    cy_us_t                                 last_reliable_p2p_deadline{ 0 };
 };
 
 test_platform_t* platform_from(cy_platform_t* const platform)
@@ -243,13 +244,15 @@ void callback_capture_bind(cy_future_t* const fut, callback_capture_t& capture)
 
 cy_message_t* make_ack_message(test_platform_t* const self, const std::uint64_t tag, const std::uint64_t topic_hash)
 {
-    std::array<unsigned char, 18> wire{};
+    // ACK wire header layout:
+    // [0] type, [8..15] topic hash, [16..23] tag.
+    std::array<unsigned char, header_bytes> wire{};
     wire[0] = 2U;
     for (std::size_t i = 0U; i < 8U; i++) {
-        wire.at(2U + i) = static_cast<unsigned char>((tag >> (i * 8U)) & 0xFFU);
+        wire.at(8U + i) = static_cast<unsigned char>((topic_hash >> (i * 8U)) & 0xFFU);
     }
     for (std::size_t i = 0U; i < 8U; i++) {
-        wire.at(10U + i) = static_cast<unsigned char>((topic_hash >> (i * 8U)) & 0xFFU);
+        wire.at(16U + i) = static_cast<unsigned char>((tag >> (i * 8U)) & 0xFFU);
     }
     return cy_test_message_make(&self->message_heap, wire.data(), wire.size());
 }
@@ -281,7 +284,7 @@ std::uint64_t captured_tag(const test_platform_t& self)
 {
     std::uint64_t tag = 0U;
     for (std::size_t i = 0U; i < 8U; i++) {
-        tag |= static_cast<std::uint64_t>(self.last_multicast.at(2U + i)) << (i * 8U);
+        tag |= static_cast<std::uint64_t>(self.last_multicast.at(16U + i)) << (i * 8U);
     }
     return tag;
 }
@@ -1502,17 +1505,19 @@ void test_send_message_ack_error_path()
     cy_subscriber_t* const   sub        = cy_subscribe(platform.cy, cy_str(topic_name), 16U);
     TEST_ASSERT_NOT_NULL(sub);
 
-    const std::uint64_t           hash = topic_hash_for(platform, topic_name);
-    std::array<unsigned char, 19> wire{};
+    const std::uint64_t                          hash = topic_hash_for(platform, topic_name);
+    std::array<unsigned char, header_bytes + 1U> wire{};
     wire[0] = 1U;
     wire[1] = 0U;
+    wire[2] = 0U;
+    wire[3] = 0U;
     for (std::size_t i = 0U; i < 8U; i++) {
-        wire.at(2U + i) = static_cast<unsigned char>((UINT64_C(1) >> (i * 8U)) & 0xFFU);
+        wire.at(8U + i) = static_cast<unsigned char>((hash >> (i * 8U)) & 0xFFU);
     }
     for (std::size_t i = 0U; i < 8U; i++) {
-        wire.at(10U + i) = static_cast<unsigned char>((hash >> (i * 8U)) & 0xFFU);
+        wire.at(16U + i) = static_cast<unsigned char>((UINT64_C(1) >> (i * 8U)) & 0xFFU);
     }
-    wire[18] = 0x5AU;
+    wire[header_bytes] = 0x5AU;
 
     cy_message_t* const msg = cy_test_message_make(&platform.message_heap, wire.data(), wire.size());
     TEST_ASSERT_NOT_NULL(msg);
@@ -1528,11 +1533,11 @@ void test_send_message_ack_error_path()
     cy_on_message(&platform.platform, lane, nullptr, message);
     message.timestamp += 1;
 
-    std::array<unsigned char, 19> wire_ok = wire;
+    std::array<unsigned char, header_bytes + 1U> wire_ok = wire;
     for (std::size_t i = 0U; i < 8U; i++) {
-        wire_ok.at(2U + i) = static_cast<unsigned char>((UINT64_C(2) >> (i * 8U)) & 0xFFU);
+        wire_ok.at(16U + i) = static_cast<unsigned char>((UINT64_C(2) >> (i * 8U)) & 0xFFU);
     }
-    wire_ok[18]                = 0x5BU;
+    wire_ok[header_bytes]      = 0x5BU;
     cy_message_t* const msg_ok = cy_test_message_make(&platform.message_heap, wire_ok.data(), wire_ok.size());
     TEST_ASSERT_NOT_NULL(msg_ok);
     message.content = msg_ok;
