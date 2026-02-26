@@ -1,6 +1,7 @@
 #include <cy.c> // NOLINT(bugprone-suspicious-include)
 #include <unity.h>
 #include "guarded_heap.h"
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -392,6 +393,17 @@ static size_t pow_u(const size_t base, const size_t exp)
     return out;
 }
 
+static size_t fill_high_eviction_domain(const uint32_t modulus, uint32_t out[6])
+{
+    out[0] = 0U;
+    out[1] = modulus / 2U;
+    out[2] = (modulus / 2U) + 1U;
+    out[3] = modulus - 1U;
+    out[4] = modulus;
+    out[5] = UINT32_MAX - 4096U;
+    return 6U;
+}
+
 static void run_topic_allocate_case(const case_spec_t* const spec, const char* const context)
 {
     fixture_t fix;
@@ -537,6 +549,120 @@ static void test_topic_allocate_seeded_probabilistic_oracle_equivalence(void)
     printf("topic_allocate probabilistic seeded cases: %zu\n", case_count);
 }
 
+static void test_topic_allocate_high_eviction_bounded_exhaustive_oracle_equivalence(void)
+{
+    static const uint32_t modulus = (uint32_t)CY_SUBJECT_ID_MODULUS_17bit;
+    uint32_t              ev_domain[6];
+    const size_t          ev_domain_count = fill_high_eviction_domain(modulus, ev_domain);
+    size_t                case_count      = 0U;
+
+    for (size_t topic_count = 1U; topic_count <= 3U; topic_count++) {
+        for (size_t family = 0U; family < 2U; family++) {
+            for (size_t age_profile = 0U; age_profile < 2U; age_profile++) {
+                const size_t total_ev_codes = pow_u(ev_domain_count, topic_count);
+                for (size_t ev_code = 0U; ev_code < total_ev_codes; ev_code++) {
+                    for (size_t target = 0U; target < topic_count; target++) {
+                        for (size_t requested_index = 0U; requested_index < ev_domain_count; requested_index++) {
+                            case_spec_t spec;
+                            memset(&spec, 0, sizeof(spec));
+                            spec.topic_count         = topic_count;
+                            spec.hash_family         = family;
+                            spec.hash_nonce          = UINT64_C(0xBEEF0000) + (uint64_t)age_profile;
+                            spec.target_index        = target;
+                            spec.requested_evictions = ev_domain[requested_index];
+
+                            build_age_profile(age_profile, topic_count, spec.lages);
+                            for (size_t i = 0U; i < topic_count; i++) {
+                                spec.insertion_order[i] = i;
+                            }
+
+                            size_t tmp = ev_code;
+                            for (size_t i = 0U; i < topic_count; i++) {
+                                spec.initial_evictions[i] = ev_domain[tmp % ev_domain_count];
+                                tmp /= ev_domain_count;
+                            }
+
+                            char context[224];
+                            (void)snprintf(context,
+                                           sizeof(context),
+                                           "high-ev #%zu n=%zu fam=%zu age=%zu code=%zu target=%zu req_idx=%zu",
+                                           case_count,
+                                           topic_count,
+                                           family,
+                                           age_profile,
+                                           ev_code,
+                                           target,
+                                           requested_index);
+                            run_topic_allocate_case(&spec, context);
+                            case_count++;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    printf("topic_allocate high-eviction exhaustive bounded cases: %zu\n", case_count);
+}
+
+static void test_topic_allocate_same_subject_id_reallocation_exhaustive(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    const uint32_t    modulus = fix.cy->platform->subject_id_modulus;
+    const uint64_t    hash    = UINT64_C(0x1000000000300000);
+    cy_topic_t* const topic   = fixture_make_topic(&fix, "alloc/exh/same-subject", hash, 0U, LAGE_MIN);
+    TEST_ASSERT_NOT_NULL(topic);
+
+    for (uint32_t evictions = 0U; evictions < modulus; evictions++) {
+        const uint32_t mirror = (evictions == 0U) ? 0U : (modulus - evictions);
+
+        topic_allocate(topic, evictions, fix.now);
+        const uint32_t sid_before = topic_subject_id(topic);
+        topic_allocate(topic, mirror, fix.now);
+        const uint32_t sid_after = topic_subject_id(topic);
+
+        TEST_ASSERT_EQUAL_UINT32(sid_before, sid_after);
+        TEST_ASSERT_EQUAL_UINT32(mirror, topic->evictions);
+        TEST_ASSERT_TRUE(topic_find_by_subject_id(fix.cy, sid_after) == topic);
+    }
+
+    fixture_deinit(&fix);
+}
+
+static void test_topic_allocate_same_subject_id_reallocation_near_uint32_max_exhaustive(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    const uint32_t    modulus = fix.cy->platform->subject_id_modulus;
+    const uint64_t    hash  = UINT32_MAX; // Keep hash low enough to avoid uint64 sum overflow at evictions=UINT32_MAX.
+    cy_topic_t* const topic = fixture_make_topic(&fix, "alloc/exh/same-subject-near-max", hash, 0U, LAGE_MIN);
+    TEST_ASSERT_NOT_NULL(topic);
+
+    for (uint32_t i = 0U; i < 4096U; i++) {
+        const uint32_t old_evictions = UINT32_MAX - i;
+        const uint32_t residue       = old_evictions % modulus;
+        const uint32_t mirror        = (residue == 0U) ? 0U : (modulus - residue);
+
+        topic_allocate(topic, old_evictions, fix.now);
+        const uint32_t sid_old = topic_subject_id(topic);
+
+        topic_allocate(topic, mirror, fix.now);
+        const uint32_t sid_mirror = topic_subject_id(topic);
+
+        TEST_ASSERT_EQUAL_UINT32(sid_old, sid_mirror);
+        TEST_ASSERT_EQUAL_UINT32(mirror, topic->evictions);
+        TEST_ASSERT_TRUE(topic_find_by_subject_id(fix.cy, sid_mirror) == topic);
+
+        topic_allocate(topic, old_evictions, fix.now);
+        TEST_ASSERT_EQUAL_UINT32(sid_old, topic_subject_id(topic));
+    }
+
+    fixture_deinit(&fix);
+}
+
 static void test_topic_allocate_displacement_transfers_writer_handle(void)
 {
     fixture_t fix;
@@ -596,6 +722,9 @@ int main(void)
     UNITY_BEGIN();
     RUN_TEST(test_topic_allocate_bounded_exhaustive_oracle_equivalence);
     RUN_TEST(test_topic_allocate_seeded_probabilistic_oracle_equivalence);
+    RUN_TEST(test_topic_allocate_high_eviction_bounded_exhaustive_oracle_equivalence);
+    RUN_TEST(test_topic_allocate_same_subject_id_reallocation_exhaustive);
+    RUN_TEST(test_topic_allocate_same_subject_id_reallocation_near_uint32_max_exhaustive);
     RUN_TEST(test_topic_allocate_displacement_transfers_writer_handle);
     RUN_TEST(test_topic_allocate_reader_recovery_after_subject_reader_new_failure);
     return UNITY_END();
