@@ -327,6 +327,24 @@ static size_t dedup_seen_count(const fixture_t* const self)
     return out;
 }
 
+static bool dedup_has_hash(const fixture_t* const self, const uint64_t hash)
+{
+    for (size_t i = 0U; i < GOSSIP_DEDUP_CAPACITY; i++) {
+        if (self->cy->gossip_dedup[i].hash == hash) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool dedup_mark(fixture_t* const self, const cy_us_t now, const uint64_t hash)
+{
+    gossip_dedup_t* const dedup = gossip_dedup_match_or_lru(self->cy, hash);
+    const bool            fresh = gossip_dedup_is_fresh(dedup, hash, now);
+    gossip_dedup_update(dedup, hash, now);
+    return fresh;
+}
+
 static bool capture_has_lane(const fixture_t* const self, const uint64_t lane_id)
 {
     for (size_t i = 0U; i < self->capture_count; i++) {
@@ -344,25 +362,25 @@ static void test_gossip_dedup_first_duplicate_and_expiry(void)
     fixture_set_now(&fix, 1000);
 
     const uint64_t h = gossip_dedup_hash(UINT64_C(0x1234567800001111), 3U, 1);
-    TEST_ASSERT_TRUE(gossip_dedup_update(fix.cy, 1000, h));
-    TEST_ASSERT_FALSE(gossip_dedup_update(fix.cy, 1001, h));
-    TEST_ASSERT_TRUE(gossip_dedup_update(fix.cy, 1000 + GOSSIP_PERIOD_DEFAULT + 2, h));
+    TEST_ASSERT_TRUE(dedup_mark(&fix, 1000, h));
+    TEST_ASSERT_FALSE(dedup_mark(&fix, 1001, h));
+    TEST_ASSERT_TRUE(dedup_mark(&fix, 1000 + GOSSIP_DEDUP_TIMEOUT + 2, h));
 
     fixture_deinit(&fix);
 }
 
-static void test_gossip_dedup_expiry_boundary_is_strictly_greater_than_period(void)
+static void test_gossip_dedup_expiry_boundary_is_strictly_greater_than_timeout(void)
 {
     fixture_t fix;
     fixture_init(&fix);
 
     const uint64_t h1 = gossip_dedup_hash(UINT64_C(0x1001), 1U, 1);
-    TEST_ASSERT_TRUE(gossip_dedup_update(fix.cy, 10000, h1));
-    TEST_ASSERT_FALSE(gossip_dedup_update(fix.cy, 10000 + GOSSIP_PERIOD_DEFAULT, h1));
+    TEST_ASSERT_TRUE(dedup_mark(&fix, 10000, h1));
+    TEST_ASSERT_FALSE(dedup_mark(&fix, 10000 + GOSSIP_DEDUP_TIMEOUT, h1));
 
     const uint64_t h2 = gossip_dedup_hash(UINT64_C(0x1002), 2U, 2);
-    TEST_ASSERT_TRUE(gossip_dedup_update(fix.cy, 20000, h2));
-    TEST_ASSERT_TRUE(gossip_dedup_update(fix.cy, 20000 + GOSSIP_PERIOD_DEFAULT + 1, h2));
+    TEST_ASSERT_TRUE(dedup_mark(&fix, 20000, h2));
+    TEST_ASSERT_TRUE(dedup_mark(&fix, 20000 + GOSSIP_DEDUP_TIMEOUT + 1, h2));
 
     fixture_deinit(&fix);
 }
@@ -372,10 +390,10 @@ static void test_gossip_dedup_capacity_eviction_replaces_oldest(void)
     fixture_t fix;
     fixture_init(&fix);
     for (size_t i = 0U; i < GOSSIP_DEDUP_CAPACITY; i++) {
-        TEST_ASSERT_TRUE(gossip_dedup_update(fix.cy, (cy_us_t)(1000 + (cy_us_t)i), (uint64_t)(100 + i)));
+        TEST_ASSERT_TRUE(dedup_mark(&fix, (cy_us_t)(1000 + (cy_us_t)i), (uint64_t)(100 + i)));
     }
     TEST_ASSERT_EQUAL_size_t(GOSSIP_DEDUP_CAPACITY, dedup_seen_count(&fix));
-    TEST_ASSERT_TRUE(gossip_dedup_update(fix.cy, 2000, UINT64_C(9999)));
+    TEST_ASSERT_TRUE(dedup_mark(&fix, 2000, UINT64_C(9999)));
     bool found_oldest = false;
     bool found_new    = false;
     for (size_t i = 0U; i < GOSSIP_DEDUP_CAPACITY; i++) {
@@ -392,8 +410,8 @@ static void test_gossip_dedup_update_on_send_prevents_immediate_reforward(void)
     fixture_t fix;
     fixture_init(&fix);
     const uint64_t h = gossip_dedup_hash(UINT64_C(0x9999), 4U, 2);
-    TEST_ASSERT_TRUE(gossip_dedup_update(fix.cy, 10, h));
-    TEST_ASSERT_FALSE(gossip_dedup_update(fix.cy, 11, h));
+    TEST_ASSERT_TRUE(dedup_mark(&fix, 10, h));
+    TEST_ASSERT_FALSE(dedup_mark(&fix, 11, h));
     fixture_deinit(&fix);
 }
 
@@ -746,6 +764,31 @@ static void test_gossip_poll_urgent_drop_when_no_eligible_and_dedup_on_success_o
     fixture_deinit(&fix);
 }
 
+static void test_gossip_poll_urgent_failed_send_does_not_evict_existing_dedup_entries(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+    fixture_set_now(&fix, 7000);
+
+    for (size_t i = 0U; i < GOSSIP_DEDUP_CAPACITY; i++) {
+        TEST_ASSERT_TRUE(dedup_mark(&fix, (cy_us_t)(1000 + i), UINT64_C(0xA000000000000000) + (uint64_t)i));
+    }
+    const uint64_t oldest_hash = UINT64_C(0xA000000000000000);
+    TEST_ASSERT_TRUE(dedup_has_hash(&fix, oldest_hash));
+
+    cy_topic_t* const topic       = fixture_make_explicit_topic(&fix, "gossip/poll/urgent/no-evict", 0U);
+    const uint64_t    urgent_hash = gossip_dedup_hash(topic->hash, topic->evictions, topic_lage(topic, 7000));
+    TEST_ASSERT_FALSE(dedup_has_hash(&fix, urgent_hash));
+
+    fix.cy->gossip_next = 8000;
+    schedule_gossip_urgent(topic);
+    gossip_poll(fix.cy, 7000); // no peers => no successful sends => dedup table must remain unchanged.
+    TEST_ASSERT_EQUAL_size_t(0U, fix.p2p_send_count);
+    TEST_ASSERT_TRUE(dedup_has_hash(&fix, oldest_hash));
+    TEST_ASSERT_FALSE(dedup_has_hash(&fix, urgent_hash));
+    fixture_deinit(&fix);
+}
+
 void setUp(void) {}
 
 void tearDown(void) {}
@@ -754,7 +797,7 @@ int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_gossip_dedup_first_duplicate_and_expiry);
-    RUN_TEST(test_gossip_dedup_expiry_boundary_is_strictly_greater_than_period);
+    RUN_TEST(test_gossip_dedup_expiry_boundary_is_strictly_greater_than_timeout);
     RUN_TEST(test_gossip_dedup_capacity_eviction_replaces_oldest);
     RUN_TEST(test_gossip_dedup_update_on_send_prevents_immediate_reforward);
     RUN_TEST(test_gossip_random_peer_except_filters_stale_blacklisted_and_empty);
@@ -772,5 +815,6 @@ int main(void)
     RUN_TEST(test_gossip_poll_broadcast_path_due_and_dedup_success_only);
     RUN_TEST(test_gossip_poll_urgent_path_and_unique_unicast);
     RUN_TEST(test_gossip_poll_urgent_drop_when_no_eligible_and_dedup_on_success_only);
+    RUN_TEST(test_gossip_poll_urgent_failed_send_does_not_evict_existing_dedup_entries);
     return UNITY_END();
 }
