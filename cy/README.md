@@ -116,9 +116,10 @@ static uint32_t topic_evictions_from_subject_id(const uint64_t hash,
 
 >TODO: Pinned topics on CAN must have no header to ensure backward compatibility, sort this out later.
 
-The transport layer just ferries **opaque blobs between nodes**. The job of the session layer is to build and interpret them. To enable that, the session layer adds small variable-size headers to the messages. All headers carry the header type in the 6 least significant bits of the first byte; the rest is header-specific. The following header types are defined:
+The transport layer just ferries **opaque blobs between nodes**. The job of the session layer is to build and interpret them. To enable that, the session layer adds small fixed-size headers to messages. All headers carry the header type in the 6 least significant bits of the first byte; the rest is header-specific. All headers have a fixed size of 24 bytes and favor natural alignment where possible to simplify parsing. The following header types are defined:
 
 ```c++
+#define HEADER_BYTES     24U
 #define HEADER_TYPE_MASK 63U
 typedef enum
 {
@@ -135,23 +136,24 @@ typedef enum
 } header_type_t;
 ```
 
-DSDL notation is used to define the headers. Void fields are sent zero and ignored on reception.
+DSDL notation is used to define the headers. Void fields are sent zero and ignored on reception. Incompatibility fields are sent zero; on reception, messages must be discarded if nonzero.
 
 #### Types 0 (best-effort message publication), 1 (reliable message publication)
 
-Each message carries its own _inline_ CRDT gossip state sans eviction counter, which allows instant consensus repair initiation if a subject-ID collision is found without waiting for the next normal gossip (broadcast/epidemic). The topic hash and the age-logarithm-floor are included directly in the header; recovery of the eviction counter from the subject-ID was considered but ultimately rejected (at least for now) because the subject-ID mapping is ambiguous for eviction counter values above half the modulus; see `topic_evictions_from_subject_id()`.
-
-Ultimately, handling such inline gossips is not essential for protocol correctness (CRDT convergence), but it does improve its performance (the average case, an under certain conditions also the worst case), so it is recommended that all nodes do that. The policy like the normal gossip processing adjusted for the fact that the evictions are not available: if a different topic is occupying the subject, perform arbitration to decide which one has to move (evictions not needed for that); if there is a local topic but it uses a different subject-ID, urgent-gossip the local topic to let remotes synchronize (either catch up if the local state is newer, or initiate new repair to let the local node update itself).
+Each message carries its own _inline_ CRDT gossip state, which allows instant consensus update without waiting for the next normal gossip (broadcast/epidemic). Handling such inline gossips is not essential for protocol correctness (CRDT convergence), but it does improve its performance, so it is recommended that all nodes do that.
 
 The message tags must be unique across reboots to avoid misattribution; for that, they are randomly initialized and incremented with every published message to enable ordering reconstruction and loss detection. Message tags can be initialized using PRNG with a good seed; the API docs provide examples how this could be achieved (easily) on an embedded system without a hardware TRNG. It follows that tags can (and do) wrap around.
 
 ```bash
 uint6 type
 void2
+void8
+uint8  incompatibility
 int8   topic_log_age    # floor(log2(topic_age)) if topic_age>0 else -1, like in the gossip message.
-uint64 tag              # For ordering recovery and acknowledgement & response correlation. Random-init, wraparound.
+uint32 evictions        # Offset 4 bytes
 uint64 topic_hash       # For subject allocation collision detection and immediate consensus updates.
-# Header size 18 bytes. Payload follows.
+uint64 tag              # For ordering recovery and acknowledgement & response correlation. Random-init, wraparound.
+# Payload follows.
 ```
 
 #### Type 2 (publication acknowledgement)
@@ -163,10 +165,10 @@ The ack priority level must match that of the original message.
 ```bash
 uint6 type
 void2
-void8
-uint64 tag              # From the acknowledged message.
+void24
+uint32 incompatibility
 uint64 topic_hash       # From the acknowledged message.
-# Total size 18 bytes.
+uint64 tag              # From the acknowledged message.
 ```
 
 #### Types 3 (best-effort response), 4 (reliable response), 5 (response ack), 6 (response nack)
@@ -180,11 +182,12 @@ The (n)ack priority level must match that of the original response.
 ```bash
 uint6 type
 void2
-void8
-uint64 message_tag      # The tag of the published message this response pertains to.
+void24
+uint32 incompatibility
 uint48 seqno            # Incremented starting from zero for each response to this message; used for streaming.
 uint16 tag              # Chosen by the responder arbitrarily for ack correlation, if needed.
-# Header size 18 bytes. Payload follows, unless ACK.
+uint64 message_tag      # The tag of the published message this response pertains to.
+# Payload follows, unless ACK.
 ```
 
 #### Type 7 (topic allocation CRDT gossip)
@@ -198,15 +201,15 @@ The TTL is only the last line of defence against cycles; each forwarding node mu
 ```bash
 uint6 type
 void2
-uint8 ttl               # Must be zero for broadcast gossips.
-uint8 incompatibility   # Transmit zero; ignore message if this is not zero.
-# offset 3
+void8
+uint8  ttl              # Must be zero for broadcast gossips.
 int8   topic_log_age    # floor(log2(topic_age)) if topic_age>0 else -1
+uint32 incompatibility
 uint64 topic_hash
 uint32 topic_evictions
-void8                   # May be used to extend the evictions counter and/or some other purpose.
+void24                  # May be used to extend the evictions counter and/or some other purpose.
 utf8[<=CY_TOPIC_NAME_MAX] topic_name  # Has 1 byte length prefix. The name is normalized.
-# Total size is 18 bytes + topic name length.
+# Total size is 24 bytes + topic name length.
 ```
 
 #### Type 8 (topic discovery scout)
@@ -216,10 +219,12 @@ This is typically broadcast to let every node check if it has any matching topic
 ```bash
 uint6 type
 void2
-void64
-uint64 incompatibility  # Transmit zero; ignore message if this is not zero.
+void24
+uint32 incompatibility
+uint64 incompatibility1
+void56
 utf8[<=CY_TOPIC_NAME_MAX] pattern  # Has 1 byte length prefix. The pattern is applied to normalized names.
-# Total size is 18 bytes + pattern length.
+# Total size is 24 bytes + pattern length.
 ```
 
 ### CRDT gossips

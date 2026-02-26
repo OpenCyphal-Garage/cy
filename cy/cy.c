@@ -226,10 +226,9 @@ struct cy_t
         }                                                  \
     } while (0)
 
-// The maximum header size is needed to calculate the extent correctly. It is added to the serialized message size.
-// Later revisions of the protocol may increase this size, although it is best to avoid it if possible.
-// This does not apply to messages that don't carry payload.
-#define HEADER_BYTES 18U
+// The header size is added to the user-supplied extent value.
+// We use a fixed-size header to simplify parsing and also to provide enough space to ensure natural alignment.
+#define HEADER_BYTES 24U
 
 // Chosen rather arbitrarily ensuring that the gossip certainly fits.
 // Does not affect normal messages since they are not broadcast.
@@ -1643,18 +1642,15 @@ static cy_err_t send_gossip_raw(const cy_t* const          cy,
     if ((writer == NULL) && (lane == NULL)) {
         return CY_OK; // Early exit to avoid unnecessary serialization.
     }
-    byte_t           buf[HEADER_BYTES + CY_TOPIC_NAME_MAX];
-    const cy_bytes_t message = { .size = HEADER_BYTES + name.len, .data = buf };
-    byte_t*          ptr     = buf;
-    *ptr++                   = header_gossip;
-    *ptr++                   = (byte_t)((writer == NULL) ? ttl : 0);
-    *ptr++                   = 0; // incompatibility
-    *ptr++                   = (byte_t)lage;
-    ptr                      = serialize_u64(ptr, hash);
-    ptr                      = serialize_u32(ptr, evictions);
-    *ptr++                   = 0;
-    *ptr++                   = (byte_t)name.len;
-    memcpy(ptr, name.str, name.len);
+    // Serialize the header.
+    byte_t buf[HEADER_BYTES] = { header_gossip, 0, (byte_t)((writer == NULL) ? ttl : 0), (byte_t)lage };
+    (void)serialize_u64(&buf[8], hash);
+    (void)serialize_u32(&buf[16], evictions);
+    buf[HEADER_BYTES - 1] = (byte_t)name.len;
+    // Compose the final message. No need to copy the name, the platform will have to do that anyway.
+    const cy_bytes_t name_bytes = { .size = name.len, .data = name.str };
+    const cy_bytes_t message    = { .size = HEADER_BYTES, .data = buf, .next = &name_bytes };
+    // Send the message.
     const cy_prio_t                   priority = (lane == NULL) ? cy_prio_nominal : lane->prio;
     const cy_us_t                     dead     = now + cy->gossip_period;
     const cy_platform_vtable_t* const vt       = cy->platform->vtable;
@@ -1785,10 +1781,11 @@ static bool on_gossip_known_topic(cy_t* const       cy,
 static bool on_gossip_unknown_topic(cy_t* const    cy,
                                     const cy_us_t  ts,
                                     const uint64_t hash,
-                                    const uint32_t subject_id,
+                                    const uint32_t evictions,
                                     const int8_t   lage)
 {
-    cy_topic_t* const mine = topic_find_by_subject_id(cy, subject_id);
+    const uint32_t    subject_id = topic_subject_id_impl(hash, evictions, cy->platform->subject_id_modulus);
+    cy_topic_t* const mine       = topic_find_by_subject_id(cy, subject_id);
     if (mine == NULL) {
         return false; // We are not using this subject-ID, no collision.
     }
@@ -1797,7 +1794,7 @@ static bool on_gossip_unknown_topic(cy_t* const    cy,
     CY_TRACE(cy,
              "💥 Collision on S%08jx:\n"
              "\t local  %s T%016jx@S%08jx evict=%ju lage=%+jd '%.*s'\n"
-             "\t remote %s T%016jx@S%08jx           lage=%+jd",
+             "\t remote %s T%016jx@S%08jx evict=%ju lage=%+jd",
              (uintmax_t)topic_subject_id(mine),
              win ? "✅" : "❌",
              (uintmax_t)mine->hash,
@@ -1808,6 +1805,7 @@ static bool on_gossip_unknown_topic(cy_t* const    cy,
              win ? "❌" : "✅",
              (uintmax_t)hash,
              (uintmax_t)subject_id,
+             (uintmax_t)evictions,
              (intmax_t)lage);
     // We don't need to do anything if we won except announcing to the infringing node that we are using this
     // subject-ID and that it has to move.
@@ -2005,8 +2003,7 @@ static void on_gossip(cy_t* const        cy,
         // We don't know this topic; check for a subject-ID collision.
         // If there is a collision and we win arbitration, the gossip can no longer be forwarded -- it is obsolete;
         // instead, we will send our new urgent gossip. This resets TTL but this is natural since it's a new gossip.
-        const uint32_t subject_id = topic_subject_id_impl(hash, evictions, cy->platform->subject_id_modulus);
-        const bool     local_won  = on_gossip_unknown_topic(cy, ts, hash, subject_id, lage);
+        const bool local_won = on_gossip_unknown_topic(cy, ts, hash, evictions, lage);
         if (should_forward && !local_won) {
             gossip_epidemic_forward(cy, ts, ttl, hash, evictions, lage, name, lane);
         }
@@ -2125,8 +2122,10 @@ static cy_err_t do_publish_impl(cy_publisher_t* const  pub,
     assert(topic->pub_count > 0);
 
     // TODO: How do we handle CAN compatibility? No header for pinned topics? The transport will strip the header?
-    byte_t header[18] = { (byte_t)header_type, (byte_t)topic_lage(topic, cy_now(cy)) };
-    (void)serialize_u64(serialize_u64(&header[2], tag), topic->hash);
+    byte_t header[HEADER_BYTES] = { (byte_t)header_type, 0, 0, (byte_t)topic_lage(topic, cy_now(cy)) };
+    (void)serialize_u32(&header[4], topic->evictions);
+    (void)serialize_u64(&header[8], topic->hash);
+    (void)serialize_u64(&header[16], tag);
     const cy_bytes_t headed_message = { .size = sizeof(header), .data = header, .next = &message };
 
     // P2P writes do not require a subject writer, so we skip creating one.
@@ -3461,7 +3460,8 @@ static cy_err_t do_respond(cy_breadcrumb_t* const breadcrumb, const cy_us_t dead
     assert(breadcrumb->seqno < (SEQNO48_MASK - 1U)); // Sanity check; this value is not practically reachable.
     byte_t header[HEADER_BYTES] = { 0 };
     header[0]                   = (byte_t)header_rsp_be;
-    (void)serialize_u64(serialize_u64(&header[2], breadcrumb->message_tag), breadcrumb->seqno++);
+    (void)serialize_u64(&header[8], breadcrumb->seqno++);
+    (void)serialize_u64(&header[16], breadcrumb->message_tag);
     const cy_bytes_t headed_message = { .size = sizeof(header), .data = header, .next = &message };
 
     // Send the P2P response.
@@ -3945,7 +3945,8 @@ static void send_message_ack(cy_t* const     cy,
 {
     byte_t header[HEADER_BYTES] = { 0 };
     header[0]                   = (byte_t)header_msg_ack;
-    (void)serialize_u64(serialize_u64(&header[2], tag), topic_hash);
+    (void)serialize_u64(&header[8], topic_hash);
+    (void)serialize_u64(&header[16], tag);
     const cy_err_t err = cy->platform->vtable->p2p_send(cy->platform, //
                                                         &lane,
                                                         deadline,
@@ -3970,7 +3971,8 @@ static void send_response_ack(cy_t* const     cy,
 {
     byte_t header[HEADER_BYTES] = { 0 };
     header[0]                   = (byte_t)(positive ? header_rsp_ack : header_rsp_nack);
-    (void)serialize_u64(serialize_u64(&header[2], message_tag), (seqno & SEQNO48_MASK) | ((uint64_t)tag << 48U));
+    (void)serialize_u64(&header[8], (seqno & SEQNO48_MASK) | ((uint64_t)tag << 48U));
+    (void)serialize_u64(&header[16], message_tag);
     const cy_err_t err = cy->platform->vtable->p2p_send(cy->platform, //
                                                         &lane,
                                                         deadline,
@@ -4014,64 +4016,61 @@ void cy_on_message(cy_platform_t* const             platform,
     switch (type) {
         case header_msg_be:
         case header_msg_rel: {
-            const int8_t lage = (int8_t)header[1];
-            if ((lage < LAGE_MIN) || (lage > LAGE_MAX)) {
+            const byte_t incompatibility = header[2];
+            const int8_t lage            = (int8_t)header[3];
+            if ((incompatibility != 0) || (lage < LAGE_MIN) || (lage > LAGE_MAX)) {
                 goto bad_message;
             }
             // Not doing gossip_peer_update() because it may be taxing to do it on every message. May reconsider.
-            const uint64_t    hash  = deserialize_u64(&header[10]);
-            cy_topic_t* const topic = cy_topic_find_by_hash(cy, hash);
-            // The inline gossip does not carry the eviction counter, so we cannot process it as a proper full gossip.
-            // We cannot reliably reconstruct the eviction counter from subject-ID because there is an ambiguity when
-            // the counter exceeds modulus/2, see rejected idea with topic_evictions_from_subject_id() in the docs.
-            // Without evictions, we cannot sync the log-age state, because if it happens that evictions are different
-            // and we sync the log-age, the CRDT state will diverge and never recover.
-            // The only use for inline gossip is to look for subject-ID collisions on distinct topics and initiate
-            // CRDT repair if found (either move the local topic if local lost, or initiate emergency epidemic gossip
-            // to let all nodes on the topic that lost update their CRDT states).
+            const uint32_t    evictions = deserialize_u32(&header[4]);
+            const uint64_t    hash      = deserialize_u64(&header[8]);
+            cy_topic_t* const topic     = cy_topic_find_by_hash(cy, hash);
+            const uint32_t    sid_max   = CY_SUBJECT_ID_MAX(cy->platform->subject_id_modulus);
+            const bool        multicast = (subject_reader != NULL) && (subject_reader->subject_id <= sid_max);
+            // Simple consistency checks.
+            if (multicast && (topic_subject_id_impl(hash, evictions, cy->platform->subject_id_modulus) !=
+                              subject_reader->subject_id)) {
+                CY_TRACE(cy, "🫣 Inline CRDT gossip inconsistent with chosen subject, suspect publisher malfunction");
+                goto bad_message; // Codex, ensure coverage in a dedicated test case, remind me about this.
+            }
+            // Process the message if the topic is known.
             if (topic != NULL) {
                 assert((topic->sub_reader == NULL) || (topic_subject_id(topic) == topic->sub_reader->subject_id));
+                // We have the topic, which may or may not be using the same subject-ID. If we use this subject-ID
+                // for another topic, then it constitutes both a divergence and a collision. The correct handling
+                // is to address the divergence by either moving the local topic if the gossiped state is newer,
+                // or by urgent gossiping the current state if it is newer to let the remote adjust. Refer to the
+                // formal model/verification for explanation on why attempting to repair the collision directly
+                // in this case is detrimental for CRDT convergence; see the issue titled "Collisions caused by
+                // divergent topics should be ignored unless the local node loses arbitration" and the
+                // AcceptGossip(remote, topics) TLA+ operator.
+                // Aside from divergence handling, we also use this opportunity to sync the age.
+                (void)on_gossip_known_topic(cy, message.timestamp, topic, evictions, lage); // May alter the topic.
                 const bool     reliable = type == header_msg_rel;
-                const uint64_t tag      = deserialize_u64(&header[2]);
+                const uint64_t tag      = deserialize_u64(&header[16]);
                 const bool     accepted = on_message(cy, topic, tag, message, reliable, lane);
                 if (reliable && accepted) { // This is either new or retransmit, must ack either way.
                     send_message_ack(cy, lane, tag, hash, message.timestamp + ACK_TX_TIMEOUT);
                 }
-            }
-            // Handle subject-ID collisions if detected.
-            const uint32_t sid_max = CY_SUBJECT_ID_MAX(cy->platform->subject_id_modulus);
-            if ((subject_reader != NULL) && (subject_reader->subject_id <= sid_max)) { // in P2P no collisions possible
-                if (topic == NULL) {
-                    // We are using this subject for a different topic! There is an allocation collision that the
-                    // sender doesn't know about. One of us has to move, either our topic or the remote one;
-                    // the arbitration is decided by the log-age and the topic hash (for tiebreak). This logic
-                    // is implemented in the unknown topic handler so we just invoke it. If we lose arbitration,
-                    // our topic will move; if the remote loses, we will schedule urgent consensus repair gossips
-                    // to let everyone know that we're occupying this subject-ID and are not moving anywhere.
-                    (void)on_gossip_unknown_topic(cy, message.timestamp, hash, subject_reader->subject_id, lage);
-                } else if (topic_subject_id(topic) != subject_reader->subject_id) {
-                    // We have both: a topic under this this hash and another topic under this subject-ID.
-                    // This constitutes both a divergence and a collision. The perfect fix is to check which one
-                    // wins divergence, then conditionally handle the collision; however, due to the lack of eviction
-                    // counter, we are unable to process the divergence here. Handling collision resolution without
-                    // checking for divergence is incorrect because it has been shown to slow down CRDT convergence;
-                    // refer to the formal model/verification for details, specifically the issue titled "Collisions
-                    // caused by divergent topics should be ignored unless the local node loses arbitration".
-                    // The simple solution that works here is to simply urgent-gossip the local topic; if it wins,
-                    // remotes will adjust; if it loses, someone will gossip the newer CRDT entry which we will use
-                    // to update our local state.
-                    gossip_begin(cy);
-                    schedule_gossip_urgent(topic);
-                } else {
-                    (void)0; // perfect sync
-                }
+            } else {
+                // We are using this subject for a different topic! There is an allocation collision that the
+                // sender doesn't know about. One of us has to move, either our topic or the remote one;
+                // the arbitration is decided by the log-age and the topic hash (for tiebreak). This logic
+                // is implemented in the unknown topic handler so we just invoke it. If we lose arbitration,
+                // our topic will move; if the remote loses, we will schedule urgent consensus repair gossips
+                // to let everyone know that we're occupying this subject-ID and are not moving anywhere.
+                (void)on_gossip_unknown_topic(cy, message.timestamp, hash, evictions, lage);
             }
             break;
         }
 
         case header_msg_ack: {
-            const uint64_t    tag   = deserialize_u64(&header[2]);
-            const uint64_t    hash  = deserialize_u64(&header[10]);
+            const uint32_t incompatibility = deserialize_u32(&header[4]);
+            if (incompatibility != 0) {
+                goto bad_message;
+            }
+            const uint64_t    hash  = deserialize_u64(&header[8]);
+            const uint64_t    tag   = deserialize_u64(&header[16]);
             cy_topic_t* const topic = cy_topic_find_by_hash(cy, hash);
             if (topic != NULL) {
                 on_message_ack(cy, topic, tag, message.timestamp, lane);
@@ -4086,12 +4085,12 @@ void cy_on_message(cy_platform_t* const             platform,
         }
 
         case header_gossip: {
-            const byte_t incompatibility = header[2];
+            const uint32_t incompatibility = deserialize_u32(&header[4]);
             if (incompatibility != 0) {
                 goto bad_message;
             }
             const bool         broadcast = subject_reader != NULL;
-            const uint_fast8_t ttl       = header[1];
+            const uint_fast8_t ttl       = header[2];
             if (broadcast && (ttl != 0)) {
                 goto bad_message; // Broadcast gossips with non-zero TTL would cause forwarding storms.
             }
@@ -4105,16 +4104,15 @@ void cy_on_message(cy_platform_t* const             platform,
             if ((lage < LAGE_MIN) || (lage > LAGE_MAX)) {
                 goto bad_message;
             }
-            const uint64_t hash      = deserialize_u64(&header[4]);
-            const uint32_t evictions = deserialize_u32(&header[12]);
+            const uint64_t hash      = deserialize_u64(&header[8]);
+            const uint32_t evictions = deserialize_u32(&header[16]);
             gossip_peer_update(cy, message.timestamp, lane); // Update only on valid messages.
             on_gossip(cy, message.timestamp, ttl, hash, evictions, lage, name, NULL, lane);
             break;
         }
 
         case header_scout: {
-            const uint64_t incompatibility = deserialize_u64(&header[9]);
-            if (incompatibility != 0) {
+            if ((deserialize_u32(&header[4]) != 0) || (deserialize_u64(&header[8]) != 0)) {
                 goto bad_message;
             }
             char           name_buf[CY_TOPIC_NAME_MAX + 1];
