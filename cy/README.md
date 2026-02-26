@@ -139,7 +139,9 @@ DSDL notation is used to define the headers. Void fields are sent zero and ignor
 
 #### Types 0 (best-effort message publication), 1 (reliable message publication)
 
-One thing to note is that each message on a subject carries its own CRDT gossip state, which allows instant consensus synchronization without waiting for the next gossip broadcast. The topic hash and the age-logarithm-floor are included directly in the header while the evictions counter is derived from the subject-ID. The consensus data is only relevant if the message is published on a subject; if sent P2P, then the eviction count cannot be reconstructed as there is no subject-ID known, so the consensus data is ignored by the receiver.
+Each message carries its own _inline_ CRDT gossip state sans eviction counter, which allows instant consensus repair initiation if a subject-ID collision is found without waiting for the next normal gossip (broadcast/epidemic). The topic hash and the age-logarithm-floor are included directly in the header; recovery of the eviction counter from the subject-ID was considered but ultimately rejected (at least for now) because the subject-ID mapping is ambiguous for eviction counter values above half the modulus; see `topic_evictions_from_subject_id()`.
+
+Ultimately, handling such inline gossips is not essential for protocol correctness (CRDT convergence), but it does improve its performance (the average case, an under certain conditions also the worst case), so it is recommended that all nodes do that. The policy like the normal gossip processing adjusted for the fact that the evictions are not available: if a different topic is occupying the subject, perform arbitration to decide which one has to move (evictions not needed for that); if there is a local topic but it uses a different subject-ID, urgent-gossip the local topic to let remotes synchronize (either catch up if the local state is newer, or initiate new repair to let the local node update itself).
 
 The message tags must be unique across reboots to avoid misattribution; for that, they are randomly initialized and incremented with every published message to enable ordering reconstruction and loss detection. Message tags can be initialized using PRNG with a good seed; the API docs provide examples how this could be achieved (easily) on an embedded system without a hardware TRNG. It follows that tags can (and do) wrap around.
 
@@ -147,7 +149,7 @@ The message tags must be unique across reboots to avoid misattribution; for that
 uint6 type
 void2
 int8   topic_log_age    # floor(log2(topic_age)) if topic_age>0 else -1, like in the gossip message.
-uint64 tag              # For ordering recovery and for acknowledgement & response correlation.
+uint64 tag              # For ordering recovery and acknowledgement & response correlation. Random-init, wraparound.
 uint64 topic_hash       # For subject allocation collision detection and immediate consensus updates.
 # Header size 18 bytes. Payload follows.
 ```

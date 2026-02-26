@@ -1785,20 +1785,19 @@ static bool on_gossip_known_topic(cy_t* const       cy,
 static bool on_gossip_unknown_topic(cy_t* const    cy,
                                     const cy_us_t  ts,
                                     const uint64_t hash,
-                                    const uint32_t evictions,
+                                    const uint32_t subject_id,
                                     const int8_t   lage)
 {
-    cy_topic_t* const mine =
-      topic_find_by_subject_id(cy, topic_subject_id_impl(hash, evictions, cy->platform->subject_id_modulus));
+    cy_topic_t* const mine = topic_find_by_subject_id(cy, subject_id);
     if (mine == NULL) {
         return false; // We are not using this subject-ID, no collision.
     }
-    assert(topic_subject_id(mine) == topic_subject_id_impl(hash, evictions, cy->platform->subject_id_modulus));
+    assert(topic_subject_id(mine) == subject_id);
     const bool win = left_wins(mine, ts, lage, hash);
     CY_TRACE(cy,
              "💥 Collision on S%08jx:\n"
              "\t local  %s T%016jx@S%08jx evict=%ju lage=%+jd '%.*s'\n"
-             "\t remote %s T%016jx@S%08jx evict=%ju lage=%+jd",
+             "\t remote %s T%016jx@S%08jx           lage=%+jd",
              (uintmax_t)topic_subject_id(mine),
              win ? "✅" : "❌",
              (uintmax_t)mine->hash,
@@ -1808,8 +1807,7 @@ static bool on_gossip_unknown_topic(cy_t* const    cy,
              STRFMT_ARG(cy_topic_name(mine)),
              win ? "❌" : "✅",
              (uintmax_t)hash,
-             (uintmax_t)topic_subject_id_impl(hash, evictions, cy->platform->subject_id_modulus),
-             (uintmax_t)evictions,
+             (uintmax_t)subject_id,
              (intmax_t)lage);
     // We don't need to do anything if we won except announcing to the infringing node that we are using this
     // subject-ID and that it has to move.
@@ -1836,6 +1834,7 @@ static gossip_peer_t* gossip_peer_oldest(cy_t* const cy)
     return out;
 }
 
+// This is very fast because the array is compact and requires no pointer chasing.
 static gossip_peer_t* gossip_peer_find(cy_t* const cy, const uint64_t id)
 {
     for (size_t i = 0; i < GOSSIP_PEER_COUNT; i++) {
@@ -1934,31 +1933,13 @@ static void gossip_epidemic_forward(cy_t* const        cy,
     }
 }
 
-typedef enum
+// Update the gossip peer set. The complexity is constant but involves a quick linear scan of a short array.
+// This must be invoked AT LEAST for each new gossip, including inline; invoking per every VALID message is fine too.
+// We assume that we never receive gossips from ourselves.
+// If there are free or stale slots, replace them unconditionally, such that we always have some minimal set.
+// If all slots are fresh and taken (large network), apply probabilistic replacement (well-known policy).
+static void gossip_peer_update(cy_t* const cy, const cy_us_t ts, const cy_lane_t lane)
 {
-    gossip_broadcast,
-    gossip_unicast,
-    gossip_inline, // Embedded with published messages on a topic.
-} gossip_origin_t;
-
-// The central dispatch of incoming gossips.
-// This process may spawn new topics, so when receiving messages, keep in mind that the topic set may be changed.
-// The name may be empty when invoked from message-attached inline gossips (there's no name available).
-// The out_topic, if not NULL, is updated with the local topic pointer if one is known or freshly created.
-static void on_gossip(cy_t* const           cy,
-                      const cy_us_t         ts,
-                      const uint_fast8_t    ttl,
-                      const uint64_t        hash,
-                      const uint32_t        evictions,
-                      const int_fast8_t     lage,
-                      const cy_str_t        name,
-                      cy_topic_t** const    out_topic,
-                      const cy_lane_t       lane,
-                      const gossip_origin_t origin)
-{
-    // Update the gossip peer set. We assume that we never receive gossips from ourselves.
-    // If there are free or stale slots, replace them unconditionally, such that we always have some minimal set.
-    // If all slots are fresh and taken (large network), apply probabilistic replacement (well-known policy).
     gossip_peer_t* this_peer = gossip_peer_find(cy, lane.id);
     if (this_peer == NULL) {
         const cy_us_t        last_seen_threshold = ts - (GOSSIP_PERIOD_DEFAULT * 2);
@@ -1984,7 +1965,22 @@ static void on_gossip(cy_t* const           cy,
         this_peer->last_seen = ts;
         this_peer->p2p       = lane.p2p;
     }
+}
 
+// The central dispatch of incoming gossips. The gossip peer set must be updated beforehand.
+// This process may spawn new topics, so when receiving messages, keep in mind that the topic set may be changed.
+// The name may be empty when invoked from message-attached inline gossips (there's no name available).
+// The out_topic, if not NULL, is updated with the local topic pointer if one is known or freshly created.
+static void on_gossip(cy_t* const        cy,
+                      const cy_us_t      ts,
+                      const uint_fast8_t ttl,
+                      const uint64_t     hash,
+                      const uint32_t     evictions,
+                      const int_fast8_t  lage,
+                      const cy_str_t     name,
+                      cy_topic_t** const out_topic,
+                      const cy_lane_t    lane)
+{
     // Find the topic, create one if there's a matching pattern subscriber.
     cy_topic_t* mine = cy_topic_find_by_hash(cy, hash);
     if ((mine == NULL) && (name.len > 0)) { // a name is required but maybe the publisher is non-compliant
@@ -1994,9 +1990,8 @@ static void on_gossip(cy_t* const           cy,
         *out_topic = mine;
     }
 
-    // Process the gossip. The dedup is updated for all gossips except inline.
-    bool should_forward = (origin != gossip_inline) && //
-                          gossip_dedup_update(cy, ts, gossip_dedup_hash(hash, evictions, lage)) && (ttl > 0);
+    // Process the gossip. Note that broadcast gossips count in dedup tracking -- no point re-forwarding that.
+    const bool should_forward = gossip_dedup_update(cy, ts, gossip_dedup_hash(hash, evictions, lage)) && (ttl > 0);
     if (mine != NULL) {
         // We have this topic! Check if we have consensus on the subject-ID.
         // If there is a divergence and we win arbitration, the gossip can no longer be forwarded -- it is obsolete;
@@ -2010,7 +2005,8 @@ static void on_gossip(cy_t* const           cy,
         // We don't know this topic; check for a subject-ID collision.
         // If there is a collision and we win arbitration, the gossip can no longer be forwarded -- it is obsolete;
         // instead, we will send our new urgent gossip. This resets TTL but this is natural since it's a new gossip.
-        const bool local_won = on_gossip_unknown_topic(cy, ts, hash, evictions, lage);
+        const uint32_t subject_id = topic_subject_id_impl(hash, evictions, cy->platform->subject_id_modulus);
+        const bool     local_won  = on_gossip_unknown_topic(cy, ts, hash, subject_id, lage);
         if (should_forward && !local_won) {
             gossip_epidemic_forward(cy, ts, ttl, hash, evictions, lage, name, lane);
         }
@@ -4018,27 +4014,21 @@ void cy_on_message(cy_platform_t* const             platform,
     switch (type) {
         case header_msg_be:
         case header_msg_rel: {
-            const uint64_t hash  = deserialize_u64(&header[10]);
-            cy_topic_t*    topic = NULL; // Avoid double lookup, let on_gossip() do the lookup.
-            if (subject_reader != NULL) {
-                const int8_t lage = (int8_t)header[1];
-                if ((lage < LAGE_MIN) || (lage > LAGE_MAX)) {
-                    goto bad_message;
-                }
-                if (evictions == UINT32_MAX) {
-                    evictions = 0; // default to zero to reduce arbitration prio
-                    // TODO performance counters
-                    CY_TRACE(cy,
-                             "⚠️ Could not deduce evictions: T%016jx@S%08jx N%016jx modulus=%08jx",
-                             (uintmax_t)hash,
-                             (uintmax_t)subject_reader->subject_id,
-                             (uintmax_t)lane.id,
-                             (uintmax_t)cy->platform->subject_id_modulus);
-                }
-                on_gossip(cy, message.timestamp, 0, hash, evictions, lage, str_empty, &topic, lane, gossip_inline);
-            } else {
-                topic = cy_topic_find_by_hash(cy, hash);
+            const int8_t lage = (int8_t)header[1];
+            if ((lage < LAGE_MIN) || (lage > LAGE_MAX)) {
+                goto bad_message;
             }
+            // Not doing gossip_peer_update() because it may be taxing to do it on every message. May reconsider.
+            const uint64_t    hash  = deserialize_u64(&header[10]);
+            cy_topic_t* const topic = cy_topic_find_by_hash(cy, hash);
+            // The inline gossip does not carry the eviction counter, so we cannot process it as a proper full gossip.
+            // We cannot reliably reconstruct the eviction counter from subject-ID because there is an ambiguity when
+            // the counter exceeds modulus/2, see rejected idea with topic_evictions_from_subject_id() in the docs.
+            // Without evictions, we cannot sync the log-age state, because if it happens that evictions are different
+            // and we sync the log-age, the CRDT state will diverge and never recover.
+            // The only use for inline gossip is to look for subject-ID collisions on distinct topics and initiate
+            // CRDT repair if found (either move the local topic if local lost, or initiate emergency epidemic gossip
+            // to let all nodes on the topic that lost update their CRDT states).
             if (topic != NULL) {
                 assert((topic->sub_reader == NULL) || (topic_subject_id(topic) == topic->sub_reader->subject_id));
                 const bool     reliable = type == header_msg_rel;
@@ -4046,6 +4036,34 @@ void cy_on_message(cy_platform_t* const             platform,
                 const bool     accepted = on_message(cy, topic, tag, message, reliable, lane);
                 if (reliable && accepted) { // This is either new or retransmit, must ack either way.
                     send_message_ack(cy, lane, tag, hash, message.timestamp + ACK_TX_TIMEOUT);
+                }
+            }
+            // Handle subject-ID collisions if detected.
+            const uint32_t sid_max = CY_SUBJECT_ID_MAX(cy->platform->subject_id_modulus);
+            if ((subject_reader != NULL) && (subject_reader->subject_id <= sid_max)) { // in P2P no collisions possible
+                if (topic == NULL) {
+                    // We are using this subject for a different topic! There is an allocation collision that the
+                    // sender doesn't know about. One of us has to move, either our topic or the remote one;
+                    // the arbitration is decided by the log-age and the topic hash (for tiebreak). This logic
+                    // is implemented in the unknown topic handler so we just invoke it. If we lose arbitration,
+                    // our topic will move; if the remote loses, we will schedule urgent consensus repair gossips
+                    // to let everyone know that we're occupying this subject-ID and are not moving anywhere.
+                    (void)on_gossip_unknown_topic(cy, message.timestamp, hash, subject_reader->subject_id, lage);
+                } else if (topic_subject_id(topic) != subject_reader->subject_id) {
+                    // We have both: a topic under this this hash and another topic under this subject-ID.
+                    // This constitutes both a divergence and a collision. The perfect fix is to check which one
+                    // wins divergence, then conditionally handle the collision; however, due to the lack of eviction
+                    // counter, we are unable to process the divergence here. Handling collision resolution without
+                    // checking for divergence is incorrect because it has been shown to slow down CRDT convergence;
+                    // refer to the formal model/verification for details, specifically the issue titled "Collisions
+                    // caused by divergent topics should be ignored unless the local node loses arbitration".
+                    // The simple solution that works here is to simply urgent-gossip the local topic; if it wins,
+                    // remotes will adjust; if it loses, someone will gossip the newer CRDT entry which we will use
+                    // to update our local state.
+                    gossip_begin(cy);
+                    schedule_gossip_urgent(topic);
+                } else {
+                    (void)0; // perfect sync
                 }
             }
             break;
@@ -4072,9 +4090,9 @@ void cy_on_message(cy_platform_t* const             platform,
             if (incompatibility != 0) {
                 goto bad_message;
             }
-            const gossip_origin_t origin = (subject_reader == NULL) ? gossip_unicast : gossip_broadcast;
-            const uint_fast8_t    ttl    = header[1];
-            if ((origin == gossip_broadcast) && (ttl != 0)) {
+            const bool         broadcast = subject_reader != NULL;
+            const uint_fast8_t ttl       = header[1];
+            if (broadcast && (ttl != 0)) {
                 goto bad_message; // Broadcast gossips with non-zero TTL would cause forwarding storms.
             }
             char           name_buf[CY_TOPIC_NAME_MAX + 1];
@@ -4089,7 +4107,8 @@ void cy_on_message(cy_platform_t* const             platform,
             }
             const uint64_t hash      = deserialize_u64(&header[4]);
             const uint32_t evictions = deserialize_u32(&header[12]);
-            on_gossip(cy, message.timestamp, ttl, hash, evictions, lage, name, NULL, lane, origin);
+            gossip_peer_update(cy, message.timestamp, lane); // Update only on valid messages.
+            on_gossip(cy, message.timestamp, ttl, hash, evictions, lage, name, NULL, lane);
             break;
         }
 
@@ -4104,6 +4123,7 @@ void cy_on_message(cy_platform_t* const             platform,
                 (cy_message_read(message.content, 0, name.len, (byte_t*)name_buf) != name.len)) {
                 goto bad_message;
             }
+            gossip_peer_update(cy, message.timestamp, lane); // Update only on valid messages.
             on_scout(cy, message.timestamp, name, lane);
             break;
         }
