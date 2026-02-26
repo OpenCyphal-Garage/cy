@@ -154,11 +154,11 @@ void frame_parse(frame_info_t& frame)
             frame.topic_hash     = read_u64(frame.wire, 10U);
         } else if (frame.header_type == header_gossip) {
             frame.has_topic_hash = true;
-            frame.topic_hash     = read_u64(frame.wire, 5U);
+            frame.topic_hash     = read_u64(frame.wire, 4U);
         }
-    } else if ((frame.header_type == header_gossip) && (frame.wire.size() >= 13U)) {
+    } else if ((frame.header_type == header_gossip) && (frame.wire.size() >= 12U)) {
         frame.has_topic_hash = true;
-        frame.topic_hash     = read_u64(frame.wire, 5U);
+        frame.topic_hash     = read_u64(frame.wire, 4U);
     }
 
     const std::size_t hdr_size = effective_header_size(frame);

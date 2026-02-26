@@ -353,8 +353,8 @@ void test_api_scout_match_triggers_gossip_response_and_fields_are_correct()
     const send_capture_t& c = p.captures.at(p.capture_count - 1U);
     TEST_ASSERT_TRUE(c.p2p);
     TEST_ASSERT_EQUAL_UINT8(header_gossip, capture_type(c));
-    TEST_ASSERT_EQUAL_UINT64(cy_topic_hash(topic), capture_u64(c, 5U));
-    TEST_ASSERT_EQUAL_UINT8(0U, c.data[2]); // scout response TTL is zero
+    TEST_ASSERT_EQUAL_UINT64(cy_topic_hash(topic), capture_u64(c, 4U));
+    TEST_ASSERT_EQUAL_UINT8(0U, c.data[1]); // scout response TTL is zero
 
     cy_unadvertise(pub);
     platform_deinit(p);

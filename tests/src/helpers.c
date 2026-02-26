@@ -43,12 +43,12 @@ size_t make_gossip_header(unsigned char* const out,
         return 0U;
     }
     out[0] = 7U;
-    out[1] = 0U;
-    out[2] = ttl;
-    out[3] = 0U;
-    out[4] = (unsigned char)topic_log_age;
-    serialize_u64(&out[5], topic_hash);
-    serialize_u32(&out[13], topic_evictions);
+    out[1] = ttl;
+    out[2] = 0U;
+    out[3] = (unsigned char)topic_log_age;
+    serialize_u64(&out[4], topic_hash);
+    serialize_u32(&out[12], topic_evictions);
+    out[16] = 0U;
     out[17] = (unsigned char)topic_name.len;
     if (topic_name.len > 0U) {
         memcpy(&out[18], topic_name.str, topic_name.len);

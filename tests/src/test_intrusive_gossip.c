@@ -97,10 +97,10 @@ static void capture_send(fixture_t* const self,
         out->type = out->data[0] & HEADER_TYPE_MASK;
     }
     if ((out->type == header_gossip) && (out->size >= HEADER_BYTES)) {
-        out->ttl       = out->data[2];
-        out->lage      = (int8_t)out->data[4];
-        out->hash      = deserialize_u64(&out->data[5]);
-        out->evictions = deserialize_u32(&out->data[13]);
+        out->ttl       = out->data[1];
+        out->lage      = (int8_t)out->data[3];
+        out->hash      = deserialize_u64(&out->data[4]);
+        out->evictions = deserialize_u32(&out->data[12]);
     }
 }
 

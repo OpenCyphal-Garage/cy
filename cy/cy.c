@@ -1710,12 +1710,12 @@ static cy_err_t send_gossip_raw(const cy_t* const          cy,
     const cy_bytes_t message = { .size = HEADER_BYTES + name.len, .data = buf };
     byte_t*          ptr     = buf;
     *ptr++                   = header_gossip;
-    *ptr++                   = 0;
     *ptr++                   = (byte_t)((writer == NULL) ? ttl : 0);
     *ptr++                   = 0; // incompatibility
     *ptr++                   = (byte_t)lage;
     ptr                      = serialize_u64(ptr, hash);
     ptr                      = serialize_u32(ptr, evictions);
+    *ptr++                   = 0;
     *ptr++                   = (byte_t)name.len;
     memcpy(ptr, name.str, name.len);
     const cy_prio_t                   priority = (lane == NULL) ? cy_prio_nominal : lane->prio;
@@ -4133,12 +4133,12 @@ void cy_on_message(cy_platform_t* const             platform,
         }
 
         case header_gossip: {
-            const byte_t incompatibility = header[3];
+            const byte_t incompatibility = header[2];
             if (incompatibility != 0) {
                 goto bad_message;
             }
             const gossip_origin_t origin = (subject_reader == NULL) ? gossip_unicast : gossip_broadcast;
-            const uint_fast8_t    ttl    = header[2];
+            const uint_fast8_t    ttl    = header[1];
             if ((origin == gossip_broadcast) && (ttl != 0)) {
                 goto bad_message; // Broadcast gossips with non-zero TTL would cause forwarding storms.
             }
@@ -4148,12 +4148,12 @@ void cy_on_message(cy_platform_t* const             platform,
                 (cy_message_read(message.content, 0, name.len, (byte_t*)name_buf) != name.len)) {
                 goto bad_message;
             }
-            const int8_t lage = (int8_t)header[4];
+            const int8_t lage = (int8_t)header[3];
             if ((lage < LAGE_MIN) || (lage > LAGE_MAX)) {
                 goto bad_message;
             }
-            const uint64_t hash      = deserialize_u64(&header[5]);
-            const uint32_t evictions = deserialize_u32(&header[13]);
+            const uint64_t hash      = deserialize_u64(&header[4]);
+            const uint32_t evictions = deserialize_u32(&header[12]);
             on_gossip(cy, message.timestamp, ttl, hash, evictions, lage, name, NULL, lane, origin);
             break;
         }

@@ -118,13 +118,13 @@ The TTL is only the last line of defence against cycles; each forwarding node mu
 ```bash
 uint6 type
 void2
-void8
 uint8 ttl               # Must be zero for broadcast gossips.
 uint8 incompatibility   # Transmit zero; ignore message if this is not zero.
-# offset 4
+# offset 3
 int8   topic_log_age    # floor(log2(topic_age)) if topic_age>0 else -1
 uint64 topic_hash
 uint32 topic_evictions
+void8                   # May be used to extend the evictions counter and/or some other purpose.
 utf8[<=CY_TOPIC_NAME_MAX] topic_name  # Has 1 byte length prefix. The name is normalized.
 # Total size is 18 bytes + topic name length.
 ```
