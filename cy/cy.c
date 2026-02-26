@@ -4096,21 +4096,25 @@ void cy_on_message(cy_platform_t* const             platform,
             }
             const bool         broadcast = subject_reader != NULL;
             const uint_fast8_t ttl       = header[2];
+            const int8_t       lage      = (int8_t)header[3];
+            const uint64_t     hash      = deserialize_u64(&header[8]);
+            const uint32_t     evictions = deserialize_u32(&header[16]);
+            char               name_buf[CY_TOPIC_NAME_MAX + 1];
+            const cy_str_t     name = { .len = header[HEADER_BYTES - 1U], .str = name_buf };
             if (broadcast && (ttl != 0)) {
                 goto bad_message; // Broadcast gossips with non-zero TTL would cause forwarding storms.
             }
-            char           name_buf[CY_TOPIC_NAME_MAX + 1];
-            const cy_str_t name = { .len = header[HEADER_BYTES - 1U], .str = name_buf };
             if ((name.len > CY_TOPIC_NAME_MAX) ||
                 (cy_message_read(message.content, 0, name.len, (byte_t*)name_buf) != name.len)) {
                 goto bad_message;
             }
-            const int8_t lage = (int8_t)header[3];
             if ((lage < LAGE_MIN) || (lage > LAGE_MAX)) {
                 goto bad_message;
             }
-            const uint64_t hash      = deserialize_u64(&header[8]);
-            const uint32_t evictions = deserialize_u32(&header[16]);
+            if (is_pinned(hash) && evictions != 0) {
+                CY_TRACE(cy, "🫣 CRDT gossip with nonzero evictions on a pinned subject");
+                goto bad_message;
+            }
             gossip_peer_update(cy, message.timestamp, lane); // Update only on valid messages.
             on_gossip(cy, message.timestamp, ttl, hash, evictions, lage, name, NULL, lane);
             break;
