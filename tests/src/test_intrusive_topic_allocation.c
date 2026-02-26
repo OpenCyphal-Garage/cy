@@ -486,6 +486,52 @@ static void test_topic_new_error_oom_name_index_node(void)
     fixture_deinit(&fix);
 }
 
+static void test_topic_subscribe_if_matching_oom_topic_new(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    cy_subscriber_t* const sub = cy_subscribe(fix.cy, cy_str("topic/auto/oom/new/>"), 64U);
+    TEST_ASSERT_NOT_NULL(sub);
+
+    const cy_str_t name                = cy_str("topic/auto/oom/new/x");
+    const uint64_t hash                = topic_hash(name);
+    const size_t   async_errors_before = fix.async_error_count;
+    fix.fail_alloc_size                = sizeof(cy_topic_t);
+    fix.fail_alloc_count               = 1U;
+
+    TEST_ASSERT_NULL(topic_subscribe_if_matching(fix.cy, name, hash, 0U, LAGE_MIN));
+    TEST_ASSERT_NULL(cy_topic_find_by_hash(fix.cy, hash));
+    TEST_ASSERT_EQUAL_size_t(async_errors_before + 1U, fix.async_error_count);
+
+    cy_unsubscribe(sub);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(fix.cy));
+    fixture_deinit(&fix);
+}
+
+static void test_topic_subscribe_if_matching_oom_coupling_rolls_back_topic(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    cy_subscriber_t* const sub = cy_subscribe(fix.cy, cy_str("topic/auto/oom/coupling/*"), 64U);
+    TEST_ASSERT_NOT_NULL(sub);
+
+    const cy_str_t name                = cy_str("topic/auto/oom/coupling/x");
+    const uint64_t hash                = topic_hash(name);
+    const size_t   async_errors_before = fix.async_error_count;
+    fix.fail_alloc_size                = sizeof(cy_topic_coupling_t) + sizeof(cy_substitution_t);
+    fix.fail_alloc_count               = 1U;
+
+    TEST_ASSERT_NULL(topic_subscribe_if_matching(fix.cy, name, hash, 0U, LAGE_MIN));
+    TEST_ASSERT_NULL(cy_topic_find_by_hash(fix.cy, hash));
+    TEST_ASSERT_EQUAL_size_t(async_errors_before + 1U, fix.async_error_count);
+
+    cy_unsubscribe(sub);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(fix.cy));
+    fixture_deinit(&fix);
+}
+
 static void test_topic_new_error_duplicate_name(void)
 {
     fixture_t fix;
@@ -893,6 +939,8 @@ int main(void)
     RUN_TEST(test_topic_new_error_oom_topic_object);
     RUN_TEST(test_topic_new_error_oom_topic_name);
     RUN_TEST(test_topic_new_error_oom_name_index_node);
+    RUN_TEST(test_topic_subscribe_if_matching_oom_topic_new);
+    RUN_TEST(test_topic_subscribe_if_matching_oom_coupling_rolls_back_topic);
     RUN_TEST(test_topic_new_error_duplicate_name);
     RUN_TEST(test_topic_new_error_duplicate_hash_rolls_back_name_index);
     RUN_TEST(test_topic_new_pinned_starts_implicit_and_not_gossiped);

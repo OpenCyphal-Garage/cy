@@ -308,7 +308,7 @@ void test_api_gossip_parser_rejects_broadcast_nonzero_ttl()
     platform_deinit(p);
 }
 
-void test_api_gossip_parser_rejects_incompatibility_and_invalid_lage_and_truncation()
+void test_api_gossip_parser_rejects_incompatibility_invalid_lage_and_short_header()
 {
     test_platform_t p{};
     platform_init(p);
@@ -325,7 +325,28 @@ void test_api_gossip_parser_rejects_incompatibility_and_invalid_lage_and_truncat
     const std::size_t              full_size = make_gossip_header(
       wire.data(), wire.size(), 1U, 0, UINT64_C(0x1000000000000002), 0U, cy_str("api/gossip/truncated"));
     TEST_ASSERT_TRUE(full_size > 0U);
-    dispatch_raw(p, wire, header_bytes - 6U, lane, nullptr, 103); // name length in header, but payload omitted
+    dispatch_raw(p, wire, header_bytes - 6U, lane, nullptr, 103); // header itself is truncated
+    TEST_ASSERT_EQUAL_size_t(0U, p.p2p_send_count);
+    platform_deinit(p);
+}
+
+void test_api_gossip_parser_rejects_payload_truncated_and_overlong_name_length()
+{
+    test_platform_t p{};
+    platform_init(p);
+    cy_test_message_reset_counters();
+    const cy_lane_t lane = { .id = 24U, .p2p = { { 0 } }, .prio = cy_prio_nominal };
+
+    std::array<unsigned char, 256> wire{};
+    const std::size_t              full_size = make_gossip_header(
+      wire.data(), wire.size(), 1U, 0, UINT64_C(0x1000000000000004), 0U, cy_str("api/gossip/truncated"));
+    TEST_ASSERT_TRUE(full_size > 0U);
+    dispatch_raw(p, wire, header_bytes, lane, nullptr, 110); // header complete, payload omitted
+    TEST_ASSERT_EQUAL_size_t(0U, p.p2p_send_count);
+
+    std::array<unsigned char, 256> wire_overlong = wire;
+    wire_overlong[header_bytes - 1U]             = static_cast<unsigned char>(CY_TOPIC_NAME_MAX + 1U);
+    dispatch_raw(p, wire_overlong, full_size, lane, nullptr, 111);
     TEST_ASSERT_EQUAL_size_t(0U, p.p2p_send_count);
     platform_deinit(p);
 }
@@ -375,6 +396,8 @@ void test_api_scout_parser_rejects_empty_and_truncated_pattern()
     const std::size_t              full_size = make_scout_header(wire.data(), wire.size(), 0U, cy_str("abc"));
     TEST_ASSERT_TRUE(full_size > 0U);
     dispatch_raw(p, wire, header_bytes + 1U, lane, nullptr, 107);
+    wire[header_bytes - 1U] = static_cast<unsigned char>(CY_TOPIC_NAME_MAX + 1U);
+    dispatch_raw(p, wire, full_size, lane, nullptr, 108);
     TEST_ASSERT_EQUAL_size_t(0U, p.p2p_send_count);
     TEST_ASSERT_EQUAL_size_t(0U, p.subject_send_count);
     platform_deinit(p);
@@ -560,7 +583,8 @@ int main()
 {
     UNITY_BEGIN();
     RUN_TEST(test_api_gossip_parser_rejects_broadcast_nonzero_ttl);
-    RUN_TEST(test_api_gossip_parser_rejects_incompatibility_and_invalid_lage_and_truncation);
+    RUN_TEST(test_api_gossip_parser_rejects_incompatibility_invalid_lage_and_short_header);
+    RUN_TEST(test_api_gossip_parser_rejects_payload_truncated_and_overlong_name_length);
     RUN_TEST(test_api_gossip_parser_rejects_gossip_incompatibility_u32);
     RUN_TEST(test_api_gossip_parser_rejects_pinned_hash_with_nonzero_evictions);
     RUN_TEST(test_api_scout_parser_rejects_empty_and_truncated_pattern);
