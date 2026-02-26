@@ -365,6 +365,8 @@ void test_begin(test_platform_t& p)
 void test_end(test_platform_t& p)
 {
     platform_deinit(&p);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&p.core_heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&p.core_heap));
     TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&p.message_heap));
     TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&p.message_heap));
 }

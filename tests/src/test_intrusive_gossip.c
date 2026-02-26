@@ -443,6 +443,43 @@ static void test_gossip_random_peer_except_deterministic_selection_sanity(void)
     fixture_deinit(&fix);
 }
 
+static void test_send_gossip_raw_no_transport_is_noop(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+    gossip_begin(fix.cy);
+    const cy_err_t err = send_gossip_raw(fix.cy, 100U, 3U, UINT64_C(0xD100000000000001), 0U, 0, str_empty, NULL, NULL);
+    TEST_ASSERT_EQUAL_INT(CY_OK, err);
+    TEST_ASSERT_EQUAL_size_t(0U, fix.subject_send_count);
+    TEST_ASSERT_EQUAL_size_t(0U, fix.p2p_send_count);
+    fixture_deinit(&fix);
+}
+
+static void test_send_gossip_raw_writer_and_lane_paths(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+    gossip_begin(fix.cy);
+
+    const cy_lane_t lane = make_lane(UINT64_C(0x701), 0x71U);
+    cy_err_t        err  = send_gossip_raw(
+      fix.cy, 200U, 5U, UINT64_C(0xD100000000000002), 3U, 1, cy_str("gossip/send/raw"), fix.cy->broad_writer, &lane);
+    TEST_ASSERT_EQUAL_INT(CY_OK, err);
+    TEST_ASSERT_EQUAL_size_t(1U, fix.subject_send_count);
+    TEST_ASSERT_EQUAL_size_t(1U, fix.p2p_send_count);
+    TEST_ASSERT_EQUAL_UINT8(0U, fix.capture[0].ttl); // broadcast forces zero TTL
+    TEST_ASSERT_EQUAL_UINT8(0U, fix.capture[1].ttl); // shared frame when both writer and lane are provided
+    TEST_ASSERT_EQUAL_UINT64(lane.id, fix.capture[1].lane_id);
+
+    fix.fail_subject_send = true;
+    err =
+      send_gossip_raw(fix.cy, 201U, 4U, UINT64_C(0xD100000000000003), 1U, 0, str_empty, fix.cy->broad_writer, &lane);
+    TEST_ASSERT_EQUAL_INT(CY_ERR_MEDIA, err);
+    TEST_ASSERT_EQUAL_size_t(2U, fix.subject_send_count);
+    TEST_ASSERT_EQUAL_size_t(1U, fix.p2p_send_count); // writer failure short-circuits p2p send
+    fixture_deinit(&fix);
+}
+
 static void test_on_gossip_peer_fill_update_and_replacement_policy(void)
 {
     fixture_t fix;
@@ -597,6 +634,49 @@ static void test_on_gossip_local_lose_forwards_merged_state(void)
     fixture_deinit(&fix);
 }
 
+static void test_on_gossip_unknown_out_topic_forward_and_error_reporting(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+    const cy_us_t now = 4000U;
+
+    fixture_set_peer(&fix, 0U, UINT64_C(10), now);
+    fixture_set_peer(&fix, 1U, UINT64_C(20), now);
+    fixture_set_peer(&fix, 2U, UINT64_C(30), now);
+    const uint64_t seq[] = { 0U, 1U, 2U, 3U };
+    fixture_set_random_sequence(&fix, seq, sizeof(seq) / sizeof(seq[0]));
+
+    cy_topic_t  dummy_topic = { 0 };
+    cy_topic_t* out_topic   = &dummy_topic;
+    fix.fail_p2p_send       = true;
+    fixture_on_gossip(
+      &fix, now, 3U, UINT64_C(0x1000000000AA0011), 2U, 0, str_empty, &out_topic, make_lane(UINT64_C(999), 0x99U));
+    TEST_ASSERT_NULL(out_topic);
+    TEST_ASSERT_TRUE(fix.p2p_send_count > 0U);    // unknown topic gossip forwarded
+    TEST_ASSERT_TRUE(fix.async_error_count > 0U); // forwarding failures reported
+    fixture_deinit(&fix);
+}
+
+static void test_on_scout_broadcast_soon_and_unicast_paths(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+    cy_topic_t* const topic = fixture_make_explicit_topic(&fix, "gossip/scout/cb/topic", 0U);
+    const cy_lane_t   lane  = make_lane(UINT64_C(0xCAFE), 0xCAU);
+    const cy_us_t     now   = 1000U;
+
+    fix.cy->gossip_next = now + (KILO * 50); // <= now+100k, broadcast soon
+    on_scout(fix.cy, now, cy_str("gossip/scout/cb/>"), lane);
+    TEST_ASSERT_EQUAL_size_t(0U, fix.p2p_send_count);
+
+    fix.cy->gossip_next = now + (KILO * 200); // > now+100k, unicast scout response
+    on_scout(fix.cy, now + 1U, cy_str("gossip/scout/cb/>"), lane);
+    TEST_ASSERT_TRUE(fix.p2p_send_count > 0U);
+    TEST_ASSERT_EQUAL_UINT8(header_gossip, fix.capture[fix.capture_count - 1U].type);
+    TEST_ASSERT_EQUAL_UINT64(topic->hash, fix.capture[fix.capture_count - 1U].hash);
+    fixture_deinit(&fix);
+}
+
 static void test_gossip_poll_broadcast_path_due_and_dedup_success_only(void)
 {
     fixture_t fix;
@@ -679,12 +759,16 @@ int main(void)
     RUN_TEST(test_gossip_dedup_update_on_send_prevents_immediate_reforward);
     RUN_TEST(test_gossip_random_peer_except_filters_stale_blacklisted_and_empty);
     RUN_TEST(test_gossip_random_peer_except_deterministic_selection_sanity);
+    RUN_TEST(test_send_gossip_raw_no_transport_is_noop);
+    RUN_TEST(test_send_gossip_raw_writer_and_lane_paths);
     RUN_TEST(test_on_gossip_peer_fill_update_and_replacement_policy);
     RUN_TEST(test_on_gossip_peer_replacement_moratorium_boundary_inclusive);
     RUN_TEST(test_on_gossip_ttl_zero_and_duplicate_are_not_forwarded);
     RUN_TEST(test_on_gossip_forward_decrements_ttl_blacklists_sender_and_limits_fanout);
     RUN_TEST(test_on_gossip_local_win_suppresses_forward_and_schedules_urgent);
     RUN_TEST(test_on_gossip_local_lose_forwards_merged_state);
+    RUN_TEST(test_on_gossip_unknown_out_topic_forward_and_error_reporting);
+    RUN_TEST(test_on_scout_broadcast_soon_and_unicast_paths);
     RUN_TEST(test_gossip_poll_broadcast_path_due_and_dedup_success_only);
     RUN_TEST(test_gossip_poll_urgent_path_and_unique_unicast);
     RUN_TEST(test_gossip_poll_urgent_drop_when_no_eligible_and_dedup_on_success_only);

@@ -224,6 +224,8 @@ void platform_deinit(test_platform_t& self)
         cy_destroy(self.cy);
         self.cy = nullptr;
     }
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&self.core_heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&self.core_heap));
     TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&self.message_heap));
     TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&self.message_heap));
 }
@@ -398,6 +400,12 @@ void test_api_scout_parser_rejects_empty_and_truncated_pattern()
     dispatch_raw(p, wire, header_bytes + 1U, lane, nullptr, 107);
     wire[header_bytes - 1U] = static_cast<unsigned char>(CY_TOPIC_NAME_MAX + 1U);
     dispatch_raw(p, wire, full_size, lane, nullptr, 108);
+
+    std::array<unsigned char, 256> wire_reserved = wire;
+    wire_reserved[header_bytes - 1U]             = 3U; // valid small length
+    wire_reserved[8U]                            = 1U; // reserved u64 field must be zero
+    dispatch_raw(p, wire_reserved, full_size, lane, nullptr, 109);
+
     TEST_ASSERT_EQUAL_size_t(0U, p.p2p_send_count);
     TEST_ASSERT_EQUAL_size_t(0U, p.subject_send_count);
     platform_deinit(p);

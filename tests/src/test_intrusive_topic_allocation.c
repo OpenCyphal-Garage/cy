@@ -409,6 +409,34 @@ static void test_cy_destroy_handles_missing_broadcast_handles(void)
     fixture_deinit(&fix);
 }
 
+static void test_cy_advertise_client_validation_oom_and_extent_growth(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    TEST_ASSERT_NULL(cy_advertise_client(NULL, cy_str("topic/ad/null/cy"), 0U));
+
+    char overlong[CY_TOPIC_NAME_MAX + 2U];
+    memset(overlong, 'a', sizeof(overlong));
+    overlong[sizeof(overlong) - 1U] = '\0';
+    TEST_ASSERT_NULL(cy_advertise_client(fix.cy, (cy_str_t){ .len = CY_TOPIC_NAME_MAX + 1U, .str = overlong }, 0U));
+    TEST_ASSERT_NULL(cy_advertise_client(fix.cy, cy_str("topic/ad/wild/*"), 0U));
+
+    fix.fail_alloc_size  = sizeof(cy_publisher_t);
+    fix.fail_alloc_count = 1U;
+    TEST_ASSERT_NULL(cy_advertise_client(fix.cy, cy_str("topic/ad/oom"), 0U));
+    fix.fail_alloc_count = 0U;
+    fix.fail_alloc_size  = 0U;
+
+    const size_t          before = fix.cy->p2p_extent;
+    cy_publisher_t* const pub    = cy_advertise_client(fix.cy, cy_str("topic/ad/ok"), before + 1U);
+    TEST_ASSERT_NOT_NULL(pub);
+    TEST_ASSERT_TRUE(fix.cy->p2p_extent > before);
+    cy_unadvertise(pub);
+
+    fixture_deinit(&fix);
+}
+
 static void test_topic_new_rejects_invalid_name(void)
 {
     fixture_t fix;
@@ -506,6 +534,20 @@ static void test_topic_subscribe_if_matching_oom_topic_new(void)
 
     cy_unsubscribe(sub);
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(fix.cy));
+    fixture_deinit(&fix);
+}
+
+static void test_topic_subscribe_if_matching_rejects_invalid_and_no_match(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    const cy_str_t name = cy_str("topic/auto/no/match");
+    const uint64_t hash = topic_hash(name);
+
+    TEST_ASSERT_NULL(topic_subscribe_if_matching(fix.cy, name, hash + 1U, 0U, LAGE_MIN)); // hash mismatch
+    TEST_ASSERT_NULL(topic_subscribe_if_matching(fix.cy, str_empty, 0U, 0U, LAGE_MIN));   // empty name
+    TEST_ASSERT_NULL(topic_subscribe_if_matching(fix.cy, name, hash, 0U, LAGE_MIN));      // no pattern subscribers
     fixture_deinit(&fix);
 }
 
@@ -641,6 +683,39 @@ static void test_left_wins_and_topic_merge_lage(void)
     fixture_deinit(&fix);
 }
 
+static void test_topic_merge_lage_clamps_out_of_range_values(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+    const cy_us_t     now  = 200 * MEGA;
+    cy_topic_t* const mine = fixture_make_topic(&fix, "alloc/lage/clamp", UINT64_C(0x1000000000000190), 0U, LAGE_MIN);
+
+    mine->ts_origin = now;
+    topic_merge_lage(mine, now, LAGE_MAX + 10);
+    TEST_ASSERT_EQUAL_INT64((int64_t)(now - (pow2us(LAGE_MAX) * MEGA)), (int64_t)mine->ts_origin);
+
+    mine->ts_origin = now;
+    topic_merge_lage(mine, now, LAGE_MIN - 10);
+    TEST_ASSERT_EQUAL_INT64((int64_t)now, (int64_t)mine->ts_origin);
+    fixture_deinit(&fix);
+}
+
+static void test_parse_hash_override_and_topic_hash_suffix_parsing(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    uint64_t out = UINT64_MAX;
+    TEST_ASSERT_TRUE(parse_hash_override(cy_str("topic/hash#1a2b"), &out));
+    TEST_ASSERT_EQUAL_UINT64(UINT64_C(0x1A2B), out);
+
+    out = UINT64_MAX;
+    TEST_ASSERT_FALSE(parse_hash_override(cy_str("topic/hash#"), &out));
+    TEST_ASSERT_FALSE(parse_hash_override(cy_str("topic/hash#1G"), &out));
+    TEST_ASSERT_EQUAL_UINT64(UINT64_C(0x10), topic_hash(cy_str("topic/hash#10")));
+    fixture_deinit(&fix);
+}
+
 static void test_topic_merge_lage_crdt_properties_commutative_associative_idempotent(void)
 {
     fixture_t fix;
@@ -736,6 +811,33 @@ static void test_topic_allocate_reader_recovery_after_subject_reader_oom(void)
 
     cy_unsubscribe(sub);
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(fix.cy));
+    fixture_deinit(&fix);
+}
+
+static void test_topic_sync_subject_writer_reports_oom(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+    cy_topic_t* const topic = fixture_make_topic(&fix, "alloc/writer/oom", UINT64_C(0x10000000000011A0), 0U, LAGE_MIN);
+    fix.fail_subject_writer_new = true;
+    TEST_ASSERT_EQUAL_INT(CY_ERR_MEMORY, topic_sync_subject_writer(topic));
+    TEST_ASSERT_NULL(topic->pub_writer);
+    fixture_deinit(&fix);
+}
+
+static void test_topic_allocate_destroys_existing_pub_writer_on_victory(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+    cy_topic_t* const topic = fixture_make_explicit_topic(&fix, "alloc/writer/destroy", UINT64_C(0x10000000000011B0));
+    topic->pub_writer       = fixture_subject_writer_new(&fix.platform, topic_subject_id(topic));
+    TEST_ASSERT_NOT_NULL(topic->pub_writer);
+    const size_t destroyed_before = fix.subject_writer_destroy_count;
+    topic_allocate(topic, topic->evictions + 1U, 220 * MEGA);
+    TEST_ASSERT_NULL(topic->pub_writer);
+    TEST_ASSERT_EQUAL_size_t(destroyed_before + 1U, fix.subject_writer_destroy_count);
+    topic->pub_count = 0U;
+    topic_sync_implicit(topic);
     fixture_deinit(&fix);
 }
 
@@ -923,6 +1025,20 @@ static void test_topic_destroy_updates_topic_iter_safely(void)
     fixture_deinit(&fix);
 }
 
+static void test_retire_expired_implicit_topics_retires_tail_topic(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+    cy_topic_t* const topic =
+      fixture_make_topic(&fix, "alloc/implicit/retire", UINT64_C(0x10000000000011C0), 0U, LAGE_MIN);
+    const uint64_t hash            = topic->hash;
+    fix.cy->implicit_topic_timeout = 10;
+    topic->ts_animated             = 0;
+    retire_expired_implicit_topics(fix.cy, 11);
+    TEST_ASSERT_NULL(cy_topic_find_by_hash(fix.cy, hash));
+    fixture_deinit(&fix);
+}
+
 void setUp(void) {}
 
 void tearDown(void) {}
@@ -935,20 +1051,26 @@ int main(void)
     RUN_TEST(test_cy_destroy_after_user_unsubscribes_and_spins);
     RUN_TEST(test_cy_destroy_after_user_destroys_futures);
     RUN_TEST(test_cy_destroy_handles_missing_broadcast_handles);
+    RUN_TEST(test_cy_advertise_client_validation_oom_and_extent_growth);
     RUN_TEST(test_topic_new_rejects_invalid_name);
     RUN_TEST(test_topic_new_error_oom_topic_object);
     RUN_TEST(test_topic_new_error_oom_topic_name);
     RUN_TEST(test_topic_new_error_oom_name_index_node);
     RUN_TEST(test_topic_subscribe_if_matching_oom_topic_new);
+    RUN_TEST(test_topic_subscribe_if_matching_rejects_invalid_and_no_match);
     RUN_TEST(test_topic_subscribe_if_matching_oom_coupling_rolls_back_topic);
     RUN_TEST(test_topic_new_error_duplicate_name);
     RUN_TEST(test_topic_new_error_duplicate_hash_rolls_back_name_index);
     RUN_TEST(test_topic_new_pinned_starts_implicit_and_not_gossiped);
     RUN_TEST(test_pinned_topic_sync_implicit_transitions_without_gossip);
     RUN_TEST(test_left_wins_and_topic_merge_lage);
+    RUN_TEST(test_topic_merge_lage_clamps_out_of_range_values);
+    RUN_TEST(test_parse_hash_override_and_topic_hash_suffix_parsing);
     RUN_TEST(test_topic_merge_lage_crdt_properties_commutative_associative_idempotent);
     RUN_TEST(test_on_gossip_known_topic_equal_lage_prefers_higher_evictions);
     RUN_TEST(test_topic_allocate_reader_recovery_after_subject_reader_oom);
+    RUN_TEST(test_topic_sync_subject_writer_reports_oom);
+    RUN_TEST(test_topic_allocate_destroys_existing_pub_writer_on_victory);
     RUN_TEST(test_on_gossip_known_topic_divergence_paths);
     RUN_TEST(test_on_gossip_unknown_topic_collision_paths);
     RUN_TEST(test_topic_allocate_recursive_chain_converges_and_writer_transfers);
@@ -956,5 +1078,6 @@ int main(void)
     RUN_TEST(test_topic_destroy_clears_associations_and_dedup);
     RUN_TEST(test_topic_destroy_error_rollback_like_path_on_coupling_oom);
     RUN_TEST(test_topic_destroy_updates_topic_iter_safely);
+    RUN_TEST(test_retire_expired_implicit_topics_retires_tail_topic);
     return UNITY_END();
 }

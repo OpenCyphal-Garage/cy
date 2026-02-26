@@ -359,6 +359,8 @@ void network_node_deinit(sim_node_t& node)
         cy_destroy(node.cy);
         node.cy = nullptr;
     }
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&node.core_heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&node.core_heap));
     TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&node.message_heap));
     TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&node.message_heap));
 }

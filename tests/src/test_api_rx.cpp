@@ -249,6 +249,10 @@ void platform_deinit(test_platform_t* const self)
         cy_destroy(self->cy);
         self->cy = nullptr;
     }
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&self->core_heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&self->core_heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&self->message_heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&self->message_heap));
 }
 
 void dispatch_message(test_platform_t* const  self,
@@ -350,6 +354,37 @@ void test_api_inline_msg_rejects_nonzero_incompatibility()
     platform_deinit(&platform);
     TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&platform.message_heap));
     TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&platform.message_heap));
+}
+
+void test_api_inline_msg_rejects_invalid_lage()
+{
+    test_platform_t platform{};
+    platform_init(&platform);
+    cy_test_message_reset_counters();
+
+    self_unsub_capture_t   capture{};
+    cy_subscriber_t* const sub = cy_subscribe(platform.cy, cy_str("rx/inline/lage"), 256U);
+    TEST_ASSERT_NOT_NULL(sub);
+    cy_user_context_t context = CY_USER_CONTEXT_EMPTY;
+    context.ptr[0]            = &capture;
+    cy_subscriber_context_set(sub, context);
+    cy_subscriber_callback_set(sub, on_arrival_count_only);
+
+    const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("rx/inline/lage"));
+    TEST_ASSERT_NOT_NULL(topic);
+    std::array<unsigned char, header_bytes + 1U> wire{};
+    make_message_header(wire.data(), header_msg_best_effort, UINT64_C(106), cy_topic_hash(topic));
+    wire[3]              = static_cast<unsigned char>(127); // invalid lage (> LAGE_MAX)
+    wire[header_bytes]   = 0x66U;
+    const cy_lane_t lane = { .id = UINT64_C(0x906), .p2p = { { 0 } }, .prio = cy_prio_nominal };
+
+    dispatch_raw(&platform, wire.data(), wire.size(), lane, nullptr, 205);
+    TEST_ASSERT_EQUAL_size_t(0U, capture.count);
+    TEST_ASSERT_EQUAL_size_t(0U, platform.p2p_count);
+
+    cy_unsubscribe(sub);
+    TEST_ASSERT_EQUAL_UINT8(CY_OK, cy_spin_once(platform.cy));
+    platform_deinit(&platform);
 }
 
 void test_api_inline_msg_rejects_pinned_hash_nonzero_evictions()
@@ -653,6 +688,7 @@ int main()
     UNITY_BEGIN();
     RUN_TEST(test_api_malformed_header_drops_message);
     RUN_TEST(test_api_inline_msg_rejects_nonzero_incompatibility);
+    RUN_TEST(test_api_inline_msg_rejects_invalid_lage);
     RUN_TEST(test_api_inline_msg_rejects_pinned_hash_nonzero_evictions);
     RUN_TEST(test_api_inline_msg_rejects_multicast_subject_mismatch);
     RUN_TEST(test_api_inline_msg_p2p_skips_subject_consistency_check);
