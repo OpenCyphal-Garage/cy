@@ -331,6 +331,7 @@ static void* wkv_realloc(wkv_t* const self, void* ptr, const size_t new_size)
 
 static void* mem_alloc(const cy_t* const cy, const size_t size)
 {
+    assert(cy != NULL);
     return cy->platform->vtable->realloc(cy->platform, NULL, size);
 }
 
@@ -345,6 +346,7 @@ static void* mem_alloc_zero(const cy_t* const cy, const size_t size)
 
 static void mem_free(const cy_t* const cy, void* ptr)
 {
+    assert(cy != NULL);
     if (ptr != NULL) {
         cy->platform->vtable->realloc(cy->platform, ptr, 0);
     }

@@ -82,6 +82,24 @@ static uint32_t expected_subject_id_no_overflow(const uint64_t hash, const uint3
     return (uint32_t)(CY_SUBJECT_ID_PINNED_MAX + 1ULL + ((h + ((e * e) % modulus)) % modulus));
 }
 
+static uint32_t expected_subject_id_wrap_u64_add(const uint64_t hash, const uint32_t evictions, const uint32_t modulus)
+{
+    TEST_ASSERT(hash > CY_SUBJECT_ID_PINNED_MAX);
+    const uint64_t square = (uint64_t)evictions * (uint64_t)evictions;
+    const uint64_t sum    = hash + square; // Deliberately relies on unsigned wraparound modulo 2**64.
+    return (uint32_t)(CY_SUBJECT_ID_PINNED_MAX + 1ULL + (sum % modulus));
+}
+
+static uint32_t expected_subject_id_without_u64_wrap(const uint64_t hash,
+                                                     const uint32_t evictions,
+                                                     const uint32_t modulus)
+{
+    TEST_ASSERT(hash > CY_SUBJECT_ID_PINNED_MAX);
+    const uint64_t square_mod = ((uint64_t)evictions * (uint64_t)evictions) % modulus;
+    const uint64_t sum_mod    = (hash % modulus) + square_mod;
+    return (uint32_t)(CY_SUBJECT_ID_PINNED_MAX + 1ULL + (sum_mod % modulus));
+}
+
 static void check_subject_id_near_uint32_max(const uint32_t modulus)
 {
     const uint64_t hash = UINT32_MAX;
@@ -95,12 +113,48 @@ static void check_subject_id_near_uint32_max(const uint32_t modulus)
     }
 }
 
+static void check_subject_id_u64_wrap_semantics(const uint32_t modulus)
+{
+    static const uint64_t hashes[] = {
+        UINT64_MAX,
+        UINT64_C(0xFFFFFFFFFFFFFFFE),
+        UINT64_C(0xFFFFFFFFF0000000),
+        UINT64_C(0xFFFFFFFF00000000),
+    };
+    static const uint32_t evictions[] = {
+        UINT32_MAX,
+        UINT32_MAX - 1U,
+        UINT32_MAX - 4095U,
+        UINT32_MAX - 65535U,
+    };
+
+    bool saw_overflow              = false;
+    bool saw_overflow_wrap_obvious = false;
+    for (size_t hi = 0U; hi < (sizeof(hashes) / sizeof(hashes[0])); hi++) {
+        for (size_t ei = 0U; ei < (sizeof(evictions) / sizeof(evictions[0])); ei++) {
+            const uint64_t hash       = hashes[hi];
+            const uint32_t eviction   = evictions[ei];
+            const uint64_t square     = (uint64_t)eviction * (uint64_t)eviction;
+            const bool     overflow   = hash > (UINT64_MAX - square);
+            const uint32_t expected   = expected_subject_id_wrap_u64_add(hash, eviction, modulus);
+            const uint32_t no_wrap    = expected_subject_id_without_u64_wrap(hash, eviction, modulus);
+            const uint32_t actual     = topic_subject_id_impl(hash, eviction, modulus);
+            saw_overflow              = saw_overflow || overflow;
+            saw_overflow_wrap_obvious = saw_overflow_wrap_obvious || (overflow && (expected != no_wrap));
+            TEST_ASSERT_EQUAL_UINT32(expected, actual);
+        }
+    }
+    TEST_ASSERT_TRUE(saw_overflow);
+    TEST_ASSERT_TRUE(saw_overflow_wrap_obvious);
+}
+
 static void test_subject_id_math_modulus_17bit(void)
 {
     const uint32_t modulus = (uint32_t)CY_SUBJECT_ID_MODULUS_17bit;
     check_subject_id_unique_until_half_modulus(modulus);
     check_subject_id_threshold_repeat_exhaustive(modulus);
     check_subject_id_near_uint32_max(modulus);
+    check_subject_id_u64_wrap_semantics(modulus);
 }
 
 static void test_subject_id_math_modulus_23bit(void)
@@ -109,6 +163,12 @@ static void test_subject_id_math_modulus_23bit(void)
     check_subject_id_unique_until_half_modulus(modulus);
     check_subject_id_threshold_repeat_exhaustive(modulus);
     check_subject_id_near_uint32_max(modulus);
+    check_subject_id_u64_wrap_semantics(modulus);
+}
+
+static void test_subject_id_wrap_semantics_modulus_32bit(void)
+{
+    check_subject_id_u64_wrap_semantics((uint32_t)CY_SUBJECT_ID_MODULUS_32bit);
 }
 
 void setUp(void) {}
@@ -120,5 +180,6 @@ int main(void)
     UNITY_BEGIN();
     RUN_TEST(test_subject_id_math_modulus_17bit);
     RUN_TEST(test_subject_id_math_modulus_23bit);
+    RUN_TEST(test_subject_id_wrap_semantics_modulus_32bit);
     return UNITY_END();
 }
