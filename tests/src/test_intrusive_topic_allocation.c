@@ -255,9 +255,10 @@ static void fake_future_cancel(cy_future_t* const base)
     }
 }
 
-static void fake_future_timeout(cy_future_t* const base, const cy_us_t now)
+static void fake_future_timeout(cy_future_t* const base, const cy_us_t scheduled, const cy_us_t now)
 {
     (void)base;
+    (void)scheduled;
     (void)now;
 }
 

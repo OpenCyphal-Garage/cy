@@ -685,7 +685,7 @@ typedef struct cy_future_vtable_t
     cy_future_status_t (*status)(const cy_future_t*);
     size_t (*result)(cy_future_t*, size_t, void*);
     void (*cancel)(cy_future_t*); // Pre: status() == pending; post: status() != pending.
-    void (*timeout)(cy_future_t*, cy_us_t now);
+    void (*timeout)(cy_future_t*, cy_us_t scheduled, cy_us_t now); // Invariant: scheduled<=now
     void (*finalize)(cy_future_t*); // Invoked immediately before destruction; pre: status() != pending.
 } cy_future_vtable_t;
 
@@ -767,8 +767,9 @@ static cy_future_t* future_index_lookup(cy_tree_t* const index, const uint64_t k
 static void future_timeout_trampoline(olga_t* const sched, olga_event_t* const event, const cy_us_t now)
 {
     (void)sched;
+    assert(event->deadline <= now);
     cy_future_t* const self = (cy_future_t*)event->user;
-    self->vtable->timeout(self, now);
+    self->vtable->timeout(self, event->deadline, now);
 }
 
 static void future_deadline_arm(cy_future_t* const self, const cy_us_t deadline)
@@ -2358,8 +2359,10 @@ static bool publish_future_is_last_attempt(const cy_us_t current_ack_deadline,
     return remaining_budget < next_ack_timeout;
 }
 
-static void publish_future_timeout(cy_future_t* const base, const cy_us_t now)
+static void publish_future_timeout(cy_future_t* const base, const cy_us_t scheduled, const cy_us_t now)
 {
+    assert(scheduled <= now); // scheduler invariant
+    (void)scheduled;
     publish_future_t* const self  = (publish_future_t*)base;
     cy_topic_t* const       topic = self->owner->topic;
     cy_t* const             cy    = topic->cy;
