@@ -12,7 +12,7 @@ The Cyphal transport layer is borrowed from Cyphal v1.0 with only minimal change
 The transport layer provides _unreliable_ _deduplicated_ (at most one) _unordered_ delivery of messages either to:
 
 - A _group of subscribers_ on a given _subject_ identified with a numerical subject-ID (IGMP group, CAN ID, etc).
-- A specified _remote note_ direct peer-to-peer (_P2P_).
+- A specified _remote node_ direct peer-to-peer (_P2P_).
 
 An exception is applied to the single _broadcast subject_ that takes the highest subject-ID: deduplication is not required on it to improve scalability; the session layer accepts occasional message duplication on this subject. This exception is due to the fact that all nodes participate in the broadcast subject, which may put strain on the smaller nodes.
 
@@ -42,9 +42,9 @@ Subject-ID values from 0 to 8191 inclusive are reserved for pinned topics, which
 
 The maximum subject-ID value is reserved for broadcast subject that is used for low-rate broadcast gossip propagation and scouts. For Cyphal/CAN, this is subject 131071=0x1ffff, for Cyphal/UDP this is 8388607=0x7fffff.
 
-Values from 8192 (inclusive) up to (8191+modulus) (inclusive) are used for automatic subject-ID allocation for topics. THe modulus is the largest prime number not greater than the maximum subject-ID minus 8191 such that $\text{modulus} mod 4 = 3$ holds. The latter condition enables very efficient constant-time reconstruction of the eviction counter from the subject-ID; while this capability is currently not used in the protocol design (an attempt to use it to optimize gossip propagation was made but rejected due to ambiguities that arise once the eviction counter exceeds half the modulus), it might come useful in the future, especially for diagnostics. For posterity, a simple solver that reconstructs the eviction counter from the subject-ID is provided below.
+Values from 8192 (inclusive) up to (8191+modulus) (inclusive) are used for automatic subject-ID allocation for topics. The modulus is the largest prime number not greater than the maximum subject-ID minus 8191 such that $\text{modulus} mod 4 = 3$ holds. The latter condition enables very efficient constant-time reconstruction of the eviction counter from the subject-ID; while this capability is currently not used in the protocol design (an attempt to use it to optimize gossip propagation was made but rejected due to ambiguities that arise once the eviction counter exceeds half the modulus), it might come useful in the future, especially for diagnostics. For posterity, a simple solver that reconstructs the eviction counter from the subject-ID is provided below.
 
-The subject-ID is derived from the topic hash and eviction counter using quadratic probing. This probing strategy guarantees unique placement until the eviction counter exceeds half the modulus, at which point the sequence will restart. Such restrarting behavior is expected and may occur during normal operation of the network. The eviction counter itself is not expected to overflow, as it is wide enough; for reference, it will take 136 years of continuous churn at 1 Hz to overflow a 32-bit eviction counter (eviction counters are not incremented continuously but only when the network configuration is changed in a way that triggers collisions, so the limit is unreachable in any practical scenario).
+The subject-ID is derived from the topic hash and eviction counter using quadratic probing. This probing strategy guarantees unique placement until the eviction counter exceeds half the modulus, at which point the sequence will restart. Such restarting behavior is expected and may occur during normal operation of the network. The eviction counter itself is not expected to overflow, as it is wide enough; for reference, it will take 136 years of continuous churn at 1 Hz to overflow a 32-bit eviction counter (eviction counters are not incremented continuously but only when the network configuration is changed in a way that triggers collisions, so the limit is unreachable in any practical scenario).
 
 ```c++
 // a**e mod m
