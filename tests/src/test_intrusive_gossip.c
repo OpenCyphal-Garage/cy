@@ -301,6 +301,20 @@ static void fixture_set_peer(fixture_t* const self, const size_t index, const ui
     memset(self->cy->gossip_peers[index].p2p.state, (int)(id & 0xFFU), sizeof(self->cy->gossip_peers[index].p2p.state));
 }
 
+static void fixture_on_gossip(fixture_t* const    self,
+                              const cy_us_t       ts,
+                              const uint_fast8_t  ttl,
+                              const uint64_t      hash,
+                              const uint32_t      evictions,
+                              const int_fast8_t   lage,
+                              const cy_str_t      name,
+                              cy_topic_t** const  out_topic,
+                              const cy_lane_t     lane)
+{
+    gossip_peer_update(self->cy, ts, lane);
+    on_gossip(self->cy, ts, ttl, hash, evictions, lage, name, out_topic, lane);
+}
+
 static size_t dedup_seen_count(const fixture_t* const self)
 {
     size_t out = 0U;
@@ -438,14 +452,14 @@ static void test_on_gossip_peer_fill_update_and_replacement_policy(void)
     fixture_set_peer(&fix, 0U, UINT64_C(1000), BIG_BANG);
 
     const cy_lane_t lane_new = make_lane(UINT64_C(5555), 0xA5U);
-    on_gossip(fix.cy, 10, 1U, UINT64_C(0x123456), 0U, 0, str_empty, NULL, lane_new, gossip_broadcast);
+    fixture_on_gossip(&fix, 10, 1U, UINT64_C(0x123456), 0U, 0, str_empty, NULL, lane_new);
     gossip_peer_t* peer = gossip_peer_find(fix.cy, UINT64_C(5555));
     TEST_ASSERT_NOT_NULL(peer);
     TEST_ASSERT_EQUAL_INT(10, peer->last_seen);
     TEST_ASSERT_EQUAL_UINT8(0xA5U, peer->p2p.state[0]);
 
     const cy_lane_t lane_update = make_lane(UINT64_C(5555), 0x5AU);
-    on_gossip(fix.cy, 20, 1U, UINT64_C(0x123457), 0U, 0, str_empty, NULL, lane_update, gossip_broadcast);
+    fixture_on_gossip(&fix, 20, 1U, UINT64_C(0x123457), 0U, 0, str_empty, NULL, lane_update);
     peer = gossip_peer_find(fix.cy, UINT64_C(5555));
     TEST_ASSERT_NOT_NULL(peer);
     TEST_ASSERT_EQUAL_INT(20, peer->last_seen);
@@ -453,36 +467,35 @@ static void test_on_gossip_peer_fill_update_and_replacement_policy(void)
 
     fix.cy->gossip_peer_replacement_moratorium_until = 1000;
     const cy_lane_t lane_blocked                     = make_lane(UINT64_C(7777), 0x77U);
-    on_gossip(fix.cy, 100, 1U, UINT64_C(0xABCDE0), 0U, 0, str_empty, NULL, lane_blocked, gossip_broadcast);
+    fixture_on_gossip(&fix, 100, 1U, UINT64_C(0xABCDE0), 0U, 0, str_empty, NULL, lane_blocked);
     TEST_ASSERT_NULL(gossip_peer_find(fix.cy, UINT64_C(7777)));
 
     fix.cy->gossip_peer_replacement_moratorium_until = 0;
     {
         const uint64_t seq_no_replace[] = { 1U }; // chance false (1 % 8 != 0)
         fixture_set_random_sequence(&fix, seq_no_replace, 1U);
-        on_gossip(fix.cy, 2000, 1U, UINT64_C(0xABCDE1), 0U, 0, str_empty, NULL, lane_blocked, gossip_broadcast);
+        fixture_on_gossip(&fix, 2000, 1U, UINT64_C(0xABCDE1), 0U, 0, str_empty, NULL, lane_blocked);
         TEST_ASSERT_NULL(gossip_peer_find(fix.cy, UINT64_C(7777)));
     }
     {
         const uint64_t seq_replace[] = { 0U, 3U, 0U }; // chance true, choose slot 3, then dither
         fixture_set_random_sequence(&fix, seq_replace, 3U);
-        on_gossip(fix.cy, 3000, 1U, UINT64_C(0xABCDE2), 0U, 0, str_empty, NULL, lane_blocked, gossip_unicast);
+        fixture_on_gossip(&fix, 3000, 1U, UINT64_C(0xABCDE2), 0U, 0, str_empty, NULL, lane_blocked);
         TEST_ASSERT_NOT_NULL(gossip_peer_find(fix.cy, UINT64_C(7777)));
     }
     {
         const cy_us_t  moratorium  = fix.cy->gossip_peer_replacement_moratorium_until;
         const uint64_t seq_again[] = { 0U, 0U, 0U };
         fixture_set_random_sequence(&fix, seq_again, 3U);
-        on_gossip(fix.cy,
-                  moratorium - 1,
-                  1U,
-                  UINT64_C(0xABCDE3),
-                  0U,
-                  0,
-                  str_empty,
-                  NULL,
-                  make_lane(UINT64_C(8888), 0x88U),
-                  gossip_unicast);
+        fixture_on_gossip(&fix,
+                          moratorium - 1,
+                          1U,
+                          UINT64_C(0xABCDE3),
+                          0U,
+                          0,
+                          str_empty,
+                          NULL,
+                          make_lane(UINT64_C(8888), 0x88U));
         TEST_ASSERT_NULL(gossip_peer_find(fix.cy, UINT64_C(8888)));
     }
     fixture_deinit(&fix);
@@ -501,16 +514,15 @@ static void test_on_gossip_peer_replacement_moratorium_boundary_inclusive(void)
 
     const uint64_t seq[] = { 0U, 0U, 0U, 0U, 0U }; // chance=true, deterministic slot/dither
     fixture_set_random_sequence(&fix, seq, sizeof(seq) / sizeof(seq[0]));
-    on_gossip(fix.cy,
-              ts_base + 1000,
-              1U,
-              UINT64_C(0xC001),
-              0U,
-              0,
-              str_empty,
-              NULL,
-              make_lane(UINT64_C(7777), 0x77U),
-              gossip_unicast);
+    fixture_on_gossip(&fix,
+                      ts_base + 1000,
+                      1U,
+                      UINT64_C(0xC001),
+                      0U,
+                      0,
+                      str_empty,
+                      NULL,
+                      make_lane(UINT64_C(7777), 0x77U));
     TEST_ASSERT_NOT_NULL(gossip_peer_find(fix.cy, UINT64_C(7777)));
 
     fixture_deinit(&fix);
@@ -526,15 +538,15 @@ static void test_on_gossip_ttl_zero_and_duplicate_are_not_forwarded(void)
     fixture_set_peer(&fix, 2U, UINT64_C(30), now);
 
     const cy_lane_t lane = make_lane(UINT64_C(99), 0x99U);
-    on_gossip(fix.cy, now, 0U, UINT64_C(0xA1), 1U, 0, str_empty, NULL, lane, gossip_unicast);
+    fixture_on_gossip(&fix, now, 0U, UINT64_C(0xA1), 1U, 0, str_empty, NULL, lane);
     TEST_ASSERT_EQUAL_size_t(0U, fix.p2p_send_count);
 
     const uint64_t seq[] = { 0U, 1U, 2U, 3U, 4U, 5U };
     fixture_set_random_sequence(&fix, seq, sizeof(seq) / sizeof(seq[0]));
-    on_gossip(fix.cy, now + 1, 5U, UINT64_C(0xA2), 2U, 0, str_empty, NULL, lane, gossip_unicast);
+    fixture_on_gossip(&fix, now + 1, 5U, UINT64_C(0xA2), 2U, 0, str_empty, NULL, lane);
     const size_t first_count = fix.p2p_send_count;
     TEST_ASSERT_TRUE(first_count > 0U);
-    on_gossip(fix.cy, now + 2, 5U, UINT64_C(0xA2), 2U, 0, str_empty, NULL, lane, gossip_unicast);
+    fixture_on_gossip(&fix, now + 2, 5U, UINT64_C(0xA2), 2U, 0, str_empty, NULL, lane);
     TEST_ASSERT_EQUAL_size_t(first_count, fix.p2p_send_count);
 
     fixture_deinit(&fix);
@@ -552,7 +564,7 @@ static void test_on_gossip_forward_decrements_ttl_blacklists_sender_and_limits_f
 
     const uint64_t seq[] = { 0U, 1U, 2U, 3U };
     fixture_set_random_sequence(&fix, seq, sizeof(seq) / sizeof(seq[0]));
-    on_gossip(fix.cy, now, 7U, UINT64_C(0xB1), 3U, 1, str_empty, NULL, make_lane(UINT64_C(99), 0x11U), gossip_unicast);
+    fixture_on_gossip(&fix, now, 7U, UINT64_C(0xB1), 3U, 1, str_empty, NULL, make_lane(UINT64_C(99), 0x11U));
     TEST_ASSERT_EQUAL_size_t(GOSSIP_OUTDEGREE, fix.p2p_send_count);
     TEST_ASSERT_FALSE(capture_has_lane(&fix, UINT64_C(99)));
     for (size_t i = 0U; i < fix.capture_count; i++) {
@@ -571,7 +583,7 @@ static void test_on_gossip_local_win_suppresses_forward_and_schedules_urgent(voi
     fixture_set_peer(&fix, 0U, UINT64_C(10), 1000);
     fixture_set_peer(&fix, 1U, UINT64_C(20), 1000);
     const uint64_t evictions_before = topic->evictions;
-    on_gossip(fix.cy, 1000, 5U, topic->hash, 4U, 1, str_empty, NULL, make_lane(UINT64_C(50), 0x22U), gossip_unicast);
+    fixture_on_gossip(&fix, 1000, 5U, topic->hash, 4U, 1, str_empty, NULL, make_lane(UINT64_C(50), 0x22U));
     TEST_ASSERT_EQUAL_UINT64(evictions_before, topic->evictions);
     TEST_ASSERT_EQUAL_size_t(0U, fix.p2p_send_count);
     TEST_ASSERT_TRUE(is_listed(&fix.cy->list_gossip_urgent, &topic->list_gossip_urgent));
@@ -588,7 +600,7 @@ static void test_on_gossip_local_lose_forwards_merged_state(void)
     fixture_set_peer(&fix, 1U, UINT64_C(20), 2000);
     const uint64_t seq[] = { 0U, 1U, 2U, 3U };
     fixture_set_random_sequence(&fix, seq, sizeof(seq) / sizeof(seq[0]));
-    on_gossip(fix.cy, 2000, 4U, topic->hash, 9U, 1, str_empty, NULL, make_lane(UINT64_C(40), 0x33U), gossip_unicast);
+    fixture_on_gossip(&fix, 2000, 4U, topic->hash, 9U, 1, str_empty, NULL, make_lane(UINT64_C(40), 0x33U));
     TEST_ASSERT_EQUAL_UINT32(9U, topic->evictions);
     TEST_ASSERT_TRUE(fix.p2p_send_count > 0U);
     TEST_ASSERT_EQUAL_UINT8(header_gossip, fix.capture[0].type);

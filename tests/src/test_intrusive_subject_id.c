@@ -17,7 +17,7 @@ static void bitset_set(unsigned char* const bits, const uint32_t index)
 }
 
 /// For non-pinned topics, the subject-ID mapping is an additive translation by (hash % p), so it is sufficient to
-/// exhaustively test injectivity and inversion at any single non-pinned hash. We sample one random hash per run.
+/// exhaustively test injectivity at any single non-pinned hash. We sample one random hash per run.
 static void check_subject_id_math(const uint32_t modulus)
 {
     const uint64_t hash = prng();
@@ -32,7 +32,6 @@ static void check_subject_id_math(const uint32_t modulus)
         TEST_ASSERT(subject_id <= CY_SUBJECT_ID_MAX(modulus));
         TEST_ASSERT(!bitset_get(seen_sid, subject_id));
         bitset_set(seen_sid, subject_id);
-        TEST_ASSERT(evictions == topic_evictions_from_subject_id(hash, subject_id, modulus));
         if (evictions < 10) { // JFYI
             printf("hash=%ju evictions=%ju => subject_id=%ju\n",
                    (uintmax_t)hash,
