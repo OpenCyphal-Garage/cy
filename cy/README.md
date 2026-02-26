@@ -34,6 +34,84 @@ The transport delivers deduplicated messages, but duplication due to retransmiss
 
 The session layer is designed to be mostly invariant to the delivery method used: multicast, unicast, or broadcast. This allows senders to choose the preferred delivery method ad-hoc. An exception applies to message publications which serve as their own gossips only when multicast (because the subject-ID encodes the eviction counter, see below).
 
+### Subject-ID ranges
+
+The set of subject-ID values ranges from zero (inclusive) up to some transport-specific boundary. For Cyphal/CAN, the maximum is $2^{17}-1$, while for Cyphal/UDP (and all IPv4-based transports in general) the maximum is $2^{23}-1$ due to L2 multicast limitations.
+
+Subject-ID values from 0 to 8191 inclusive are reserved for pinned topics, which are guaranteed to be collision-free.
+
+The maximum subject-ID value is reserved for broadcast subject that is used for low-rate broadcast gossip propagation and scouts. For Cyphal/CAN, this is subject 131071=0x1ffff, for Cyphal/UDP this is 8388607=0x7fffff.
+
+Values from 8192 (inclusive) up to (8191+modulus) (inclusive) are used for automatic subject-ID allocation for topics. THe modulus is the largest prime number not greater than the maximum subject-ID minus 8191 such that $\text{modulus} mod 4 = 3$ holds. The latter condition enables very efficient constant-time reconstruction of the eviction counter from the subject-ID; while this capability is currently not used in the protocol design (an attempt to use it to optimize gossip propagation was made but rejected due to ambiguities that arise once the eviction counter exceeds half the modulus), it might come useful in the future, especially for diagnostics. For posterity, a simple solver that reconstructs the eviction counter from the subject-ID is provided below.
+
+The subject-ID is derived from the topic hash and eviction counter using quadratic probing. This probing strategy guarantees unique placement until the eviction counter exceeds half the modulus, at which point the sequence will restart. Such restrarting behavior is expected and may occur during normal operation of the network. The eviction counter itself is not expected to overflow, as it is wide enough; for reference, it will take 136 years of continuous churn at 1 Hz to overflow a 32-bit eviction counter (eviction counters are not incremented continuously but only when the network configuration is changed in a way that triggers collisions, so the limit is unreachable in any practical scenario).
+
+```c++
+// a**e mod m
+static uint32_t pow_mod_u32(uint32_t a, uint32_t e, const uint32_t m)
+{
+    uint32_t r = 1 % m;
+    a %= m;
+    while (e) {
+        if (e & 1U) {
+            r = (uint32_t)(((uint64_t)r * (uint64_t)a) % m);
+        }
+        a = (uint32_t)(((uint64_t)a * (uint64_t)a) % m);
+        e >>= 1U;
+    }
+    return r;
+}
+
+// Legendre symbol: a^((p-1)/2) mod p is 1 for residues, p-1 for non-residues, 0 for a==0.
+static bool is_quadratic_residue_prime(const uint32_t a, const uint32_t p)
+{
+    return (a == 0) || (pow_mod_u32(a, (p - 1U) / 2U, p) == 1U);
+}
+
+// Derives evictions from a non-pinned subject-ID. For pinned subject-ID returns zero unconditionally.
+// Assumes subject_id_modulus is a prime with (subject_id_modulus % 4) == 3.
+// Returns UINT32_MAX if the subject-ID was obtained using distinct parameters/expression (no solutions).
+// If evictions>floor(modulus/2), the subject-ID sequence repeats, leading to non-unique solutions.
+// Complexity is O(1).
+// This implementation has been exhaustively brute-force verified at least for modulus values 131071 and 8388607.
+static uint32_t topic_evictions_from_subject_id(const uint64_t hash,
+                                                const uint32_t subject_id,
+                                                const uint32_t subject_id_modulus)
+{
+    const uint32_t p = subject_id_modulus;
+    assert((p > 3) && ((p & 3U) == 3U)); // Method below requires p&3=3, i.e. p%4=3
+    if ((subject_id <= CY_SUBJECT_ID_PINNED_MAX) || is_pinned(hash)) {
+        return 0; // Pinned subjects are collision-free, assume zero evictions.
+    }
+
+    const uint32_t base = subject_id - (CY_SUBJECT_ID_PINNED_MAX + 1U);
+    if (base >= p) {
+        return UINT32_MAX; // The subject-ID was calculated using distinct parameters.
+    }
+
+    const uint32_t delta = (uint32_t)(((uint64_t)base + (uint64_t)p - (hash % p)) % p); // delta = (base - h) mod p
+    if (!is_quadratic_residue_prime(delta, p)) {
+        return UINT32_MAX; // The subject-ID was calculated using distinct parameters.
+    }
+
+    // sqrt(delta) mod p (since p % 4 == 3): r = delta^((p+1)/4) mod p
+    const uint32_t r1 = (delta == 0U) ? 0U : pow_mod_u32(delta, (p + 1U) / 4U, p);
+    const uint32_t r2 = (r1 == 0U) ? 0U : (p - r1);
+
+    uint32_t       best     = UINT32_MAX;
+    const uint32_t roots[2] = { r1, r2 };
+    for (unsigned i = 0; i < 2; i++) {
+        const uint64_t s = roots[i];
+        // We assume the eviction counter doesn't exceed half-modulus as that leads to ambiguity.
+        if ((s <= (p / 2U)) && (s < best)) {
+            assert(base == ((hash % p) + ((uint64_t)(s % p) * (uint64_t)(s % p)) % p) % p);
+            best = (uint32_t)s;
+        }
+    }
+    return best;
+}
+```
+
 ### Headers
 
 >TODO: Pinned topics on CAN must have no header to ensure backward compatibility, sort this out later.

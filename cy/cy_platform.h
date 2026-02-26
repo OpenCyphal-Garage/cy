@@ -87,8 +87,7 @@ struct cy_platform_t
     /// The modulus shall be a prime number because the subject-ID function uses a quadratic probing strategy:
     ///     subject_id = CY_SUBJECT_ID_PINNED_MAX + 1 + ((hash + evictions^2) mod modulus)
     /// Further, to enable fast reconstruction of the eviction count from the subject-ID, we impose an additional
-    /// constraint that subject_id_modulus mod 4 == 3. The suitability of the modulus is checked at initialization.
-    /// See topic_evictions_from_subject_id() for the reconstruction algorithm.
+    /// constraint that subject_id_modulus mod 4 == 3.
     ///
     /// See https://en.wikipedia.org/wiki/Quadratic_probing
     /// See https://github.com/OpenCyphal-Garage/cy/issues/12#issuecomment-3577831960
