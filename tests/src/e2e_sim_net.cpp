@@ -145,11 +145,14 @@ void frame_parse(frame_info_t& frame)
     frame.topic_hash     = 0U;
 
     if (frame.wire.size() >= header_size) {
-        if (frame.header_type <= 6U) {
+        if (frame.header_type <= 2U) {
             frame.has_tag = true;
             frame.tag     = read_u64(frame.wire, 16U);
+        } else if (frame.header_type <= 6U) {
+            frame.has_tag = true;
+            frame.tag     = frame.wire.at(1U);
         }
-        if ((frame.header_type <= 2U) || (frame.header_type == header_gossip)) {
+        if ((frame.header_type <= 6U) || (frame.header_type == header_gossip)) {
             frame.has_topic_hash = true;
             frame.topic_hash     = read_u64(frame.wire, 8U);
         }

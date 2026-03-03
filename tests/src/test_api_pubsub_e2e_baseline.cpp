@@ -29,6 +29,14 @@ struct arrival_capture_t final
     std::size_t                   malformed{ 0U };
 };
 
+struct response_server_capture_t final
+{
+    std::size_t   count{ 0U };
+    std::uint64_t first_message_tag{ 0U };
+    std::uint64_t first_topic_hash{ 0U };
+    cy_err_t      last_respond_error{ CY_OK };
+};
+
 extern "C" void on_arrival_capture(cy_subscriber_t* const sub, const cy_arrival_t arrival)
 {
     auto* const capture = static_cast<arrival_capture_t*>(cy_subscriber_context(sub).ptr[0]);
@@ -44,6 +52,23 @@ extern "C" void on_arrival_capture(cy_subscriber_t* const sub, const cy_arrival_
     }
 
     capture->samples.push_back(arrival_sample_t{ .publisher_id = payload.publisher_id, .app_seq = payload.sequence });
+}
+
+extern "C" void on_arrival_respond(cy_subscriber_t* const sub, const cy_arrival_t arrival)
+{
+    auto* const capture = static_cast<response_server_capture_t*>(cy_subscriber_context(sub).ptr[0]);
+    TEST_ASSERT_NOT_NULL(capture);
+
+    capture->count++;
+    if (capture->count == 1U) {
+        capture->first_message_tag = arrival.breadcrumb.message_tag;
+        capture->first_topic_hash  = arrival.breadcrumb.topic_hash;
+    }
+
+    const auto       payload    = e2e::app_payload_pack(109U, static_cast<std::uint64_t>(capture->count));
+    const cy_bytes_t response   = { .size = payload.size(), .data = payload.data(), .next = nullptr };
+    cy_breadcrumb_t  breadcrumb = arrival.breadcrumb;
+    capture->last_respond_error = cy_respond(&breadcrumb, arrival.message.timestamp + publish_deadline, response);
 }
 
 void drive_for(e2e::sim_net_t& net, cy_us_t& now, const cy_us_t duration)
@@ -70,6 +95,16 @@ void set_now(e2e::sim_net_t& net, const cy_us_t now)
 {
     e2e::sim_net_node_now_set(net, e2e::sim_node_a, now);
     e2e::sim_net_node_now_set(net, e2e::sim_node_b, now);
+}
+
+std::uint64_t read_u64_at(const std::vector<unsigned char>& wire, const std::size_t offset)
+{
+    TEST_ASSERT_TRUE(wire.size() >= (offset + 8U));
+    std::uint64_t out = 0U;
+    for (std::size_t i = 0U; i < 8U; i++) {
+        out |= static_cast<std::uint64_t>(wire.at(offset + i)) << (i * 8U);
+    }
+    return out;
 }
 
 cy_publisher_t* make_publisher(e2e::sim_net_t& net, const char* const topic_name)
@@ -175,7 +210,7 @@ void wait_all_futures(e2e::sim_net_t& net, cy_us_t& now, const std::vector<cy_fu
         bool all_done = true;
         for (cy_future_t* const fut : futures) {
             TEST_ASSERT_NOT_NULL(fut);
-            if (cy_future_status(fut) == cy_future_pending) {
+            if (!cy_future_done(fut)) {
                 all_done = false;
                 break;
             }
@@ -188,11 +223,15 @@ void wait_all_futures(e2e::sim_net_t& net, cy_us_t& now, const std::vector<cy_fu
     }
 }
 
-void assert_future_statuses(const std::vector<cy_future_t*>& futures, const cy_future_status_t expected)
+void assert_publish_futures(const std::vector<cy_future_t*>& futures,
+                            const cy_err_t                   expected_error,
+                            const bool                       expected_delivered)
 {
     for (cy_future_t* const fut : futures) {
         TEST_ASSERT_NOT_NULL(fut);
-        TEST_ASSERT_EQUAL_INT(expected, cy_future_status(fut));
+        TEST_ASSERT_TRUE(cy_future_done(fut));
+        TEST_ASSERT_EQUAL_INT(expected_error, cy_future_error(fut));
+        TEST_ASSERT_EQUAL_INT(expected_delivered ? 1 : 0, cy_publish_delivered(fut) ? 1 : 0);
     }
 }
 
@@ -303,7 +342,7 @@ void test_api_pubsub_e2e_a03_reliable_happy_unordered()
 
     TEST_ASSERT_EQUAL_size_t(0U, capture.malformed);
     assert_unordered_complete_unique(capture, 103U, 1U, 8U);
-    assert_future_statuses(futures, cy_future_success);
+    assert_publish_futures(futures, CY_OK, true);
 
     cleanup_case(net, now, futures, { sub }, { pub });
 }
@@ -333,7 +372,7 @@ void test_api_pubsub_e2e_a04_reliable_happy_ordered()
     TEST_ASSERT_EQUAL_size_t(0U, capture.malformed);
     assert_unordered_complete_unique(capture, 104U, 1U, 8U);
     assert_ordered_strictly_increasing(capture, 104U);
-    assert_future_statuses(futures, cy_future_success);
+    assert_publish_futures(futures, CY_OK, true);
 
     cleanup_case(net, now, futures, { sub }, { pub });
 }
@@ -362,7 +401,7 @@ void test_api_pubsub_e2e_a05_reliable_burst_no_faults_unordered()
 
     TEST_ASSERT_EQUAL_size_t(0U, capture.malformed);
     assert_unordered_complete_unique(capture, 105U, 1U, 24U);
-    assert_future_statuses(futures, cy_future_success);
+    assert_publish_futures(futures, CY_OK, true);
 
     cleanup_case(net, now, futures, { sub }, { pub });
 }
@@ -392,7 +431,7 @@ void test_api_pubsub_e2e_a06_reliable_burst_no_faults_ordered()
     TEST_ASSERT_EQUAL_size_t(0U, capture.malformed);
     assert_unordered_complete_unique(capture, 106U, 1U, 24U);
     assert_ordered_strictly_increasing(capture, 106U);
-    assert_future_statuses(futures, cy_future_success);
+    assert_publish_futures(futures, CY_OK, true);
 
     cleanup_case(net, now, futures, { sub }, { pub });
 }
@@ -471,6 +510,68 @@ void test_api_pubsub_e2e_a08_unsubscribe_resubscribe_during_active_publishing()
     cleanup_case(net, now, {}, { second_sub }, { pub });
 }
 
+void test_api_pubsub_e2e_a09_response_frame_metadata_is_parsed_per_response_header_layout()
+{
+    e2e::sim_net_t net{};
+    TEST_ASSERT_EQUAL_INT(CY_OK,
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xA09U));
+    cy_us_t now = 0;
+
+    static constexpr const char* topic_name = "e2e/a09/topic";
+    cy_publisher_t* const client = cy_advertise_client(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str(topic_name), 64U);
+    TEST_ASSERT_NOT_NULL(client);
+    cy_ack_timeout_set(client, ack_timeout_us);
+
+    response_server_capture_t server_capture{};
+    cy_subscriber_t* const    server_sub = cy_subscribe(e2e::sim_net_cy(net, e2e::sim_node_b), cy_str(topic_name), 64U);
+    TEST_ASSERT_NOT_NULL(server_sub);
+
+    cy_user_context_t ctx = CY_USER_CONTEXT_EMPTY;
+    ctx.ptr[0]            = &server_capture;
+    cy_subscriber_context_set(server_sub, ctx);
+    cy_subscriber_callback_set(server_sub, on_arrival_respond);
+
+    set_now(net, now);
+    const auto         request_payload = e2e::app_payload_pack(909U, 1U);
+    const cy_bytes_t   request_message = { .size = request_payload.size(),
+                                           .data = request_payload.data(),
+                                           .next = nullptr };
+    cy_future_t* const request_future  = cy_request(client, now + 300'000, 200'000, request_message);
+    TEST_ASSERT_NOT_NULL(request_future);
+
+    wait_all_futures(net, now, { request_future });
+    TEST_ASSERT_TRUE(cy_future_done(request_future));
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_future_error(request_future));
+    TEST_ASSERT_EQUAL_UINT64(1U, cy_response_count(request_future));
+    TEST_ASSERT_EQUAL_size_t(1U, server_capture.count);
+    TEST_ASSERT_EQUAL_UINT8(CY_OK, server_capture.last_respond_error);
+
+    const cy_response_t response = cy_response(request_future);
+    TEST_ASSERT_NOT_NULL(response.message.content);
+    cy_message_refcount_dec(response.message.content);
+
+    const auto& captures = e2e::sim_net_captures(net);
+    bool        found    = false;
+    for (const e2e::frame_capture_t& cap : captures) {
+        if ((cap.frame.source != e2e::sim_node_b) || (cap.frame.destination != e2e::sim_node_a) || !cap.frame.p2p ||
+            (cap.frame.header_type != 3U)) {
+            continue;
+        }
+        found = true;
+        TEST_ASSERT_TRUE(cap.frame.has_tag);
+        TEST_ASSERT_EQUAL_UINT64(0U, cap.frame.tag); // Best-effort responses currently use ack-correlation tag=0.
+        TEST_ASSERT_TRUE(cap.frame.has_topic_hash);
+        TEST_ASSERT_EQUAL_UINT64(server_capture.first_topic_hash, cap.frame.topic_hash);
+        TEST_ASSERT_TRUE(cap.frame.wire.size() >= 24U);
+        TEST_ASSERT_EQUAL_UINT8(0U, cap.frame.wire.at(1U)); // Response tag at byte offset 1.
+        TEST_ASSERT_EQUAL_UINT64(server_capture.first_message_tag, read_u64_at(cap.frame.wire, 16U));
+        break;
+    }
+    TEST_ASSERT_TRUE(found);
+
+    cleanup_case(net, now, { request_future }, { server_sub }, { client });
+}
+
 } // namespace
 
 extern "C" void setUp()
@@ -492,5 +593,6 @@ int main()
     RUN_TEST(test_api_pubsub_e2e_a06_reliable_burst_no_faults_ordered);
     RUN_TEST(test_api_pubsub_e2e_a07_late_subscriber_join_post_subscribe_only);
     RUN_TEST(test_api_pubsub_e2e_a08_unsubscribe_resubscribe_during_active_publishing);
+    RUN_TEST(test_api_pubsub_e2e_a09_response_frame_metadata_is_parsed_per_response_header_layout);
     return UNITY_END();
 }

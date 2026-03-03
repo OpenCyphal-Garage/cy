@@ -428,13 +428,12 @@ void summarize_futures(const std::vector<future_state_t>& futures,
     pending = 0U;
     for (const future_state_t& item : futures) {
         TEST_ASSERT_NOT_NULL(item.future);
-        const cy_future_status_t status = cy_future_status(item.future);
-        if (status == cy_future_success) {
-            success++;
-        } else if (status == cy_future_failure) {
-            failure++;
-        } else {
+        if (!cy_future_done(item.future)) {
             pending++;
+        } else if (cy_publish_delivered(item.future)) {
+            success++;
+        } else {
+            failure++;
         }
     }
 }

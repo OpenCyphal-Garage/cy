@@ -273,36 +273,246 @@ static void test_bytes_dup_oom_before_first_chunk(void)
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&fixture.heap));
 }
 
-static void test_bitmap_clz_basic(void)
+static bool bitmap_ref_test(const bitmap_t* const bitmap, const size_t bit)
+{
+    return (bitmap[bit / 64U] & (UINT64_C(1) << (bit % 64U))) != 0U;
+}
+
+static void bitmap_ref_set(bitmap_t* const bitmap, const size_t bit)
+{
+    bitmap[bit / 64U] |= UINT64_C(1) << (bit % 64U);
+}
+
+static void bitmap_ref_shift(bitmap_t* const       out,
+                             const bitmap_t* const in,
+                             const size_t          bit_count,
+                             const ptrdiff_t       shift_amount)
+{
+    const size_t words = BITMAP_WORDS(bit_count);
+    memset(out, 0, words * sizeof(out[0]));
+    if ((bit_count == 0U) || (shift_amount == 0)) {
+        memcpy(out, in, words * sizeof(out[0]));
+        return;
+    }
+    for (size_t dst = 0U; dst < bit_count; dst++) {
+        const ptrdiff_t src = (ptrdiff_t)dst - shift_amount;
+        if ((src >= 0) && ((size_t)src < bit_count) && bitmap_ref_test(in, (size_t)src)) {
+            bitmap_ref_set(out, dst);
+        }
+    }
+}
+
+static void assert_bitmap_words_equal(const bitmap_t* const expected,
+                                      const bitmap_t* const actual,
+                                      const size_t          bit_count)
+{
+    const size_t words = BITMAP_WORDS(bit_count);
+    for (size_t i = 0U; i < words; i++) {
+        TEST_ASSERT_EQUAL_UINT64(expected[i], actual[i]);
+    }
+}
+
+static void assert_bitmap_shift_case(const size_t    bit_count,
+                                     const ptrdiff_t shift_amount,
+                                     const bitmap_t  word0,
+                                     const bitmap_t  word1,
+                                     const bitmap_t  word2)
+{
+    bitmap_t source[3]   = { word0, word1, word2 };
+    bitmap_t actual[3]   = { word0, word1, word2 };
+    bitmap_t expected[3] = { 0, 0, 0 };
+    bitmap_ref_shift(expected, source, bit_count, shift_amount);
+    bitmap_shift(actual, bit_count, shift_amount);
+    assert_bitmap_words_equal(expected, actual, bit_count);
+}
+
+static void test_bitmap_footprint_rounding(void)
+{
+    TEST_ASSERT_EQUAL_size_t(0U, bitmap_footprint(0U));
+    TEST_ASSERT_EQUAL_size_t(sizeof(bitmap_t), bitmap_footprint(1U));
+    TEST_ASSERT_EQUAL_size_t(sizeof(bitmap_t), bitmap_footprint(63U));
+    TEST_ASSERT_EQUAL_size_t(sizeof(bitmap_t), bitmap_footprint(64U));
+    TEST_ASSERT_EQUAL_size_t(2U * sizeof(bitmap_t), bitmap_footprint(65U));
+    TEST_ASSERT_EQUAL_size_t(3U * sizeof(bitmap_t), bitmap_footprint(130U));
+}
+
+static void test_bitmap_new_zero_init_and_oom(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+
+    fixture_set_fail_after(&fixture, SIZE_MAX);
+    bitmap_t* const bm = bitmap_new(&fixture.cy, 130U);
+    TEST_ASSERT_NOT_NULL(bm);
+    TEST_ASSERT_EQUAL_size_t(1U, guarded_heap_allocated_fragments(&fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(bitmap_footprint(130U), guarded_heap_allocated_bytes(&fixture.heap));
+    for (size_t i = 0U; i < BITMAP_WORDS(130U); i++) {
+        TEST_ASSERT_EQUAL_UINT64(0U, bm[i]);
+    }
+    mem_free(&fixture.cy, bm);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&fixture.heap));
+
+    fixture_set_fail_after(&fixture, SIZE_MAX);
+    TEST_ASSERT_NULL(bitmap_new(&fixture.cy, 0U));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&fixture.heap));
+
+    fixture_set_fail_after(&fixture, 0U);
+    TEST_ASSERT_NULL(bitmap_new(&fixture.cy, 1U));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&fixture.heap));
+}
+
+static void test_bitmap_set_clear_test_cross_word(void)
 {
     bitmap_t bm[3] = { 0, 0, 0 };
 
-    TEST_ASSERT_EQUAL_size_t(0U, bitmap_clz(NULL, 0U));
-    TEST_ASSERT_EQUAL_size_t(5U, bitmap_clz(NULL, 5U));
-    TEST_ASSERT_EQUAL_size_t(0U, bitmap_clz(bm, 0U));
-    TEST_ASSERT_EQUAL_size_t(130U, bitmap_clz(bm, 130U));
+    TEST_ASSERT_FALSE(bitmap_test(bm, 0U));
+    TEST_ASSERT_FALSE(bitmap_test(bm, 63U));
+    TEST_ASSERT_FALSE(bitmap_test(bm, 64U));
+    TEST_ASSERT_FALSE(bitmap_test(bm, 129U));
 
     bitmap_set(bm, 0U);
-    TEST_ASSERT_EQUAL_size_t(0U, bitmap_clz(bm, 130U));
-
-    bitmap_clear(bm, 0U);
+    bitmap_set(bm, 63U);
     bitmap_set(bm, 64U);
-    TEST_ASSERT_EQUAL_size_t(64U, bitmap_clz(bm, 130U));
+    bitmap_set(bm, 129U);
 
-    bitmap_set(bm, 2U);
-    TEST_ASSERT_EQUAL_size_t(2U, bitmap_clz(bm, 130U));
+    TEST_ASSERT_TRUE(bitmap_test(bm, 0U));
+    TEST_ASSERT_TRUE(bitmap_test(bm, 63U));
+    TEST_ASSERT_TRUE(bitmap_test(bm, 64U));
+    TEST_ASSERT_TRUE(bitmap_test(bm, 129U));
+    TEST_ASSERT_FALSE(bitmap_test(bm, 1U));
+    TEST_ASSERT_FALSE(bitmap_test(bm, 65U));
+
+    bitmap_clear(bm, 63U);
+    bitmap_clear(bm, 129U);
+    TEST_ASSERT_TRUE(bitmap_test(bm, 0U));
+    TEST_ASSERT_FALSE(bitmap_test(bm, 63U));
+    TEST_ASSERT_TRUE(bitmap_test(bm, 64U));
+    TEST_ASSERT_FALSE(bitmap_test(bm, 129U));
 }
 
-static void test_bitmap_clz_ignores_tail_padding_bits(void)
+static void test_bitmap_clz_branch_matrix(void)
 {
-    bitmap_t bm[2] = { 0, 0 };
+    bitmap_t bm130[3] = { 0, 0, 0 };
+    bitmap_t bm128[2] = { 0, 0 };
+    bitmap_t bm65[2]  = { 0, 0 };
 
-    // count=65 means only bits 0..64 are valid.
-    bm[1] = UINT64_C(1) << 1U; // global bit 65 (out of range)
-    TEST_ASSERT_EQUAL_size_t(65U, bitmap_clz(bm, 65U));
+    TEST_ASSERT_EQUAL_size_t(5U, bitmap_clz(NULL, 5U));
+    TEST_ASSERT_EQUAL_size_t(0U, bitmap_clz(bm130, 0U));
+    TEST_ASSERT_EQUAL_size_t(130U, bitmap_clz(bm130, 130U));
 
-    bm[1] = UINT64_C(1) << 0U; // global bit 64 (in range)
-    TEST_ASSERT_EQUAL_size_t(64U, bitmap_clz(bm, 65U));
+    bm130[1] = UINT64_C(1) << 7U; // bit 71.
+    TEST_ASSERT_EQUAL_size_t(71U, bitmap_clz(bm130, 130U));
+
+    bm130[0] = UINT64_C(1) << 3U; // first word now wins.
+    TEST_ASSERT_EQUAL_size_t(3U, bitmap_clz(bm130, 130U));
+
+    bm130[0] = 0U;
+    bm130[1] = 0U;
+    bm130[2] = UINT64_C(1) << 1U; // bit 129.
+    TEST_ASSERT_EQUAL_size_t(129U, bitmap_clz(bm130, 130U));
+
+    bm65[1] = UINT64_C(1) << 1U; // bit 65 is outside count=65.
+    TEST_ASSERT_EQUAL_size_t(65U, bitmap_clz(bm65, 65U));
+    bm65[1] = UINT64_C(1) << 0U; // bit 64 is valid.
+    TEST_ASSERT_EQUAL_size_t(64U, bitmap_clz(bm65, 65U));
+
+    bm128[1] = UINT64_C(1) << 5U; // tail=0 path (bit count is multiple of 64).
+    TEST_ASSERT_EQUAL_size_t(69U, bitmap_clz(bm128, 128U));
+}
+
+static void test_bitmap_any_none_branch_matrix(void)
+{
+    bitmap_t bm130[3] = { 0, 0, 0 };
+    bitmap_t bm65[2]  = { 0, 0 };
+    bitmap_t bm128[2] = { 0, 0 };
+
+    TEST_ASSERT_FALSE(bitmap_any(NULL, 5U));
+    TEST_ASSERT_TRUE(bitmap_none(NULL, 5U));
+
+    TEST_ASSERT_FALSE(bitmap_any(bm130, 0U));
+    TEST_ASSERT_TRUE(bitmap_none(bm130, 0U));
+    TEST_ASSERT_FALSE(bitmap_any(bm130, 130U));
+    TEST_ASSERT_TRUE(bitmap_none(bm130, 130U));
+
+    bm130[0] = UINT64_C(1) << 11U;
+    TEST_ASSERT_TRUE(bitmap_any(bm130, 130U));
+    TEST_ASSERT_FALSE(bitmap_none(bm130, 130U));
+
+    bm65[1] = UINT64_C(1) << 1U; // out-of-range for count=65.
+    TEST_ASSERT_FALSE(bitmap_any(bm65, 65U));
+    TEST_ASSERT_TRUE(bitmap_none(bm65, 65U));
+    bm65[1] = UINT64_C(1) << 0U; // bit 64 is valid.
+    TEST_ASSERT_TRUE(bitmap_any(bm65, 65U));
+    TEST_ASSERT_FALSE(bitmap_none(bm65, 65U));
+
+    bm128[1] = UINT64_C(1) << 63U; // tail=0 path.
+    TEST_ASSERT_TRUE(bitmap_any(bm128, 128U));
+    TEST_ASSERT_FALSE(bitmap_none(bm128, 128U));
+}
+
+static void test_bitmap_shift_guard_noop_paths(void)
+{
+    bitmap_t bm[3]       = { UINT64_C(0xAAAAAAAAAAAAAAAA), UINT64_C(0x0123456789ABCDEF), UINT64_C(0xFEDCBA9876543210) };
+    bitmap_t snapshot[3] = { bm[0], bm[1], bm[2] };
+
+    bitmap_shift(NULL, 130U, 1);
+
+    bitmap_shift(bm, 0U, 1);
+    TEST_ASSERT_EQUAL_UINT64(snapshot[0], bm[0]);
+    TEST_ASSERT_EQUAL_UINT64(snapshot[1], bm[1]);
+    TEST_ASSERT_EQUAL_UINT64(snapshot[2], bm[2]);
+
+    bitmap_shift(bm, 130U, 0);
+    TEST_ASSERT_EQUAL_UINT64(snapshot[0], bm[0]);
+    TEST_ASSERT_EQUAL_UINT64(snapshot[1], bm[1]);
+    TEST_ASSERT_EQUAL_UINT64(snapshot[2], bm[2]);
+}
+
+static void test_bitmap_shift_large_shift_clears_bitmap(void)
+{
+    bitmap_t bm[3] = { UINT64_C(0xAAAAAAAAAAAAAAAA), UINT64_C(0x0123456789ABCDEF), UINT64_C(0xFFFFFFFFFFFFFFFF) };
+
+    bitmap_shift(bm, 130U, 130);
+    TEST_ASSERT_EQUAL_UINT64(0U, bm[0]);
+    TEST_ASSERT_EQUAL_UINT64(0U, bm[1]);
+    TEST_ASSERT_EQUAL_UINT64(0U, bm[2]);
+
+    bm[0] = UINT64_C(0xAAAAAAAAAAAAAAAA);
+    bm[1] = UINT64_C(0x0123456789ABCDEF);
+    bm[2] = UINT64_C(0xFFFFFFFFFFFFFFFF);
+    bitmap_shift(bm, 130U, -130);
+    TEST_ASSERT_EQUAL_UINT64(0U, bm[0]);
+    TEST_ASSERT_EQUAL_UINT64(0U, bm[1]);
+    TEST_ASSERT_EQUAL_UINT64(0U, bm[2]);
+}
+
+static void test_bitmap_shift_left_branch_matrix(void)
+{
+    const bitmap_t word0 = UINT64_C(0x0123456789ABCDEF);
+    const bitmap_t word1 = UINT64_C(0x0FEDCBA987654321);
+    const bitmap_t word2 = UINT64_C(0xFFFFFFFFFFFFFFFF);
+
+    assert_bitmap_shift_case(130U, 1, word0, word1, word2);
+    assert_bitmap_shift_case(130U, 64, word0, word1, word2);
+    assert_bitmap_shift_case(130U, 65, word0, word1, word2);
+    assert_bitmap_shift_case(128U, 1, word0, word1, word2);
+    assert_bitmap_shift_case(128U, 64, word0, word1, word2);
+}
+
+static void test_bitmap_shift_right_branch_matrix(void)
+{
+    const bitmap_t word0 = UINT64_C(0x0123456789ABCDEF);
+    const bitmap_t word1 = UINT64_C(0x0FEDCBA987654321);
+    const bitmap_t word2 = UINT64_C(0xFFFFFFFFFFFFFFFF);
+
+    assert_bitmap_shift_case(130U, -1, word0, word1, word2);
+    assert_bitmap_shift_case(130U, -64, word0, word1, word2);
+    assert_bitmap_shift_case(130U, -65, word0, word1, word2);
+    assert_bitmap_shift_case(128U, -1, word0, word1, word2);
+    assert_bitmap_shift_case(128U, -64, word0, word1, word2);
 }
 
 void setUp(void) {}
@@ -319,7 +529,14 @@ int main(void)
     RUN_TEST(test_bytes_undup_null_is_noop);
     RUN_TEST(test_bytes_dup_all_empty_fragments_returns_sentinel);
     RUN_TEST(test_bytes_dup_oom_before_first_chunk);
-    RUN_TEST(test_bitmap_clz_basic);
-    RUN_TEST(test_bitmap_clz_ignores_tail_padding_bits);
+    RUN_TEST(test_bitmap_footprint_rounding);
+    RUN_TEST(test_bitmap_new_zero_init_and_oom);
+    RUN_TEST(test_bitmap_set_clear_test_cross_word);
+    RUN_TEST(test_bitmap_clz_branch_matrix);
+    RUN_TEST(test_bitmap_any_none_branch_matrix);
+    RUN_TEST(test_bitmap_shift_guard_noop_paths);
+    RUN_TEST(test_bitmap_shift_large_shift_clears_bitmap);
+    RUN_TEST(test_bitmap_shift_left_branch_matrix);
+    RUN_TEST(test_bitmap_shift_right_branch_matrix);
     return UNITY_END();
 }

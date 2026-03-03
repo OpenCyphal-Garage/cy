@@ -207,7 +207,7 @@ bool wait_all_futures(e2e::sim_net_t& net, cy_us_t& now, const std::vector<cy_fu
         bool all_done = true;
         for (cy_future_t* const fut : futures) {
             TEST_ASSERT_NOT_NULL(fut);
-            if (cy_future_status(fut) == cy_future_pending) {
+            if (!cy_future_done(fut)) {
                 all_done = false;
                 break;
             }
@@ -221,11 +221,15 @@ bool wait_all_futures(e2e::sim_net_t& net, cy_us_t& now, const std::vector<cy_fu
     return false;
 }
 
-void assert_future_statuses(const std::vector<cy_future_t*>& futures, const cy_future_status_t expected)
+void assert_publish_futures(const std::vector<cy_future_t*>& futures,
+                            const cy_err_t                   expected_error,
+                            const bool                       expected_delivered)
 {
     for (cy_future_t* const fut : futures) {
         TEST_ASSERT_NOT_NULL(fut);
-        TEST_ASSERT_EQUAL_INT(expected, cy_future_status(fut));
+        TEST_ASSERT_TRUE(cy_future_done(fut));
+        TEST_ASSERT_EQUAL_INT(expected_error, cy_future_error(fut));
+        TEST_ASSERT_EQUAL_INT(expected_delivered ? 1 : 0, cy_publish_delivered(fut) ? 1 : 0);
     }
 }
 
@@ -314,8 +318,8 @@ void test_api_pubsub_e2e_c01_ack_loss_retransmit_duplicate_rejected_unordered()
     assert_unordered_complete_unique(cold_capture, cold_pub_id, 1U, 8U);
     assert_unordered_unique_only(hot_capture, hot_pub_id);
     assert_unordered_unique_only(cold_capture, cold_pub_id);
-    assert_future_statuses(hot_futures, cy_future_success);
-    assert_future_statuses(cold_futures, cy_future_success);
+    assert_publish_futures(hot_futures, CY_OK, true);
+    assert_publish_futures(cold_futures, CY_OK, true);
 
     std::vector<cy_future_t*> all_futures = hot_futures;
     all_futures.insert(all_futures.end(), cold_futures.begin(), cold_futures.end());
@@ -373,8 +377,8 @@ void test_api_pubsub_e2e_c02_ack_loss_retransmit_duplicate_rejected_ordered()
     assert_unordered_complete_unique(cold_capture, cold_pub_id, 1U, 8U);
     assert_ordered_strictly_increasing(hot_capture, hot_pub_id);
     assert_ordered_strictly_increasing(cold_capture, cold_pub_id);
-    assert_future_statuses(hot_futures, cy_future_success);
-    assert_future_statuses(cold_futures, cy_future_success);
+    assert_publish_futures(hot_futures, CY_OK, true);
+    assert_publish_futures(cold_futures, CY_OK, true);
 
     std::vector<cy_future_t*> all_futures = hot_futures;
     all_futures.insert(all_futures.end(), cold_futures.begin(), cold_futures.end());
@@ -465,8 +469,8 @@ void test_api_pubsub_e2e_c03_retransmit_overtakes_newer_message_unordered_unique
     assert_unordered_complete_unique(cold_capture, cold_pub_id, 1U, 2U);
     assert_unordered_unique_only(hot_capture, hot_pub_id);
     assert_unordered_unique_only(cold_capture, cold_pub_id);
-    assert_future_statuses(hot_futures, cy_future_success);
-    assert_future_statuses(cold_futures, cy_future_success);
+    assert_publish_futures(hot_futures, CY_OK, true);
+    assert_publish_futures(cold_futures, CY_OK, true);
 
     std::vector<cy_future_t*> all_futures = hot_futures;
     all_futures.insert(all_futures.end(), cold_futures.begin(), cold_futures.end());
@@ -557,8 +561,8 @@ void test_api_pubsub_e2e_c04_retransmit_overtakes_newer_message_ordered_restored
     assert_unordered_complete_unique(cold_capture, cold_pub_id, 1U, 2U);
     assert_ordered_strictly_increasing(hot_capture, hot_pub_id);
     assert_ordered_strictly_increasing(cold_capture, cold_pub_id);
-    assert_future_statuses(hot_futures, cy_future_success);
-    assert_future_statuses(cold_futures, cy_future_success);
+    assert_publish_futures(hot_futures, CY_OK, true);
+    assert_publish_futures(cold_futures, CY_OK, true);
 
     std::vector<cy_future_t*> all_futures = hot_futures;
     all_futures.insert(all_futures.end(), cold_futures.begin(), cold_futures.end());
@@ -620,10 +624,18 @@ void test_api_pubsub_e2e_c05_ordered_gap_timeout_flush()
     assert_unordered_complete_unique(cold_capture, cold_pub_id, 1U, 2U);
     assert_ordered_strictly_increasing(hot_capture, hot_pub_id);
     assert_ordered_strictly_increasing(cold_capture, cold_pub_id);
-    TEST_ASSERT_EQUAL_INT(cy_future_failure, cy_future_status(hot_fut_1));
-    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(hot_fut_2));
-    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(cold_fut_1));
-    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(cold_fut_2));
+    TEST_ASSERT_TRUE(cy_future_done(hot_fut_1));
+    TEST_ASSERT_EQUAL_INT(CY_ERR_DELIVERY, cy_future_error(hot_fut_1));
+    TEST_ASSERT_FALSE(cy_publish_delivered(hot_fut_1));
+    TEST_ASSERT_TRUE(cy_future_done(hot_fut_2));
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_future_error(hot_fut_2));
+    TEST_ASSERT_TRUE(cy_publish_delivered(hot_fut_2));
+    TEST_ASSERT_TRUE(cy_future_done(cold_fut_1));
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_future_error(cold_fut_1));
+    TEST_ASSERT_TRUE(cy_publish_delivered(cold_fut_1));
+    TEST_ASSERT_TRUE(cy_future_done(cold_fut_2));
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_future_error(cold_fut_2));
+    TEST_ASSERT_TRUE(cy_publish_delivered(cold_fut_2));
 
     std::vector<cy_future_t*> all_futures = hot_futures;
     all_futures.insert(all_futures.end(), cold_futures.begin(), cold_futures.end());
@@ -685,8 +697,8 @@ void test_api_pubsub_e2e_c06_late_older_frame_after_timeout_rejected()
     assert_unordered_complete_unique(cold_capture, cold_pub_id, 1U, 2U);
     assert_ordered_strictly_increasing(hot_capture, hot_pub_id);
     assert_ordered_strictly_increasing(cold_capture, cold_pub_id);
-    assert_future_statuses(hot_futures, cy_future_success);
-    assert_future_statuses(cold_futures, cy_future_success);
+    assert_publish_futures(hot_futures, CY_OK, true);
+    assert_publish_futures(cold_futures, CY_OK, true);
 
     std::vector<cy_future_t*> all_futures = hot_futures;
     all_futures.insert(all_futures.end(), cold_futures.begin(), cold_futures.end());
@@ -759,8 +771,8 @@ void test_api_pubsub_e2e_c07_ordered_buffer_capacity_stress_large_jump_backfill(
 
     assert_unordered_complete_unique(cold_capture, cold_pub_id, 1U, 12U);
     assert_ordered_strictly_increasing(cold_capture, cold_pub_id);
-    assert_future_statuses(hot_futures, cy_future_success);
-    assert_future_statuses(cold_futures, cy_future_success);
+    assert_publish_futures(hot_futures, CY_OK, true);
+    assert_publish_futures(cold_futures, CY_OK, true);
 
     std::vector<cy_future_t*> all_futures = hot_futures;
     all_futures.insert(all_futures.end(), cold_futures.begin(), cold_futures.end());
@@ -836,8 +848,8 @@ void test_api_pubsub_e2e_c08_high_jitter_moderate_loss_ordered_monotonicity()
     assert_ordered_strictly_increasing(cold_capture, cold_pub_id);
     TEST_ASSERT_TRUE(sequences_for(hot_capture, hot_pub_id).size() >= 10U);
     TEST_ASSERT_TRUE(sequences_for(cold_capture, cold_pub_id).size() >= 10U);
-    assert_future_statuses(hot_futures, cy_future_success);
-    assert_future_statuses(cold_futures, cy_future_success);
+    assert_publish_futures(hot_futures, CY_OK, true);
+    assert_publish_futures(cold_futures, CY_OK, true);
 
     std::vector<cy_future_t*> all_futures = hot_futures;
     all_futures.insert(all_futures.end(), cold_futures.begin(), cold_futures.end());
@@ -911,8 +923,8 @@ void test_api_pubsub_e2e_c09_high_jitter_moderate_loss_unordered_completeness()
     assert_unordered_complete_unique(cold_capture, cold_pub_id, 1U, 14U);
     assert_unordered_unique_only(hot_capture, hot_pub_id);
     assert_unordered_unique_only(cold_capture, cold_pub_id);
-    assert_future_statuses(hot_futures, cy_future_success);
-    assert_future_statuses(cold_futures, cy_future_success);
+    assert_publish_futures(hot_futures, CY_OK, true);
+    assert_publish_futures(cold_futures, CY_OK, true);
 
     std::vector<cy_future_t*> all_futures = hot_futures;
     all_futures.insert(all_futures.end(), cold_futures.begin(), cold_futures.end());
@@ -985,8 +997,8 @@ void test_api_pubsub_e2e_c10_reordering_window_boundary_behavior()
     assert_ordered_strictly_increasing(cold_capture, cold_pub_id);
     assert_unordered_unique_only(hot_capture, hot_pub_id);
     assert_unordered_unique_only(cold_capture, cold_pub_id);
-    assert_future_statuses(hot_futures, cy_future_success);
-    assert_future_statuses(cold_futures, cy_future_success);
+    assert_publish_futures(hot_futures, CY_OK, true);
+    assert_publish_futures(cold_futures, CY_OK, true);
 
     std::vector<cy_future_t*> all_futures = hot_futures;
     all_futures.insert(all_futures.end(), cold_futures.begin(), cold_futures.end());

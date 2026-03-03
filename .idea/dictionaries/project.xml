@@ -41,11 +41,13 @@
       <w>prevprime</w>
       <w>pushok</w>
       <w>readmes</w>
+      <w>refcounting</w>
       <w>remappings</w>
       <w>reuseport</w>
       <w>rnid</w>
       <w>rtps</w>
       <w>seqno</w>
+      <w>seqnos</w>
       <w>splitmix</w>
       <w>stayin</w>
       <w>strfmt</w>

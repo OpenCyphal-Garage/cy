@@ -37,9 +37,13 @@ extern "C"
 // error code 1 is omitted intentionally
 #define CY_ERR_ARGUMENT 2
 #define CY_ERR_MEMORY   3
-#define CY_ERR_CAPACITY 4
+#define CY_ERR_CAPACITY 4 // May be used by the platform layer if any resource is depleted (e.g., queue size).
 #define CY_ERR_NAME     5
-#define CY_ERR_MEDIA    6
+#define CY_ERR_MEDIA    6  // Generic low-level network error from the underlying platform layer.
+#define CY_ERR_LAG      7  // Strong scheduler lag detected. Non-real-time systems may ignore.
+#define CY_ERR_DELIVERY 8  // Reliable message was not acknowledged by the remote(s).
+#define CY_ERR_RESPONSE 9  // Response did not arrive on time.
+#define CY_ERR_CANCELED 10 // Future canceled before it could normally complete.
 
 typedef uint_fast8_t cy_err_t;
 typedef int64_t      cy_us_t; ///< Monotonic microsecond timestamp. Signed to permit arithmetics in the past.
@@ -114,6 +118,7 @@ size_t cy_message_size(const cy_message_t* const msg);
 size_t cy_message_read(const cy_message_t* const msg, const size_t offset, const size_t size, void* const destination);
 
 /// Use reference counting to manage the lifetime of message instances.
+/// No effect if the message pointer is NULL.
 void cy_message_refcount_inc(cy_message_t* const msg);
 void cy_message_refcount_dec(cy_message_t* const msg);
 
@@ -135,26 +140,18 @@ typedef struct cy_message_ts_t
 /// The future object is passed to the user-provided callback when the operation completes (successfully or not).
 /// Future instances are owned by the application; the application is responsible for destroying them
 /// using cy_future_destroy(). Destroying a pending future will cancel the associated operation.
+///
+/// There are functions that operate only on specific polymorphic type of future; they always include runtime type
+/// checking, such that invocation with a wrong polymorphic future type will be detected and handled gracefully.
+/// E.g., invoking cy_response() on a future from cy_publish_reliable() is incorrect but well-defined and safe.
 typedef struct cy_future_t cy_future_t;
 
 /// If set, invoked on future completion always; also may be invoked multiple times for progress updates while pending.
 typedef void (*cy_future_callback_t)(cy_future_t*);
 
-/// A future can transition from pending to either success or failure exactly once.
-typedef enum cy_future_status_t
-{
-    cy_future_pending = 0,
-    cy_future_success = 1,
-    cy_future_failure = 2,
-} cy_future_status_t;
-cy_future_status_t cy_future_status(const cy_future_t* const self);
-
-/// The result depends on the type of the future; some intermediate results may be available while still pending.
-/// Returns the size of the result; if the size of the provided storage is less, the result may not be copied or
-/// may be copied incompletely depending on the specific future type. One valid use case is to pass in zero storage
-/// to query the size needed, and then allocate the storage and call this function again to copy the result,
-/// assuming the size hasn't increased in the meantime.
-size_t cy_future_result(cy_future_t* const self, const size_t storage_size, void* const storage);
+/// State queries. Transient errors may occur while not done, they may also trigger callbacks. CY_OK indicates success.
+bool     cy_future_done(const cy_future_t* const self);
+cy_err_t cy_future_error(const cy_future_t* const self);
 
 /// The application can store arbitrary data in the context to share information with the future callback, if used.
 cy_user_context_t cy_future_context(const cy_future_t* const self);
@@ -162,17 +159,18 @@ void              cy_future_context_set(cy_future_t* const self, const cy_user_c
 
 /// The callback is guaranteed to be invoked when the future completes (successfully or not);
 /// also, it may be invoked when the future is still pending to provide intermediate progress updates.
-/// Therefore, it is necessary to always check the future status inside the callback.
+/// Therefore, it is necessary to always check the future done()/error() inside the callback.
 ///
 /// If the future is already completed, the callback will be invoked immediately before this function returns,
-/// unless it was already set.
+/// unless it was already set. This is why the context must be set BEFORE setting the callback!
 /// It is safe to destroy the future from within its own callback (but it is not safe to destroy another future).
 cy_future_callback_t cy_future_callback(const cy_future_t* const self);
 void                 cy_future_callback_set(cy_future_t* const self, const cy_future_callback_t callback);
 
 /// Every future must be destroyed. If the future is still pending, the associated action will be cancelled.
 /// A future may be destroyed from within its own callback.
-/// If a future is not of interest, use this function as the future callback to ensure automatic destruction.
+/// If the future outcome is not of interest, use this function as the future callback to ensure automatic destruction.
+/// Note: the actual memory deallocation may happen at a later time depending on the future implementation.
 void cy_future_destroy(cy_future_t* const self);
 
 // =====================================================================================================================
@@ -182,9 +180,8 @@ void cy_future_destroy(cy_future_t* const self);
 typedef struct cy_publisher_t cy_publisher_t;
 
 /// Create a new publisher on the topic. The default priority value is cy_prio_nominal, it can be changed later.
-/// The response_extent is the extent (maximum size) of the response data if the publisher expects responses.
-/// TODO: currently, responses may arrive out-of-order; this can be easily changed in the future if/when needed
-///       by adding a reordering window parameter here and implementing a simple reordering buffer in Cy.
+/// The response_extent is the extent (maximum size) of the response data if the publisher expects responses;
+/// see cy_request() for details.
 cy_publisher_t* cy_advertise(cy_t* const cy, const cy_str_t name);
 cy_publisher_t* cy_advertise_client(cy_t* const cy, const cy_str_t name, const size_t response_extent);
 
@@ -192,6 +189,14 @@ cy_publisher_t* cy_advertise_client(cy_t* const cy, const cy_str_t name, const s
 cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t deadline, const cy_bytes_t message);
 
 /// Publish a reliable one-way message.
+///
+/// The error is OK when the required acks are received without errors.
+/// If acks not received before the timeout, the status is ERR_DELIVERY.
+/// If transmission fails at the platform layer, the error from the platform layer is assigned as-is.
+/// If at least one attempt could not complete fully due to a strong scheduler lag (update delay), status is ERR_LAG.
+/// Errors are non-fatal: attempts to deliver will continue regardless until canceled or timed out, but the
+/// future callback (if set) is triggered on every error, and the future remains non-done until acked or timed out
+/// (or destroyed by the application).
 ///
 /// Reliable messages consume more memory for associated states and are a greater burden on the network and nodes
 /// compared to best-effort messages. A best-effort message is simply sent out to the network expecting the transport
@@ -209,40 +214,70 @@ cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t deadline, const cy_
 ///
 /// TODO API for querying the tracked associations and per-remote delivery success may be added in the future since it
 ///   is expected that some applications would benefit from the knowledge of which specific remotes accept their data.
-///   Currently, the future result is not defined (only success/failure).
 cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadline, const cy_bytes_t message);
 
-/// Future result of a request message that expects a response.
-typedef struct cy_request_result_t
+/// Successful delivery may be masked by non-fatal errors when querying cy_future_error().
+/// This function provides an unambiguous query that ignores errors and only checks if delivery was acknowledged.
+/// The result is only valid when the future is no longer pending.
+bool cy_publish_delivered(const cy_future_t* const future);
+
+/// Models a single response to a request sent with cy_request(). There may be several of those received from different
+/// remote nodes and also multiple response messages from the same remote node if response streaming is used.
+/// This is obtained from the request future using cy_response().
+///
+/// The tuple of sender ID and seqno uniquely identifies each response per message.
+/// For a globally unique identifier, add the tag of the original message as well.
+///
+/// Information on reliability, priority, etc. is intentionally not exposed; may change in the future if needed.
+typedef struct cy_response_t
 {
-    /// Delivery result of the request message itself.
-    /// It is updated while the future is still pending, as a means to provide intermediate progress feedback.
-    // cy_publish_result_t request;
+    uint64_t remote_id; ///< Uniquely identifies the source node within the network.
+    uint64_t seqno;     ///< If the remote streams multiple responses, each response increments seqno starting from 0.
 
-    /// The response is valid only if the future status is cy_future_success.
-    /// It is updated with every received response; the arrival of new responses can be monitored using either
-    /// a future callback or by checking the seqno counter.
-    /// The message contents can be moved out using cy_message_move(); if not moved out, it will be destroyed
-    /// when the future is destroyed.
-    struct cy_request_result_response_t
-    {
-        cy_message_ts_t message;
-        uint64_t        remote_id; ///< Uniquely identifies the remote node that sent the response within the network.
-        uint64_t        seqno;     ///< Incremented by the remote (sic) with each response sent; starts at zero.
-    } response;
-} cy_request_result_t;
+    cy_message_ts_t message;
+} cy_response_t;
 
-/// The first received P2P response transfer will be awaited from any remote node that received the published message.
-/// The future result is of type cy_request_result_t.
-/// The future will be updated when the request delivery feedback is available (intermediate update) and when
-/// the response is received. The future will enter the completed state after the first response, and it will
-/// continue to receive further responses if the remote chooses to send more; the future will remain completed.
-/// The application can monitor the seqno field in the response to detect new responses.
-/// To stop receiving further responses, the application must destroy the future.
+/// This is similar to cy_publish_reliable() except that we also wait for the remote(s) to send some P2P response(s).
+/// The response timeout is added to the delivery deadline to obtain the total time to wait for the first response;
+/// for subsequent responses it is used as the maximum inter-response interval for liveness monitoring to alert the
+/// application when responses cease to arrive. The application may destroy the future at any moment (e.g., if it
+/// needs no further responses).
+///
+/// The future will continue to receive responses as long as it is alive, even after the liveness monitoring timeout.
+/// Each received response resets the liveness timeout, which implies that the future may flip between done/pending
+/// multiple times until destroyed. The ERR_RESPONSE is cleared if the response arrives after the timeout.
+///
+/// Received deduplicated responses are stored in the future; the application should retrieve them using cy_response().
+/// The queue length is 1; on overflow, the old entry is replaced. To process all responses, the application needs to
+/// either set the future callback, which will be invoked per every received response, or to poll the future
+/// sufficiently frequently to avoid overrun.
+///
+/// If the remote node that sends the responses uses reliable delivery, it will be able to monitor whether the
+/// requester is still listening for responses (i.e., whether the future is still alive):
+/// once the future is destroyed, the local node will respond to further responses from the remote node with negative
+/// acknowledgments, which the remote application can use to decide when to cease responding if streaming is used.
+///
+/// Responses may arrive out of order depending on the behavior of the underlying network; the library does not attempt
+/// to reconstruct the original seqno ordering. It is guaranteed that each response arrives at most once. If multiple
+/// ordering-sensitive responses are expected, the application should monitor the seqno field, which starts at zero
+/// per remote and is incremented with each response.
 cy_future_t* cy_request(cy_publisher_t* const pub,
-                        const cy_us_t         delivery_deadline,
-                        const cy_us_t         first_response_deadline,
+                        const cy_us_t         delivery_deadline, // Attempt to reliably deliver the request until this
+                        const cy_us_t         response_timeout,  // NB: this is relative time, not a deadline!
                         const cy_bytes_t      message);
+
+/// If the request future holds a received response, fetches that response and demotes the future state back to pending,
+/// ready to receive the next response. If no response is available, the message pointer will be NULL.
+/// Responses will be lost if the application neglects to fetch one prior to the next response arrival; i.e.,
+/// the queue is limited to only one, most recent sample.
+///
+/// This is not idempotent -- the response is moved to the application.
+/// The application MUST use cy_message_refcount_dec() when done with the message.
+cy_response_t cy_response(cy_future_t* const future);
+
+/// Successful response arrival may be masked by non-fatal errors when querying cy_future_error().
+/// This function provides an unambiguous query that directly reports received unique responses regardless of errors.
+uint64_t cy_response_count(const cy_future_t* const future);
 
 /// Defaults to cy_prio_nominal for all newly created publishers.
 /// Changing the priority may affect the reliable delivery timeout, so if a specific timeout value is needed,
@@ -262,7 +297,7 @@ void    cy_ack_timeout_set(cy_publisher_t* const pub, const cy_us_t timeout);
 /// It can be used to obtain the topic name, hash, etc. of this publisher.
 cy_topic_t* cy_publisher_topic(const cy_publisher_t* const pub);
 
-/// All pending futures created by this publisher, if any, will be cancelled.
+/// The application MUST destroy all futures created by this publisher instance beforehand.
 void cy_unadvertise(cy_publisher_t* const pub);
 
 // =====================================================================================================================
@@ -411,14 +446,6 @@ typedef enum cy_response_status_t
     cy_response_rejected     = 2, ///< Remote received the response but the application is no longer interested in it.
 } cy_response_status_t;
 
-/// Future result of sending a reliable response message.
-/// The future will succeed iff the response is cy_response_acknowledged.
-typedef struct cy_response_result_t
-{
-    cy_response_status_t status;
-    uint64_t seqno; ///< The unique sequence number used for this response message. Constant, always available.
-} cy_response_result_t;
-
 /// Send a best-effort response to a message previously received from a topic subscription.
 /// The response will be sent directly to the publisher using peer-to-peer transport, not affecting other nodes.
 /// This can be invoked from a subscription callback or at any later point as long as the breadcrumb is available.
@@ -431,9 +458,7 @@ cy_err_t cy_respond(cy_breadcrumb_t* const breadcrumb, const cy_us_t deadline, c
 /// This is useful for streamed RPC responses where the server (the sender) needs to know whether the client
 /// is still listening or has gone away (in which case streaming should be ceased).
 ///
-/// The future result is of type cy_response_result_t. The seqno field is always available immediately upon future
-/// creation; the acknowledged field becomes true when/if the remote node acknowledges reception of the response.
-/// Destruction of the future will cancel the response if it is still pending transmission.
+/// TODO implement and document
 cy_future_t* cy_respond_reliable(cy_breadcrumb_t* const breadcrumb, const cy_us_t deadline, const cy_bytes_t message);
 
 // =====================================================================================================================

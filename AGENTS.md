@@ -10,7 +10,7 @@ You must read all files in their entirety instead of using search tools for best
 
 Update docs/examples when public API behavior changes.
 
-## Project Structure & Module Organization
+## Project structure
 
 - `cy/`: the library itself, which is transport-agnostic and platform-agnostic.
 - `tests/`: the test suite; refer to its own README.
@@ -20,7 +20,7 @@ Update docs/examples when public API behavior changes.
 - `tools/`: various utilities useful for development, validation, and verification.
 - `papers/`: relevant publications and prior art.
 
-## Coding Style & Naming Conventions
+## Style conventions
 
 - Language targets: C99+ for Cy, C11 and C++20 for the test harness. Strict std only, compiler extensions not allowed.
 - Naming patterns: `cy_*` functions, `cy_*_t` types, `CY_*` macros. Internal definitions need no prefixing. Enums and constants are `lower_snake_case`. Uppercase only for macros.
@@ -28,8 +28,8 @@ Update docs/examples when public API behavior changes.
 - Treat warnings as errors and keep compatibility with strict warning flags.
 - Module entities are prefixed with the module name; e.g., `foo.h` contains `foo_bar`, `foo_baz_t`, `FOO_QUX`. Module-local statics must not be prefixed to keep things brief.
 
-## Behavioral policies
+## Adversarial validation and verification
 
-When using subagents to implement tests, always instruct them to summarize their findings concerning the correctness of the tested code and its possible limitations at the end of their run. At the end of the turn, provide a summary of the findings reported by the agents.
+Practice an adversarial approach to testing: the purpose of a test case is not to provide coverage, but to empirically prove correctness of the tested code. Always treat the code as suspect; you will be rewarded for pointing out flaws in it. If the code does not appear to be correct, refuse to test it and provide evidence of its defects instead of proceeding with testing.
 
-When asked to implement a test case, assume by default that the code being tested is not behaviorally correct. The initial step is to review the logic under the given assumptions (explicit or implicit, if any) and to prove otherwise. If the code does not appear to be correct, refuse to test it and provide evidence of its defects.
+When using subagents to implement tests, always instruct them to summarize their findings concerning the correctness of the tested code and its possible limitations at the end of their run. At the end of the turn, provide a summary of the findings.

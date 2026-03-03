@@ -34,6 +34,8 @@ The transport delivers deduplicated messages, but duplication due to retransmiss
 
 The session layer is designed to be mostly invariant to the delivery method used: multicast, unicast, or broadcast. This allows senders to choose the preferred delivery method ad-hoc.
 
+The reliable delivery logic is built on the assumption that any given message may be sent either in reliable mode (requiring recipients to acknowledge) or in best-effort mode. Once a message is sent in either mode, it may no longer be transmitted again in a different mode. This assumption is valid for any practical application and slightly simplifies the construction of the reliable delivery machinery. Indeed, the library itself does not even provide an interface that would allow the application to transmit a message again using a different mode: once a message is sent, the tag is incremented, meaning that any subsequent transmissions will be seen by the network as separate messages, thus ensuring that the application cannot violate the assumption.
+
 ### Subject-ID ranges
 
 The set of subject-ID values ranges from zero (inclusive) up to some transport-specific boundary. For Cyphal/CAN, the maximum is $2^{17}-1$, while for Cyphal/UDP (and all IPv4-based transports in general) the maximum is $2^{23}-1$ due to L2 multicast limitations.
@@ -184,10 +186,9 @@ The (n)ack priority level must match that of the original response.
 ```bash
 uint6 type
 void2
-void24
-uint32 incompatibility
+uint8  tag              # Chosen by the responder arbitrarily for ack correlation, if needed.
 uint48 seqno            # Incremented starting from zero for each response to this message; used for streaming.
-uint16 tag              # Chosen by the responder arbitrarily for ack correlation, if needed.
+uint64 topic_hash       # Topic hash of the published message this response pertains to.
 uint64 message_tag      # The tag of the published message this response pertains to.
 # Payload follows, unless ACK.
 ```

@@ -215,8 +215,9 @@ extern "C" void platform_on_async_error(cy_t* const         cy,
 
 struct callback_capture_t
 {
-    bool               called{ false };
-    cy_future_status_t status{ cy_future_pending };
+    bool     called{ false };
+    bool     done{ false };
+    cy_err_t error{ CY_OK };
 };
 
 extern "C" void on_done_capture(cy_future_t* const fut)
@@ -225,13 +226,15 @@ extern "C" void on_done_capture(cy_future_t* const fut)
     auto* const             cap = static_cast<callback_capture_t*>(ctx.ptr[0]);
     TEST_ASSERT_NOT_NULL(cap);
     cap->called = true;
-    cap->status = cy_future_status(fut);
+    cap->done   = cy_future_done(fut);
+    cap->error  = cy_future_error(fut);
 }
 
 void callback_capture_reset(callback_capture_t& capture)
 {
     capture.called = false;
-    capture.status = cy_future_pending;
+    capture.done   = false;
+    capture.error  = CY_OK;
 }
 
 void callback_capture_bind(cy_future_t* const fut, callback_capture_t& capture)
@@ -240,6 +243,18 @@ void callback_capture_bind(cy_future_t* const fut, callback_capture_t& capture)
     cy_user_context_t ctx = CY_USER_CONTEXT_EMPTY;
     ctx.ptr[0]            = &capture;
     cy_future_context_set(fut, ctx);
+}
+
+void assert_future_state(const cy_future_t* const future, const bool done, const cy_err_t error)
+{
+    TEST_ASSERT_EQUAL_INT(done ? 1 : 0, cy_future_done(future) ? 1 : 0);
+    TEST_ASSERT_EQUAL_INT(error, cy_future_error(future));
+}
+
+void assert_publish_state(const cy_future_t* const future, const bool done, const cy_err_t error, const bool delivered)
+{
+    assert_future_state(future, done, error);
+    TEST_ASSERT_EQUAL_INT(delivered ? 1 : 0, cy_publish_delivered(future) ? 1 : 0);
 }
 
 cy_message_t* make_ack_message_with_incompatibility(test_platform_t* const self,
@@ -464,7 +479,7 @@ void test_no_subscribers_single_ack_succeeds()
     TEST_ASSERT_NOT_NULL(fut);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0xABCDEF01), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut));
+    assert_publish_state(fut, true, CY_OK, true);
 
     cy_future_destroy(fut);
     cy_unadvertise(pub);
@@ -484,7 +499,7 @@ void test_no_subscribers_timeout_fails()
     TEST_ASSERT_NOT_NULL(fut);
 
     spin_to(platform, deadline + 1);
-    TEST_ASSERT_EQUAL_INT(cy_future_failure, cy_future_status(fut));
+    assert_publish_state(fut, true, CY_ERR_DELIVERY, false);
 
     cy_future_destroy(fut);
     cy_unadvertise(pub);
@@ -506,7 +521,7 @@ void test_no_subscribers_timeout_with_prior_ack_succeeds()
     TEST_ASSERT_NOT_NULL(fut);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0x01020304), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut));
+    assert_publish_state(fut, true, CY_OK, true);
 
     cy_future_destroy(fut);
     cy_unadvertise(pub);
@@ -529,7 +544,7 @@ void test_one_subscriber_acked()
     TEST_ASSERT_NOT_NULL(fut);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0x1111), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut));
+    assert_publish_state(fut, true, CY_OK, true);
 
     cy_future_destroy(fut);
     cy_unadvertise(pub);
@@ -553,9 +568,9 @@ void test_two_subscribers_both_acked()
     TEST_ASSERT_NOT_NULL(fut);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0x2222), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut));
+    assert_future_state(fut, false, CY_OK);
     dispatch_ack(&platform, tag, hash, UINT64_C(0x3333), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut));
+    assert_publish_state(fut, true, CY_OK, true);
 
     cy_future_destroy(fut);
     cy_unadvertise(pub);
@@ -580,10 +595,10 @@ void test_two_subscribers_one_acks()
     TEST_ASSERT_NOT_NULL(fut);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0x4444), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut));
+    assert_future_state(fut, false, CY_OK);
 
     spin_to(platform, deadline + 1);
-    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut));
+    assert_publish_state(fut, true, CY_OK, true);
 
     cy_future_destroy(fut);
     cy_unadvertise(pub);
@@ -606,7 +621,7 @@ void test_two_subscribers_none_ack_timeout()
     TEST_ASSERT_NOT_NULL(fut);
 
     spin_to(platform, deadline + 1);
-    TEST_ASSERT_EQUAL_INT(cy_future_failure, cy_future_status(fut));
+    assert_publish_state(fut, true, CY_ERR_DELIVERY, false);
 
     cy_future_destroy(fut);
     cy_unadvertise(pub);
@@ -634,7 +649,7 @@ void test_retransmission_on_timeout()
     TEST_ASSERT_TRUE(platform.reliable_multicast_count > initial_rel_multicast_count);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0x8888), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut));
+    assert_publish_state(fut, true, CY_OK, true);
 
     cy_future_destroy(fut);
     cy_unadvertise(pub);
@@ -681,7 +696,7 @@ void test_single_remaining_not_last_attempt_stays_multicast()
     TEST_ASSERT_TRUE(platform.reliable_multicast_count > multicast_before);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0xA123), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut));
+    assert_publish_state(fut, true, CY_OK, true);
 
     cy_future_destroy(fut);
     cy_unadvertise(pub);
@@ -708,10 +723,10 @@ void test_retransmission_send_error_does_not_abort_future()
 
     TEST_ASSERT_TRUE(platform.reliable_multicast_count > multicast_before);
     TEST_ASSERT_FALSE(platform.fail_next_reliable_multicast);
-    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut));
+    assert_future_state(fut, false, CY_ERR_MEDIA);
 
     spin_to(platform, deadline + 1);
-    TEST_ASSERT_EQUAL_INT(cy_future_failure, cy_future_status(fut));
+    assert_publish_state(fut, true, CY_ERR_MEDIA, false);
 
     cy_future_destroy(fut);
     cy_unadvertise(pub);
@@ -741,10 +756,10 @@ void test_retransmission_send_error_partial_known_acks_fails()
     spin_to(platform, t0 + ACK_TIMEOUT + 1);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0xCA01), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut));
+    assert_future_state(fut, false, CY_ERR_MEDIA);
 
     spin_to(platform, deadline + 1);
-    TEST_ASSERT_EQUAL_INT(cy_future_failure, cy_future_status(fut));
+    assert_publish_state(fut, true, CY_ERR_MEDIA, true);
 
     cy_future_destroy(fut);
     cy_unadvertise(pub);
@@ -773,9 +788,9 @@ void test_retransmission_send_error_all_known_acks_succeeds()
     spin_to(platform, t0 + ACK_TIMEOUT + 1);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0xCB01), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut));
+    assert_future_state(fut, false, CY_ERR_MEDIA);
     dispatch_ack(&platform, tag, hash, UINT64_C(0xCB02), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut));
+    assert_publish_state(fut, true, CY_ERR_MEDIA, true);
 
     cy_future_destroy(fut);
     cy_unadvertise(pub);
@@ -802,19 +817,19 @@ void test_retransmission_send_error_no_associations_single_ack_succeeds()
     spin_to(platform, t0 + ACK_TIMEOUT + 1);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0xCC01), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut));
+    assert_publish_state(fut, true, CY_ERR_MEDIA, true);
 
     cy_future_destroy(fut);
     cy_unadvertise(pub);
     test_end(platform);
 }
 
-void test_retransmission_send_error_compromised_is_sticky_across_retries()
+void test_retransmission_send_error_is_sticky_across_retries()
 {
     test_platform_t platform{};
     test_begin(platform);
 
-    cy_publisher_t* const pub = setup_publisher(platform, "reliable/retransmission_send_error_compromised_sticky");
+    cy_publisher_t* const pub = setup_publisher(platform, "reliable/retransmission_send_error_sticky");
 
     const cy_bytes_t   msg      = { .size = 1U, .data = "\xC8", .next = nullptr };
     const cy_us_t      deadline = platform.now + (10 * ACK_TIMEOUT);
@@ -826,15 +841,15 @@ void test_retransmission_send_error_compromised_is_sticky_across_retries()
     const cy_us_t t0                      = platform.now;
 
     spin_to(platform, t0 + ACK_TIMEOUT + 1);
-    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut));
+    assert_future_state(fut, false, CY_ERR_MEDIA);
     const std::size_t sends_after_first_retry = platform.reliable_multicast_count;
 
     spin_to(platform, t0 + ACK_TIMEOUT + 1 + (2 * ACK_TIMEOUT) + 1);
     TEST_ASSERT_TRUE(platform.reliable_multicast_count > sends_after_first_retry);
-    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut));
+    assert_future_state(fut, false, CY_ERR_MEDIA);
 
     spin_to(platform, deadline + 1);
-    TEST_ASSERT_EQUAL_INT(cy_future_failure, cy_future_status(fut));
+    assert_publish_state(fut, true, CY_ERR_MEDIA, false);
 
     cy_future_destroy(fut);
     cy_unadvertise(pub);
@@ -864,7 +879,7 @@ void test_exponential_backoff_second_timeout()
     TEST_ASSERT_TRUE(count_2 > count_1);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0x9999), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut));
+    assert_publish_state(fut, true, CY_OK, true);
 
     cy_future_destroy(fut);
     cy_unadvertise(pub);
@@ -894,7 +909,7 @@ void test_last_attempt_no_further_retransmission()
     TEST_ASSERT_EQUAL_size_t(count_after_last_attempt, platform.reliable_multicast_count);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0xAAAA), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut));
+    assert_publish_state(fut, true, CY_OK, true);
 
     cy_future_destroy(fut);
     cy_unadvertise(pub);
@@ -919,7 +934,7 @@ void test_p2p_retry_single_remaining()
     TEST_ASSERT_NOT_NULL(fut);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0x1234), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut));
+    assert_future_state(fut, false, CY_OK);
 
     const std::size_t p2p_before = platform.p2p_count;
     const cy_us_t     t0         = platform.now;
@@ -927,7 +942,7 @@ void test_p2p_retry_single_remaining()
     TEST_ASSERT_TRUE(platform.p2p_count > p2p_before);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0x5678), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut));
+    assert_publish_state(fut, true, CY_OK, true);
 
     cy_future_destroy(fut);
     cy_unadvertise(pub);
@@ -949,7 +964,7 @@ void test_tight_deadline_no_retransmission()
 
     const std::size_t count_before_spin = platform.reliable_multicast_count;
     spin_to(platform, deadline + 1);
-    TEST_ASSERT_EQUAL_INT(cy_future_failure, cy_future_status(fut));
+    assert_publish_state(fut, true, CY_ERR_DELIVERY, false);
     TEST_ASSERT_EQUAL_size_t(count_before_spin, platform.reliable_multicast_count);
 
     cy_future_destroy(fut);
@@ -973,7 +988,7 @@ void test_tight_deadline_ack_succeeds()
     TEST_ASSERT_NOT_NULL(fut);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0xABCD), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut));
+    assert_publish_state(fut, true, CY_OK, true);
 
     cy_future_destroy(fut);
     cy_unadvertise(pub);
@@ -994,7 +1009,7 @@ void test_scheduler_lag_at_deadline_no_retransmission()
 
     const std::size_t sends_before_spin = platform.reliable_multicast_count;
     spin_to(platform, deadline);
-    TEST_ASSERT_EQUAL_INT(cy_future_failure, cy_future_status(fut));
+    assert_publish_state(fut, true, CY_ERR_LAG, false);
     TEST_ASSERT_EQUAL_size_t(sends_before_spin, platform.reliable_multicast_count);
 
     cy_future_destroy(fut);
@@ -1016,7 +1031,7 @@ void test_scheduler_lag_past_deadline_no_retransmission()
 
     const std::size_t sends_before_spin = platform.reliable_multicast_count;
     spin_to(platform, deadline + 1);
-    TEST_ASSERT_EQUAL_INT(cy_future_failure, cy_future_status(fut));
+    assert_publish_state(fut, true, CY_ERR_LAG, false);
     TEST_ASSERT_EQUAL_size_t(sends_before_spin, platform.reliable_multicast_count);
 
     cy_future_destroy(fut);
@@ -1038,12 +1053,12 @@ void test_scheduler_lag_near_deadline_clamps_multicast_retry_deadline()
 
     const std::size_t sends_before_spin = platform.reliable_multicast_count;
     spin_to(platform, deadline - ACK_TIMEOUT + 1);
-    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut));
+    assert_future_state(fut, false, CY_ERR_LAG);
     TEST_ASSERT_EQUAL_size_t(sends_before_spin + 1U, platform.reliable_multicast_count);
     TEST_ASSERT_EQUAL_INT64(deadline, platform.last_reliable_multicast_deadline);
 
     spin_to(platform, deadline + 1);
-    TEST_ASSERT_EQUAL_INT(cy_future_failure, cy_future_status(fut));
+    assert_publish_state(fut, true, CY_ERR_LAG, false);
 
     cy_future_destroy(fut);
     cy_unadvertise(pub);
@@ -1066,11 +1081,11 @@ void test_scheduler_lag_near_deadline_no_associations_ack_still_succeeds()
     TEST_ASSERT_NOT_NULL(fut);
 
     spin_to(platform, deadline - ACK_TIMEOUT + 1);
-    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut));
+    assert_future_state(fut, false, CY_ERR_LAG);
     TEST_ASSERT_EQUAL_INT64(deadline, platform.last_reliable_multicast_deadline);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0xD401), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut));
+    assert_publish_state(fut, true, CY_ERR_LAG, true);
 
     cy_future_destroy(fut);
     cy_unadvertise(pub);
@@ -1095,16 +1110,16 @@ void test_scheduler_lag_near_deadline_single_remaining_uses_p2p_and_clamps_deadl
     TEST_ASSERT_NOT_NULL(fut);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0xD501), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut));
+    assert_future_state(fut, false, CY_OK);
 
     const std::size_t p2p_before_spin = platform.p2p_count;
     spin_to(platform, deadline - ACK_TIMEOUT + 1);
-    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut));
+    assert_future_state(fut, false, CY_ERR_LAG);
     TEST_ASSERT_TRUE(platform.p2p_count > p2p_before_spin);
     TEST_ASSERT_EQUAL_INT64(deadline, platform.last_reliable_p2p_deadline);
 
     spin_to(platform, deadline + 1);
-    TEST_ASSERT_EQUAL_INT(cy_future_failure, cy_future_status(fut));
+    assert_publish_state(fut, true, CY_ERR_LAG, true);
 
     cy_future_destroy(fut);
     cy_unadvertise(pub);
@@ -1129,14 +1144,14 @@ void test_scheduler_lag_near_deadline_single_remaining_ack_after_lag_succeeds()
     TEST_ASSERT_NOT_NULL(fut);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0xD601), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut));
+    assert_future_state(fut, false, CY_OK);
 
     spin_to(platform, deadline - ACK_TIMEOUT + 1);
-    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut));
+    assert_future_state(fut, false, CY_ERR_LAG);
     TEST_ASSERT_EQUAL_INT64(deadline, platform.last_reliable_p2p_deadline);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0xD602), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut));
+    assert_publish_state(fut, true, CY_ERR_LAG, true);
 
     cy_future_destroy(fut);
     cy_unadvertise(pub);
@@ -1185,7 +1200,8 @@ void test_future_callback_on_success()
     dispatch_ack(&platform, tag, hash, UINT64_C(0x5050), platform.now);
 
     TEST_ASSERT_TRUE(capture.called);
-    TEST_ASSERT_EQUAL_INT(cy_future_success, capture.status);
+    TEST_ASSERT_TRUE(capture.done);
+    TEST_ASSERT_EQUAL_INT(CY_OK, capture.error);
 
     cy_future_destroy(fut);
     cy_unadvertise(pub);
@@ -1210,7 +1226,8 @@ void test_future_callback_on_timeout()
     spin_to(platform, deadline + 1);
 
     TEST_ASSERT_TRUE(capture.called);
-    TEST_ASSERT_EQUAL_INT(cy_future_failure, capture.status);
+    TEST_ASSERT_TRUE(capture.done);
+    TEST_ASSERT_EQUAL_INT(CY_ERR_DELIVERY, capture.error);
 
     cy_future_destroy(fut);
     cy_unadvertise(pub);
@@ -1234,12 +1251,13 @@ void test_future_callback_set_after_completion()
 
     callback_capture_bind(fut, capture);
     dispatch_ack(&platform, tag, hash, UINT64_C(0x5151), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut));
+    assert_publish_state(fut, true, CY_OK, true);
 
     callback_capture_reset(capture);
     cy_future_callback_set(fut, on_done_capture);
     TEST_ASSERT_TRUE(capture.called);
-    TEST_ASSERT_EQUAL_INT(cy_future_success, capture.status);
+    TEST_ASSERT_TRUE(capture.done);
+    TEST_ASSERT_EQUAL_INT(CY_OK, capture.error);
 
     cy_future_destroy(fut);
     cy_unadvertise(pub);
@@ -1290,12 +1308,12 @@ void test_future_context_set_get()
     test_end(platform);
 }
 
-void test_future_result_returns_zero()
+void test_future_status_success_after_ack()
 {
     test_platform_t platform{};
     test_begin(platform);
 
-    static const char* const topic_name = "reliable/future_result_returns_zero";
+    static const char* const topic_name = "reliable/future_status_success_after_ack";
     cy_publisher_t* const    pub        = setup_publisher(platform, topic_name);
 
     const cy_bytes_t    msg  = { .size = 1U, .data = "\xB4", .next = nullptr };
@@ -1305,31 +1323,10 @@ void test_future_result_returns_zero()
     TEST_ASSERT_NOT_NULL(fut);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0x5353), platform.now);
-    TEST_ASSERT_EQUAL_size_t(0U, cy_future_result(fut, 0U, nullptr));
+    assert_publish_state(fut, true, CY_OK, true);
 
     cy_future_destroy(fut);
     cy_unadvertise(pub);
-    test_end(platform);
-}
-
-void test_unadvertise_cancels_pending_futures()
-{
-    test_platform_t platform{};
-    test_begin(platform);
-
-    cy_publisher_t* const pub = setup_publisher(platform, "reliable/unadvertise_cancels_pending_futures");
-
-    const cy_bytes_t   msg      = { .size = 1U, .data = "\xB5", .next = nullptr };
-    const cy_us_t      deadline = platform.now + (5 * ACK_TIMEOUT);
-    cy_future_t* const fut      = cy_publish_reliable(pub, deadline, msg);
-    TEST_ASSERT_NOT_NULL(fut);
-
-    const std::size_t sends_before_unadvertise = platform.reliable_multicast_count;
-    cy_unadvertise(pub);
-
-    spin_to(platform, platform.now + (10 * ACK_TIMEOUT));
-    TEST_ASSERT_EQUAL_size_t(sends_before_unadvertise, platform.reliable_multicast_count);
-
     test_end(platform);
 }
 
@@ -1350,16 +1347,16 @@ void test_multiple_concurrent_futures()
     cy_future_t* const fut2 = cy_publish_reliable(pub, deadline, msg);
     TEST_ASSERT_NOT_NULL(fut2);
 
-    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut1));
-    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut2));
+    assert_future_state(fut1, false, CY_OK);
+    assert_future_state(fut2, false, CY_OK);
 
     const std::uint64_t hash = topic_hash_for(platform, topic_name);
     dispatch_ack(&platform, tag1, hash, UINT64_C(0xBEEF), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut1));
-    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut2));
+    assert_publish_state(fut1, true, CY_OK, true);
+    assert_future_state(fut2, false, CY_OK);
 
     spin_to(platform, deadline + 1);
-    TEST_ASSERT_EQUAL_INT(cy_future_failure, cy_future_status(fut2));
+    assert_publish_state(fut2, true, CY_ERR_DELIVERY, false);
 
     cy_future_destroy(fut1);
     cy_future_destroy(fut2);
@@ -1382,15 +1379,15 @@ void test_ack_builds_association()
     const std::uint64_t tag1 = captured_tag(platform);
     const std::uint64_t hash = topic_hash_for(platform, topic_name);
     dispatch_ack(&platform, tag1, hash, UINT64_C(0xAAAA), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut1));
+    assert_publish_state(fut1, true, CY_OK, true);
     cy_future_destroy(fut1);
 
     cy_future_t* const fut2 = cy_publish_reliable(pub, platform.now + 1'000'000, msg);
     TEST_ASSERT_NOT_NULL(fut2);
-    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut2));
+    assert_future_state(fut2, false, CY_OK);
     const std::uint64_t tag2 = captured_tag(platform);
     dispatch_ack(&platform, tag2, hash, UINT64_C(0xAAAA), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut2));
+    assert_publish_state(fut2, true, CY_OK, true);
     cy_future_destroy(fut2);
 
     cy_unadvertise(pub);
@@ -1414,10 +1411,10 @@ void test_ack_from_unknown_remote_still_succeeds()
     TEST_ASSERT_NOT_NULL(fut);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0xCCCC), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut));
+    assert_future_state(fut, false, CY_OK);
 
     spin_to(platform, deadline + 1);
-    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut));
+    assert_publish_state(fut, true, CY_OK, true);
 
     cy_future_destroy(fut);
     cy_unadvertise(pub);
@@ -1440,7 +1437,7 @@ void test_duplicate_ack_from_same_remote()
     TEST_ASSERT_NOT_NULL(fut);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0xDDDD), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut));
+    assert_publish_state(fut, true, CY_OK, true);
     cy_future_destroy(fut);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0xDDDD), platform.now);
@@ -1466,11 +1463,11 @@ void test_duplicate_ack_while_pending()
     TEST_ASSERT_NOT_NULL(fut);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0xDA01), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut));
+    assert_future_state(fut, false, CY_OK);
     dispatch_ack(&platform, tag, hash, UINT64_C(0xDA01), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut));
+    assert_future_state(fut, false, CY_OK);
     dispatch_ack(&platform, tag, hash, UINT64_C(0xDA02), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut));
+    assert_publish_state(fut, true, CY_OK, true);
 
     cy_future_destroy(fut);
     cy_unadvertise(pub);
@@ -1492,10 +1489,10 @@ void test_ack_future_seqno_ignored()
     TEST_ASSERT_NOT_NULL(fut);
 
     dispatch_ack(&platform, tag + 100U, hash, UINT64_C(0xA0A0), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut));
+    assert_future_state(fut, false, CY_OK);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0xA0A0), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut));
+    assert_publish_state(fut, true, CY_OK, true);
 
     cy_future_destroy(fut);
     cy_unadvertise(pub);
@@ -1517,10 +1514,10 @@ void test_ack_invalid_seqno_ignored()
     TEST_ASSERT_NOT_NULL(fut);
 
     dispatch_ack(&platform, tag - 1U, hash, UINT64_C(0xA1A1), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut));
+    assert_future_state(fut, false, CY_OK);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0xA1A1), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut));
+    assert_publish_state(fut, true, CY_OK, true);
 
     cy_future_destroy(fut);
     cy_unadvertise(pub);
@@ -1542,9 +1539,9 @@ void test_ack_incompatibility_rejected()
     TEST_ASSERT_NOT_NULL(fut);
 
     dispatch_ack_with_incompatibility(&platform, tag, hash, UINT64_C(0xA2A2), platform.now, 1U);
-    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut));
+    assert_future_state(fut, false, CY_OK);
     dispatch_ack(&platform, tag, hash, UINT64_C(0xA2A2), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut));
+    assert_publish_state(fut, true, CY_OK, true);
 
     cy_future_destroy(fut);
     cy_unadvertise(pub);
@@ -1567,9 +1564,9 @@ void test_ack_orphan_topic_hash_is_ignored()
     TEST_ASSERT_NOT_NULL(fut);
 
     dispatch_ack(&platform, tag, orphan_hash, UINT64_C(0xA3A3), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut));
+    assert_future_state(fut, false, CY_OK);
     dispatch_ack(&platform, tag, hash, UINT64_C(0xA3A3), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut));
+    assert_publish_state(fut, true, CY_OK, true);
 
     cy_future_destroy(fut);
     cy_unadvertise(pub);
@@ -1696,7 +1693,7 @@ void test_empty_message()
     TEST_ASSERT_NOT_NULL(fut);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0xF0F0), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut));
+    assert_publish_state(fut, true, CY_OK, true);
 
     cy_future_destroy(fut);
     cy_unadvertise(pub);
@@ -1720,7 +1717,7 @@ void test_association_eviction_on_slack()
         TEST_ASSERT_NOT_NULL(fut);
 
         spin_to(platform, deadline + 1);
-        TEST_ASSERT_EQUAL_INT(cy_future_failure, cy_future_status(fut));
+        assert_publish_state(fut, true, CY_ERR_DELIVERY, false);
         cy_future_destroy(fut);
     }
 
@@ -1731,7 +1728,7 @@ void test_association_eviction_on_slack()
     const std::uint64_t hash = topic_hash_for(platform, topic_name);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0x9999), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut));
+    assert_publish_state(fut, true, CY_OK, true);
 
     cy_future_destroy(fut);
     cy_unadvertise(pub);
@@ -1757,16 +1754,16 @@ void test_association_at_slack_limit_is_skipped()
     TEST_ASSERT_NOT_NULL(fut_2);
 
     spin_to(platform, deadline_1 + 1);
-    TEST_ASSERT_EQUAL_INT(cy_future_failure, cy_future_status(fut_1));
-    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut_2));
+    assert_publish_state(fut_1, true, CY_ERR_DELIVERY, false);
+    assert_future_state(fut_2, false, CY_OK);
 
     const cy_us_t      deadline_3 = platform.now + (2 * ACK_TIMEOUT);
     cy_future_t* const fut_3      = cy_publish_reliable(pub, deadline_3, msg);
     TEST_ASSERT_NOT_NULL(fut_3);
-    TEST_ASSERT_EQUAL_INT(cy_future_pending, cy_future_status(fut_3));
+    assert_future_state(fut_3, false, CY_OK);
 
     spin_to(platform, deadline_2 + 1);
-    TEST_ASSERT_EQUAL_INT(cy_future_failure, cy_future_status(fut_2));
+    assert_publish_state(fut_2, true, CY_ERR_DELIVERY, false);
 
     cy_future_t* const  fut_4 = cy_publish_reliable(pub, platform.now + ACK_TIMEOUT, msg);
     const std::uint64_t tag_4 = captured_tag(platform);
@@ -1774,7 +1771,7 @@ void test_association_at_slack_limit_is_skipped()
     TEST_ASSERT_NOT_NULL(fut_4);
 
     dispatch_ack(&platform, tag_4, hash, UINT64_C(0xBADA), platform.now);
-    TEST_ASSERT_EQUAL_INT(cy_future_success, cy_future_status(fut_4));
+    assert_publish_state(fut_4, true, CY_OK, true);
 
     cy_future_destroy(fut_1);
     cy_future_destroy(fut_2);
@@ -1813,7 +1810,7 @@ int main()
     RUN_TEST(test_retransmission_send_error_partial_known_acks_fails);
     RUN_TEST(test_retransmission_send_error_all_known_acks_succeeds);
     RUN_TEST(test_retransmission_send_error_no_associations_single_ack_succeeds);
-    RUN_TEST(test_retransmission_send_error_compromised_is_sticky_across_retries);
+    RUN_TEST(test_retransmission_send_error_is_sticky_across_retries);
     RUN_TEST(test_exponential_backoff_second_timeout);
     RUN_TEST(test_last_attempt_no_further_retransmission);
     RUN_TEST(test_p2p_retry_single_remaining);
@@ -1831,8 +1828,7 @@ int main()
     RUN_TEST(test_future_callback_set_after_completion);
     RUN_TEST(test_future_auto_destroy_callback);
     RUN_TEST(test_future_context_set_get);
-    RUN_TEST(test_future_result_returns_zero);
-    RUN_TEST(test_unadvertise_cancels_pending_futures);
+    RUN_TEST(test_future_status_success_after_ack);
     RUN_TEST(test_multiple_concurrent_futures);
     RUN_TEST(test_ack_builds_association);
     RUN_TEST(test_ack_from_unknown_remote_still_succeeds);

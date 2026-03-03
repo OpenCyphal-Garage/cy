@@ -171,7 +171,6 @@ static void fixture_deinit(fixture_t* const self)
     if (self->cy != NULL) {
         TEST_ASSERT_TRUE(wkv_is_empty(&self->cy->subscribers_by_name));
         TEST_ASSERT_TRUE(wkv_is_empty(&self->cy->subscribers_by_pattern));
-        TEST_ASSERT_NULL(self->cy->request_futures_by_tag);
         TEST_ASSERT_NULL(self->cy->response_futures_by_tag);
         for (cy_topic_t* topic = cy_topic_iter_first(self->cy); topic != NULL; topic = cy_topic_iter_next(topic)) {
             TEST_ASSERT_EQUAL_UINT32(0U, topic->pub_count);
@@ -228,31 +227,19 @@ typedef struct
     cy_future_t base;
     bool        done;
     cy_tree_t** index_owner;
-    size_t*     cancel_count;
-    size_t*     finalize_count;
+    size_t*     dispose_count;
 } fake_future_t;
 
-static cy_future_status_t fake_future_status(const cy_future_t* const base)
+static bool fake_future_done(const cy_future_t* const base)
 {
     const fake_future_t* const self = (const fake_future_t*)base;
-    return self->done ? cy_future_success : cy_future_pending;
+    return self->done;
 }
 
-static size_t fake_future_result(cy_future_t* const base, const size_t storage_size, void* const storage)
+static cy_err_t fake_future_error(const cy_future_t* const base)
 {
     (void)base;
-    (void)storage_size;
-    (void)storage;
-    return 0U;
-}
-
-static void fake_future_cancel(cy_future_t* const base)
-{
-    fake_future_t* const self = (fake_future_t*)base;
-    self->done                = true;
-    if (self->cancel_count != NULL) {
-        (*self->cancel_count)++;
-    }
+    return CY_OK;
 }
 
 static void fake_future_timeout(cy_future_t* const base, const cy_us_t scheduled, const cy_us_t now)
@@ -262,36 +249,35 @@ static void fake_future_timeout(cy_future_t* const base, const cy_us_t scheduled
     (void)now;
 }
 
-static void fake_future_finalize(cy_future_t* const base)
+static void fake_future_dispose(cy_future_t* const base)
 {
     fake_future_t* const self = (fake_future_t*)base;
+    self->done                = true;
     if ((self->index_owner != NULL) && cavl2_is_inserted(*self->index_owner, &self->base.index)) {
         cavl2_remove(self->index_owner, &self->base.index);
     }
-    if (self->finalize_count != NULL) {
-        (*self->finalize_count)++;
+    if (self->dispose_count != NULL) {
+        (*self->dispose_count)++;
     }
+    mem_free(base->cy, base);
 }
 
-static const cy_future_vtable_t fake_future_vtable = { .status   = fake_future_status,
-                                                       .result   = fake_future_result,
-                                                       .cancel   = fake_future_cancel,
-                                                       .timeout  = fake_future_timeout,
-                                                       .finalize = fake_future_finalize };
+static const cy_future_vtable_t fake_future_vtable = { .done    = fake_future_done,
+                                                       .error   = fake_future_error,
+                                                       .timeout = fake_future_timeout,
+                                                       .dispose = fake_future_dispose };
 
 static fake_future_t* make_fake_future(cy_t* const       cy,
-                                       size_t* const     cancel_count,
-                                       size_t* const     finalize_count,
+                                       size_t* const     dispose_count,
                                        const bool        done,
                                        const uint64_t    key,
                                        cy_tree_t** const index)
 {
     fake_future_t* const out = (fake_future_t*)future_new(cy, &fake_future_vtable, sizeof(fake_future_t));
     if (out != NULL) {
-        out->done           = done;
-        out->index_owner    = index;
-        out->cancel_count   = cancel_count;
-        out->finalize_count = finalize_count;
+        out->done          = done;
+        out->index_owner   = index;
+        out->dispose_count = dispose_count;
         TEST_ASSERT_TRUE(future_index_insert(&out->base, index, key));
     }
     return out;
@@ -339,52 +325,6 @@ static void test_cy_destroy_after_user_unsubscribes_and_spins(void)
     TEST_ASSERT_NULL(fix.platform.cy);
     TEST_ASSERT_EQUAL_size_t(1U, fix.subject_reader_destroy_count); // broadcast reader only
     TEST_ASSERT_EQUAL_size_t(1U, fix.subject_writer_destroy_count); // broadcast writer
-    fixture_deinit(&fix);
-}
-
-static void test_cy_destroy_after_user_destroys_futures(void)
-{
-    fixture_t fix;
-    fixture_init(&fix);
-
-    cy_topic_t* const topic =
-      fixture_make_topic(&fix, "destroy/futures/topic", UINT64_C(0x1000000000000B00), 0U, LAGE_MIN);
-    TEST_ASSERT_NOT_NULL(topic);
-
-    size_t cancel_topic      = 0U;
-    size_t finalize_topic    = 0U;
-    size_t cancel_request    = 0U;
-    size_t finalize_request  = 0U;
-    size_t cancel_response   = 0U;
-    size_t finalize_response = 0U;
-
-    fake_future_t* const fut_topic =
-      make_fake_future(fix.cy, &cancel_topic, &finalize_topic, false, UINT64_C(0xA001), &topic->pub_futures_by_tag);
-    fake_future_t* const fut_request = make_fake_future(
-      fix.cy, &cancel_request, &finalize_request, false, UINT64_C(0xA002), &fix.cy->request_futures_by_tag);
-    fake_future_t* const fut_response = make_fake_future(
-      fix.cy, &cancel_response, &finalize_response, true, UINT64_C(0xA003), &fix.cy->response_futures_by_tag);
-    TEST_ASSERT_NOT_NULL(fut_topic);
-    TEST_ASSERT_NOT_NULL(fut_request);
-    TEST_ASSERT_NOT_NULL(fut_response);
-
-    cy_future_destroy(&fut_topic->base);
-    cy_future_destroy(&fut_request->base);
-    cy_future_destroy(&fut_response->base);
-    TEST_ASSERT_NULL(topic->pub_futures_by_tag);
-    TEST_ASSERT_NULL(fix.cy->request_futures_by_tag);
-    TEST_ASSERT_NULL(fix.cy->response_futures_by_tag);
-
-    cy_destroy(fix.cy);
-    fix.cy = NULL;
-
-    TEST_ASSERT_NULL(fix.platform.cy);
-    TEST_ASSERT_EQUAL_size_t(1U, cancel_topic);
-    TEST_ASSERT_EQUAL_size_t(1U, finalize_topic);
-    TEST_ASSERT_EQUAL_size_t(1U, cancel_request);
-    TEST_ASSERT_EQUAL_size_t(1U, finalize_request);
-    TEST_ASSERT_EQUAL_size_t(0U, cancel_response); // already materialized
-    TEST_ASSERT_EQUAL_size_t(1U, finalize_response);
     fixture_deinit(&fix);
 }
 
@@ -1049,7 +989,6 @@ int main(void)
     RUN_TEST(test_cy_destroy_null_is_noop);
     RUN_TEST(test_cy_destroy_empty_instance_cleans_all_resources);
     RUN_TEST(test_cy_destroy_after_user_unsubscribes_and_spins);
-    RUN_TEST(test_cy_destroy_after_user_destroys_futures);
     RUN_TEST(test_cy_destroy_handles_missing_broadcast_handles);
     RUN_TEST(test_cy_advertise_client_validation_oom_and_extent_growth);
     RUN_TEST(test_topic_new_rejects_invalid_name);

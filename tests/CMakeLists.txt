@@ -110,6 +110,12 @@ cy_gen_test_intrusive_matrix(test_intrusive_publish_reliable
         src/helpers.c
         platform_stubs/guarded_heap.c
 )
+cy_gen_test_intrusive_matrix(test_intrusive_rpc
+        src/test_intrusive_rpc.c
+        src/helpers.c
+        platform_stubs/guarded_heap.c
+        platform_stubs/message.c
+)
 cy_gen_test_intrusive_matrix(test_intrusive_gossip
         src/test_intrusive_gossip.c
         src/helpers.c
@@ -177,6 +183,10 @@ cy_gen_test_arch_matrix(test_api_consensus_model_based 11 "CY_CONFIG_TRACE=1"
 )
 cy_gen_test_arch_matrix(test_api_pubsub_e2e_baseline 11 "CY_CONFIG_TRACE=1"
         src/test_api_pubsub_e2e_baseline.cpp
+        ${cy_api_e2e_common_sources}
+)
+cy_gen_test_arch_matrix(test_api_rpc_e2e 11 "CY_CONFIG_TRACE=1"
+        src/test_api_rpc_e2e.cpp
         ${cy_api_e2e_common_sources}
 )
 cy_gen_test_arch_matrix(test_api_pubsub_e2e_reliable_loss 11 "CY_CONFIG_TRACE=1"

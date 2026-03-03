@@ -360,13 +360,12 @@ void summarize_futures(const std::vector<future_state_t>& futures,
         if (item.future == nullptr) {
             continue;
         }
-        const cy_future_status_t st = cy_future_status(item.future);
-        if (st == cy_future_success) {
-            success++;
-        } else if (st == cy_future_failure) {
-            failure++;
-        } else {
+        if (!cy_future_done(item.future)) {
             pending++;
+        } else if (cy_publish_delivered(item.future)) {
+            success++;
+        } else {
+            failure++;
         }
     }
 }

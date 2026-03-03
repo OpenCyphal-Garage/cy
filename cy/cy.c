@@ -184,7 +184,6 @@ struct cy_t
     wkv_t subscribers_by_pattern; // Only patterns for implicit subscriptions on gossips.
 
     // Pending network state indexes. Removal is guided by remote nodes and by deadline (via olga).
-    cy_tree_t* request_futures_by_tag;
     cy_tree_t* response_futures_by_tag;
 
     size_t p2p_extent;
@@ -477,6 +476,13 @@ static byte_t* serialize_u32(byte_t* ptr, const uint32_t value)
     }
     return ptr;
 }
+static byte_t* serialize_u48(byte_t* ptr, const uint64_t value)
+{
+    for (size_t i = 0; i < 6; i++) {
+        *ptr++ = (byte_t)((byte_t)(value >> (i * 8U)) & 0xFFU);
+    }
+    return ptr;
+}
 static byte_t* serialize_u64(byte_t* ptr, const uint64_t value)
 {
     for (size_t i = 0; i < 8; i++) {
@@ -488,6 +494,14 @@ static uint32_t deserialize_u32(const byte_t* ptr)
 {
     uint32_t value = 0;
     for (size_t i = 0; i < 4; i++) {
+        value |= ((uint64_t)*ptr++ << (i * 8U));
+    }
+    return value;
+}
+static uint64_t deserialize_u48(const byte_t* ptr)
+{
+    uint64_t value = 0;
+    for (size_t i = 0; i < 6; i++) {
         value |= ((uint64_t)*ptr++ << (i * 8U));
     }
     return value;
@@ -507,7 +521,9 @@ static uint64_t deserialize_u64(const byte_t* ptr)
 
 typedef uint64_t bitmap_t;
 
-static size_t bitmap_footprint(const size_t count) { return ((count + 63U) / 64U) * sizeof(bitmap_t); }
+#define BITMAP_WORDS(bit_count) (((bit_count) + 63U) / 64U)
+
+static size_t bitmap_footprint(const size_t bit_count) { return BITMAP_WORDS(bit_count) * sizeof(bitmap_t); }
 
 // Initially the bitmap will have all bits cleared.
 static bitmap_t* bitmap_new(const cy_t* const cy, const size_t count)
@@ -522,16 +538,20 @@ static bool bitmap_test(const bitmap_t* const bitmap, const size_t bit)
 {
     return (bitmap[bit / 64U] & (1ULL << (bit % 64U))) != 0;
 }
+static bool bitmap_test_bounded(const bitmap_t* const bitmap, const size_t bit_count, const uintmax_t bit)
+{
+    return (bit < bit_count) && bitmap_test(bitmap, (size_t)bit);
+}
 
 // Find the index of the first set bit. Returns `count` if no bits are set.
-static size_t bitmap_clz(const bitmap_t* const bitmap, const size_t count)
+static size_t bitmap_clz(const bitmap_t* const bitmap, const size_t bit_count)
 {
     if (bitmap != NULL) {
-        const size_t words = (count + 63U) / 64U;
+        const size_t words = BITMAP_WORDS(bit_count);
         for (size_t i = 0; i < words; i++) {
             bitmap_t bits = bitmap[i];
             if (i == (words - 1U)) { // Ignore the padding bits of the last word if count is not a multiple of 64.
-                const size_t tail = count % 64U;
+                const size_t tail = bit_count % 64U;
                 if (tail > 0U) {
                     bits &= (1ULL << tail) - 1ULL;
                 }
@@ -539,12 +559,88 @@ static size_t bitmap_clz(const bitmap_t* const bitmap, const size_t count)
             if (bits != 0U) {
                 const size_t first = 63U - clz64(bits & (0ULL - bits));
                 const size_t out   = (i * 64U) + first;
-                assert(out < count);
+                assert(out < bit_count);
                 return out;
             }
         }
     }
-    return count;
+    return bit_count;
+}
+
+// True if at least one bit is set.
+static bool bitmap_any(const bitmap_t* const bitmap, const size_t bit_count)
+{
+    if (bitmap != NULL) {
+        const size_t words = BITMAP_WORDS(bit_count);
+        for (size_t i = 0; i < words; i++) {
+            bitmap_t bits = bitmap[i];
+            if (i == (words - 1U)) { // Ignore padding bits when bit_count is not a multiple of 64.
+                const size_t tail = bit_count % 64U;
+                if (tail > 0U) {
+                    bits &= (1ULL << tail) - 1ULL;
+                }
+            }
+            if (bits != 0U) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// True if no bits are set.
+static bool bitmap_none(const bitmap_t* const bitmap, const size_t bit_count) { return !bitmap_any(bitmap, bit_count); }
+
+// Shift left or right by the specified number of bits. Newly inserted bits are zeroed.
+// Positive amount shifts left, negative amount shifts right.
+static void bitmap_shift(bitmap_t* const bitmap, const size_t bit_count, const intmax_t shift_amount)
+{
+    if ((bitmap != NULL) && (bit_count > 0U) && (shift_amount != 0)) {
+        const size_t words = BITMAP_WORDS(bit_count);
+        assert(words > 0U);
+        // Ignore non-existent bits in the tail word on input and output to prevent leakage.
+        const size_t tail = bit_count % 64U;
+        if (tail > 0U) {
+            bitmap[words - 1U] &= (1ULL << tail) - 1ULL;
+        }
+        // Compute absolute shift safely even for INT64_MIN.
+        const uintmax_t shift_mag =
+          (shift_amount >= 0) ? (uintmax_t)shift_amount : ((uintmax_t)(-(shift_amount + 1)) + 1U);
+        if (shift_mag >= bit_count) {
+            memset(bitmap, 0, words * sizeof(bitmap[0]));
+            return;
+        }
+        const size_t whole_words = (size_t)(shift_mag / 64U);
+        const size_t part_bits   = (size_t)(shift_mag % 64U);
+        if (shift_amount > 0) { // Left shift.
+            if (whole_words > 0U) {
+                for (size_t i = words; i-- > 0U;) {
+                    bitmap[i] = (i >= whole_words) ? bitmap[i - whole_words] : 0U;
+                }
+            }
+            if (part_bits > 0U) {
+                for (size_t i = words; i-- > 0U;) {
+                    const bitmap_t carry = (i > 0U) ? (bitmap[i - 1U] >> (64U - part_bits)) : 0U;
+                    bitmap[i]            = (bitmap[i] << part_bits) | carry;
+                }
+            }
+        } else { // Right shift.
+            if (whole_words > 0U) {
+                for (size_t i = 0U; i < words; i++) {
+                    bitmap[i] = ((i + whole_words) < words) ? bitmap[i + whole_words] : 0U;
+                }
+            }
+            if (part_bits > 0U) {
+                for (size_t i = 0U; i < words; i++) {
+                    const bitmap_t carry = ((i + 1U) < words) ? (bitmap[i + 1U] << (64U - part_bits)) : 0U;
+                    bitmap[i]            = (bitmap[i] >> part_bits) | carry;
+                }
+            }
+        }
+        if (tail > 0U) {
+            bitmap[words - 1U] &= (1ULL << tail) - 1ULL;
+        }
+    }
 }
 
 // =====================================================================================================================
@@ -665,11 +761,15 @@ static void message_skip(cy_message_t* const msg, const size_t offset)
 
 typedef struct cy_future_vtable_t
 {
-    cy_future_status_t (*status)(const cy_future_t*);
-    size_t (*result)(cy_future_t*, size_t, void*);
-    void (*cancel)(cy_future_t*); // Pre: status() == pending; post: status() != pending.
-    void (*timeout)(cy_future_t*, cy_us_t scheduled, cy_us_t now); // Invariant: scheduled<=now
-    void (*finalize)(cy_future_t*); // Invoked immediately before destruction; pre: status() != pending.
+    bool (*done)(const cy_future_t*);
+    cy_err_t (*error)(const cy_future_t*);
+
+    // Invariant: scheduled<=now
+    void (*timeout)(cy_future_t*, cy_us_t scheduled, cy_us_t now);
+
+    // Cancellation/finalization/destruction. This function must free the memory (perhaps not immediately).
+    // Pre-condition: callback == NULL.
+    void (*dispose)(cy_future_t*);
 } cy_future_vtable_t;
 
 // For simplicity, the base future provides built-in timeout and key lookup capabilities. This simplifies usage.
@@ -693,8 +793,7 @@ static void* future_new(cy_t* const cy, const cy_future_vtable_t* const vtbl, co
 {
     assert(derived_size >= sizeof(cy_future_t));
     assert(vtbl != NULL);
-    assert((vtbl->status != NULL) && (vtbl->result != NULL) && (vtbl->cancel != NULL) && (vtbl->timeout != NULL) &&
-           (vtbl->finalize != NULL));
+    assert((vtbl->done != NULL) && (vtbl->error != NULL) && (vtbl->timeout != NULL) && (vtbl->dispose != NULL));
     cy_future_t* const future = (cy_future_t*)mem_alloc_zero(cy, derived_size);
     if (future != NULL) {
         future->index    = TREE_NULL;
@@ -745,6 +844,11 @@ static cy_future_t* future_index_lookup(cy_tree_t* const index, const uint64_t k
     return (cy_future_t*)cavl2_find(index, &key, future_cavl_compare);
 }
 
+static bool future_indexed(const cy_future_t* const self, const cy_tree_t* const index)
+{
+    return cavl2_is_inserted(index, &self->index);
+}
+
 // FUTURE TIMEOUT
 
 static void future_timeout_trampoline(olga_t* const sched, olga_event_t* const event, const cy_us_t now)
@@ -760,15 +864,18 @@ static void future_deadline_arm(cy_future_t* const self, const cy_us_t deadline)
     olga_defer(&self->cy->olga, deadline, self, future_timeout_trampoline, &self->timeout);
 }
 
+// No effect if not armed (idempotent).
 static void future_deadline_disarm(cy_future_t* const self) { olga_cancel(&self->cy->olga, &self->timeout); }
+
+static bool future_deadline_armed(const cy_future_t* const self)
+{
+    return olga_is_pending(&self->cy->olga, &self->timeout);
+}
 
 // FUTURE API
 
-cy_future_status_t cy_future_status(const cy_future_t* const self) { return self->vtable->status(self); }
-size_t             cy_future_result(cy_future_t* const self, const size_t storage_size, void* const storage)
-{
-    return self->vtable->result(self, storage_size, storage);
-}
+bool     cy_future_done(const cy_future_t* const self) { return self->vtable->done(self); }
+cy_err_t cy_future_error(const cy_future_t* const self) { return self->vtable->error(self); }
 
 cy_user_context_t cy_future_context(const cy_future_t* const self) { return self->context; }
 void cy_future_context_set(cy_future_t* const self, const cy_user_context_t context) { self->context = context; }
@@ -778,7 +885,7 @@ void                 cy_future_callback_set(cy_future_t* const self, const cy_fu
 {
     const bool was_set = (self->callback != NULL);
     self->callback     = callback;
-    if (!was_set && (cy_future_status(self) != cy_future_pending)) {
+    if (!was_set && cy_future_done(self)) {
         future_notify(self);
     }
 }
@@ -786,13 +893,8 @@ void                 cy_future_callback_set(cy_future_t* const self, const cy_fu
 void cy_future_destroy(cy_future_t* const self)
 {
     if (self != NULL) {
-        self->callback = NULL; // Remember that a future may be destroyed from within its own callback.
-        if (cy_future_status(self) == cy_future_pending) {
-            self->vtable->cancel(self);
-        }
-        assert(cy_future_status(self) != cy_future_pending);
-        self->vtable->finalize(self);
-        mem_free(self->cy, self);
+        self->callback = NULL;       // Remember that a future may be destroyed from within its own callback.
+        self->vtable->dispose(self); // Will free the memory now or schedule to do it later.
     }
 }
 
@@ -872,6 +974,9 @@ struct cy_topic_t
     size_t               pub_count;        // Number of active advertisements; counted for garbage collection.
     cy_subject_writer_t* pub_writer;       // Initially NULL, created ad-hoc, then lives on until topic destruction.
     cy_tree_t*           pub_futures_by_tag;
+
+    // Similar to publish futures but referencing request_future_t.
+    cy_tree_t* request_futures_by_tag;
 
     // Subscriber-related states.
     //
@@ -1479,6 +1584,8 @@ static cy_err_t topic_new(cy_t* const        cy,
     topic->pub_writer         = NULL;
     topic->pub_futures_by_tag = NULL;
 
+    topic->request_futures_by_tag = NULL;
+
     topic->user_context = CY_USER_CONTEXT_EMPTY;
 
     // Insert the new topic into the name and hash indexes.
@@ -2055,7 +2162,7 @@ static void* wkv_cb_topic_scout_response(const wkv_event_t evt)
 // this the easier way. If we only have a few topics, we don't even need to do anything here since by virtue of
 // having few topics their gossip rate will be high, so the remote will hear about them soon enough.
 // Thus, scout handling is essentially only useful in many-topic nodes, and in general-purpose implementations.
-static void on_scout(cy_t* const cy, cy_us_t ts, const cy_str_t name, const cy_lane_t lane)
+static void on_scout(cy_t* const cy, const cy_us_t ts, const cy_str_t name, const cy_lane_t lane)
 {
     CY_TRACE(cy, "📢 '%.*s'", STRFMT_ARG(name));
     scout_response_context_t ctx = { .now = ts, .lane = lane };
@@ -2194,9 +2301,9 @@ typedef struct
     cy_publisher_t* owner;
     cy_us_t         deadline;
 
-    bool done;
-    bool acknowledged;
-    bool compromised; // Not all attempts could be completed due to scheduler lag, send error, or cancellation.
+    bool     done;
+    bool     acknowledged;
+    cy_err_t error; ///< High-priority errors override low-priority ones. Future is notified on error.
 
     // Retransmission states.
     const cy_bytes_t* data;
@@ -2212,22 +2319,11 @@ typedef struct
     association_t* assoc_set[]; // Ordered by remote-ID, allows bisection.
 } publish_future_t;
 
-static cy_future_status_t publish_future_status(const cy_future_t* const base)
+static bool     publish_future_done(const cy_future_t* const base) { return ((const publish_future_t*)base)->done; }
+static cy_err_t publish_future_error(const cy_future_t* const base)
 {
     const publish_future_t* const self = (const publish_future_t*)base;
-    if (!self->done) {
-        return cy_future_pending;
-    }
-    const bool success = self->acknowledged && (!self->compromised || (self->assoc_remaining == 0));
-    return success ? cy_future_success : cy_future_failure;
-}
-
-static size_t publish_future_result(cy_future_t* const base, const size_t storage_size, void* const storage)
-{
-    (void)base;         // Currently we don't return anything, but we could easily expose some ack-related information.
-    (void)storage_size; // For example, the number of acks/retransmissions, etc. We could even expose the list of
-    (void)storage;      // remotes that acknowledged the message: either as a contiguous list
-    return 0;           // (requires more future heap), or incrementally with multiple calls to result().
+    return (self->error != CY_OK) ? self->error : ((self->acknowledged || !self->done) ? CY_OK : CY_ERR_DELIVERY);
 }
 
 // When we're done with the future, we need to update the shared states of our associations.
@@ -2243,8 +2339,8 @@ static void publish_future_release_associations(publish_future_t* const self)
         // Don't register ack loss when canceled prematurely because there may not have been enough time for round trip.
         // Also, don't register any ack loss if at least one publication has failed, that is obvious.
         const uint64_t seqno = self->base.key - topic->pub_tag_baseline;
-        assert(seqno < (1ULL << 48U)); // sanity /math check -- values above 2**48 are unreachable in practice.
-        if (bitmap_test(self->assoc_knockout, i) && (seqno >= ass->seqno_witness) && !self->compromised) {
+        assert(seqno < (1ULL << 48U)); // sanity/math check -- values above 2**48 are unreachable in practice.
+        if (bitmap_test(self->assoc_knockout, i) && (seqno >= ass->seqno_witness) && (self->error == CY_OK)) {
             ass->slack++;
         }
 
@@ -2274,15 +2370,6 @@ static void publish_future_materialize(publish_future_t* const self)
     bytes_undup(cy, self->data);
     self->data = NULL;
     future_notify(&self->base); // Invalidates the future. Expect finalization call.
-}
-
-static void publish_future_cancel(cy_future_t* const base)
-{
-    publish_future_t* const self = (publish_future_t*)base;
-    if (!self->done) {
-        self->compromised = true; // Reachability information incomplete.
-        publish_future_materialize(self);
-    }
 }
 
 // Decides whether there enough room for the next full backoff window.
@@ -2317,7 +2404,8 @@ static void publish_future_timeout(cy_future_t* const base, const cy_us_t schedu
     // If we are supposed to try more attempts (data not yet destroyed) but we are already near the deadline,
     // it means that there is a strong scheduler lag that prevented us from completing some of the attempts fully,
     // and we can no longer rely on reachability information. We may still transmit but with only a short ACK timeout.
-    self->compromised = self->compromised || ((self->data != NULL) && (now >= (self->deadline - self->ack_timeout)));
+    const bool sched_lag_error = (self->data != NULL) && (now >= (self->deadline - self->ack_timeout));
+    self->error = ((self->error == CY_OK) && sched_lag_error) ? CY_ERR_LAG : self->error; // Weak error, no overwrite.
 
     // Check completion.
     assert(!self->done);
@@ -2344,7 +2432,7 @@ static void publish_future_timeout(cy_future_t* const base, const cy_us_t schedu
     // it may cause repeated P2P delivery failures; we could possibly consider this in the heuristic?
     // We already have the last_seen in the association, we could also use that.
     const bool       use_p2p = (self->assoc_remaining == 1) && last_attempt; // heuristic subject to review
-    cy_lane_t        lane    = { 0 };
+    cy_lane_t        lane    = { 0 };                                        // cppcheck-suppress unreadVariable
     const cy_lane_t* lane_p  = NULL;
     if (use_p2p) {
         const size_t assoc_idx = bitmap_clz(self->assoc_knockout, self->assoc_capacity);
@@ -2364,7 +2452,7 @@ static void publish_future_timeout(cy_future_t* const base, const cy_us_t schedu
     // Send the message.
     const cy_err_t er = do_publish_impl(self->owner, ack_deadline, *self->data, header_msg_rel, self->base.key, lane_p);
     ON_ASYNC_ERROR_IF(cy, topic, er);
-    self->compromised = self->compromised || (er != CY_OK);
+    self->error = (er != CY_OK) ? er : self->error; // Send errors are strong, overriding prior errors if any.
 
     // Schedule the next poll event.
     // If there is going to be another attempt, schedule the next timeout to fire when it's time to transmit;
@@ -2378,25 +2466,34 @@ static void publish_future_timeout(cy_future_t* const base, const cy_us_t schedu
         assert(ack_deadline < self->deadline);
         future_deadline_arm(base, ack_deadline);
     }
+
+    // Notify if any errors occurred, even if not yet done. The user will check the done state.
+    if ((er != CY_OK) || sched_lag_error) {
+        assert(self->error != CY_OK);
+        future_notify(&self->base); // Invalidates the future. Expect disposal.
+    }
 }
 
-static void publish_future_finalize(cy_future_t* const base)
+static void publish_future_dispose(cy_future_t* const base)
 {
     publish_future_t* const self = (publish_future_t*)base;
+    if (!self->done) {
+        self->error = (self->error == CY_OK) ? CY_ERR_CANCELED : self->error; // Avoid slack adjustment.
+        publish_future_materialize(self);
+    }
     assert(self->done);
     assert(self->assoc_capacity == 0);
     assert(self->assoc_knockout == NULL);
     assert(self->data == NULL);
-    assert(!olga_is_pending(&base->cy->olga, &base->timeout));
-    assert(!cavl2_is_inserted(self->owner->topic->pub_futures_by_tag, &base->index));
-    (void)self;
+    assert(!future_deadline_armed(base));
+    assert(!future_indexed(base, self->owner->topic->pub_futures_by_tag));
+    mem_free(base->cy, self);
 }
 
-static const cy_future_vtable_t publish_future_vtable = { .status   = publish_future_status,
-                                                          .result   = publish_future_result,
-                                                          .cancel   = publish_future_cancel,
-                                                          .timeout  = publish_future_timeout,
-                                                          .finalize = publish_future_finalize };
+static const cy_future_vtable_t publish_future_vtable = { .done    = publish_future_done,
+                                                          .error   = publish_future_error,
+                                                          .timeout = publish_future_timeout,
+                                                          .dispose = publish_future_dispose };
 
 static void publish_future_on_ack(publish_future_t* const self, const uint64_t remote_id)
 {
@@ -2430,15 +2527,11 @@ cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadli
     if (fut == NULL) {
         return NULL;
     }
-    fut->owner           = pub;
-    fut->deadline        = deadline;
-    fut->done            = false;
-    fut->acknowledged    = false;
-    fut->compromised     = false;
-    fut->ack_timeout     = cy_ack_timeout(pub);
-    fut->assoc_capacity  = topic->assoc_count;
-    fut->assoc_remaining = 0;
-    fut->assoc_knockout  = bitmap_new(cy, fut->assoc_capacity);
+    fut->owner          = pub;
+    fut->deadline       = deadline;
+    fut->ack_timeout    = cy_ack_timeout(pub);
+    fut->assoc_capacity = topic->assoc_count;
+    fut->assoc_knockout = bitmap_new(cy, fut->assoc_capacity);
     if ((fut->assoc_knockout == NULL) && (fut->assoc_capacity > 0)) {
         mem_free(cy, fut);
         return NULL;
@@ -2503,6 +2596,311 @@ cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadli
     return &fut->base;
 }
 
+bool cy_publish_delivered(const cy_future_t* const future)
+{
+    return (future != NULL) && (future->vtable == &publish_future_vtable) && ((publish_future_t*)future)->acknowledged;
+}
+
+// How many most recently received seqnos to keep in the bitmap.
+// The value is a compromise between practically possible delays and memory usage; ideally we want <=64B per remote.
+// Duplicates older than this are nacked.
+#define REQUEST_FUTURE_BITMAP_BITS 192
+
+// An instance is stored per remote node that replied to a request using reliable delivery.
+// We use it to keep track of which responses have been seen and acknowledged in case our ack gets lost
+// and the remote retransmits it again -- we need to make sure we don't eject duplicate responses to the app.
+typedef struct
+{
+    cy_tree_t index_by_remote_id;
+    uint64_t  remote_id;
+    uint64_t  seqno_top;
+    bitmap_t  seqno_acked[BITMAP_WORDS(REQUEST_FUTURE_BITMAP_BITS)]; // bit 0 = seqno_top, bit 1 = seqno_top-1, ...
+} request_future_remote_t;
+
+typedef struct
+{
+    cy_t*    cy;
+    uint64_t remote_id;
+} request_future_remote_factory_context_t;
+
+typedef struct
+{
+    cy_future_t base; // The key is the tag.
+    cy_topic_t* topic;
+    cy_us_t     liveness_timeout; // Inter-response timeout for stream liveness monitoring.
+
+    bool         finalized; // Staying behind to handle possible duplicate responses to ack/nack correctly.
+    bool         oom;       // OOM flag is sticky because a single OOM implies that the response set is incomplete.
+    cy_future_t* publish;
+    cy_err_t     publish_error;
+
+    uint64_t      response_count; // Unique responses after deduplication from all remotes combined.
+    cy_response_t last_response;  // Overwritten when new responses arrive.
+
+    // States per remote node that is responding to this request using reliable response delivery.
+    // States are never removed assuming that futures are short-lived and/or the responder set is mostly constant.
+    // This is used to deduplicate responses (when reliable response is delivered but ack is lost, remote retransmits)
+    // and to keep track which ones need to be acked when duplicates arrive.
+    cy_tree_t* remote_by_id;
+} request_future_t;
+
+static int32_t request_future_remote_cavl_compare(const void* const user, const cy_tree_t* const node)
+{
+    const uint64_t outer = *(const uint64_t*)user;
+    const uint64_t inner = ((const request_future_remote_t*)node)->remote_id;
+    return (outer == inner) ? 0 : ((outer > inner) ? +1 : -1);
+}
+
+static cy_tree_t* request_future_remote_cavl_factory(void* const user)
+{
+    const request_future_remote_factory_context_t* const ctx = (const request_future_remote_factory_context_t*)user;
+    request_future_remote_t* const node = mem_alloc_zero(ctx->cy, sizeof(request_future_remote_t)); //
+    if (node != NULL) {
+        node->remote_id = ctx->remote_id;
+    }
+    return (cy_tree_t*)node;
+}
+
+static void request_publish_callback(cy_future_t* const fut)
+{
+    request_future_t* const self = (request_future_t*)cy_future_context(fut).ptr[0];
+    assert(self->publish == fut);
+    assert(!self->finalized);
+    self->publish_error = cy_future_error(fut); // Record publish error but keep going.
+    if (cy_future_done(fut)) {                  // In case there are intermediate updates. May be uncoverable.
+        const bool fatal = !cy_publish_delivered(fut);
+        cy_future_destroy(fut);
+        self->publish = NULL;
+        if ((self->response_count == 0) && fatal) {
+            future_deadline_disarm(&self->base); // We are exceedingly unlikely to succeed, fail early.
+        }
+    }
+    if (self->publish_error != CY_OK) {
+        future_notify(&self->base); // Invalidates self; expect finalization.
+    }
+}
+
+// Returns true if the reception is acknowledged, false otherwise.
+// Invalidates the future because it may be destroyed.
+static bool request_on_response(request_future_t* const self,
+                                const uint64_t          seqno,
+                                const cy_message_ts_t   message,
+                                const bool              reliable,
+                                const cy_lane_t         lane)
+{
+    assert(seqno <= SEQNO48_MASK);
+    assert(message.timestamp >= 0);
+    assert(message.content != NULL);
+    cy_t* const cy = self->base.cy;
+
+    // Zombie mode -- the application has destroyed the future and is no longer accepting responses.
+    // We are left behind only to retransmit acks for reliable responses if any are lost.
+    if (self->finalized) {
+        if (reliable) {
+            const request_future_remote_t* const remote =
+              (request_future_remote_t*)cavl2_find(self->remote_by_id, &lane.id, request_future_remote_cavl_compare);
+            if ((remote != NULL) && (seqno <= remote->seqno_top)) {
+                return bitmap_test_bounded(remote->seqno_acked, REQUEST_FUTURE_BITMAP_BITS, remote->seqno_top - seqno);
+            }
+        }
+        return false; // Do not proceed to the acceptance path, we're already dead.
+    }
+
+    // The transport deduplicates messages, meaning that at this level only reliable responses require deduplication,
+    // because the remote would retransmit if our acks are lost. We need to shield the application from that.
+    if (reliable) {
+        request_future_remote_factory_context_t factory_ctx = { .cy = cy, .remote_id = lane.id };
+        request_future_remote_t* const          remote =
+          (request_future_remote_t*)cavl2_find_or_insert(&self->remote_by_id,
+                                                         &lane.id,
+                                                         request_future_remote_cavl_compare,
+                                                         &factory_ctx,
+                                                         request_future_remote_cavl_factory);
+        if (remote == NULL) {
+            self->oom = true;
+            ON_ASYNC_ERROR(cy, self->topic, CY_ERR_MEMORY);
+            future_deadline_disarm(&self->base); // Escalate major failure. Response set cannot be valid anymore.
+            future_notify(&self->base);          // Invalidates the future.
+            return false;                        // Cannot accept, tell the sender about that.
+        }
+        if (seqno > remote->seqno_top) { // Pushes the frontier, need to shift the bitmap.
+            bitmap_shift(remote->seqno_acked, REQUEST_FUTURE_BITMAP_BITS, (intmax_t)(seqno - remote->seqno_top));
+            bitmap_set(remote->seqno_acked, 0); // 0th bit is always set, redundant bit simple
+            remote->seqno_top = seqno;
+        } else { // earlier seqno below the frontier, which might be new if delivered out of order
+            const uint64_t dist = remote->seqno_top - seqno;
+            if (dist >= REQUEST_FUTURE_BITMAP_BITS) {
+                return false; // too old, exceeds history, probably sender misbehaving, do not accept
+            }
+            if (bitmap_test(remote->seqno_acked, (size_t)dist)) {
+                return true; // seen that, probably lost ack, tell the sender again that we have this one already
+            }
+            bitmap_set(remote->seqno_acked, (size_t)dist); // genuinely new response just arrived out of order
+        }
+        assert(remote->seqno_top >= seqno);
+    }
+
+    // At this point, the response is known to be unique. Rewrite the last stored response.
+    self->response_count++;
+    cy_message_refcount_dec(self->last_response.message.content); // NULL-safe
+    self->last_response.remote_id = lane.id;
+    self->last_response.seqno     = seqno;
+    self->last_response.message   = message;
+    cy_message_refcount_inc(self->last_response.message.content);
+
+    // Refresh the liveness monitor: alert the application if responses cease to arrive regularly.
+    future_deadline_arm(&self->base, message.timestamp + self->liveness_timeout);
+
+    // Notify the application that a new response is available.
+    future_notify(&self->base); // Invalidates self; expect finalization.
+    return true;
+}
+
+static void request_future_destroy(request_future_t* const self)
+{
+    cy_future_t* const base = &self->base;
+    assert(self->finalized);
+    assert(self->publish == NULL);
+    future_deadline_disarm(base);
+    cy_message_refcount_dec(self->last_response.message.content); // NULL-safe
+    future_index_remove(base, &self->topic->request_futures_by_tag);
+    while (self->remote_by_id != NULL) {
+        request_future_remote_t* const remote = (request_future_remote_t*)self->remote_by_id;
+        cavl2_remove(&self->remote_by_id, self->remote_by_id);
+        mem_free(base->cy, remote);
+    }
+    mem_free(base->cy, self);
+}
+
+static bool request_future_done(const cy_future_t* const base)
+{
+    const request_future_t* const self = (const request_future_t*)base;
+    assert(!self->finalized);                                                             // use after free?
+    return (self->last_response.message.content != NULL) || !future_deadline_armed(base); // got response or timed out
+}
+
+static cy_err_t request_future_error(const cy_future_t* const base)
+{
+    const request_future_t* const self = (const request_future_t*)base;
+    assert(!self->finalized);
+    if (self->oom) {
+        return CY_ERR_MEMORY;
+    }
+    if (self->publish_error != CY_OK) {
+        return self->publish_error;
+    }
+    if ((self->last_response.message.content == NULL) && !future_deadline_armed(base)) {
+        return CY_ERR_RESPONSE;
+    }
+    return CY_OK;
+}
+
+static void request_future_timeout(cy_future_t* const base, const cy_us_t scheduled, const cy_us_t now)
+{
+    (void)scheduled;
+    (void)now;
+    request_future_t* const self = (request_future_t*)base;
+    if (!self->finalized) {
+        future_notify(base); // Expect finalization call.
+    } else {
+        request_future_destroy(self);
+    }
+}
+
+static void request_future_dispose(cy_future_t* const base)
+{
+    request_future_t* const self = (request_future_t*)base;
+    assert(!self->finalized);
+    if (self->publish != NULL) {
+        cy_future_destroy(self->publish);
+        self->publish = NULL;
+    }
+    self->finalized = true;
+    // The acks that we sent for reliable responses may have been lost, in which case the remote would retransmit.
+    // In that case we will need to respond the same way we did the first time without involving the application.
+    // To facilitate that, we leave a pending finalized future behind. It will be destroyed after some timeout.
+    if (self->remote_by_id != NULL) { // Stayin' alive because we need to continue processing possible duplicates.
+        cy_message_refcount_dec(self->last_response.message.content); // Release memory early (NULL-safe)
+        self->last_response.message.content = NULL;
+        future_deadline_arm(base, cy_now(base->cy) + (SESSION_LIFETIME / 2));
+    } else { // If we didn't ack any reliable responses, there is no need to leave a finalized future behind.
+        request_future_destroy(self);
+    }
+}
+
+static const cy_future_vtable_t request_future_vtable = { .done    = request_future_done,
+                                                          .error   = request_future_error,
+                                                          .timeout = request_future_timeout,
+                                                          .dispose = request_future_dispose };
+
+cy_future_t* cy_request(cy_publisher_t* const pub,
+                        const cy_us_t         delivery_deadline,
+                        const cy_us_t         response_timeout,
+                        const cy_bytes_t      message)
+{
+    if ((pub == NULL) || (delivery_deadline < 0) || (response_timeout < 0) ||
+        ((message.data == NULL) && (message.size > 0))) {
+        return NULL;
+    }
+    cy_topic_t* const topic = pub->topic;
+    cy_t* const       cy    = topic->cy;
+
+    // Prepare the future.
+    request_future_t* const fut = future_new(cy, &request_future_vtable, sizeof(request_future_t));
+    if (fut == NULL) {
+        return NULL;
+    }
+    fut->topic                           = topic;
+    fut->liveness_timeout                = response_timeout;
+    fut->last_response.message.timestamp = BIG_BANG;
+    fut->last_response.message.content   = NULL;
+    fut->remote_by_id                    = NULL;
+
+    // Once fallible preparations are done, send the request.
+    // Reliable publication is quite a can of worms but we use it as a black box here.
+    fut->publish = cy_publish_reliable(pub, delivery_deadline, message);
+    if (fut->publish == NULL) {
+        mem_free(cy, fut);
+        return NULL;
+    }
+
+    // Set up our future; this is infallible. Use the same tag for response correlation.
+    const bool insert_ok = future_index_insert(&fut->base, &topic->request_futures_by_tag, fut->publish->key);
+    assert(insert_ok); // cannot fail by design, tags are per-topic unique
+    (void)insert_ok;
+    future_deadline_arm(&fut->base, delivery_deadline + response_timeout);
+
+    // Set up the publish future afterward because in theory it may trigger a callback immediately.
+    cy_future_context_set(fut->publish, (cy_user_context_t){ { fut } });
+    cy_future_callback_set(fut->publish, request_publish_callback);
+    return &fut->base;
+}
+
+static bool request_is_valid_future(const cy_future_t* const future)
+{
+    return (future != NULL) && (future->vtable == &request_future_vtable);
+}
+
+cy_response_t cy_response(cy_future_t* const future)
+{
+    cy_response_t result = { 0 };
+    if (request_is_valid_future(future)) {
+        request_future_t* const self = (request_future_t*)future;
+        result                       = self->last_response; // refcount not updated due to move
+        // Erase the moved instance.
+        self->last_response.remote_id         = UINT64_MAX; // arbitrary sentinel
+        self->last_response.seqno             = UINT64_MAX; // ditto
+        self->last_response.message.timestamp = BIG_BANG;
+        self->last_response.message.content   = NULL;
+    }
+    return result;
+}
+
+uint64_t cy_response_count(const cy_future_t* const future)
+{
+    return request_is_valid_future(future) ? ((request_future_t*)future)->response_count : 0;
+}
+
 cy_prio_t cy_priority(const cy_publisher_t* const pub) { return (pub != NULL) ? pub->priority : cy_prio_nominal; }
 void      cy_priority_set(cy_publisher_t* const pub, const cy_prio_t priority)
 {
@@ -2539,21 +2937,12 @@ void cy_unadvertise(cy_publisher_t* const pub)
     }
     cy_topic_t* const topic = pub->topic;
 
-    // Finalize pending publish futures.
-    // We could store a dedicated list of pending futures per publisher, it's easy, but I don't see much benefit
-    // because there are typically very few pending futures at a time, especially at the time of publisher destruction,
-    // so it seems pragmatic to just walk the list. This is easy to improve if it becomes an issue.
-    while (true) {
-        // Restart the search in case the callback destroys another future.
-        publish_future_t* fut = (publish_future_t*)cavl2_min(topic->pub_futures_by_tag);
-        while ((fut != NULL) && (fut->owner != pub)) {
-            fut = (publish_future_t*)cavl2_next_greater((cy_tree_t*)fut);
-        }
-        if (fut == NULL) {
-            break;
-        }
-        cy_future_destroy(&fut->base);
+#ifndef NDEBUG // Ensure the application did not forget to destroy publisher futures first. This is optional.
+    for (publish_future_t* fut = (publish_future_t*)cavl2_min(topic->pub_futures_by_tag); fut != NULL;
+         fut                   = (publish_future_t*)cavl2_next_greater((cy_tree_t*)fut)) {
+        assert(fut->owner != pub);
     }
+#endif
 
     // Dereference the topic.
     assert(!is_implicit(topic));
@@ -2786,6 +3175,10 @@ static int32_t reordering_slot_cavl_compare(const void* const user, const cy_tre
 // store the full state associated with the message. A pattern subscription may receive messages from multiple topics
 // matching the pattern; we need separate reordering state per topic per publisher, keeping in mind that the same
 // remote may publish on multiple topics matching our subscriber.
+//
+// TODO: Consider a much simpler design where instead of a tree, interned messages are stored in a fixed array
+//  of 8 elements, ordered by linearized tag with a fixed (tag-index) offset. New arrivals shift the array.
+//  8 elements are ought to be enough for anybody; bookkeeping simplified, performance to improve if array is small.
 typedef struct
 {
     cy_tree_t        index;        // For lookup when new messages received by (remote-ID, topic hash).
@@ -3428,7 +3821,7 @@ static void subscriber_destroy_delayed(olga_t* const olga, olga_event_t* const e
     }
     assert(*sub == self);
     if (*sub == self) {
-        *sub = self->next;
+        *sub = self->next; // cppcheck-suppress nullPointerRedundantCheck
     }
     self->next = NULL;
 
@@ -3473,9 +3866,9 @@ static cy_err_t do_respond(cy_breadcrumb_t* const breadcrumb, const cy_us_t dead
 
     // Compose the header. The tag is zero since we don't expect any ack.
     assert(breadcrumb->seqno < (SEQNO48_MASK - 1U)); // Sanity check; this value is not practically reachable.
-    byte_t header[HEADER_BYTES] = { 0 };
-    header[0]                   = (byte_t)header_rsp_be;
-    (void)serialize_u64(&header[8], breadcrumb->seqno++);
+    byte_t header[HEADER_BYTES] = { (byte_t)header_rsp_be, 0 };
+    (void)serialize_u48(&header[2], breadcrumb->seqno++);
+    (void)serialize_u64(&header[8], breadcrumb->topic_hash);
     (void)serialize_u64(&header[16], breadcrumb->message_tag);
     const cy_bytes_t headed_message = { .size = sizeof(header), .data = header, .next = &message };
 
@@ -3534,6 +3927,17 @@ static void topic_destroy(cy_topic_t* const topic)
     }
     assert(topic->sub_list_dedup_by_recency.head == NULL);
     assert(topic->sub_list_dedup_by_recency.tail == NULL);
+
+    // Remove any zombie request futures that may be left behind to manage retransmissions.
+    // This is lifetime-safe because the API contract requires that the application must destroy pending futures
+    // before destroying their pulisher, and the topic cannot be destroyed as long as it has at least one live
+    // publisher (or subscriber or whatever). To wit, topics are recycled after some timeout, and by the time it
+    // expires the zombie request futures are likely going to be destroyed on timeout anyway.
+    while (topic->request_futures_by_tag != NULL) {
+        request_future_t* const future = (request_future_t*)topic->request_futures_by_tag;
+        assert(future->finalized); // Otherwise, the application forgot to destroy the future!
+        request_future_destroy(future);
+    }
 
     // Delist and deindex.
     if (cy->topic_iter == topic) {
@@ -3641,7 +4045,6 @@ cy_t* cy_new(cy_platform_t* const platform)
     cy->subscribers_by_pattern.sub_one = cy_name_one;
     cy->subscribers_by_pattern.sub_any = cy_name_any;
 
-    cy->request_futures_by_tag  = NULL;
     cy->response_futures_by_tag = NULL;
 
     cy->p2p_extent = HEADER_BYTES + 1024U; // Arbitrary initial size; will be refined when publishers are created.
@@ -3986,13 +4389,15 @@ static void send_response_ack(cy_t* const     cy,
                               const cy_lane_t lane,
                               const uint64_t  message_tag,
                               const uint64_t  seqno,
-                              const uint16_t  tag,
+                              const byte_t    tag,
+                              const uint64_t  hash,
                               const bool      positive,
                               const cy_us_t   deadline)
 {
-    byte_t header[HEADER_BYTES] = { 0 };
-    header[0]                   = (byte_t)(positive ? header_rsp_ack : header_rsp_nack);
-    (void)serialize_u64(&header[8], (seqno & SEQNO48_MASK) | ((uint64_t)tag << 48U));
+    assert(seqno <= SEQNO48_MASK);
+    byte_t header[HEADER_BYTES] = { (byte_t)(positive ? header_rsp_ack : header_rsp_nack), tag };
+    (void)serialize_u48(&header[2], seqno);
+    (void)serialize_u64(&header[8], hash);
     (void)serialize_u64(&header[16], message_tag);
     const cy_err_t err = cy->platform->vtable->p2p_send(cy->platform, //
                                                         &lane,
@@ -4042,7 +4447,6 @@ void cy_on_message(cy_platform_t* const             platform,
             if ((incompatibility != 0) || (lage < LAGE_MIN) || (lage > LAGE_MAX)) {
                 goto bad_message;
             }
-            // Deserialize and validate the message.
             const uint32_t evictions = deserialize_u32(&header[4]);
             const uint64_t hash      = deserialize_u64(&header[8]);
             if (is_pinned(hash) && evictions != 0) {
@@ -4108,6 +4512,47 @@ void cy_on_message(cy_platform_t* const             platform,
                          (uintmax_t)tag);
             }
             break;
+        }
+
+        case header_rsp_be:
+        case header_rsp_rel: {
+            if (subject_reader != NULL) {
+                goto bad_message; // Require responses to be P2P only.
+            }
+            const bool     reliable    = type == header_rsp_rel;
+            const byte_t   tag         = header[1];
+            const uint64_t seqno       = deserialize_u48(&header[2]);
+            const uint64_t hash        = deserialize_u64(&header[8]);
+            const uint64_t message_tag = deserialize_u64(&header[16]);
+            // If the future is available (and topic), let it decide how the response should be acknowledged.
+            // A naive solution would destroy futures immediately when the application no longer needs them
+            // and nack all responses for which no live future is found, but this is not correct because in the
+            // edge case when we ack a response and destroy the future immediately afterward with the subsequent loss
+            // of the ack, the remote would retransmit, and the next time we will respond with a nack because the
+            // future is already destroyed. There are many ways to avoid this, such as keeping a log of recently
+            // acked responses, etc. Here, we choose to keep futures alive for a brief time after the application
+            // destroys them such that we could delegate the ack/nack decision to them, because it appears to be
+            // the simplest solution with minimal state keeping. Note that futures that acknowledged no responses
+            // do not need to be retained since the outcome is always the same -- always nack.
+            // This is an implementation detail that does not affect wire semantics of course.
+            bool              ack   = false;
+            cy_topic_t* const topic = cy_topic_find_by_hash(cy, hash);
+            if (topic != NULL) {
+                request_future_t* const future =
+                  (request_future_t*)future_index_lookup(topic->request_futures_by_tag, message_tag);
+                if (future != NULL) {
+                    ack = request_on_response(future, seqno, message, reliable, lane);
+                }
+            }
+            if (reliable) {
+                send_response_ack(cy, lane, message_tag, seqno, tag, hash, ack, message.timestamp + ACK_TX_TIMEOUT);
+            }
+            break;
+        }
+
+        case header_rsp_ack:
+        case header_rsp_nack: {
+            break; // TODO: not implemented yet, will be implemented in the next sprint.
         }
 
         case header_gossip: {
