@@ -89,6 +89,7 @@ if (COVERAGE)
             COMMAND ${gcovr}
             --root ${CMAKE_SOURCE_DIR}
             --filter ${CMAKE_SOURCE_DIR}/cy/
+            --merge-mode-functions merge-use-line-min
             --html-details ${coverage_report_html}
             --print-summary
             COMMAND ${CMAKE_COMMAND} -E echo "📜 📜 📜 COVERAGE REPORT: file://${coverage_report_html} 📜 📜 📜"

@@ -131,7 +131,7 @@ static void test_dedup_drop_stale(void)
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&fixture.heap));
 }
 
-/// Forward advance by a small step (1..63): bitmap shifts, previous current-tag bit is set. Covers fwd < DEDUP_HISTORY.
+/// Forward advance by a small step (1..DEDUP_HISTORY-1): bitmap shifts and keeps nearby tags.
 static void test_dedup_forward_small_step(void)
 {
     dedup_fixture_t fixture;
@@ -141,11 +141,11 @@ static void test_dedup_forward_small_step(void)
 
     dedup_t* const dd = dedup_make_state(&owner, 1U, 100U, 0);
     TEST_ASSERT_FALSE(dedup_update(dd, &owner, 100U, 0)); // establish tag=100, bitmap=0
-    // Advance by 1: fwd=1 < 64, bitmap = (0<<1) | (1<<0) = 1, tag becomes 101.
+    // Advance by 1: fwd=1 < DEDUP_HISTORY, tag becomes 101.
     TEST_ASSERT_FALSE(dedup_update(dd, &owner, 101U, 1));
     // The old tag=100 should be marked as seen (bit 0 of bitmap); re-receiving it is a duplicate.
     TEST_ASSERT_TRUE(dedup_update(dd, &owner, 100U, 2));
-    // Advance by 2 more: fwd=2, bitmap = (1<<2) | (1<<1) = 6, tag becomes 103.
+    // Advance by 2 more: fwd=2, tag becomes 103.
     TEST_ASSERT_FALSE(dedup_update(dd, &owner, 103U, 3));
     // tag=100 is now at rev=3, bit 2 set → duplicate.
     TEST_ASSERT_TRUE(dedup_update(dd, &owner, 100U, 4));
@@ -161,8 +161,7 @@ static void test_dedup_forward_small_step(void)
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&fixture.heap));
 }
 
-/// Forward advance by exactly DEDUP_HISTORY (64): special case to avoid undefined shift-by-64. Covers
-/// fwd==DEDUP_HISTORY.
+/// Forward advance by exactly DEDUP_HISTORY: boundary path enters reset (fwd < DEDUP_HISTORY is false).
 static void test_dedup_forward_exact_history(void)
 {
     dedup_fixture_t fixture;
@@ -170,21 +169,22 @@ static void test_dedup_forward_exact_history(void)
     dedup_fixture_init(&fixture);
     dedup_owner_init(&owner, &fixture);
 
-    dedup_t* const dd = dedup_make_state(&owner, 2U, 100U, 0);
-    TEST_ASSERT_FALSE(dedup_update(dd, &owner, 100U, 0)); // establish tag=100, bitmap=0
-    // Advance by exactly 64: fwd=64==DEDUP_HISTORY → bitmap = 1<<63, tag becomes 164.
-    TEST_ASSERT_FALSE(dedup_update(dd, &owner, 164U, 1));
-    // The old tag=100 is at rev=64, bit 63 set → duplicate.
-    TEST_ASSERT_TRUE(dedup_update(dd, &owner, 100U, 2));
-    // tag=101 is at rev=63, bit 62 NOT set → not duplicate.
-    TEST_ASSERT_FALSE(dedup_update(dd, &owner, 101U, 3));
+    const uint64_t base_tag     = 100U;
+    const uint64_t boundary_tag = base_tag + DEDUP_HISTORY;
+
+    dedup_t* const dd = dedup_make_state(&owner, 2U, base_tag, 0);
+    TEST_ASSERT_FALSE(dedup_update(dd, &owner, base_tag, 0)); // establish current tag
+    TEST_ASSERT_FALSE(dedup_update(dd, &owner, boundary_tag, 1));
+    // Reset keeps only the new current tag; the old base tag is accepted once again.
+    TEST_ASSERT_FALSE(dedup_update(dd, &owner, base_tag, 2));
+    TEST_ASSERT_TRUE(dedup_update(dd, &owner, base_tag, 3));
 
     dedup_cleanup(&owner);
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&fixture.heap));
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&fixture.heap));
 }
 
-/// Forward advance by more than DEDUP_HISTORY (>64): bitmap reset (session restart). Covers fwd > DEDUP_HISTORY.
+/// Forward advance by more than DEDUP_HISTORY: bitmap reset (session restart). Covers fwd > DEDUP_HISTORY.
 static void test_dedup_forward_large_jump(void)
 {
     dedup_fixture_t fixture;
@@ -192,16 +192,19 @@ static void test_dedup_forward_large_jump(void)
     dedup_fixture_init(&fixture);
     dedup_owner_init(&owner, &fixture);
 
-    dedup_t* const dd = dedup_make_state(&owner, 3U, 100U, 0);
-    TEST_ASSERT_FALSE(dedup_update(dd, &owner, 100U, 0)); // establish tag=100, bitmap=0
+    const uint64_t base_tag = 100U;
+    const uint64_t jump_tag = base_tag + DEDUP_HISTORY + 88U;
+
+    dedup_t* const dd = dedup_make_state(&owner, 3U, base_tag, 0);
+    TEST_ASSERT_FALSE(dedup_update(dd, &owner, base_tag, 0)); // establish current tag
     // Set some bitmap bits first by visiting nearby tags.
-    TEST_ASSERT_FALSE(dedup_update(dd, &owner, 101U, 1)); // fwd=1 < 64
-    // Now jump far ahead: fwd=200 > 64 → bitmap=0, tag becomes 301.
-    TEST_ASSERT_FALSE(dedup_update(dd, &owner, 301U, 2));
+    TEST_ASSERT_FALSE(dedup_update(dd, &owner, base_tag + 1U, 1)); // fwd=1 < DEDUP_HISTORY
+    // Now jump far ahead: fwd > DEDUP_HISTORY -> bitmap reset.
+    TEST_ASSERT_FALSE(dedup_update(dd, &owner, jump_tag, 2));
     // Previous tags should NOT be remembered (bitmap was reset).
-    TEST_ASSERT_FALSE(dedup_update(dd, &owner, 300U, 3)); // rev=1, bit 0 was clear → new
-    // But 300 is now set; re-receiving is duplicate.
-    TEST_ASSERT_TRUE(dedup_update(dd, &owner, 300U, 4));
+    TEST_ASSERT_FALSE(dedup_update(dd, &owner, jump_tag - 1U, 3)); // rev=1, bit 1 was clear -> new
+    // But jump_tag-1 is now set; re-receiving is duplicate.
+    TEST_ASSERT_TRUE(dedup_update(dd, &owner, jump_tag - 1U, 4));
 
     dedup_cleanup(&owner);
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&fixture.heap));

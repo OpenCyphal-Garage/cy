@@ -534,6 +534,13 @@ static bitmap_t* bitmap_new(const cy_t* const cy, const size_t count)
 static void bitmap_set(bitmap_t* const bitmap, const size_t bit) { bitmap[bit / 64U] |= 1ULL << (bit % 64U); }
 static void bitmap_clear(bitmap_t* const bitmap, const size_t bit) { bitmap[bit / 64U] &= ~(1ULL << (bit % 64U)); }
 
+static void bitmap_reset(bitmap_t* const bitmap, const size_t bit_count)
+{
+    if (bitmap != NULL) {
+        memset(bitmap, 0, bitmap_footprint(bit_count));
+    }
+}
+
 static bool bitmap_test(const bitmap_t* const bitmap, const size_t bit)
 {
     return (bitmap[bit / 64U] & (1ULL << (bit % 64U))) != 0;
@@ -607,7 +614,7 @@ static void bitmap_shift(bitmap_t* const bitmap, const size_t bit_count, const i
         const uintmax_t shift_mag =
           (shift_amount >= 0) ? (uintmax_t)shift_amount : ((uintmax_t)(-(shift_amount + 1)) + 1U);
         if (shift_mag >= bit_count) {
-            memset(bitmap, 0, words * sizeof(bitmap[0]));
+            bitmap_reset(bitmap, bit_count);
             return;
         }
         const size_t whole_words = (size_t)(shift_mag / 64U);
@@ -2604,7 +2611,7 @@ bool cy_publish_delivered(const cy_future_t* const future)
 // How many most recently received seqnos to keep in the bitmap.
 // The value is a compromise between practically possible delays and memory usage; ideally we want <=64B per remote.
 // Duplicates older than this are nacked.
-#define REQUEST_FUTURE_BITMAP_BITS 192
+#define REQUEST_FUTURE_HISTORY 192
 
 // An instance is stored per remote node that replied to a request using reliable delivery.
 // We use it to keep track of which responses have been seen and acknowledged in case our ack gets lost
@@ -2614,7 +2621,7 @@ typedef struct
     cy_tree_t index_by_remote_id;
     uint64_t  remote_id;
     uint64_t  seqno_top;
-    bitmap_t  seqno_acked[BITMAP_WORDS(REQUEST_FUTURE_BITMAP_BITS)]; // bit 0 = seqno_top, bit 1 = seqno_top-1, ...
+    bitmap_t  seqno_acked[BITMAP_WORDS(REQUEST_FUTURE_HISTORY)]; // bit 0 = seqno_top, bit 1 = seqno_top-1, ...
 } request_future_remote_t;
 
 typedef struct
@@ -2700,7 +2707,7 @@ static bool request_on_response(request_future_t* const self,
             const request_future_remote_t* const remote =
               (request_future_remote_t*)cavl2_find(self->remote_by_id, &lane.id, request_future_remote_cavl_compare);
             if ((remote != NULL) && (seqno <= remote->seqno_top)) {
-                return bitmap_test_bounded(remote->seqno_acked, REQUEST_FUTURE_BITMAP_BITS, remote->seqno_top - seqno);
+                return bitmap_test_bounded(remote->seqno_acked, REQUEST_FUTURE_HISTORY, remote->seqno_top - seqno);
             }
         }
         return false; // Do not proceed to the acceptance path, we're already dead.
@@ -2724,12 +2731,12 @@ static bool request_on_response(request_future_t* const self,
             return false;                        // Cannot accept, tell the sender about that.
         }
         if (seqno > remote->seqno_top) { // Pushes the frontier, need to shift the bitmap.
-            bitmap_shift(remote->seqno_acked, REQUEST_FUTURE_BITMAP_BITS, (intmax_t)(seqno - remote->seqno_top));
+            bitmap_shift(remote->seqno_acked, REQUEST_FUTURE_HISTORY, (intmax_t)(seqno - remote->seqno_top));
             bitmap_set(remote->seqno_acked, 0); // 0th bit is always set, redundant bit simple
             remote->seqno_top = seqno;
         } else { // earlier seqno below the frontier, which might be new if delivered out of order
             const uint64_t dist = remote->seqno_top - seqno;
-            if (dist >= REQUEST_FUTURE_BITMAP_BITS) {
+            if (dist >= REQUEST_FUTURE_HISTORY) {
                 return false; // too old, exceeds history, probably sender misbehaving, do not accept
             }
             if (bitmap_test(remote->seqno_acked, (size_t)dist)) {
@@ -3031,8 +3038,8 @@ static void subscriber_invoke(cy_subscriber_t* const subscriber, const cy_arriva
 // --------------------------------------------------------------------------------------------------------------------
 // RELIABLE MESSAGE DEDUPLICATION TO MITIGATE ACK LOSS
 
-// TODO double this using two side-by-side uint64_t bitmaps.
-#define DEDUP_HISTORY 64U
+// Must be a multiple of 64. Shouldn't be too large because every update requires bit shifting throughout.
+#define DEDUP_HISTORY 512U
 
 // An instance is kept per remote node that publishes messages on a given topic, or P2P.
 // It is used for deduplication of reliable messages received from that remote; duplications occur when the remote
@@ -3046,11 +3053,12 @@ typedef struct dedup_t
     uint64_t remote_id;
     cy_us_t  last_active_at;
 
-    // bitmap[0]=tag-1, bitmap[1]=tag-2, bitmap[2]=tag-3, ..., bitmap[63]=tag-64; tag itself is implicitly true.
+    // bitmap[0]=tag, bitmap[1]=tag, bitmap[2]=tag, ..., bitmap[63]=tag-63
+    // tag itself is always true so setting zeroth bit is redundant, but is simpler.
     uint64_t tag;
-    uint64_t bitmap;
+    bitmap_t bitmap[BITMAP_WORDS(DEDUP_HISTORY)];
 } dedup_t;
-static_assert((sizeof(void*) > 4) || (sizeof(dedup_t) <= (64 - 8)), "should fit in a small o1heap block");
+static_assert((sizeof(void*) > 4) || (sizeof(dedup_t) <= (128 - 8)), "should fit in a small o1heap block");
 
 typedef struct
 {
@@ -3068,25 +3076,21 @@ static bool dedup_update(dedup_t* const self, cy_topic_t* const owner, const uin
     enlist_head(&owner->sub_list_dedup_by_recency, &self->list_recency);
 
     // Consult with the bitmap for duplication and update its state.
-    const uint64_t rev = self->tag - tag;
-    if (rev == 0) {
-        return true;
-    }
-    if (rev <= DEDUP_HISTORY) { // Either duplicate or out-of-order; bit already in the bitmap.
-        if ((self->bitmap & (1ULL << (rev - 1))) != 0) {
-            return true;
+    const uint64_t fwd = tag - self->tag; // Wrapping arithmetic.
+    const uint64_t rev = self->tag - tag; // Wrapping arithmetic.
+    if (rev < DEDUP_HISTORY) {            // Either duplicate or out-of-order; bit already in the bitmap.
+        if (bitmap_test(self->bitmap, (size_t)rev)) {
+            return true; // This is a duplicate.
         }
-        self->bitmap |= (1ULL << (rev - 1));
-    } else {
-        const uint64_t fwd = tag - self->tag;
+        bitmap_set(self->bitmap, (size_t)rev);
+    } else { // Push the frontier or reset.
         if (fwd < DEDUP_HISTORY) {
-            self->bitmap = (self->bitmap << fwd) | (1ULL << (fwd - 1U)); // Mark the previous current-tag as well.
-        } else if (fwd == DEDUP_HISTORY) {
-            self->bitmap = 1ULL << (DEDUP_HISTORY - 1U); // Mark the previous current; special case to avoid shift by 64
+            bitmap_shift(self->bitmap, DEDUP_HISTORY, (intmax_t)fwd);
         } else {
-            self->bitmap = 0; // A large tag jump in either direction is treated as a session restart.
+            bitmap_reset(self->bitmap, DEDUP_HISTORY); // Large jump in either direction --> session restart.
         }
         self->tag = tag;
+        bitmap_set(self->bitmap, 0);
     }
     return false;
 }
@@ -3125,9 +3129,7 @@ static cy_tree_t* dedup_factory(void* const user)
     dedup_t* const state = mem_alloc_zero(ctx->owner->cy, sizeof(dedup_t));
     if (state != NULL) {
         state->remote_id = ctx->remote_id;
-        // The tag itself is implicitly considered received, so we start with a distant tag value to avoid false-dup.
-        state->tag    = ctx->tag + DEDUP_HISTORY + 1U;
-        state->bitmap = 0;
+        state->tag       = ctx->tag; // Bitmap bit 0 is not set so it won't be rejected as duplicate.
     }
     CY_TRACE(ctx->owner->cy,
              "🧹 N%016jx tag=%016jx: %s",
