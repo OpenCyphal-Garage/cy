@@ -135,12 +135,16 @@ typedef enum
     header_rsp_ack  = 5,    ///< Acknowledgement of a reliable response. No payload.
     header_rsp_nack = 6,    ///< Negative acknowledgement of a reliable message or response. No payload.
     header_gossip   = 7,    ///< Topic allocation CRDT gossip. No payload.
-    header_scout    = 8,    ///< Topic discovery scout. No payload.
+    header_scout    = 8,    ///< Discovery scout. No payload.
     // Rest reserved for future use.
 } header_type_t;
 ```
 
 DSDL notation is used to define the headers. Void fields are sent zero and ignored on reception. Incompatibility fields are sent zero; on reception, messages must be discarded if nonzero.
+
+Potential future extensions:
+
+- Make scouts with an empty name valid, requiring all nodes to respond with a condensed node status and diagnostic message. It would carry basic operational information such as the set of epidemic gossip peers, perfcounters, topic count, etc.
 
 #### Types 0 (best-effort message publication), 1 (reliable message publication)
 
@@ -215,7 +219,7 @@ utf8[<=CY_TOPIC_NAME_MAX] topic_name  # Has 1 byte length prefix. The name is no
 # Total size is 24 bytes + topic name length.
 ```
 
-#### Type 8 (topic discovery scout)
+#### Type 8 (discovery scout)
 
 This is typically broadcast to let every node check if it has any matching topics. On match, responses are sent as the ordinary CRDT gossip message with zero TTL. Responses are usually unicast, but this is not required; the only requirement is that the requester should be likely to receive them.
 
@@ -229,6 +233,8 @@ void56
 utf8[<=CY_TOPIC_NAME_MAX] pattern  # Has 1 byte length prefix. The pattern is applied to normalized names.
 # Total size is 24 bytes + pattern length.
 ```
+
+Currently, the name has to be non-empty. Empty-name scouts are reserved for future use.
 
 ### CRDT gossips
 
