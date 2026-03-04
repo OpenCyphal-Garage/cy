@@ -184,7 +184,7 @@ struct cy_t
     wkv_t subscribers_by_pattern; // Only patterns for implicit subscriptions on gossips.
 
     // Pending network state indexes. Removal is guided by remote nodes and by deadline (via olga).
-    cy_tree_t* response_futures_by_tag;
+    cy_tree_t* respond_futures_by_tag;
 
     size_t p2p_extent;
 
@@ -2391,9 +2391,9 @@ static void publish_future_materialize(publish_future_t* const self)
 //  - t=11: 1st retry           timeout=2   deadline=13     --> (13+2*2)<24
 //  - t=13: 2nd retry           timeout=4   deadline=17     --> (17+4*2)>24, last attempt
 //  - passively wait for acks until 24, no further attempts.
-static bool publish_future_is_last_attempt(const cy_us_t current_ack_deadline,
-                                           const cy_us_t current_ack_timeout,
-                                           const cy_us_t total_deadline)
+static bool ack_is_last_attempt(const cy_us_t current_ack_deadline,
+                                const cy_us_t current_ack_timeout,
+                                const cy_us_t total_deadline)
 {
     const cy_us_t next_ack_timeout = current_ack_timeout * 2; // next retry would use exponential backoff
     const cy_us_t remaining_budget = total_deadline - current_ack_deadline;
@@ -2425,7 +2425,7 @@ static void publish_future_timeout(cy_future_t* const base, const cy_us_t schedu
     assert(now < self->deadline);
     self->ack_timeout *= 2;                                                       // exponential backoff
     const cy_us_t ack_deadline = sooner(self->ack_timeout + now, self->deadline); // manage possible scheduler lag
-    const bool    last_attempt = publish_future_is_last_attempt(ack_deadline, self->ack_timeout, self->deadline);
+    const bool    last_attempt = ack_is_last_attempt(ack_deadline, self->ack_timeout, self->deadline);
     assert(ack_deadline > now);
 
     // We can use multicast throughout, but it may be inefficient if we only need to reach few remaining subscribers.
@@ -2551,7 +2551,7 @@ cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadli
     const cy_us_t now          = cy_now(cy);
     const cy_us_t ack_deadline = sooner(deadline, now + fut->ack_timeout);
     const cy_us_t tx_deadline  = ack_deadline;
-    const bool    one_shot     = publish_future_is_last_attempt(ack_deadline, fut->ack_timeout, deadline);
+    const bool    one_shot     = ack_is_last_attempt(ack_deadline, fut->ack_timeout, deadline);
 
     // If we anticipate retransmissions, copy the data. This is wasteful. There is a way to improve it though:
     // we can extend the transport API such that we could copy once into the TX queue memory and then hold it via
@@ -2916,14 +2916,15 @@ void      cy_priority_set(cy_publisher_t* const pub, const cy_prio_t priority)
     }
 }
 
+static cy_us_t derive_ack_timeout(const cy_us_t ack_baseline_timeout, const cy_prio_t priority)
+{
+    assert(ack_baseline_timeout > 0);
+    return ack_baseline_timeout * (1LL << (byte_t)priority); // NOLINT(*signed*)
+}
+
 cy_us_t cy_ack_timeout(const cy_publisher_t* const pub)
 {
-    cy_us_t out = BIG_BANG;
-    if (pub != NULL) {
-        assert(pub->ack_baseline_timeout > 0);
-        out = pub->ack_baseline_timeout * (1LL << (byte_t)pub->priority); // NOLINT(*signed*)
-    }
-    return out;
+    return (pub != NULL) ? derive_ack_timeout(pub->ack_baseline_timeout, pub->priority) : BIG_BANG;
 }
 
 void cy_ack_timeout_set(cy_publisher_t* const pub, const cy_us_t timeout)
@@ -3861,15 +3862,20 @@ void cy_unsubscribe(cy_subscriber_t* const self)
     }
 }
 
-static cy_err_t do_respond(cy_breadcrumb_t* const breadcrumb, const cy_us_t deadline, const cy_bytes_t message)
+// Does not alter seqno; the caller is responsible for that.
+static cy_err_t do_respond(cy_breadcrumb_t* const breadcrumb,
+                           const cy_us_t          deadline,
+                           const cy_bytes_t       message,
+                           const header_type_t    type,
+                           const byte_t           tag)
 {
     assert((breadcrumb != NULL) && (breadcrumb->cy != NULL) && (deadline >= 0));
     gossip_begin(breadcrumb->cy);
 
-    // Compose the header. The tag is zero since we don't expect any ack.
+    // Compose the header.
     assert(breadcrumb->seqno < (SEQNO48_MASK - 1U)); // Sanity check; this value is not practically reachable.
-    byte_t header[HEADER_BYTES] = { (byte_t)header_rsp_be, 0 };
-    (void)serialize_u48(&header[2], breadcrumb->seqno++);
+    byte_t header[HEADER_BYTES] = { (byte_t)type, tag };
+    (void)serialize_u48(&header[2], breadcrumb->seqno);
     (void)serialize_u64(&header[8], breadcrumb->topic_hash);
     (void)serialize_u64(&header[16], breadcrumb->message_tag);
     const cy_bytes_t headed_message = { .size = sizeof(header), .data = header, .next = &message };
@@ -3883,10 +3889,202 @@ static cy_err_t do_respond(cy_breadcrumb_t* const breadcrumb, const cy_us_t dead
 
 cy_err_t cy_respond(cy_breadcrumb_t* const breadcrumb, const cy_us_t deadline, const cy_bytes_t message)
 {
+    cy_err_t err = CY_ERR_ARGUMENT;
     if ((breadcrumb != NULL) && (breadcrumb->cy != NULL) && (deadline >= 0)) {
-        return do_respond(breadcrumb, deadline, message);
+        err = do_respond(breadcrumb, deadline, message, header_rsp_be, 0xFF); // arbitrary tag value
+        breadcrumb->seqno++; // Increment always in case of partial send success.
     }
-    return CY_ERR_ARGUMENT;
+    return err;
+}
+
+typedef struct
+{
+    cy_future_t     base; // The key is respond_key().
+    cy_us_t         deadline;
+    cy_breadcrumb_t breadcrumb;
+    byte_t          tag;
+
+    cy_err_t error;
+
+    const cy_bytes_t* data;
+    cy_us_t           ack_timeout;
+} respond_future_t;
+
+static bool     respond_future_done(const cy_future_t* const base) { return !future_deadline_armed(base); }
+static cy_err_t respond_future_error(const cy_future_t* const base) { return ((const respond_future_t*)base)->error; }
+
+static void respond_future_timeout(cy_future_t* const base, const cy_us_t scheduled, const cy_us_t now)
+{
+    assert(scheduled <= now); // scheduler invariant
+    (void)scheduled;
+    respond_future_t* const self = (respond_future_t*)base;
+    assert(self->breadcrumb.cy == base->cy);
+    cy_t* const cy = base->cy;
+
+    // If we are supposed to try more attempts (data not yet destroyed) but we are already near the deadline,
+    // it means that there is a strong scheduler lag that prevented us from completing some of the attempts fully,
+    // and we can no longer rely on reachability information. We may still transmit but with only a short ACK timeout.
+    const bool sched_lag_error = (self->data != NULL) && (now >= (self->deadline - self->ack_timeout));
+    self->error = ((self->error == CY_OK) && sched_lag_error) ? CY_ERR_LAG : self->error; // Weak error, no overwrite.
+
+    // Check completion.
+    if ((self->data == NULL) || (now >= self->deadline)) { // This is the final poll.
+        future_index_remove(base, &cy->respond_futures_by_tag);
+        assert(base->vtable->done(base)); // timer not restarted
+        self->error = CY_ERR_DELIVERY;    // no response -- not delivered
+        future_notify(&self->base);       // Invalidates the future. Expect disposal.
+        return;
+    }
+
+    // Compute next deadline and decide if it's going to be the last attempt based on the remaining time.
+    assert(now < self->deadline);
+    self->ack_timeout *= 2;                                                       // exponential backoff
+    const cy_us_t ack_deadline = sooner(self->ack_timeout + now, self->deadline); // manage possible scheduler lag
+    const bool    last_attempt = ack_is_last_attempt(ack_deadline, self->ack_timeout, self->deadline);
+    assert(ack_deadline > now);
+
+    // Send the message.
+    const cy_err_t er = do_respond(&self->breadcrumb, ack_deadline, *self->data, header_rsp_rel, self->tag);
+    ON_ASYNC_ERROR_IF(cy, NULL, er);
+    self->error = (er != CY_OK) ? er : self->error; // Send errors are strong, overriding prior errors if any.
+
+    // Schedule the next poll event.
+    // If there is going to be another attempt, schedule the next timeout to fire when it's time to transmit;
+    // otherwise, if this is the last attempt, we will only need to get back to this state at the final deadline.
+    // If there will be no more attempts, we don't need to keep the payload, so we should free it early.
+    if (last_attempt) {
+        bytes_undup(cy, self->data); // Release memory ASAP, no longer going to need it.
+        self->data = NULL;
+        future_deadline_arm(base, self->deadline);
+    } else {
+        assert(ack_deadline < self->deadline);
+        future_deadline_arm(base, ack_deadline);
+    }
+
+    // Notify if any errors occurred, but we are not done yet.
+    if ((er != CY_OK) || sched_lag_error) {
+        assert(self->error != CY_OK);
+        assert(!base->vtable->done(base)); // Not done yet -- timer pending.
+        future_notify(&self->base);        // Invalidates the future. Expect disposal.
+    }
+}
+
+static void respond_future_dispose(cy_future_t* const base)
+{
+    cy_t* const cy = base->cy;
+    future_deadline_disarm(base); // idempotent
+    if (future_indexed(base, cy->respond_futures_by_tag)) {
+        future_index_remove(base, &cy->respond_futures_by_tag);
+    }
+    bytes_undup(cy, ((respond_future_t*)base)->data); // NULL-safe
+    mem_free(base->cy, base);
+}
+
+static const cy_future_vtable_t respond_future_vtable = { .done    = respond_future_done,
+                                                          .error   = respond_future_error,
+                                                          .timeout = respond_future_timeout,
+                                                          .dispose = respond_future_dispose };
+
+static void respond_future_on_ack(respond_future_t* const self, const bool positive_ack)
+{
+    cy_t* const cy = self->base.cy;
+    assert(!self->base.vtable->done(&self->base));
+    self->error = positive_ack ? CY_OK : CY_ERR_NACK; // Overwrite previous error -- assume it has been seen.
+    future_deadline_disarm(&self->base);
+    future_index_remove(&self->base, &cy->respond_futures_by_tag);
+    bytes_undup(cy, self->data);
+    self->data = NULL;
+    future_notify(&self->base); // Invalidates the future. Expect finalization call.
+}
+
+static uint64_t respond_key(const uint64_t remote_id,
+                            const uint64_t message_tag,
+                            const uint64_t hash,
+                            const uint64_t seqno,
+                            const byte_t   tag)
+{
+    assert(seqno <= SEQNO48_MASK);
+    // This simple and fast hash should suffice. We could use rapidhash but it's likely an overkill.
+    // Message tag and seqno change their LSb quickly, which is why we shift seqno to the left (it's only 48 bits wide).
+    // The tag is shifted left for the same reason -- we want it to reside in the area where bits are mostly static.
+    return remote_id ^ message_tag ^ hash ^ (seqno << 16U) ^ ((uint64_t)tag << 56U);
+}
+
+cy_future_t* cy_respond_reliable(cy_breadcrumb_t* const breadcrumb, const cy_us_t deadline, const cy_bytes_t message)
+{
+    if ((breadcrumb == NULL) || (breadcrumb->cy == NULL) || (CY_PRIO_COUNT <= (size_t)breadcrumb->priority) ||
+        (deadline < 0) || ((message.data == NULL) && (message.size > 0))) {
+        return NULL;
+    }
+    cy_t* const cy = breadcrumb->cy;
+
+    // Prepare the future.
+    respond_future_t* const fut = future_new(cy, &respond_future_vtable, sizeof(respond_future_t));
+    if (fut == NULL) {
+        return NULL;
+    }
+    fut->deadline   = deadline;
+    fut->breadcrumb = *breadcrumb; // Sample the original breadcrumb with the correct seqno.
+
+    // Compute the timings but don't arm the timer yet because transmission may still fail.
+    // The transmission deadline of each attempt equals the next attempt time such that we don't enqueue duplicates.
+    // If the application gave us a deadline that's too tight, that's on them -- we will still try hoping for the best.
+    // Remember that the given deadline is a strict limit that we are not allowed to exceed.
+    fut->ack_timeout           = derive_ack_timeout(cy->ack_baseline_timeout, breadcrumb->priority);
+    const cy_us_t now          = cy_now(cy);
+    const cy_us_t ack_deadline = sooner(deadline, now + fut->ack_timeout);
+    const cy_us_t tx_deadline  = ack_deadline;
+    const bool    one_shot     = ack_is_last_attempt(ack_deadline, fut->ack_timeout, deadline);
+
+    // If we anticipate retransmissions, copy the data. This is wasteful. There is a way to improve it though:
+    // we can extend the transport API such that we could copy once into the TX queue memory and then hold it via
+    // refcounting until we're done transmitting. See the old experimental libudpard implementation where we used
+    // to have reliable delivery in the transport layer; we can borrow some ideas from there to minimize TX copy.
+    if (!one_shot) {
+        fut->data = bytes_dup(cy, message);
+        if (fut->data == NULL) {
+            mem_free(cy, fut);
+            return NULL;
+        }
+    } else {
+        fut->data = NULL; // Not enough time for retransmissions, no need to copy the data.
+    }
+
+    // Insert the future into the index. The key entropy is high, but there is a tiny chance of a collision,
+    // which are resolved by incrementing the tag (which can be chosen arbitrarily).
+    // We preserve runtime handling of that chance even though it is negligible for any practical use case.
+    // If this becomes a problem, we could use 128-bit keys (this is an implementation detail that is not wire-visible)
+    // or avoid hashing and just use the full stream ID tripled plus seqno as the key.
+    fut->tag = 0;
+    while (!future_index_insert(&fut->base,
+                                &cy->respond_futures_by_tag,
+                                respond_key(breadcrumb->remote_id, //
+                                            breadcrumb->message_tag,
+                                            breadcrumb->topic_hash,
+                                            breadcrumb->seqno,
+                                            fut->tag))) {
+        if (fut->tag == 0xFF) { // practically unreachable
+            bytes_undup(cy, fut->data);
+            mem_free(cy, fut);
+            CY_TRACE(cy, "🙀 Tag variability exhausted, this is impossible");
+            return NULL;
+        }
+        fut->tag++;
+    }
+
+    // Once the fallible operations are done, transmit.
+    const cy_err_t res = do_respond(breadcrumb, tx_deadline, message, header_rsp_rel, fut->tag);
+    breadcrumb->seqno++; // Sampled breadcrumb copy has now diverged. Increment always in case of partial send success.
+    if (res != CY_OK) {
+        future_index_remove(&fut->base, &cy->respond_futures_by_tag);
+        bytes_undup(cy, fut->data); // No-op if NULL.
+        mem_free(cy, fut);
+        return NULL;
+    }
+
+    // Complete the infallible steps.
+    future_deadline_arm(&fut->base, one_shot ? deadline : ack_deadline);
+    return (cy_future_t*)fut;
 }
 
 // =====================================================================================================================
@@ -3932,7 +4130,7 @@ static void topic_destroy(cy_topic_t* const topic)
 
     // Remove any zombie request futures that may be left behind to manage retransmissions.
     // This is lifetime-safe because the API contract requires that the application must destroy pending futures
-    // before destroying their pulisher, and the topic cannot be destroyed as long as it has at least one live
+    // before destroying their publisher, and the topic cannot be destroyed as long as it has at least one live
     // publisher (or subscriber or whatever). To wit, topics are recycled after some timeout, and by the time it
     // expires the zombie request futures are likely going to be destroyed on timeout anyway.
     while (topic->request_futures_by_tag != NULL) {
@@ -4047,7 +4245,7 @@ cy_t* cy_new(cy_platform_t* const platform)
     cy->subscribers_by_pattern.sub_one = cy_name_one;
     cy->subscribers_by_pattern.sub_any = cy_name_any;
 
-    cy->response_futures_by_tag = NULL;
+    cy->respond_futures_by_tag = NULL;
 
     cy->p2p_extent = HEADER_BYTES + 1024U; // Arbitrary initial size; will be refined when publishers are created.
     cy->platform->vtable->p2p_extent_set(platform, cy->p2p_extent);
@@ -4105,6 +4303,7 @@ void cy_destroy(cy_t* const cy)
     // We are unable to destroy user-owner objects like publishers/subscribers/futures because we don't own them.
     assert(wkv_is_empty(&cy->subscribers_by_name));
     assert(wkv_is_empty(&cy->subscribers_by_pattern));
+    assert(cy->respond_futures_by_tag == NULL); // All pending response futures must be destroyed.
 
     // Remove global subject reader & writer.
     if (cy->broad_reader != NULL) {
@@ -4497,6 +4696,9 @@ void cy_on_message(cy_platform_t* const             platform,
         }
 
         case header_msg_ack: {
+            if (subject_reader != NULL) {
+                goto bad_message; // Require ACKs to be P2P only.
+            }
             const uint32_t incompatibility = deserialize_u32(&header[4]);
             if (incompatibility != 0) {
                 goto bad_message;
@@ -4554,7 +4756,36 @@ void cy_on_message(cy_platform_t* const             platform,
 
         case header_rsp_ack:
         case header_rsp_nack: {
-            break; // TODO: not implemented yet, will be implemented in the next sprint.
+            if (subject_reader != NULL) {
+                goto bad_message; // Require ACKs to be P2P only.
+            }
+            const byte_t   tag         = header[1];
+            const uint64_t seqno       = deserialize_u48(&header[2]);
+            const uint64_t hash        = deserialize_u64(&header[8]);
+            const uint64_t message_tag = deserialize_u64(&header[16]);
+            // Find the pending future, if any. If not, it could be a duplicate ack.
+            const uint64_t          key    = respond_key(lane.id, message_tag, hash, seqno, tag);
+            respond_future_t* const future = (respond_future_t*)future_index_lookup(cy->respond_futures_by_tag, key);
+            // Do a full match check to manage possible (however unlikely) hash collisions. This is cheap.
+            // This only matters if the true future is already gone, because collisions are mitigated at insertion time.
+            const bool match = (future != NULL) &&                                //
+                               (future->breadcrumb.remote_id == lane.id) &&       //
+                               (future->breadcrumb.message_tag == message_tag) && //
+                               (future->breadcrumb.topic_hash == hash) &&         //
+                               (future->breadcrumb.seqno == seqno) &&             //
+                               (future->tag == tag);
+            if (match) {
+                respond_future_on_ack(future, type == header_rsp_ack);
+            } else {
+                CY_TRACE(cy,
+                         "⚠️ Orphan response ACK N%016jx T%016jx message_tag=%016jx seqno=%ju tag=%02x",
+                         (uintmax_t)lane.id,
+                         (uintmax_t)hash,
+                         (uintmax_t)message_tag,
+                         (uintmax_t)seqno,
+                         tag);
+            }
+            break;
         }
 
         case header_gossip: {

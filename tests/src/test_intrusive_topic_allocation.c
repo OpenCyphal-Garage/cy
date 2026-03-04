@@ -171,7 +171,7 @@ static void fixture_deinit(fixture_t* const self)
     if (self->cy != NULL) {
         TEST_ASSERT_TRUE(wkv_is_empty(&self->cy->subscribers_by_name));
         TEST_ASSERT_TRUE(wkv_is_empty(&self->cy->subscribers_by_pattern));
-        TEST_ASSERT_NULL(self->cy->response_futures_by_tag);
+        TEST_ASSERT_NULL(self->cy->respond_futures_by_tag);
         for (cy_topic_t* topic = cy_topic_iter_first(self->cy); topic != NULL; topic = cy_topic_iter_next(topic)) {
             TEST_ASSERT_EQUAL_UINT32(0U, topic->pub_count);
             TEST_ASSERT_NULL(topic->pub_futures_by_tag);

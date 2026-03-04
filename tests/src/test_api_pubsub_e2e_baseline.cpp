@@ -559,11 +559,11 @@ void test_api_pubsub_e2e_a09_response_frame_metadata_is_parsed_per_response_head
         }
         found = true;
         TEST_ASSERT_TRUE(cap.frame.has_tag);
-        TEST_ASSERT_EQUAL_UINT64(0U, cap.frame.tag); // Best-effort responses currently use ack-correlation tag=0.
+        TEST_ASSERT_EQUAL_UINT64(0xFF, cap.frame.tag); // Best-effort responses currently use ack-correlation tag=255.
         TEST_ASSERT_TRUE(cap.frame.has_topic_hash);
         TEST_ASSERT_EQUAL_UINT64(server_capture.first_topic_hash, cap.frame.topic_hash);
         TEST_ASSERT_TRUE(cap.frame.wire.size() >= 24U);
-        TEST_ASSERT_EQUAL_UINT8(0U, cap.frame.wire.at(1U)); // Response tag at byte offset 1.
+        TEST_ASSERT_EQUAL_UINT8(0xFFU, cap.frame.wire.at(1U)); // Response tag at byte offset 1.
         TEST_ASSERT_EQUAL_UINT64(server_capture.first_message_tag, read_u64_at(cap.frame.wire, 16U));
         break;
     }

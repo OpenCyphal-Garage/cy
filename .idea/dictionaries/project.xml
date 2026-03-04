@@ -15,6 +15,7 @@
       <w>csma</w>
       <w>cyphal</w>
       <w>cyudp</w>
+      <w>deinit</w>
       <w>dgrams</w>
       <w>dscp</w>
       <w>gaap</w>

@@ -93,36 +93,30 @@ static void forget_associations(cy_topic_t* const topic)
     }
 }
 
-static void test_publish_future_is_last_attempt_basic(void)
+static void test_ack_is_last_attempt_basic(void)
 {
     // (100 + 50*2) = 200 > 200 is FALSE
-    TEST_ASSERT_FALSE(publish_future_is_last_attempt(100, 50, 200));
+    TEST_ASSERT_FALSE(ack_is_last_attempt(100, 50, 200));
     // (100 + 50*2) = 200 > 199 is TRUE
-    TEST_ASSERT_TRUE(publish_future_is_last_attempt(100, 50, 199));
+    TEST_ASSERT_TRUE(ack_is_last_attempt(100, 50, 199));
     // (0 + 0*2) = 0 > 0 is FALSE
-    TEST_ASSERT_FALSE(publish_future_is_last_attempt(0, 0, 0));
+    TEST_ASSERT_FALSE(ack_is_last_attempt(0, 0, 0));
     // (0 + 1*2) = 2 > 1 is TRUE
-    TEST_ASSERT_TRUE(publish_future_is_last_attempt(0, 1, 1));
+    TEST_ASSERT_TRUE(ack_is_last_attempt(0, 1, 1));
 }
 
-static void test_is_last_attempt_exactly_equal(void)
-{
-    TEST_ASSERT_FALSE(publish_future_is_last_attempt(100, 50, 200));
-}
+static void test_is_last_attempt_exactly_equal(void) { TEST_ASSERT_FALSE(ack_is_last_attempt(100, 50, 200)); }
 
-static void test_is_last_attempt_one_over(void) { TEST_ASSERT_TRUE(publish_future_is_last_attempt(101, 50, 200)); }
+static void test_is_last_attempt_one_over(void) { TEST_ASSERT_TRUE(ack_is_last_attempt(101, 50, 200)); }
 
-static void test_is_last_attempt_large_margin(void)
-{
-    TEST_ASSERT_TRUE(publish_future_is_last_attempt(1000, 500, 100));
-}
+static void test_is_last_attempt_large_margin(void) { TEST_ASSERT_TRUE(ack_is_last_attempt(1000, 500, 100)); }
 
-static void test_is_last_attempt_large_room(void) { TEST_ASSERT_FALSE(publish_future_is_last_attempt(100, 50, 10000)); }
+static void test_is_last_attempt_large_room(void) { TEST_ASSERT_FALSE(ack_is_last_attempt(100, 50, 10000)); }
 
 static void test_is_last_attempt_zero_timeout(void)
 {
-    TEST_ASSERT_TRUE(publish_future_is_last_attempt(5, 0, 4));
-    TEST_ASSERT_FALSE(publish_future_is_last_attempt(5, 0, 5));
+    TEST_ASSERT_TRUE(ack_is_last_attempt(5, 0, 4));
+    TEST_ASSERT_FALSE(ack_is_last_attempt(5, 0, 5));
 }
 
 static void test_is_last_attempt_preserves_full_ack_window(void)
@@ -131,9 +125,9 @@ static void test_is_last_attempt_preserves_full_ack_window(void)
     // t=10 initial attempt timeout=1  -> ack_deadline=11
     // t=11 retry #1       timeout=2  -> ack_deadline=13
     // t=13 retry #2       timeout=4  -> ack_deadline=17 (must be last)
-    TEST_ASSERT_FALSE(publish_future_is_last_attempt(11, 1, 24));
-    TEST_ASSERT_FALSE(publish_future_is_last_attempt(13, 2, 24));
-    TEST_ASSERT_TRUE(publish_future_is_last_attempt(17, 4, 24));
+    TEST_ASSERT_FALSE(ack_is_last_attempt(11, 1, 24));
+    TEST_ASSERT_FALSE(ack_is_last_attempt(13, 2, 24));
+    TEST_ASSERT_TRUE(ack_is_last_attempt(17, 4, 24));
 }
 
 static void test_bisect_empty(void) { TEST_ASSERT_EQUAL_size_t(0U, association_bisect(NULL, 0U, 123U)); }
@@ -557,7 +551,7 @@ void tearDown(void) {}
 int main(void)
 {
     UNITY_BEGIN();
-    RUN_TEST(test_publish_future_is_last_attempt_basic);
+    RUN_TEST(test_ack_is_last_attempt_basic);
     RUN_TEST(test_is_last_attempt_exactly_equal);
     RUN_TEST(test_is_last_attempt_one_over);
     RUN_TEST(test_is_last_attempt_large_margin);

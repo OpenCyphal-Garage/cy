@@ -41,9 +41,10 @@ extern "C"
 #define CY_ERR_NAME     5
 #define CY_ERR_MEDIA    6  // Generic low-level network error from the underlying platform layer.
 #define CY_ERR_LAG      7  // Strong scheduler lag detected. Non-real-time systems may ignore.
-#define CY_ERR_DELIVERY 8  // Reliable message was not acknowledged by the remote(s).
+#define CY_ERR_DELIVERY 8  // Reliable message (publication or response) was not acknowledged by the remote(s).
 #define CY_ERR_RESPONSE 9  // Response did not arrive on time.
-#define CY_ERR_CANCELED 10 // Future canceled before it could normally complete.
+#define CY_ERR_NACK     10 // Explicitly rejected by the remote.
+#define CY_ERR_CANCELED 11 // Future canceled before it could normally complete.
 
 typedef uint_fast8_t cy_err_t;
 typedef int64_t      cy_us_t; ///< Monotonic microsecond timestamp. Signed to permit arithmetics in the past.
@@ -346,7 +347,7 @@ typedef struct cy_breadcrumb_t
     uint64_t topic_hash;  ///< Identifies the topic the original request message was received from.
     uint64_t message_tag; ///< The tag of the original request message this breadcrumb can respond to.
 
-    uint64_t         seqno; ///< Incremented with each response sent (incl. failed); starts at zero.
+    uint64_t         seqno; ///< Incremented with each response sent; starts at zero.
     cy_p2p_context_t p2p_context;
 } cy_breadcrumb_t;
 
@@ -432,20 +433,6 @@ void cy_subscriber_name(const cy_subscriber_t* const self, char* const out_name)
 /// This is done to enable safe destruction from within a callback.
 void cy_unsubscribe(cy_subscriber_t* const self);
 
-/// If streaming responses are used, streaming should continue only as long as the response futures materialize to
-/// cy_response_acknowledged; otherwise, the stream should be ceased.
-///
-/// A known ambiguity exists if the server sends a reliable response that is accepted, but the pack is lost;
-/// the server will retransmit the response, but the client application may no longer be listening if it only needed
-/// a single response; the second response will be a nack instead of a pack.
-/// TODO If this becomes a problem, store a short list of recently positively-acked responses in the Cy state.
-typedef enum cy_response_status_t
-{
-    cy_response_timeout      = 0, ///< Remote did not respond before the deadline.
-    cy_response_acknowledged = 1, ///< Remote responded and acknowledged the response.
-    cy_response_rejected     = 2, ///< Remote received the response but the application is no longer interested in it.
-} cy_response_status_t;
-
 /// Send a best-effort response to a message previously received from a topic subscription.
 /// The response will be sent directly to the publisher using peer-to-peer transport, not affecting other nodes.
 /// This can be invoked from a subscription callback or at any later point as long as the breadcrumb is available.
@@ -455,10 +442,21 @@ typedef enum cy_response_status_t
 cy_err_t cy_respond(cy_breadcrumb_t* const breadcrumb, const cy_us_t deadline, const cy_bytes_t message);
 
 /// Reliable counterpart of cy_respond() that provides the delivery success feedback via a future.
-/// This is useful for streamed RPC responses where the server (the sender) needs to know whether the client
-/// is still listening or has gone away (in which case streaming should be ceased).
+/// This is especially useful for streamed RPC responses where the server (the sender) needs to know whether the
+/// client (original message publisher) is still listening or has gone away (in which case streaming should be ceased).
 ///
-/// TODO implement and document
+/// The client session layer will respond with a positive ACK as long as the application is still receiving the
+/// responses (in the specific implementation of Cy it means that the corresponding future is still alive).
+/// If the application is no longer listening (in Cy, future is destroyed), the session layer will respond with a NACK,
+/// indicating that response could not be delivered to the application, and further responses will not be useful.
+///
+/// The future materializes (becomes done) either on timeout, or upon (N)ACK arrival. The user can check the outcome
+/// using cy_future_error():
+///     CY_OK:              ACK received (remote application accepted the response).
+///     CY_ERR_NACK:        remote replied with NACK.
+///     CY_ERR_DELIVERY:    remote did not respond before the timeout: network connectivity issue or remote is down.
+/// These are the only possible error states that may occur at the time when the future is resolved. Additional
+/// transient errors may occur while delivery is in progress, in particular errors originating from the platform layer.
 cy_future_t* cy_respond_reliable(cy_breadcrumb_t* const breadcrumb, const cy_us_t deadline, const cy_bytes_t message);
 
 // =====================================================================================================================
