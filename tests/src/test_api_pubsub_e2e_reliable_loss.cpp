@@ -34,9 +34,14 @@ struct arrival_capture_t final
     std::size_t                   malformed{ 0U };
 };
 
-extern "C" void on_arrival_capture(cy_subscriber_t* const sub, const cy_arrival_t arrival)
+extern "C" void on_arrival_capture(cy_future_t* const sub)
 {
-    auto* const capture = static_cast<arrival_capture_t*>(cy_subscriber_context(sub).ptr[0]);
+    const cy_arrival_t arrival = cy_arrival_move(sub);
+    if (arrival.message.content == nullptr) {
+        return;
+    }
+
+    auto* const capture = static_cast<arrival_capture_t*>(cy_future_context(sub).ptr[0]);
     TEST_ASSERT_NOT_NULL(capture);
 
     std::array<unsigned char, 32> bytes{};
@@ -45,10 +50,12 @@ extern "C" void on_arrival_capture(cy_subscriber_t* const sub, const cy_arrival_
     e2e::app_payload_t payload{};
     if (!e2e::app_payload_unpack(bytes.data(), size, payload)) {
         capture->malformed++;
+        cy_message_refcount_dec(arrival.message.content);
         return;
     }
 
     capture->samples.push_back(arrival_sample_t{ .publisher_id = payload.publisher_id, .app_seq = payload.sequence });
+    cy_message_refcount_dec(arrival.message.content);
 }
 
 bool is_rel_a_to_b(const e2e::frame_info_t& frame)
@@ -105,15 +112,15 @@ cy_publisher_t* make_publisher(e2e::sim_net_t& net, const char* const topic_name
     return pub;
 }
 
-cy_subscriber_t* make_subscriber(e2e::sim_net_t& net, const char* const topic_name, arrival_capture_t& capture)
+cy_future_t* make_subscriber(e2e::sim_net_t& net, const char* const topic_name, arrival_capture_t& capture)
 {
-    cy_subscriber_t* const sub = cy_subscribe(e2e::sim_net_cy(net, e2e::sim_node_b), cy_str(topic_name), 64U);
+    cy_future_t* const sub = cy_subscribe(e2e::sim_net_cy(net, e2e::sim_node_b), cy_str(topic_name), 64U);
     TEST_ASSERT_NOT_NULL(sub);
 
     cy_user_context_t ctx = CY_USER_CONTEXT_EMPTY;
     ctx.ptr[0]            = &capture;
-    cy_subscriber_context_set(sub, ctx);
-    cy_subscriber_callback_set(sub, on_arrival_capture);
+    cy_future_context_set(sub, ctx);
+    cy_future_callback_set(sub, on_arrival_capture);
     return sub;
 }
 
@@ -200,11 +207,11 @@ void assert_publish_futures(const std::vector<cy_future_t*>& futures,
     }
 }
 
-void cleanup_case(e2e::sim_net_t&                      net,
-                  cy_us_t&                             now,
-                  const std::vector<cy_future_t*>&     futures,
-                  const std::vector<cy_subscriber_t*>& subscribers,
-                  const std::vector<cy_publisher_t*>&  publishers)
+void cleanup_case(e2e::sim_net_t&                     net,
+                  cy_us_t&                            now,
+                  const std::vector<cy_future_t*>&    futures,
+                  const std::vector<cy_future_t*>&    subscribers,
+                  const std::vector<cy_publisher_t*>& publishers)
 {
     for (cy_future_t* const fut : futures) {
         if (fut != nullptr) {
@@ -212,9 +219,9 @@ void cleanup_case(e2e::sim_net_t&                      net,
         }
     }
 
-    for (cy_subscriber_t* const sub : subscribers) {
+    for (cy_future_t* const sub : subscribers) {
         if (sub != nullptr) {
-            cy_unsubscribe(sub);
+            cy_future_destroy(sub);
         }
     }
     drive_for(net, now, 40'000);
@@ -248,9 +255,9 @@ void test_api_pubsub_e2e_b01_drop_first_data_frame_for_each_message()
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
-    cy_publisher_t* const  pub = make_publisher(net, "e2e/b01/topic");
-    arrival_capture_t      capture{};
-    cy_subscriber_t* const sub = make_subscriber(net, "e2e/b01/topic", capture);
+    cy_publisher_t* const pub = make_publisher(net, "e2e/b01/topic");
+    arrival_capture_t     capture{};
+    cy_future_t* const    sub = make_subscriber(net, "e2e/b01/topic", capture);
 
     std::vector<cy_future_t*> futures{};
     set_now(net, now);
@@ -289,9 +296,9 @@ void test_api_pubsub_e2e_b02_drop_every_nth_data_frame()
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
-    cy_publisher_t* const  pub = make_publisher(net, "e2e/b02/topic");
-    arrival_capture_t      capture{};
-    cy_subscriber_t* const sub = make_subscriber(net, "e2e/b02/topic", capture);
+    cy_publisher_t* const pub = make_publisher(net, "e2e/b02/topic");
+    arrival_capture_t     capture{};
+    cy_future_t* const    sub = make_subscriber(net, "e2e/b02/topic", capture);
 
     std::vector<cy_future_t*> futures{};
     set_now(net, now);
@@ -327,9 +334,9 @@ void test_api_pubsub_e2e_b03_mid_stream_burst_data_loss_window()
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
-    cy_publisher_t* const  pub = make_publisher(net, "e2e/b03/topic");
-    arrival_capture_t      capture{};
-    cy_subscriber_t* const sub = make_subscriber(net, "e2e/b03/topic", capture);
+    cy_publisher_t* const pub = make_publisher(net, "e2e/b03/topic");
+    arrival_capture_t     capture{};
+    cy_future_t* const    sub = make_subscriber(net, "e2e/b03/topic", capture);
 
     std::vector<cy_future_t*> futures{};
     for (std::uint64_t seq = 1U; seq <= 10U; seq++) {
@@ -364,9 +371,9 @@ void test_api_pubsub_e2e_b04_drop_first_ack_for_each_message()
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
-    cy_publisher_t* const  pub = make_publisher(net, "e2e/b04/topic");
-    arrival_capture_t      capture{};
-    cy_subscriber_t* const sub = make_subscriber(net, "e2e/b04/topic", capture);
+    cy_publisher_t* const pub = make_publisher(net, "e2e/b04/topic");
+    arrival_capture_t     capture{};
+    cy_future_t* const    sub = make_subscriber(net, "e2e/b04/topic", capture);
 
     std::vector<cy_future_t*> futures{};
     set_now(net, now);
@@ -409,9 +416,9 @@ void test_api_pubsub_e2e_b05_drop_acks_for_first_k_retry_cycles_then_recover()
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
-    cy_publisher_t* const  pub = make_publisher(net, "e2e/b05/topic");
-    arrival_capture_t      capture{};
-    cy_subscriber_t* const sub = make_subscriber(net, "e2e/b05/topic", capture);
+    cy_publisher_t* const pub = make_publisher(net, "e2e/b05/topic");
+    arrival_capture_t     capture{};
+    cy_future_t* const    sub = make_subscriber(net, "e2e/b05/topic", capture);
 
     std::vector<cy_future_t*> futures{};
     set_now(net, now);
@@ -465,9 +472,9 @@ void test_api_pubsub_e2e_b06_mixed_data_and_ack_loss_pattern()
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
-    cy_publisher_t* const  pub = make_publisher(net, "e2e/b06/topic");
-    arrival_capture_t      capture{};
-    cy_subscriber_t* const sub = make_subscriber(net, "e2e/b06/topic", capture);
+    cy_publisher_t* const pub = make_publisher(net, "e2e/b06/topic");
+    arrival_capture_t     capture{};
+    cy_future_t* const    sub = make_subscriber(net, "e2e/b06/topic", capture);
 
     std::vector<cy_future_t*> futures{};
     set_now(net, now);
@@ -504,9 +511,9 @@ void test_api_pubsub_e2e_b07_one_way_partition_a_to_b_then_heal_before_deadlines
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
-    cy_publisher_t* const  pub = make_publisher(net, "e2e/b07/topic");
-    arrival_capture_t      capture{};
-    cy_subscriber_t* const sub = make_subscriber(net, "e2e/b07/topic", capture);
+    cy_publisher_t* const pub = make_publisher(net, "e2e/b07/topic");
+    arrival_capture_t     capture{};
+    cy_future_t* const    sub = make_subscriber(net, "e2e/b07/topic", capture);
 
     std::vector<cy_future_t*> futures{};
     set_now(net, now);
@@ -542,9 +549,9 @@ void test_api_pubsub_e2e_b08_one_way_partition_b_to_a_ack_blackout_then_heal()
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
-    cy_publisher_t* const  pub = make_publisher(net, "e2e/b08/topic");
-    arrival_capture_t      capture{};
-    cy_subscriber_t* const sub = make_subscriber(net, "e2e/b08/topic", capture);
+    cy_publisher_t* const pub = make_publisher(net, "e2e/b08/topic");
+    arrival_capture_t     capture{};
+    cy_future_t* const    sub = make_subscriber(net, "e2e/b08/topic", capture);
 
     std::vector<cy_future_t*> futures{};
     set_now(net, now);
@@ -578,9 +585,9 @@ void test_api_pubsub_e2e_b09_full_partition_interval_then_heal_within_deadlines(
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
-    cy_publisher_t* const  pub = make_publisher(net, "e2e/b09/topic");
-    arrival_capture_t      capture{};
-    cy_subscriber_t* const sub = make_subscriber(net, "e2e/b09/topic", capture);
+    cy_publisher_t* const pub = make_publisher(net, "e2e/b09/topic");
+    arrival_capture_t     capture{};
+    cy_future_t* const    sub = make_subscriber(net, "e2e/b09/topic", capture);
 
     std::vector<cy_future_t*> futures{};
     set_now(net, now);
@@ -614,9 +621,9 @@ void test_api_pubsub_e2e_b10_partition_longer_than_deadline_expected_failures()
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
-    cy_publisher_t* const  pub = make_publisher(net, "e2e/b10/topic");
-    arrival_capture_t      capture{};
-    cy_subscriber_t* const sub = make_subscriber(net, "e2e/b10/topic", capture);
+    cy_publisher_t* const pub = make_publisher(net, "e2e/b10/topic");
+    arrival_capture_t     capture{};
+    cy_future_t* const    sub = make_subscriber(net, "e2e/b10/topic", capture);
 
     std::vector<cy_future_t*> futures{};
     set_now(net, now);
@@ -649,9 +656,9 @@ void test_api_pubsub_e2e_b11_late_ack_after_failure_does_not_resurrect_future()
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
-    cy_publisher_t* const  pub = make_publisher(net, "e2e/b11/topic");
-    arrival_capture_t      capture{};
-    cy_subscriber_t* const sub = make_subscriber(net, "e2e/b11/topic", capture);
+    cy_publisher_t* const pub = make_publisher(net, "e2e/b11/topic");
+    arrival_capture_t     capture{};
+    cy_future_t* const    sub = make_subscriber(net, "e2e/b11/topic", capture);
 
     set_now(net, now);
     cy_future_t* const fut = publish_reliable(pub, 211U, 1U, now, 60'000);
@@ -696,9 +703,9 @@ void test_api_pubsub_e2e_b12_transient_ack_send_media_failures_on_receiver_side_
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
-    cy_publisher_t* const  pub = make_publisher(net, "e2e/b12/topic");
-    arrival_capture_t      capture{};
-    cy_subscriber_t* const sub = make_subscriber(net, "e2e/b12/topic", capture);
+    cy_publisher_t* const pub = make_publisher(net, "e2e/b12/topic");
+    arrival_capture_t     capture{};
+    cy_future_t* const    sub = make_subscriber(net, "e2e/b12/topic", capture);
 
     std::vector<cy_future_t*> futures{};
     set_now(net, now);

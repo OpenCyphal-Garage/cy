@@ -32,10 +32,14 @@ struct arrival_capture_t final
     std::size_t                   malformed{ 0U };
 };
 
-extern "C" void on_arrival_capture(cy_subscriber_t* const sub, const cy_arrival_t arrival)
+extern "C" void on_arrival_capture(cy_future_t* const sub)
 {
-    (void)arrival;
-    auto* const capture = static_cast<arrival_capture_t*>(cy_subscriber_context(sub).ptr[0]);
+    const cy_arrival_t arrival = cy_arrival_move(sub);
+    if (arrival.message.content == nullptr) {
+        return;
+    }
+
+    auto* const capture = static_cast<arrival_capture_t*>(cy_future_context(sub).ptr[0]);
     TEST_ASSERT_NOT_NULL(capture);
 
     std::array<unsigned char, 32> bytes{};
@@ -44,10 +48,12 @@ extern "C" void on_arrival_capture(cy_subscriber_t* const sub, const cy_arrival_
     e2e::app_payload_t payload{};
     if (!e2e::app_payload_unpack(bytes.data(), size, payload)) {
         capture->malformed++;
+        cy_message_refcount_dec(arrival.message.content);
         return;
     }
 
     capture->samples.push_back(arrival_sample_t{ .publisher_id = payload.publisher_id, .sequence = payload.sequence });
+    cy_message_refcount_dec(arrival.message.content);
 }
 
 void set_now(e2e::sim_net_t& net, const cy_us_t now)
@@ -76,14 +82,14 @@ void drain_queue(e2e::sim_net_t& net, cy_us_t& now)
     }
 }
 
-void cleanup_case(e2e::sim_net_t&                      net,
-                  cy_us_t&                             now,
-                  const std::vector<cy_subscriber_t*>& subscribers,
-                  const std::vector<cy_publisher_t*>&  publishers)
+void cleanup_case(e2e::sim_net_t&                     net,
+                  cy_us_t&                            now,
+                  const std::vector<cy_future_t*>&    subscribers,
+                  const std::vector<cy_publisher_t*>& publishers)
 {
-    for (cy_subscriber_t* const sub : subscribers) {
+    for (cy_future_t* const sub : subscribers) {
         if (sub != nullptr) {
-            cy_unsubscribe(sub);
+            cy_future_destroy(sub);
         }
     }
     drive_for(net, now, 100'000);
@@ -203,22 +209,20 @@ void run_seed_case(const std::uint64_t seed)
     arrival_capture_t capture_a{};
     arrival_capture_t capture_b{};
 
-    cy_subscriber_t* const sub_a =
-      cy_subscribe(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("e2e/model/collide/>"), 64U);
-    cy_subscriber_t* const sub_b =
-      cy_subscribe(e2e::sim_net_cy(net, e2e::sim_node_b), cy_str("e2e/model/collide/>"), 64U);
+    cy_future_t* const sub_a = cy_subscribe(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("e2e/model/collide/>"), 64U);
+    cy_future_t* const sub_b = cy_subscribe(e2e::sim_net_cy(net, e2e::sim_node_b), cy_str("e2e/model/collide/>"), 64U);
     TEST_ASSERT_NOT_NULL(sub_a);
     TEST_ASSERT_NOT_NULL(sub_b);
 
     cy_user_context_t ctx_a = CY_USER_CONTEXT_EMPTY;
     ctx_a.ptr[0]            = &capture_a;
-    cy_subscriber_context_set(sub_a, ctx_a);
-    cy_subscriber_callback_set(sub_a, on_arrival_capture);
+    cy_future_context_set(sub_a, ctx_a);
+    cy_future_callback_set(sub_a, on_arrival_capture);
 
     cy_user_context_t ctx_b = CY_USER_CONTEXT_EMPTY;
     ctx_b.ptr[0]            = &capture_b;
-    cy_subscriber_context_set(sub_b, ctx_b);
-    cy_subscriber_callback_set(sub_b, on_arrival_capture);
+    cy_future_context_set(sub_b, ctx_b);
+    cy_future_callback_set(sub_b, on_arrival_capture);
 
     cy_publisher_t* const pub_a = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), topic_a_name);
     cy_publisher_t* const pub_b = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_b), topic_b_name);

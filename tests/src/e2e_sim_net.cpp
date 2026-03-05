@@ -11,7 +11,6 @@
 namespace e2e {
 namespace {
 
-constexpr std::uint8_t header_type_mask = 63U;
 constexpr std::uint8_t header_gossip    = 7U;
 constexpr std::uint8_t header_scout     = 8U;
 constexpr std::size_t  header_size      = 24U;
@@ -138,7 +137,7 @@ std::size_t effective_header_size(const frame_info_t& frame)
 
 void frame_parse(frame_info_t& frame)
 {
-    frame.header_type    = frame.wire.empty() ? 0U : static_cast<std::uint8_t>(frame.wire.front() & header_type_mask);
+    frame.header_type    = frame.wire.empty() ? 0U : static_cast<std::uint8_t>(frame.wire.front());
     frame.has_tag        = false;
     frame.tag            = 0U;
     frame.has_topic_hash = false;

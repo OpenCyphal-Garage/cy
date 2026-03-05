@@ -1579,7 +1579,7 @@ void test_send_message_ack_error_path()
     test_begin(platform);
 
     static const char* const topic_name = "reliable/send_message_ack_error_path";
-    cy_subscriber_t* const   sub        = cy_subscribe(platform.cy, cy_str(topic_name), 16U);
+    cy_future_t* const       sub        = cy_subscribe(platform.cy, cy_str(topic_name), 16U);
     TEST_ASSERT_NOT_NULL(sub);
 
     const std::uint64_t                          hash = topic_hash_for(platform, topic_name);
@@ -1623,7 +1623,7 @@ void test_send_message_ack_error_path()
     TEST_ASSERT_EQUAL_size_t(p2p_count_before + 2U, platform.p2p_count);
     TEST_ASSERT_FALSE(platform.fail_next_p2p_send);
 
-    cy_unsubscribe(sub);
+    cy_future_destroy(sub);
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
 
     test_end(platform);

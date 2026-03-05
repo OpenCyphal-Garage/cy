@@ -56,7 +56,7 @@ struct subscriber_context_t final
 struct handles_t final
 {
     std::array<std::array<cy_publisher_t*, max_topics>, e2e::sim_node_count>      pub{};
-    std::array<std::array<cy_subscriber_t*, max_topics>, e2e::sim_node_count>     sub{};
+    std::array<std::array<cy_future_t*, max_topics>, e2e::sim_node_count>         sub{};
     std::array<std::array<subscriber_context_t, max_topics>, e2e::sim_node_count> ctx{};
     std::array<std::array<std::uint64_t, max_topics>, e2e::sim_node_count>        next_seq{};
 };
@@ -234,7 +234,7 @@ void destroy_node_handles(e2e::sim_net_t&   net,
 {
     for (std::size_t t = 0U; t < topic_count; t++) {
         if (handles.sub.at(node_index).at(t) != nullptr) {
-            cy_unsubscribe(handles.sub.at(node_index).at(t));
+            cy_future_destroy(handles.sub.at(node_index).at(t));
             handles.sub.at(node_index).at(t) = nullptr;
         }
     }
@@ -256,9 +256,14 @@ void destroy_all_handles(e2e::sim_net_t& net, handles_t& handles, const std::siz
     }
 }
 
-extern "C" void on_arrival_capture(cy_subscriber_t* const sub, const cy_arrival_t arrival)
+extern "C" void on_arrival_capture(cy_future_t* const sub)
 {
-    auto* const ctx = static_cast<subscriber_context_t*>(cy_subscriber_context(sub).ptr[0]);
+    const cy_arrival_t arrival = cy_arrival_move(sub);
+    if (arrival.message.content == nullptr) {
+        return;
+    }
+
+    auto* const ctx = static_cast<subscriber_context_t*>(cy_future_context(sub).ptr[0]);
     TEST_ASSERT_NOT_NULL(ctx);
     TEST_ASSERT_NOT_NULL(ctx->log);
 
@@ -268,6 +273,7 @@ extern "C" void on_arrival_capture(cy_subscriber_t* const sub, const cy_arrival_
     e2e::app_payload_t payload{};
     if (!e2e::app_payload_unpack(bytes.data(), size, payload)) {
         ctx->log->malformed_count++;
+        cy_message_refcount_dec(arrival.message.content);
         return;
     }
 
@@ -283,6 +289,7 @@ extern "C" void on_arrival_capture(cy_subscriber_t* const sub, const cy_arrival_
     if (!ctx->log->unique.insert(key).second) {
         ctx->log->duplicate_count++;
     }
+    cy_message_refcount_dec(arrival.message.content);
 }
 
 void create_topic_handles(e2e::sim_net_t&   net,
@@ -300,7 +307,7 @@ void create_topic_handles(e2e::sim_net_t&   net,
     cy_ack_timeout_set(pub, 60'000);
     handles.pub.at(node_index).at(topic_index) = pub;
 
-    cy_subscriber_t* sub = nullptr;
+    cy_future_t* sub = nullptr;
     if (ordered) {
         sub = cy_subscribe_ordered(
           e2e::sim_net_cy(net, node_index), cy_str(colliding_topics.at(topic_index)), 1024U, 60'000);
@@ -318,8 +325,8 @@ void create_topic_handles(e2e::sim_net_t&   net,
 
     cy_user_context_t user_ctx = CY_USER_CONTEXT_EMPTY;
     user_ctx.ptr[0]            = &ctx;
-    cy_subscriber_context_set(sub, user_ctx);
-    cy_subscriber_callback_set(sub, on_arrival_capture);
+    cy_future_context_set(sub, user_ctx);
+    cy_future_callback_set(sub, on_arrival_capture);
 }
 
 std::optional<std::uint64_t> publish_best_effort(handles_t&        handles,

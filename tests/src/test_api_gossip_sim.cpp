@@ -11,7 +11,6 @@
 #include <vector>
 
 namespace {
-constexpr std::uint8_t header_type_mask   = 63U;
 constexpr std::uint8_t header_type_msg_be = 0U;
 constexpr std::size_t  header_bytes       = 24U;
 constexpr std::size_t  max_wire_size      = 256U;
@@ -225,7 +224,7 @@ extern "C" cy_err_t sim_subject_writer_send(cy_platform_t* const       platform,
     std::array<unsigned char, max_wire_size> data{};
     const std::size_t                        size = flatten_fragments(message, data.data(), data.size());
 
-    if ((writer != nullptr) && (size >= header_bytes) && ((data[0] & header_type_mask) == header_type_msg_be)) {
+    if ((writer != nullptr) && (size >= header_bytes) && (data[0] == header_type_msg_be)) {
         self->last_msg_be_hash       = read_u64(data.data(), 8U);
         self->last_msg_be_subject_id = writer->subject_id;
     }

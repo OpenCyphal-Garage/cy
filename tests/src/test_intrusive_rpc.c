@@ -161,6 +161,12 @@ static void fixture_assert_clean(const fixture_t* const self)
     TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_live_count());
 }
 
+static void assert_message_counters(const size_t destroyed, const size_t live)
+{
+    TEST_ASSERT_EQUAL_size_t(destroyed, cy_test_message_destroy_count());
+    TEST_ASSERT_EQUAL_size_t(live, cy_test_message_live_count());
+}
+
 static cy_message_ts_t make_message(fixture_t* const self, const cy_us_t ts, const byte_t marker)
 {
     const byte_t        payload[3] = { marker, (byte_t)(marker + 1U), (byte_t)(marker + 2U) };
@@ -364,7 +370,7 @@ static void test_respond_reliable_ack_success(void)
     TEST_ASSERT_NOT_NULL(fut);
     TEST_ASSERT_EQUAL_UINT64(4U, breadcrumb.seqno);
     TEST_ASSERT_EQUAL_size_t(1U, fixture.p2p_send_count);
-    TEST_ASSERT_EQUAL_UINT8(header_rsp_rel, fixture.last_p2p[0] & HEADER_TYPE_MASK);
+    TEST_ASSERT_EQUAL_UINT8(header_rsp_rel, fixture.last_p2p[0]);
     TEST_ASSERT_EQUAL_UINT64(3U, deserialize_u48(&fixture.last_p2p[2]));
     const byte_t tag = fixture.last_p2p[1];
 
@@ -445,7 +451,7 @@ static void test_respond_reliable_retransmit_then_ack(void)
     fixture_advance_to(&fixture, fixture.now + ack_to + 1);
     TEST_ASSERT_FALSE(cy_future_done(fut));
     TEST_ASSERT_EQUAL_size_t(2U, fixture.p2p_send_count);
-    TEST_ASSERT_EQUAL_UINT8(header_rsp_rel, fixture.last_p2p[0] & HEADER_TYPE_MASK);
+    TEST_ASSERT_EQUAL_UINT8(header_rsp_rel, fixture.last_p2p[0]);
 
     dispatch_response_control(&fixture, (byte_t)header_rsp_ack, tag, 2U, hash, msg_tag, remote_id, fixture.now, false);
     TEST_ASSERT_TRUE(cy_future_done(fut));
@@ -633,6 +639,35 @@ static void test_respond_reliable_multicast_ack_rejected(void)
     fixture_assert_clean(&fixture);
 }
 
+static void test_message_refcount_primitives_destroy_once(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+
+    const byte_t        payload[2] = { 0xAAU, 0xBBU };
+    cy_message_t* const msg        = cy_test_message_make(&fixture.heap, payload, sizeof(payload));
+    TEST_ASSERT_NOT_NULL(msg);
+    TEST_ASSERT_EQUAL_UINT32(1U, msg->refcount);
+    assert_message_counters(0U, 1U);
+
+    cy_message_refcount_inc(NULL); // NULL-safe no-op.
+    cy_message_refcount_dec(NULL); // NULL-safe no-op.
+    TEST_ASSERT_EQUAL_UINT32(1U, msg->refcount);
+    assert_message_counters(0U, 1U);
+
+    cy_message_refcount_inc(msg);
+    TEST_ASSERT_EQUAL_UINT32(2U, msg->refcount);
+    assert_message_counters(0U, 1U);
+
+    cy_message_refcount_dec(msg);
+    TEST_ASSERT_EQUAL_UINT32(1U, msg->refcount);
+    assert_message_counters(0U, 1U);
+
+    cy_message_refcount_dec(msg);
+    assert_message_counters(1U, 0U);
+    fixture_assert_clean(&fixture);
+}
+
 static void test_request_on_response_best_effort_overwrite_and_callback(void)
 {
     fixture_t fixture;
@@ -659,6 +694,7 @@ static void test_request_on_response_best_effort_overwrite_and_callback(void)
     TEST_ASSERT_TRUE(future_deadline_armed(&fut->base));
     TEST_ASSERT_EQUAL_UINT32(2U, first.content->refcount);
     cy_message_refcount_dec(first.content); // release local copy
+    assert_message_counters(0U, 1U);
 
     const cy_message_ts_t second = make_message(&fixture, fixture.now + 20U, 2U);
     TEST_ASSERT_TRUE(request_on_response(fut, 0U, second, false, lane_b));
@@ -669,15 +705,64 @@ static void test_request_on_response_best_effort_overwrite_and_callback(void)
     TEST_ASSERT_EQUAL_UINT64(99U, fut->last_response.remote_id);
     TEST_ASSERT_EQUAL_UINT64(0U, fut->last_response.seqno);
     cy_message_refcount_dec(second.content); // release local copy
+    assert_message_counters(1U, 1U);         // Overwrite destroys the first response.
 
-    const cy_response_t moved = cy_response(&fut->base);
+    const cy_response_t moved = cy_response_move(&fut->base);
     TEST_ASSERT_NOT_NULL(moved.message.content);
     TEST_ASSERT_FALSE(cy_future_done(&fut->base));
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_future_error(&fut->base));
     cy_message_refcount_dec(moved.message.content);
+    assert_message_counters(2U, 0U);
 
     cy_future_destroy(&fut->base);
     TEST_ASSERT_NULL(topic.request_futures_by_tag);
+    assert_message_counters(2U, 0U);
+    fixture_assert_clean(&fixture);
+}
+
+static void test_request_future_destroy_releases_last_response(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+
+    cy_topic_t        topic;
+    request_future_t* fut  = make_request_future(&fixture, &topic, UINT64_C(1101), 20000);
+    const cy_lane_t   lane = make_lane(77U);
+
+    const cy_message_ts_t msg = make_message(&fixture, fixture.now + 5U, 0x31U);
+    TEST_ASSERT_TRUE(request_on_response(fut, 1U, msg, false, lane));
+    cy_message_refcount_dec(msg.content); // release local copy
+    assert_message_counters(0U, 1U);
+
+    cy_future_destroy(&fut->base);
+    TEST_ASSERT_NULL(topic.request_futures_by_tag);
+    assert_message_counters(1U, 0U);
+    fixture_assert_clean(&fixture);
+}
+
+static void test_request_future_dispose_zombie_releases_last_response_early(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+
+    cy_topic_t        topic;
+    request_future_t* fut  = make_request_future(&fixture, &topic, UINT64_C(1102), 20000);
+    const cy_lane_t   lane = make_lane(88U);
+
+    const cy_message_ts_t msg = make_message(&fixture, fixture.now + 6U, 0x41U);
+    TEST_ASSERT_TRUE(request_on_response(fut, 9U, msg, true, lane)); // reliable creates remote state.
+    cy_message_refcount_dec(msg.content);                            // release local copy
+    assert_message_counters(0U, 1U);
+
+    cy_future_destroy(&fut->base);
+    TEST_ASSERT_TRUE(fut->finalized);
+    TEST_ASSERT_NULL(fut->last_response.message.content);
+    TEST_ASSERT_NOT_NULL(topic.request_futures_by_tag);
+    assert_message_counters(1U, 0U); // dispose() released the retained response immediately.
+
+    fixture_advance_to(&fixture, fixture.now + (SESSION_LIFETIME / 2) + 1);
+    TEST_ASSERT_NULL(topic.request_futures_by_tag);
+    assert_message_counters(1U, 0U);
     fixture_assert_clean(&fixture);
 }
 
@@ -908,7 +993,10 @@ int main(void)
     RUN_TEST(test_respond_reliable_ack_match_field_mismatch_keeps_future_pending);
     RUN_TEST(test_respond_reliable_key_collision_increments_tag);
     RUN_TEST(test_respond_reliable_multicast_ack_rejected);
+    RUN_TEST(test_message_refcount_primitives_destroy_once);
     RUN_TEST(test_request_on_response_best_effort_overwrite_and_callback);
+    RUN_TEST(test_request_future_destroy_releases_last_response);
+    RUN_TEST(test_request_future_dispose_zombie_releases_last_response_early);
     RUN_TEST(test_request_on_response_reliable_dedup_and_ordering);
     RUN_TEST(test_request_on_response_zombie_ack_seen_nack_unseen);
     RUN_TEST(test_request_on_response_reliable_oom_escalates_failure);

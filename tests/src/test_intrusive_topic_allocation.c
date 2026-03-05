@@ -306,12 +306,12 @@ static void test_cy_destroy_after_user_unsubscribes_and_spins(void)
     fixture_init(&fix);
 
     static const char* const topic_name = "destroy/deferred/subscriber/*";
-    cy_subscriber_t* const   sub        = cy_subscribe(fix.cy, cy_str(topic_name), 128U);
+    cy_future_t* const       sub        = cy_subscribe(fix.cy, cy_str(topic_name), 128U);
     TEST_ASSERT_NOT_NULL(sub);
     TEST_ASSERT_FALSE(wkv_is_empty(&fix.cy->subscribers_by_name));
     TEST_ASSERT_FALSE(wkv_is_empty(&fix.cy->subscribers_by_pattern));
 
-    cy_unsubscribe(sub); // Deferred destruction event is now pending.
+    cy_future_destroy(sub); // Deferred destruction event is now pending.
     TEST_ASSERT_FALSE(wkv_is_empty(&fix.cy->subscribers_by_name));
     TEST_ASSERT_FALSE(wkv_is_empty(&fix.cy->subscribers_by_pattern));
 
@@ -459,7 +459,7 @@ static void test_topic_subscribe_if_matching_oom_topic_new(void)
     fixture_t fix;
     fixture_init(&fix);
 
-    cy_subscriber_t* const sub = cy_subscribe(fix.cy, cy_str("topic/auto/oom/new/>"), 64U);
+    cy_future_t* const sub = cy_subscribe(fix.cy, cy_str("topic/auto/oom/new/>"), 64U);
     TEST_ASSERT_NOT_NULL(sub);
 
     const cy_str_t name                = cy_str("topic/auto/oom/new/x");
@@ -472,7 +472,7 @@ static void test_topic_subscribe_if_matching_oom_topic_new(void)
     TEST_ASSERT_NULL(cy_topic_find_by_hash(fix.cy, hash));
     TEST_ASSERT_EQUAL_size_t(async_errors_before + 1U, fix.async_error_count);
 
-    cy_unsubscribe(sub);
+    cy_future_destroy(sub);
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(fix.cy));
     fixture_deinit(&fix);
 }
@@ -496,7 +496,7 @@ static void test_topic_subscribe_if_matching_oom_coupling_rolls_back_topic(void)
     fixture_t fix;
     fixture_init(&fix);
 
-    cy_subscriber_t* const sub = cy_subscribe(fix.cy, cy_str("topic/auto/oom/coupling/*"), 64U);
+    cy_future_t* const sub = cy_subscribe(fix.cy, cy_str("topic/auto/oom/coupling/*"), 64U);
     TEST_ASSERT_NOT_NULL(sub);
 
     const cy_str_t name                = cy_str("topic/auto/oom/coupling/x");
@@ -509,7 +509,7 @@ static void test_topic_subscribe_if_matching_oom_coupling_rolls_back_topic(void)
     TEST_ASSERT_NULL(cy_topic_find_by_hash(fix.cy, hash));
     TEST_ASSERT_EQUAL_size_t(async_errors_before + 1U, fix.async_error_count);
 
-    cy_unsubscribe(sub);
+    cy_future_destroy(sub);
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(fix.cy));
     fixture_deinit(&fix);
 }
@@ -731,7 +731,7 @@ static void test_topic_allocate_reader_recovery_after_subject_reader_oom(void)
     fixture_t fix;
     fixture_init(&fix);
 
-    cy_subscriber_t* const sub = cy_subscribe(fix.cy, cy_str("alloc/reader/oom"), 64U);
+    cy_future_t* const sub = cy_subscribe(fix.cy, cy_str("alloc/reader/oom"), 64U);
     TEST_ASSERT_NOT_NULL(sub);
     cy_topic_t* const topic = cy_topic_find_by_name(fix.cy, cy_str("alloc/reader/oom"));
     TEST_ASSERT_NOT_NULL(topic);
@@ -749,7 +749,7 @@ static void test_topic_allocate_reader_recovery_after_subject_reader_oom(void)
     topic_sync_subject_reader(topic);
     TEST_ASSERT_NOT_NULL(topic->sub_reader);
 
-    cy_unsubscribe(sub);
+    cy_future_destroy(sub);
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(fix.cy));
     fixture_deinit(&fix);
 }

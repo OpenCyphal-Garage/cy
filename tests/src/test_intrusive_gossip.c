@@ -94,7 +94,7 @@ static void capture_send(fixture_t* const self,
     out->lane_id    = lane_id;
     out->size       = flatten_fragments(message, out->data, sizeof(out->data));
     if (out->size > 0U) {
-        out->type = out->data[0] & HEADER_TYPE_MASK;
+        out->type = out->data[0];
     }
     if ((out->type == header_gossip) && (out->size >= HEADER_BYTES)) {
         // Gossip wire header layout in cy.c: ttl at byte 2, hash at 8, evictions at 16.

@@ -236,7 +236,6 @@ struct cy_t
 // Does not affect normal messages since they are not broadcast.
 #define BROADCAST_EXTENT 500U
 
-#define HEADER_TYPE_MASK 63U
 typedef enum
 {
     header_msg_be   = 0,
@@ -1150,8 +1149,8 @@ typedef struct subscriber_root_t
     wkv_node_t* index_name;
     wkv_node_t* index_pattern; // NULL if this is a verbatim subscriber.
 
-    cy_t*            cy;
-    cy_subscriber_t* head; // New subscribers are inserted at the head of the list.
+    cy_t*                cy;
+    struct subscriber_t* head; // New subscribers are inserted at the head of the list.
 
     bool needs_scouting;
 } subscriber_root_t;
@@ -2796,8 +2795,8 @@ static cy_err_t request_future_error(const cy_future_t* const base)
     if (self->publish_error != CY_OK) {
         return self->publish_error;
     }
-    if ((self->last_response.message.content == NULL) && !future_deadline_armed(base)) {
-        return CY_ERR_RESPONSE;
+    if (!future_deadline_armed(base)) {
+        return CY_ERR_LIVENESS;
     }
     return CY_OK;
 }
@@ -2883,15 +2882,25 @@ cy_future_t* cy_request(cy_publisher_t* const pub,
     return &fut->base;
 }
 
-static bool request_is_valid_future(const cy_future_t* const future)
+bool cy_is_request(const cy_future_t* const future)
 {
     return (future != NULL) && (future->vtable == &request_future_vtable);
 }
 
-cy_response_t cy_response(cy_future_t* const future)
+cy_response_t cy_response_borrow(const cy_future_t* const future)
 {
     cy_response_t result = { 0 };
-    if (request_is_valid_future(future)) {
+    if (cy_is_request(future)) {
+        const request_future_t* const self = (const request_future_t*)future;
+        result                             = self->last_response; // refcount not updated due to borrowing
+    }
+    return result;
+}
+
+cy_response_t cy_response_move(cy_future_t* const future)
+{
+    cy_response_t result = { 0 };
+    if (cy_is_request(future)) {
         request_future_t* const self = (request_future_t*)future;
         result                       = self->last_response; // refcount not updated due to move
         // Erase the moved instance.
@@ -2905,7 +2914,7 @@ cy_response_t cy_response(cy_future_t* const future)
 
 uint64_t cy_response_count(const cy_future_t* const future)
 {
-    return request_is_valid_future(future) ? ((request_future_t*)future)->response_count : 0;
+    return cy_is_request(future) ? ((request_future_t*)future)->response_count : 0;
 }
 
 cy_prio_t cy_priority(const cy_publisher_t* const pub) { return (pub != NULL) ? pub->priority : cy_prio_nominal; }
@@ -2980,60 +2989,119 @@ typedef struct
     // will be ejected in the order of arrival, and the missing frames even if arrive later will be dropped.
     cy_us_t reordering_window;
 
-    // The maximum number of messages that can be interned for reordering per remote publisher.
-    // This is a hard limit to prevent unbounded memory consumption in case of extreme high-rate out-of-order arrivals.
-    // If the limit is reached, the reordering window will close early and messages will be ejected even while
-    // waiting for missing frames, as if the time window had elapsed.
-    // By definition, the limit can only be exceeded if more than reordering_capacity messages arrive within the
-    // reordering_window time.
-    size_t reordering_capacity;
+    // Future will materialize with CY_ERR_LIVENESS if no new messages were seen in this time.
+    // It will continue to receive new messages despite the error, which will clear once new messages arrive.
+    cy_us_t liveness_timeout;
 } subscriber_params_t;
 
-struct cy_subscriber_t
+typedef struct subscriber_t
 {
-    subscriber_root_t* root; // Many-to-one relationship, never NULL.
-    cy_subscriber_t*   next; // Lists all subscribers under the same root.
+    cy_future_t base;
+    bool        verbatim; // True if the name is not a pattern; i.e., matches only a single topic.
+
+    subscriber_root_t*   root; // Many-to-one relationship, never NULL.
+    struct subscriber_t* next; // Lists all subscribers under the same root.
+
+    uint64_t     message_count;
+    cy_arrival_t last_arrival;
+    cy_err_t     error;
+    bool         disposed;
 
     subscriber_params_t params;
 
     cy_tree_t* index_reordering_by_remote_id;
     cy_list_t  list_reordering_by_recency;
+} subscriber_t;
 
-    cy_user_context_t        user_context;
-    cy_subscriber_callback_t callback;
-
-    // This is currently only used for delayed destruction.
-    // It is wasteful because it takes ~40 bytes, but simplifies the destruction logic.
-    olga_event_t event;
-};
-
-static cy_breadcrumb_t make_breadcrumb(const cy_topic_t* const topic, const cy_lane_t lane, const uint64_t message_tag)
+static bool subscriber_done(const cy_future_t* const base)
 {
-    return (cy_breadcrumb_t){ .cy          = topic->cy,
-                              .priority    = lane.prio,
-                              .remote_id   = lane.id,
-                              .topic_hash  = topic->hash,
-                              .message_tag = message_tag,
-                              .seqno       = 0, // Starts a new sequence.
-                              .p2p_context = lane.p2p };
+    const subscriber_t* const self = (const subscriber_t*)base;
+    if (self->last_arrival.message.content != NULL) {
+        return true;
+    }
+    return (self->params.liveness_timeout > 0) && !future_deadline_armed(base);
 }
 
-static cy_arrival_t make_arrival(cy_topic_t* const           topic,
-                                 const cy_lane_t             lane,
-                                 const uint64_t              message_tag,
-                                 const cy_message_ts_t       message,
-                                 const cy_substitution_set_t substitutions)
+static cy_err_t subscriber_error(const cy_future_t* const base)
 {
-    return (cy_arrival_t){ .message       = message,
-                           .breadcrumb    = make_breadcrumb(topic, lane, message_tag),
-                           .topic         = topic,
-                           .substitutions = substitutions };
+    const subscriber_t* const self = (const subscriber_t*)base;
+    assert(!self->disposed); // use after free
+    return self->error;
 }
 
-static void subscriber_invoke(cy_subscriber_t* const subscriber, const cy_arrival_t arrival)
+static void subscriber_destroy(subscriber_t* const self);
+
+static void subscriber_timeout(cy_future_t* const base, cy_us_t scheduled, cy_us_t now)
 {
-    assert(subscriber->callback != NULL);
-    subscriber->callback(subscriber, arrival);
+    (void)scheduled;
+    (void)now;
+    subscriber_t* const self = (subscriber_t*)base;
+    assert((self->root != NULL) && (self->root->cy == base->cy));
+    if (!self->disposed) {
+        self->error = CY_ERR_LIVENESS;
+        future_notify(base);
+    } else {
+        subscriber_destroy(self); // self invalidated
+    }
+}
+
+static void subscriber_dispose(cy_future_t* const base)
+{
+    subscriber_t* const self = (subscriber_t*)base;
+    assert(!self->disposed); // use after free
+#if CY_CONFIG_TRACE
+    char name[CY_TOPIC_NAME_MAX + 1];
+    cy_subscriber_name(base, name);
+    CY_TRACE(base->cy, "🗑️ %s", name);
+#endif
+    future_deadline_arm(base, 0);
+    self->disposed = true;
+    // Release message early.
+    cy_message_refcount_dec(self->last_arrival.message.content); // NULL-safe.
+    self->last_arrival.message.content = NULL;
+}
+
+static const cy_future_vtable_t subscriber_vtable = { .done    = subscriber_done,
+                                                      .error   = subscriber_error,
+                                                      .timeout = subscriber_timeout,
+                                                      .dispose = subscriber_dispose };
+
+static cy_arrival_t make_arrival(const cy_topic_t* const topic,
+                                 const cy_lane_t         lane,
+                                 const uint64_t          message_tag,
+                                 const cy_message_ts_t   message)
+{
+    const cy_breadcrumb_t bread = { .cy          = topic->cy,
+                                    .priority    = lane.prio,
+                                    .remote_id   = lane.id,
+                                    .topic_hash  = topic->hash,
+                                    .message_tag = message_tag,
+                                    .seqno       = 0, // Starts a new sequence.
+                                    .p2p_context = lane.p2p };
+    return (cy_arrival_t){ .message = message, .breadcrumb = bread };
+}
+
+static void subscriber_notify(subscriber_t* const self, const cy_arrival_t arrival)
+{
+    if (self->disposed) {
+        return;
+    }
+    cy_message_refcount_dec(self->last_arrival.message.content); // NULL-safe
+    self->last_arrival = arrival;                                // overwrite last message -- queue message deep
+    cy_message_refcount_inc(self->last_arrival.message.content);
+    self->message_count++;
+    if (self->params.liveness_timeout > 0) {
+        future_deadline_arm(&self->base, arrival.message.timestamp + self->params.liveness_timeout);
+    }
+    self->error = CY_OK;
+    assert(self->base.vtable->done(&self->base));
+    future_notify(&self->base);
+}
+
+static void subscriber_notify_error(subscriber_t* const self, const cy_err_t error)
+{
+    self->error = error;
+    future_notify(&self->base);
 }
 
 // --------------------------------------------------------------------------------------------------------------------
@@ -3143,11 +3211,9 @@ static cy_tree_t* dedup_factory(void* const user)
 // --------------------------------------------------------------------------------------------------------------------
 // MESSAGE ORDERING RECOVERY TO MITIGATE TRANSPORT REORDERING AND RELIABLE RETRANSMISSIONS
 
-// An arbitrarily chosen default.
-#define REORDERING_CAPACITY_DEFAULT 16U
-
-// Smaller values are clamped to this. See the implementation to see why.
-#define REORDERING_CAPACITY_MIN 4U
+// Maximum number of interned messages to keep. If more messages need to be stored, the ones with the lowest linearized
+// tag will be forcibly evicted, advancing the frontier tag.
+#define REORDERING_CAPACITY 16U
 
 static void reordering_on_window_expiration(olga_t* const sched, olga_event_t* const event, const cy_us_t now);
 
@@ -3179,9 +3245,8 @@ static int32_t reordering_slot_cavl_compare(const void* const user, const cy_tre
 // matching the pattern; we need separate reordering state per topic per publisher, keeping in mind that the same
 // remote may publish on multiple topics matching our subscriber.
 //
-// TODO: Consider a much simpler design where instead of a tree, interned messages are stored in a fixed array
-//  of 8 elements, ordered by linearized tag with a fixed (tag-index) offset. New arrivals shift the array.
-//  8 elements are ought to be enough for anybody; bookkeeping simplified, performance to improve if array is small.
+// TODO: Consider a simpler design where instead of a tree, interned messages are stored in a fixed array of
+//       8~16 elements, ordered by linearized tag with a fixed (tag-index) offset. New arrivals shift the array.
 typedef struct
 {
     cy_tree_t        index;        // For lookup when new messages received by (remote-ID, topic hash).
@@ -3193,10 +3258,9 @@ typedef struct
 
     // Metadata needed for asynchronous ejection.
     // The topic will be kept alive by our subscription, so there is no lifetime issue. Same for the substitutions.
-    cy_subscriber_t*      subscriber;
-    cy_topic_t*           topic;
-    cy_substitution_set_t substitutions; // Matching the subscription pattern to topic name.
-    cy_p2p_context_t      p2p_context;   // Updated with the latest received message.
+    subscriber_t*    subscriber;
+    cy_topic_t*      topic;
+    cy_p2p_context_t p2p_context; // Updated with the latest received message.
 
     uint64_t   tag_baseline;         // First seen tag in this state; subtract from incoming tags for linearization.
     uint64_t   last_ejected_lin_tag; // Linearized tag seen by the application; lesser tags are not allowed.
@@ -3206,12 +3270,11 @@ typedef struct
 
 typedef struct
 {
-    cy_us_t               now;
-    cy_lane_t             lane;
-    cy_subscriber_t*      subscriber;
-    cy_topic_t*           topic;
-    cy_substitution_set_t substitutions;
-    uint64_t              tag;
+    cy_us_t       now;
+    cy_lane_t     lane;
+    subscriber_t* subscriber;
+    cy_topic_t*   topic;
+    uint64_t      tag;
 } reordering_context_t;
 
 // Remove the slot and invoke the user callback.
@@ -3241,12 +3304,11 @@ static void reordering_eject(reordering_t* const self, reordering_slot_t* const 
       make_arrival(self->topic,
                    (cy_lane_t){ .id = self->remote_id, .p2p = self->p2p_context, .prio = slot->priority },
                    slot->lin_tag + self->tag_baseline,
-                   slot->message,
-                   self->substitutions);
+                   slot->message);
     mem_free(cy, slot); // Free the slot before the callback to give the application more memory to work with.
 
-    // Invoke the callback with the arrival and dispose the message.
-    subscriber_invoke(self->subscriber, arrival);
+    // Store the message and notify the client.
+    subscriber_notify(self->subscriber, arrival);
     cy_message_refcount_dec(arrival.message.content);
 }
 
@@ -3297,8 +3359,7 @@ static void reordering_resequence(reordering_t* const self, const uint64_t tag)
     // handle the former case without message loss we start with the reordering delay.
     assert(self->interned_count == 0);
     assert(self->interned_by_lin_tag == NULL);
-    assert(self->subscriber->params.reordering_capacity >= REORDERING_CAPACITY_MIN);
-    self->tag_baseline         = tag - (self->subscriber->params.reordering_capacity / 2U);
+    self->tag_baseline         = tag - (REORDERING_CAPACITY / 2U);
     self->last_ejected_lin_tag = 0;
 }
 
@@ -3312,7 +3373,6 @@ static bool reordering_push(reordering_t* const   self,
                             const cy_message_ts_t message)
 {
     assert(self->subscriber->params.reordering_window >= 0);
-    assert(self->subscriber->params.reordering_capacity >= REORDERING_CAPACITY_MIN); // caller must ensure
     assert(self->topic->cy == self->subscriber->root->cy);
     cy_t* const cy = self->topic->cy;
 
@@ -3322,7 +3382,7 @@ static bool reordering_push(reordering_t* const   self,
 
     // Dispatch the message according to its tag ordering.
     uint64_t     lin_tag  = tag - self->tag_baseline;
-    const size_t capacity = self->subscriber->params.reordering_capacity;
+    const size_t capacity = REORDERING_CAPACITY;
 
     // Late arrival or duplicate, the gap is already closed and the application has moved on, cannot accept.
     // Note that this check does not detect possible duplicates that are currently interned; this is checked below.
@@ -3360,7 +3420,7 @@ static bool reordering_push(reordering_t* const   self,
     // The next expected message can be ejected immediately. No need to allocate state, happy fast path, most common.
     if (lin_tag == self->last_ejected_lin_tag + 1U) {
         self->last_ejected_lin_tag = lin_tag;
-        subscriber_invoke(self->subscriber, make_arrival(self->topic, lane, tag, message, self->substitutions));
+        subscriber_notify(self->subscriber, make_arrival(self->topic, lane, tag, message));
         reordering_scan(self, false); // The just-ejected message may have closed an earlier gap.
         return true;
     }
@@ -3393,6 +3453,8 @@ static bool reordering_push(reordering_t* const   self,
                  (uintmax_t)tag,
                  (uintmax_t)lin_tag,
                  (uintmax_t)self->last_ejected_lin_tag);
+        ON_ASYNC_ERROR(cy, self->topic, CY_ERR_MEMORY);
+        subscriber_notify_error(self->subscriber, CY_ERR_MEMORY);
         return false;
     }
     const cy_tree_t* const slot_tree = cavl2_find_or_insert(
@@ -3432,7 +3494,7 @@ static void reordering_destroy(reordering_t* const self)
     mem_free(self->subscriber->root->cy, self);
 }
 
-static void reordering_drop_stale(cy_subscriber_t* const owner, const cy_us_t now)
+static void reordering_drop_stale(subscriber_t* const owner, const cy_us_t now)
 {
     while (true) {
         reordering_t* const rr = LIST_TAIL(owner->list_reordering_by_recency, reordering_t, list_recency);
@@ -3464,7 +3526,6 @@ static cy_tree_t* reordering_cavl_factory(void* const user)
         self->remote_id           = outer->lane.id;
         self->subscriber          = outer->subscriber;
         self->topic               = outer->topic;
-        self->substitutions       = outer->substitutions;
         self->interned_count      = 0;
         self->interned_by_lin_tag = NULL;
         reordering_resequence(self, outer->tag);
@@ -3501,38 +3562,46 @@ static bool on_message(cy_t* const           cy,
                                                                    dedup_factory),
                                               dedup_t,
                                               index_remote_id);
-        if (dedup == NULL) { // Out of memory.
-            return false;    // The remote will retransmit and we might be able to accept it then.
+        if (dedup == NULL) {
+            ON_ASYNC_ERROR(cy, topic, CY_ERR_MEMORY);
+            // We could notify subscribers about the error, but the value of that notification is rather low.
+            // If we chose to do that, we would need to scan all couplings and subscribers.
+            return false; // The remote will retransmit and we might be able to accept it then.
         }
         assert(dedup->remote_id == lane.id);
+        // NOTE: If all subscribers are pending disposal and none saw the original message that has been duplicated,
+        // we will be acknowledging it here even though no subscribers have actually received it. This is not very
+        // significant practically because for this to happen we have to keep disposed subscribers alive for longer
+        // than the duplicate retransmit interval, but it should ideally be fixed by slightly restructuring the flow.
+        // One solution is to remove the reordering feature from the core.
         if (dedup_update(dedup, topic, tag, message.timestamp)) {
             CY_TRACE(cy, "🍒 Dup N%016jx tag=%016jx", (uintmax_t)lane.id, (uintmax_t)tag);
             return true; // Already received, ack but don't process.
         }
     }
-
     // Go over the matching subscribers and invoke the handlers.
     // Remember that one topic may match many subscribers, and a single pattern subscriber may match many topics.
     bool                       acknowledge = false;
     const cy_topic_coupling_t* cpl         = topic->couplings;
     while (cpl != NULL) {
         const cy_topic_coupling_t* const next_cpl = cpl->next;
-        cy_subscriber_t*                 sub      = cpl->root->head;
+        subscriber_t*                    sub      = cpl->root->head;
         assert(sub != NULL); // Otherwise it should have been removed from the coupling list.
         while (sub != NULL) {
-            cy_subscriber_t* const      next_sub      = sub->next;
-            const cy_substitution_set_t substitutions = { .count         = cpl->substitution_count,
-                                                          .substitutions = cpl->substitutions };
-            const bool use_reordering = (sub->params.reordering_window >= 0) && // minimums enforced at API level
-                                        (sub->params.reordering_capacity >= REORDERING_CAPACITY_MIN);
+            subscriber_t* const next_sub = sub->next;
+            if (sub->disposed) { // Skip to avoid acknowledging the message erroneously.
+                CY_TRACE(cy, "🦘 Skipping disposed subscriber %p", (void*)sub);
+                sub = next_sub;
+                continue;
+            }
+            const bool use_reordering = (sub->params.reordering_window >= 0); // minimums enforced at API level
             if (use_reordering) {
                 reordering_context_t ctx = {
-                    .now           = message.timestamp,
-                    .lane          = lane,
-                    .subscriber    = sub,
-                    .topic         = topic, // The topic and coupling references will be kept alive by the subscriber.
-                    .substitutions = substitutions,
-                    .tag           = tag,
+                    .now        = message.timestamp,
+                    .lane       = lane,
+                    .subscriber = sub,
+                    .topic      = topic, // The topic and coupling references will be kept alive by the subscriber.
+                    .tag        = tag,
                 };
                 // Will either find an existing state or create a new one; NULL on OOM only.
                 reordering_t* const rr = CAVL2_TO_OWNER(cavl2_find_or_insert(&sub->index_reordering_by_remote_id, //
@@ -3548,11 +3617,20 @@ static bool on_message(cy_t* const           cy,
                     assert(rr->subscriber == sub);
                     rr->p2p_context = lane.p2p; // keep the latest known return path discovery from the transport
                     if (reordering_push(rr, tag, lane.prio, message)) {
+                        // NOTE: If the subscriber is destroyed while there are messages interned in the reordering
+                        // buffer, the remote might be mislead into thinking that the application has received the
+                        // messages while this is not technically true. This is more of an API design issue -- ideally
+                        // the application would need to actually consume all interned messages before disposing the
+                        // future. But the reality is that RELIABLE delivery where acknowledgements are semantically
+                        // significant to the application is rarely used with ORDERED subscribers.
                         acknowledge = true;
                     }
+                } else {
+                    ON_ASYNC_ERROR(cy, topic, CY_ERR_MEMORY);
+                    subscriber_notify_error(sub, CY_ERR_MEMORY);
                 }
             } else {
-                subscriber_invoke(sub, make_arrival(topic, lane, tag, message, substitutions));
+                subscriber_notify(sub, make_arrival(topic, lane, tag, message));
                 acknowledge = true;
             }
             sub = next_sub;
@@ -3573,10 +3651,10 @@ static size_t subscription_extent_w_overhead(const cy_topic_t* const topic)
     const cy_topic_coupling_t* cpl = topic->couplings;
     assert(cpl != NULL);
     while (cpl != NULL) {
-        const bool             verbatim = cpl->root->index_pattern == NULL; // no substitution tokens in the name
-        const cy_subscriber_t* sub      = cpl->root->head;
-        size_t                 agg      = sub->params.extent_pure;
-        sub                             = sub->next;
+        const bool          verbatim = cpl->root->index_pattern == NULL; // no substitution tokens in the name
+        const subscriber_t* sub      = cpl->root->head;
+        size_t              agg      = sub->params.extent_pure;
+        sub                          = sub->next;
         while (sub != NULL) {
             agg = larger(agg, sub->params.extent_pure);
             sub = sub->next;
@@ -3598,9 +3676,9 @@ static size_t subscription_extent_w_overhead(const cy_topic_t* const topic)
 //      topic [1] --> [*] coupling [*] --> [1] subscriber_root [1] --> [*] subscriber
 static void* wkv_cb_couple_new_subscription(const wkv_event_t evt)
 {
-    const cy_subscriber_t* const sub   = (cy_subscriber_t*)evt.context;
-    cy_topic_t* const            topic = (cy_topic_t*)evt.node->value;
-    cy_t* const                  cy    = topic->cy;
+    const subscriber_t* const sub   = (subscriber_t*)evt.context;
+    cy_topic_t* const         topic = (cy_topic_t*)evt.node->value;
+    cy_t* const               cy    = topic->cy;
 
     // Traverse the couplings of this topic, check if the topic is already coupled with the root of this subscriber.
     bool coupled = false;
@@ -3686,13 +3764,7 @@ static cy_err_t ensure_subscriber_root(cy_t* const cy, const cy_str_t resolved_n
     return CY_OK;
 }
 
-static void subscriber_callback_default(cy_subscriber_t* const sub, const cy_arrival_t arrival)
-{
-    (void)sub;
-    (void)arrival;
-}
-
-static cy_subscriber_t* subscribe(cy_t* const cy, const cy_str_t name, subscriber_params_t params)
+static subscriber_t* subscribe(cy_t* const cy, const cy_str_t name, subscriber_params_t params)
 {
     assert((cy != NULL) && (params.reordering_window >= -1));
     char           name_buf[CY_TOPIC_NAME_MAX + 1U];
@@ -3700,18 +3772,15 @@ static cy_subscriber_t* subscribe(cy_t* const cy, const cy_str_t name, subscribe
     if (resolved.len > CY_TOPIC_NAME_MAX) {
         return NULL;
     }
-    name_buf[resolved.len]     = 0; // this is not needed for the logic but helps with tracing (if enabled)
-    cy_subscriber_t* const sub = mem_alloc_zero(cy, sizeof(*sub));
+    name_buf[resolved.len]  = 0; // this is not needed for the logic but helps with tracing (if enabled)
+    subscriber_t* const sub = future_new(cy, &subscriber_vtable, sizeof(subscriber_t));
     if (sub == NULL) {
         return NULL;
     }
-    params.reordering_capacity =
-      (params.reordering_capacity == 0) ? 0 : larger(params.reordering_capacity, REORDERING_CAPACITY_MIN);
-    sub->params        = params;
-    sub->user_context  = CY_USER_CONTEXT_EMPTY;
-    sub->callback      = subscriber_callback_default;
-    sub->event         = OLGA_EVENT_INIT;
-    const cy_err_t res = ensure_subscriber_root(cy, resolved, &sub->root);
+    sub->params                         = params;
+    sub->last_arrival.message.timestamp = cy_now(cy); // used for liveness monitoring
+    sub->last_arrival.message.content   = NULL;
+    const cy_err_t res                  = ensure_subscriber_root(cy, resolved, &sub->root);
     if (res != CY_OK) {
         mem_free(cy, sub);
         return NULL;
@@ -3720,9 +3789,11 @@ static cy_subscriber_t* subscribe(cy_t* const cy, const cy_str_t name, subscribe
     sub->next       = sub->root->head;
     sub->root->head = sub;
     if (NULL != wkv_match(&cy->topics_by_name, resolved, sub, wkv_cb_couple_new_subscription)) {
-        cy_unsubscribe(sub);
+        subscriber_destroy(sub);
         return NULL;
     }
+    sub->verbatim = cy_name_is_verbatim(resolved); // Cache once, is useful.
+    // liveness monitoring is disabled by default
     CY_TRACE(cy,
              "✨'%.*s' extent_pure=%zu rwin=%jd",
              STRFMT_ARG(resolved),
@@ -3731,46 +3802,131 @@ static cy_subscriber_t* subscribe(cy_t* const cy, const cy_str_t name, subscribe
     return sub;
 }
 
-cy_subscriber_t* cy_subscribe(cy_t* const cy, const cy_str_t name, const size_t extent)
+cy_future_t* cy_subscribe(cy_t* const cy, const cy_str_t name, const size_t extent)
 {
     if (cy != NULL) {
-        const subscriber_params_t params = { .extent_pure = extent, .reordering_window = -1, .reordering_capacity = 0 };
-        return subscribe(cy, name, params);
+        const subscriber_params_t params = { .extent_pure = extent, .reordering_window = -1 };
+        return (cy_future_t*)subscribe(cy, name, params);
     }
     return NULL;
 }
 
-cy_subscriber_t* cy_subscribe_ordered(cy_t* const    cy,
-                                      const cy_str_t name,
-                                      const size_t   extent,
-                                      const cy_us_t  reordering_window)
+cy_future_t* cy_subscribe_ordered(cy_t* const    cy,
+                                  const cy_str_t name,
+                                  const size_t   extent,
+                                  const cy_us_t  reordering_window)
 {
     if ((cy != NULL) && (reordering_window >= 0)) {
         const subscriber_params_t params = {
-            .extent_pure         = extent,
-            .reordering_window   = sooner(reordering_window, SESSION_LIFETIME / 2), // sane limit for extra paranoia
-            .reordering_capacity = REORDERING_CAPACITY_DEFAULT,
+            .extent_pure       = extent,
+            .reordering_window = sooner(reordering_window, SESSION_LIFETIME / 2), // sane limit for extra paranoia
         };
-        return subscribe(cy, name, params);
+        return (cy_future_t*)subscribe(cy, name, params);
     }
     return NULL;
 }
 
-cy_user_context_t cy_subscriber_context(const cy_subscriber_t* const self) { return self->user_context; }
-void              cy_subscriber_context_set(cy_subscriber_t* const self, const cy_user_context_t context)
+bool cy_is_subscriber(const cy_future_t* const future)
 {
-    self->user_context = context;
+    return (future != NULL) && (future->vtable == &subscriber_vtable);
 }
 
-cy_subscriber_callback_t cy_subscriber_callback(const cy_subscriber_t* const self) { return self->callback; }
-void cy_subscriber_callback_set(cy_subscriber_t* const self, const cy_subscriber_callback_t callback)
+cy_arrival_t cy_arrival_borrow(const cy_future_t* const future)
 {
-    self->callback = (callback == NULL) ? subscriber_callback_default : callback;
+    if (cy_is_subscriber(future)) {
+        const subscriber_t* const self = (const subscriber_t*)future;
+        if (self->last_arrival.message.content != NULL) {
+            return self->last_arrival;
+        }
+    }
+    return (cy_arrival_t){ 0 };
 }
 
-void cy_subscriber_name(const cy_subscriber_t* const self, char* const out_name)
+cy_arrival_t cy_arrival_move(cy_future_t* const future)
 {
-    wkv_get_key(&self->root->cy->subscribers_by_name, self->root->index_name, out_name);
+    if (cy_is_subscriber(future)) {
+        subscriber_t* const self = (subscriber_t*)future;
+        if (self->last_arrival.message.content != NULL) {
+            const cy_arrival_t out             = self->last_arrival;
+            self->last_arrival.message.content = NULL; // message moved, everything else stays (esp. the timestamp!)
+            return out;
+        }
+    }
+    return (cy_arrival_t){ 0 };
+}
+
+uint64_t cy_arrival_count(const cy_future_t* const future)
+{
+    return cy_is_subscriber(future) ? ((const subscriber_t*)future)->message_count : 0;
+}
+
+cy_us_t cy_subscriber_timeout(const cy_future_t* const future)
+{
+    return cy_is_subscriber(future) ? ((const subscriber_t*)future)->params.liveness_timeout : 0;
+}
+
+void cy_subscriber_timeout_set(cy_future_t* const future, const cy_us_t timeout)
+{
+    if (cy_is_subscriber(future)) {
+        subscriber_t* const self = (subscriber_t*)future;
+        assert(!self->disposed); // use after free
+        assert((self->last_arrival.message.timestamp >= 0) && (self->last_arrival.message.timestamp < HEAT_DEATH));
+        self->params.liveness_timeout = sooner(later(0, timeout), KILO * MEGA * MEGA);
+        // Any argument resets the pending liveness error. It may re-appear later.
+        if (self->error == CY_ERR_LIVENESS) {
+            self->error = CY_OK;
+        }
+        // Apply the timeout immediately.
+        if (self->params.liveness_timeout > 0) {
+            future_deadline_arm(future, self->last_arrival.message.timestamp + self->params.liveness_timeout);
+        } else {
+            future_deadline_disarm(future);
+        }
+    }
+}
+
+void cy_subscriber_name(const cy_future_t* const future, char* const out_name)
+{
+    if (out_name != NULL) {
+        if (cy_is_subscriber(future)) {
+            const subscriber_t* const self = (const subscriber_t*)future;
+            wkv_get_key(&self->root->cy->subscribers_by_name, self->root->index_name, out_name);
+        } else {
+            *out_name = '\0';
+        }
+    }
+}
+
+cy_substitution_set_t cy_subscriber_substitutions(const cy_future_t* const future, const cy_topic_t* const topic)
+{
+    cy_substitution_set_t out = { .count = 0, .substitutions = NULL };
+    if (cy_is_subscriber(future)) {
+        const subscriber_t* const self = (const subscriber_t*)future;
+        assert(!self->disposed); // use after free
+        if (self->verbatim) {    // instant result for verbatim subscribers, no need to scan.
+            static const cy_substitution_t sentinel;
+            out.substitutions = &sentinel;
+        } else if (topic != NULL) {
+            const cy_topic_coupling_t* cpl = topic->couplings;
+            while (cpl != NULL) {
+                const subscriber_t* sub = cpl->root->head;
+                assert(sub != NULL); // Otherwise it should have been removed from the coupling list.
+                while (sub != NULL) {
+                    if (sub == self) {
+                        out.count         = cpl->substitution_count;
+                        out.substitutions = cpl->substitutions;
+                        assert(out.substitutions != NULL); // never NULL even if empty
+                        return out;
+                    }
+                    sub = sub->next;
+                }
+                cpl = cpl->next;
+            }
+        } else {
+            (void)0; // Bad call.
+        }
+    }
+    return out;
 }
 
 static void topic_decouple_subscriber_root(cy_topic_t* const topic, const subscriber_root_t* const root)
@@ -3791,22 +3947,19 @@ static void topic_decouple_subscriber_root(cy_topic_t* const topic, const subscr
     topic_sync_implicit(topic); // topics are destroyed lazily to avoid premature state loss
 }
 
-static void subscriber_destroy_delayed(olga_t* const olga, olga_event_t* const event, const int64_t now)
+static void subscriber_destroy(subscriber_t* const self)
 {
-    (void)now;
-    cy_t* const              cy   = olga->user;
-    cy_subscriber_t* const   self = event->user;
+    cy_t* const              cy   = self->base.cy;
     subscriber_root_t* const root = self->root;
     assert((root != NULL) && (root->cy == cy));
-
 #if CY_CONFIG_TRACE
     char name[CY_TOPIC_NAME_MAX + 1];
-    cy_subscriber_name(self, name);
+    cy_subscriber_name(&self->base, name);
     CY_TRACE(cy, "🗑️ %s", name);
 #endif
 
     // Suppress callbacks from reordering_eject() et al that may occur during finalization.
-    self->callback = subscriber_callback_default;
+    assert(self->base.callback == NULL); // Must have been reset beforehand by the future framework.
 
     // Drop all pending ordered messages first because the states keep pointers into topic couplings.
     while (self->index_reordering_by_remote_id != NULL) {
@@ -3818,7 +3971,7 @@ static void subscriber_destroy_delayed(olga_t* const olga, olga_event_t* const e
     assert(self->list_reordering_by_recency.tail == NULL);
 
     // Delist this subscriber from the root.
-    cy_subscriber_t** sub = &root->head;
+    subscriber_t** sub = &root->head;
     while ((*sub != NULL) && (*sub != self)) {
         sub = &(*sub)->next;
     }
@@ -3846,20 +3999,9 @@ static void subscriber_destroy_delayed(olga_t* const olga, olga_event_t* const e
         mem_free(cy, root);
     }
 
+    // Finish it.
+    cy_message_refcount_dec(self->last_arrival.message.content); // NULL-safe.
     mem_free(cy, self);
-}
-
-void cy_unsubscribe(cy_subscriber_t* const self)
-{
-    if ((self != NULL) && (self->root != NULL) && (self->root->cy != NULL)) {
-        cy_t* const cy = self->root->cy;
-#if CY_CONFIG_TRACE
-        char name[CY_TOPIC_NAME_MAX + 1];
-        cy_subscriber_name(self, name);
-        CY_TRACE(cy, "🗑️ %s", name);
-#endif
-        olga_defer(&cy->olga, 0, self, subscriber_destroy_delayed, &self->event);
-    }
 }
 
 // Does not alter seqno; the caller is responsible for that.
@@ -4430,7 +4572,7 @@ static void poll(cy_t* const cy, cy_us_t* const out_now)
         // Do we accept the full subscriber scan here?
         const cy_topic_coupling_t* cpl = cy->topic_iter->couplings;
         while (cpl != NULL) {
-            cy_subscriber_t* sub = cpl->root->head;
+            subscriber_t* sub = cpl->root->head;
             while (sub != NULL) {
                 reordering_drop_stale(sub, now);
                 sub = sub->next;
@@ -4636,7 +4778,7 @@ void cy_on_message(cy_platform_t* const             platform,
         goto bad_message;
     }
     message_skip(message.content, HEADER_BYTES);
-    const header_type_t type = header[0] & HEADER_TYPE_MASK;
+    const header_type_t type = (header_type_t)header[0];
 
     // This is the central entry point for all incoming messages. It's complex but there's an advantage to keeping the
     // central dispatch logic in one place because of the tight coupling between different parts of the stack.

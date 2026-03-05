@@ -29,9 +29,14 @@ struct arrival_capture_t final
     std::size_t                   malformed{ 0U };
 };
 
-extern "C" void on_arrival_capture(cy_subscriber_t* const sub, const cy_arrival_t arrival)
+extern "C" void on_arrival_capture(cy_future_t* const sub)
 {
-    auto* const capture = static_cast<arrival_capture_t*>(cy_subscriber_context(sub).ptr[0]);
+    const cy_arrival_t arrival = cy_arrival_move(sub);
+    if (arrival.message.content == nullptr) {
+        return;
+    }
+
+    auto* const capture = static_cast<arrival_capture_t*>(cy_future_context(sub).ptr[0]);
     TEST_ASSERT_NOT_NULL(capture);
 
     std::array<unsigned char, 32> bytes{};
@@ -40,11 +45,16 @@ extern "C" void on_arrival_capture(cy_subscriber_t* const sub, const cy_arrival_
     e2e::app_payload_t payload{};
     if (!e2e::app_payload_unpack(bytes.data(), size, payload)) {
         capture->malformed++;
+        cy_message_refcount_dec(arrival.message.content);
         return;
     }
 
     capture->samples.push_back(arrival_sample_t{
-      .publisher_id = payload.publisher_id, .sequence = payload.sequence, .topic_hash = cy_topic_hash(arrival.topic) });
+      .publisher_id = payload.publisher_id,
+      .sequence     = payload.sequence,
+      .topic_hash   = arrival.breadcrumb.topic_hash,
+    });
+    cy_message_refcount_dec(arrival.message.content);
 }
 
 void set_now(e2e::sim_net_t& net, const cy_us_t now)
@@ -73,14 +83,14 @@ void drain_queue(e2e::sim_net_t& net, cy_us_t& now)
     }
 }
 
-void cleanup_case(e2e::sim_net_t&                      net,
-                  cy_us_t&                             now,
-                  const std::vector<cy_subscriber_t*>& subscribers,
-                  const std::vector<cy_publisher_t*>&  publishers)
+void cleanup_case(e2e::sim_net_t&                     net,
+                  cy_us_t&                            now,
+                  const std::vector<cy_future_t*>&    subscribers,
+                  const std::vector<cy_publisher_t*>& publishers)
 {
-    for (cy_subscriber_t* const sub : subscribers) {
+    for (cy_future_t* const sub : subscribers) {
         if (sub != nullptr) {
-            cy_unsubscribe(sub);
+            cy_future_destroy(sub);
         }
     }
     drive_for(net, now, 100'000);
@@ -149,22 +159,22 @@ void test_api_consensus_edge_partition_heal_eventual_bidirectional_delivery()
     arrival_capture_t capture_a{};
     arrival_capture_t capture_b{};
 
-    cy_subscriber_t* const sub_a =
+    cy_future_t* const sub_a =
       cy_subscribe(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("e2e/consensus/partition/topic"), 64U);
-    cy_subscriber_t* const sub_b =
+    cy_future_t* const sub_b =
       cy_subscribe(e2e::sim_net_cy(net, e2e::sim_node_b), cy_str("e2e/consensus/partition/topic"), 64U);
     TEST_ASSERT_NOT_NULL(sub_a);
     TEST_ASSERT_NOT_NULL(sub_b);
 
     cy_user_context_t ctx_a = CY_USER_CONTEXT_EMPTY;
     ctx_a.ptr[0]            = &capture_a;
-    cy_subscriber_context_set(sub_a, ctx_a);
-    cy_subscriber_callback_set(sub_a, on_arrival_capture);
+    cy_future_context_set(sub_a, ctx_a);
+    cy_future_callback_set(sub_a, on_arrival_capture);
 
     cy_user_context_t ctx_b = CY_USER_CONTEXT_EMPTY;
     ctx_b.ptr[0]            = &capture_b;
-    cy_subscriber_context_set(sub_b, ctx_b);
-    cy_subscriber_callback_set(sub_b, on_arrival_capture);
+    cy_future_context_set(sub_b, ctx_b);
+    cy_future_callback_set(sub_b, on_arrival_capture);
 
     cy_us_t now = 0;
     for (std::uint64_t seq = 1U; seq <= 36U; seq++) {
@@ -213,8 +223,8 @@ void test_api_consensus_edge_colliding_topics_discover_and_deliver_with_faults()
       CY_OK, e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), UINT64_C(0xE002)));
     e2e::sim_net_faults_set(net, &faults);
 
-    cy_subscriber_t* const sub_a = cy_subscribe(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str(pattern), 64U);
-    cy_subscriber_t* const sub_b = cy_subscribe(e2e::sim_net_cy(net, e2e::sim_node_b), cy_str(pattern), 64U);
+    cy_future_t* const sub_a = cy_subscribe(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str(pattern), 64U);
+    cy_future_t* const sub_b = cy_subscribe(e2e::sim_net_cy(net, e2e::sim_node_b), cy_str(pattern), 64U);
     TEST_ASSERT_NOT_NULL(sub_a);
     TEST_ASSERT_NOT_NULL(sub_b);
 
@@ -223,13 +233,13 @@ void test_api_consensus_edge_colliding_topics_discover_and_deliver_with_faults()
 
     cy_user_context_t ctx_a = CY_USER_CONTEXT_EMPTY;
     ctx_a.ptr[0]            = &capture_a;
-    cy_subscriber_context_set(sub_a, ctx_a);
-    cy_subscriber_callback_set(sub_a, on_arrival_capture);
+    cy_future_context_set(sub_a, ctx_a);
+    cy_future_callback_set(sub_a, on_arrival_capture);
 
     cy_user_context_t ctx_b = CY_USER_CONTEXT_EMPTY;
     ctx_b.ptr[0]            = &capture_b;
-    cy_subscriber_context_set(sub_b, ctx_b);
-    cy_subscriber_callback_set(sub_b, on_arrival_capture);
+    cy_future_context_set(sub_b, ctx_b);
+    cy_future_callback_set(sub_b, on_arrival_capture);
 
     cy_publisher_t* const pub_a = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str(topic_a));
     cy_publisher_t* const pub_b = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_b), cy_str(topic_b));

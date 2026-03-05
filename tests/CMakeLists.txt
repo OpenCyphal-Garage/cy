@@ -116,6 +116,12 @@ cy_gen_test_intrusive_matrix(test_intrusive_rpc
         platform_stubs/guarded_heap.c
         platform_stubs/message.c
 )
+cy_gen_test_intrusive_matrix(test_intrusive_future_notify_destroy
+        src/test_intrusive_future_notify_destroy.c
+        src/helpers.c
+        platform_stubs/guarded_heap.c
+        platform_stubs/message.c
+)
 cy_gen_test_intrusive_matrix(test_intrusive_gossip
         src/test_intrusive_gossip.c
         src/helpers.c

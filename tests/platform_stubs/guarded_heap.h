@@ -10,6 +10,9 @@ extern "C"
 
 #define GUARDED_HEAP_CANARY_SIZE 256UL
 
+/// Number of freed fragments retained for deferred UAF-write checks before actual release.
+#define GUARDED_HEAP_QUARANTINE_LIMIT 1024UL
+
 typedef struct
 {
     size_t   allocated_fragments;
@@ -17,8 +20,9 @@ typedef struct
     uint64_t prng_state;
 } guarded_heap_t;
 
-void   guarded_heap_init(guarded_heap_t* self, uint64_t seed);
-void   guarded_heap_reset(guarded_heap_t* self);
+void guarded_heap_init(guarded_heap_t* self, uint64_t seed);
+void guarded_heap_reset(guarded_heap_t* self);
+
 size_t guarded_heap_allocated_fragments(const guarded_heap_t* self);
 size_t guarded_heap_allocated_bytes(const guarded_heap_t* self);
 

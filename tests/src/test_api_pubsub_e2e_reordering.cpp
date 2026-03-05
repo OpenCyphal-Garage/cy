@@ -36,9 +36,14 @@ struct arrival_capture_t final
     std::size_t                   malformed{ 0U };
 };
 
-extern "C" void on_arrival_capture(cy_subscriber_t* const sub, const cy_arrival_t arrival)
+extern "C" void on_arrival_capture(cy_future_t* const sub)
 {
-    auto* const capture = static_cast<arrival_capture_t*>(cy_subscriber_context(sub).ptr[0]);
+    const cy_arrival_t arrival = cy_arrival_move(sub);
+    if (arrival.message.content == nullptr) {
+        return;
+    }
+
+    auto* const capture = static_cast<arrival_capture_t*>(cy_future_context(sub).ptr[0]);
     TEST_ASSERT_NOT_NULL(capture);
 
     std::array<unsigned char, 32> bytes{};
@@ -47,10 +52,12 @@ extern "C" void on_arrival_capture(cy_subscriber_t* const sub, const cy_arrival_
     e2e::app_payload_t payload{};
     if (!e2e::app_payload_unpack(bytes.data(), size, payload)) {
         capture->malformed++;
+        cy_message_refcount_dec(arrival.message.content);
         return;
     }
 
     capture->samples.push_back(arrival_sample_t{ .publisher_id = payload.publisher_id, .app_seq = payload.sequence });
+    cy_message_refcount_dec(arrival.message.content);
 }
 
 bool is_rel_a_to_b(const e2e::frame_info_t& frame)
@@ -107,12 +114,12 @@ cy_publisher_t* make_publisher(e2e::sim_net_t& net, const char* const topic_name
     return pub;
 }
 
-cy_subscriber_t* make_subscriber(e2e::sim_net_t&    net,
-                                 const char* const  topic_name,
-                                 const bool         ordered,
-                                 arrival_capture_t& capture)
+cy_future_t* make_subscriber(e2e::sim_net_t&    net,
+                             const char* const  topic_name,
+                             const bool         ordered,
+                             arrival_capture_t& capture)
 {
-    cy_subscriber_t* sub = nullptr;
+    cy_future_t* sub = nullptr;
     if (ordered) {
         sub = cy_subscribe_ordered(e2e::sim_net_cy(net, e2e::sim_node_b), cy_str(topic_name), 64U, ordered_window_us);
     } else {
@@ -122,8 +129,8 @@ cy_subscriber_t* make_subscriber(e2e::sim_net_t&    net,
 
     cy_user_context_t ctx = CY_USER_CONTEXT_EMPTY;
     ctx.ptr[0]            = &capture;
-    cy_subscriber_context_set(sub, ctx);
-    cy_subscriber_callback_set(sub, on_arrival_capture);
+    cy_future_context_set(sub, ctx);
+    cy_future_callback_set(sub, on_arrival_capture);
     return sub;
 }
 
@@ -233,11 +240,11 @@ void assert_publish_futures(const std::vector<cy_future_t*>& futures,
     }
 }
 
-void cleanup_case(e2e::sim_net_t&                      net,
-                  cy_us_t&                             now,
-                  const std::vector<cy_future_t*>&     futures,
-                  const std::vector<cy_subscriber_t*>& subscribers,
-                  const std::vector<cy_publisher_t*>&  publishers)
+void cleanup_case(e2e::sim_net_t&                     net,
+                  cy_us_t&                            now,
+                  const std::vector<cy_future_t*>&    futures,
+                  const std::vector<cy_future_t*>&    subscribers,
+                  const std::vector<cy_publisher_t*>& publishers)
 {
     for (cy_future_t* const fut : futures) {
         if (fut != nullptr) {
@@ -245,9 +252,9 @@ void cleanup_case(e2e::sim_net_t&                      net,
         }
     }
 
-    for (cy_subscriber_t* const sub : subscribers) {
+    for (cy_future_t* const sub : subscribers) {
         if (sub != nullptr) {
-            cy_unsubscribe(sub);
+            cy_future_destroy(sub);
         }
     }
     drive_for(net, now, 50'000);
@@ -291,10 +298,10 @@ void test_api_pubsub_e2e_c01_ack_loss_retransmit_duplicate_rejected_unordered()
     cy_publisher_t* const cold_pub = make_publisher(net, "e2e/c01/cold");
     hot_hash                       = topic_hash_for(net, "e2e/c01/hot");
 
-    arrival_capture_t      hot_capture{};
-    arrival_capture_t      cold_capture{};
-    cy_subscriber_t* const hot_sub  = make_subscriber(net, "e2e/c01/hot", false, hot_capture);
-    cy_subscriber_t* const cold_sub = make_subscriber(net, "e2e/c01/cold", false, cold_capture);
+    arrival_capture_t  hot_capture{};
+    arrival_capture_t  cold_capture{};
+    cy_future_t* const hot_sub  = make_subscriber(net, "e2e/c01/hot", false, hot_capture);
+    cy_future_t* const cold_sub = make_subscriber(net, "e2e/c01/cold", false, cold_capture);
 
     std::vector<cy_future_t*> hot_futures{};
     std::vector<cy_future_t*> cold_futures{};
@@ -350,10 +357,10 @@ void test_api_pubsub_e2e_c02_ack_loss_retransmit_duplicate_rejected_ordered()
     cy_publisher_t* const cold_pub = make_publisher(net, "e2e/c02/cold");
     hot_hash                       = topic_hash_for(net, "e2e/c02/hot");
 
-    arrival_capture_t      hot_capture{};
-    arrival_capture_t      cold_capture{};
-    cy_subscriber_t* const hot_sub  = make_subscriber(net, "e2e/c02/hot", true, hot_capture);
-    cy_subscriber_t* const cold_sub = make_subscriber(net, "e2e/c02/cold", true, cold_capture);
+    arrival_capture_t  hot_capture{};
+    arrival_capture_t  cold_capture{};
+    cy_future_t* const hot_sub  = make_subscriber(net, "e2e/c02/hot", true, hot_capture);
+    cy_future_t* const cold_sub = make_subscriber(net, "e2e/c02/cold", true, cold_capture);
 
     std::vector<cy_future_t*> hot_futures{};
     std::vector<cy_future_t*> cold_futures{};
@@ -433,10 +440,10 @@ void test_api_pubsub_e2e_c03_retransmit_overtakes_newer_message_unordered_unique
     cy_publisher_t* const cold_pub = make_publisher(net, "e2e/c03/cold");
     hot_hash                       = topic_hash_for(net, "e2e/c03/hot");
 
-    arrival_capture_t      hot_capture{};
-    arrival_capture_t      cold_capture{};
-    cy_subscriber_t* const hot_sub  = make_subscriber(net, "e2e/c03/hot", false, hot_capture);
-    cy_subscriber_t* const cold_sub = make_subscriber(net, "e2e/c03/cold", false, cold_capture);
+    arrival_capture_t  hot_capture{};
+    arrival_capture_t  cold_capture{};
+    cy_future_t* const hot_sub  = make_subscriber(net, "e2e/c03/hot", false, hot_capture);
+    cy_future_t* const cold_sub = make_subscriber(net, "e2e/c03/cold", false, cold_capture);
 
     std::vector<cy_future_t*> hot_futures{};
     std::vector<cy_future_t*> cold_futures{};
@@ -525,10 +532,10 @@ void test_api_pubsub_e2e_c04_retransmit_overtakes_newer_message_ordered_restored
     cy_publisher_t* const cold_pub = make_publisher(net, "e2e/c04/cold");
     hot_hash                       = topic_hash_for(net, "e2e/c04/hot");
 
-    arrival_capture_t      hot_capture{};
-    arrival_capture_t      cold_capture{};
-    cy_subscriber_t* const hot_sub  = make_subscriber(net, "e2e/c04/hot", true, hot_capture);
-    cy_subscriber_t* const cold_sub = make_subscriber(net, "e2e/c04/cold", true, cold_capture);
+    arrival_capture_t  hot_capture{};
+    arrival_capture_t  cold_capture{};
+    cy_future_t* const hot_sub  = make_subscriber(net, "e2e/c04/hot", true, hot_capture);
+    cy_future_t* const cold_sub = make_subscriber(net, "e2e/c04/cold", true, cold_capture);
 
     std::vector<cy_future_t*> hot_futures{};
     std::vector<cy_future_t*> cold_futures{};
@@ -595,10 +602,10 @@ void test_api_pubsub_e2e_c05_ordered_gap_timeout_flush()
     cy_publisher_t* const cold_pub = make_publisher(net, "e2e/c05/cold");
     hot_hash                       = topic_hash_for(net, "e2e/c05/hot");
 
-    arrival_capture_t      hot_capture{};
-    arrival_capture_t      cold_capture{};
-    cy_subscriber_t* const hot_sub  = make_subscriber(net, "e2e/c05/hot", true, hot_capture);
-    cy_subscriber_t* const cold_sub = make_subscriber(net, "e2e/c05/cold", true, cold_capture);
+    arrival_capture_t  hot_capture{};
+    arrival_capture_t  cold_capture{};
+    cy_future_t* const hot_sub  = make_subscriber(net, "e2e/c05/hot", true, hot_capture);
+    cy_future_t* const cold_sub = make_subscriber(net, "e2e/c05/cold", true, cold_capture);
 
     set_now(net, now);
     cy_future_t* const hot_fut_1  = publish_reliable(hot_pub, hot_pub_id, 1U, now, 90'000);
@@ -668,10 +675,10 @@ void test_api_pubsub_e2e_c06_late_older_frame_after_timeout_rejected()
     cy_publisher_t* const cold_pub = make_publisher(net, "e2e/c06/cold");
     hot_hash                       = topic_hash_for(net, "e2e/c06/hot");
 
-    arrival_capture_t      hot_capture{};
-    arrival_capture_t      cold_capture{};
-    cy_subscriber_t* const hot_sub  = make_subscriber(net, "e2e/c06/hot", true, hot_capture);
-    cy_subscriber_t* const cold_sub = make_subscriber(net, "e2e/c06/cold", true, cold_capture);
+    arrival_capture_t  hot_capture{};
+    arrival_capture_t  cold_capture{};
+    cy_future_t* const hot_sub  = make_subscriber(net, "e2e/c06/hot", true, hot_capture);
+    cy_future_t* const cold_sub = make_subscriber(net, "e2e/c06/cold", true, cold_capture);
 
     set_now(net, now);
     cy_future_t* const hot_fut_1  = publish_reliable(hot_pub, hot_pub_id, 1U, now, 300'000);
@@ -731,10 +738,10 @@ void test_api_pubsub_e2e_c07_ordered_buffer_capacity_stress_large_jump_backfill(
     cy_publisher_t* const cold_pub = make_publisher(net, "e2e/c07/cold");
     hot_hash                       = topic_hash_for(net, "e2e/c07/hot");
 
-    arrival_capture_t      hot_capture{};
-    arrival_capture_t      cold_capture{};
-    cy_subscriber_t* const hot_sub  = make_subscriber(net, "e2e/c07/hot", true, hot_capture);
-    cy_subscriber_t* const cold_sub = make_subscriber(net, "e2e/c07/cold", true, cold_capture);
+    arrival_capture_t  hot_capture{};
+    arrival_capture_t  cold_capture{};
+    cy_future_t* const hot_sub  = make_subscriber(net, "e2e/c07/hot", true, hot_capture);
+    cy_future_t* const cold_sub = make_subscriber(net, "e2e/c07/cold", true, cold_capture);
 
     std::vector<cy_future_t*> hot_futures{};
     std::vector<cy_future_t*> cold_futures{};
@@ -819,10 +826,10 @@ void test_api_pubsub_e2e_c08_high_jitter_moderate_loss_ordered_monotonicity()
     cy_publisher_t* const hot_pub  = make_publisher(net, "e2e/c08/hot");
     cy_publisher_t* const cold_pub = make_publisher(net, "e2e/c08/cold");
 
-    arrival_capture_t      hot_capture{};
-    arrival_capture_t      cold_capture{};
-    cy_subscriber_t* const hot_sub  = make_subscriber(net, "e2e/c08/hot", true, hot_capture);
-    cy_subscriber_t* const cold_sub = make_subscriber(net, "e2e/c08/cold", true, cold_capture);
+    arrival_capture_t  hot_capture{};
+    arrival_capture_t  cold_capture{};
+    cy_future_t* const hot_sub  = make_subscriber(net, "e2e/c08/hot", true, hot_capture);
+    cy_future_t* const cold_sub = make_subscriber(net, "e2e/c08/cold", true, cold_capture);
 
     std::vector<cy_future_t*> hot_futures{};
     std::vector<cy_future_t*> cold_futures{};
@@ -896,10 +903,10 @@ void test_api_pubsub_e2e_c09_high_jitter_moderate_loss_unordered_completeness()
     cy_publisher_t* const hot_pub  = make_publisher(net, "e2e/c09/hot");
     cy_publisher_t* const cold_pub = make_publisher(net, "e2e/c09/cold");
 
-    arrival_capture_t      hot_capture{};
-    arrival_capture_t      cold_capture{};
-    cy_subscriber_t* const hot_sub  = make_subscriber(net, "e2e/c09/hot", false, hot_capture);
-    cy_subscriber_t* const cold_sub = make_subscriber(net, "e2e/c09/cold", false, cold_capture);
+    arrival_capture_t  hot_capture{};
+    arrival_capture_t  cold_capture{};
+    cy_future_t* const hot_sub  = make_subscriber(net, "e2e/c09/hot", false, hot_capture);
+    cy_future_t* const cold_sub = make_subscriber(net, "e2e/c09/cold", false, cold_capture);
 
     std::vector<cy_future_t*> hot_futures{};
     std::vector<cy_future_t*> cold_futures{};
@@ -966,10 +973,10 @@ void test_api_pubsub_e2e_c10_reordering_window_boundary_behavior()
     hot_hash                       = topic_hash_for(net, "e2e/c10/hot");
     cold_hash                      = topic_hash_for(net, "e2e/c10/cold");
 
-    arrival_capture_t      hot_capture{};
-    arrival_capture_t      cold_capture{};
-    cy_subscriber_t* const hot_sub  = make_subscriber(net, "e2e/c10/hot", true, hot_capture);
-    cy_subscriber_t* const cold_sub = make_subscriber(net, "e2e/c10/cold", true, cold_capture);
+    arrival_capture_t  hot_capture{};
+    arrival_capture_t  cold_capture{};
+    cy_future_t* const hot_sub  = make_subscriber(net, "e2e/c10/hot", true, hot_capture);
+    cy_future_t* const cold_sub = make_subscriber(net, "e2e/c10/cold", true, cold_capture);
 
     set_now(net, now);
     cy_future_t* const hot_fut_1  = publish_reliable(hot_pub, hot_pub_id, 1U, now, 420'000);

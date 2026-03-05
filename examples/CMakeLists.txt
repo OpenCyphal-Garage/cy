@@ -7,10 +7,10 @@ enable_testing()
 include_directories(SYSTEM "${CMAKE_SOURCE_DIR}/lib")
 
 # UDP node examples.
-add_executable(udp_pub main_udp_pub.c)
-add_executable(udp_sub main_udp_sub.c)
-target_link_libraries(udp_pub cy_udp_posix_trace)
-target_link_libraries(udp_sub cy_udp_posix_trace)
+#add_executable(udp_pub main_udp_pub.c)
+#add_executable(udp_sub main_udp_sub.c)
+#target_link_libraries(udp_pub cy_udp_posix_trace)
+#target_link_libraries(udp_sub cy_udp_posix_trace)
 
 # UDP file transfer examples.
 #add_executable(udp_file_server main_udp_file_server.c)

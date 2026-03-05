@@ -690,7 +690,7 @@ static void test_topic_allocate_reader_recovery_after_subject_reader_new_failure
     fixture_t fix;
     fixture_init(&fix);
 
-    cy_subscriber_t* const sub = cy_subscribe(fix.cy, cy_str("alloc/exh/reader/failure"), 64U);
+    cy_future_t* const sub = cy_subscribe(fix.cy, cy_str("alloc/exh/reader/failure"), 64U);
     TEST_ASSERT_NOT_NULL(sub);
 
     cy_topic_t* const topic = cy_topic_find_by_name(fix.cy, cy_str("alloc/exh/reader/failure"));
@@ -706,7 +706,7 @@ static void test_topic_allocate_reader_recovery_after_subject_reader_new_failure
     topic_sync_subject_reader(topic);
     TEST_ASSERT_NOT_NULL(topic->sub_reader);
 
-    cy_unsubscribe(sub);
+    cy_future_destroy(sub);
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(fix.cy));
 
     fixture_deinit(&fix);

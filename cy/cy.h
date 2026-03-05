@@ -42,7 +42,7 @@ extern "C"
 #define CY_ERR_MEDIA    6  // Generic low-level network error from the underlying platform layer.
 #define CY_ERR_LAG      7  // Strong scheduler lag detected. Non-real-time systems may ignore.
 #define CY_ERR_DELIVERY 8  // Reliable message (publication or response) was not acknowledged by the remote(s).
-#define CY_ERR_RESPONSE 9  // Response did not arrive on time.
+#define CY_ERR_LIVENESS 9  // Message (publication or response) did not arrive on time.
 #define CY_ERR_NACK     10 // Explicitly rejected by the remote.
 #define CY_ERR_CANCELED 11 // Future canceled before it could normally complete.
 
@@ -144,7 +144,7 @@ typedef struct cy_message_ts_t
 ///
 /// There are functions that operate only on specific polymorphic type of future; they always include runtime type
 /// checking, such that invocation with a wrong polymorphic future type will be detected and handled gracefully.
-/// E.g., invoking cy_response() on a future from cy_publish_reliable() is incorrect but well-defined and safe.
+/// E.g., invoking cy_response_move() on a future from cy_publish_reliable() is incorrect but well-defined and safe.
 typedef struct cy_future_t cy_future_t;
 
 /// If set, invoked on future completion always; also may be invoked multiple times for progress updates while pending.
@@ -224,7 +224,7 @@ bool cy_publish_delivered(const cy_future_t* const future);
 
 /// Models a single response to a request sent with cy_request(). There may be several of those received from different
 /// remote nodes and also multiple response messages from the same remote node if response streaming is used.
-/// This is obtained from the request future using cy_response().
+/// This is obtained from the request future using cy_response_borrow()/_move().
 ///
 /// The tuple of sender ID and seqno uniquely identifies each response per message.
 /// For a globally unique identifier, add the tag of the original message as well.
@@ -246,9 +246,12 @@ typedef struct cy_response_t
 ///
 /// The future will continue to receive responses as long as it is alive, even after the liveness monitoring timeout.
 /// Each received response resets the liveness timeout, which implies that the future may flip between done/pending
-/// multiple times until destroyed. The ERR_RESPONSE is cleared if the response arrives after the timeout.
+/// multiple times until destroyed. The CY_ERR_LIVENESS is cleared if the response arrives after the timeout.
+/// Liveness state is independent from response queue state: if CY_ERR_LIVENESS is reported, a queued unread response
+/// may still be present.
 ///
-/// Received deduplicated responses are stored in the future; the application should retrieve them using cy_response().
+/// Received deduplicated responses are stored in the future; the application should retrieve them using
+/// cy_response_borrow()/_move().
 /// The queue length is 1; on overflow, the old entry is replaced. To process all responses, the application needs to
 /// either set the future callback, which will be invoked per every received response, or to poll the future
 /// sufficiently frequently to avoid overrun.
@@ -267,16 +270,23 @@ cy_future_t* cy_request(cy_publisher_t* const pub,
                         const cy_us_t         response_timeout,  // NB: this is relative time, not a deadline!
                         const cy_bytes_t      message);
 
-/// If the request future holds a received response, fetches that response and demotes the future state back to pending,
-/// ready to receive the next response. If no response is available, the message pointer will be NULL.
+/// Polymorphic type check: true if the future is not NULL and is a request future.
+bool cy_is_request(const cy_future_t* const future);
+
+/// If the request future holds a received response, cy_response_move() fetches that response and demotes the future
+/// state back to pending unless it is in the liveness timeout state CY_ERR_LIVENESS, in which case it will remain done.
+/// cy_response_borrow() returns the message but also keeps the original unchanged.
+///
+/// If no response is available, the message pointer will be NULL.
 /// Responses will be lost if the application neglects to fetch one prior to the next response arrival; i.e.,
 /// the queue is limited to only one, most recent sample.
 ///
 /// This is not idempotent -- the response is moved to the application.
 /// The application MUST use cy_message_refcount_dec() when done with the message.
-cy_response_t cy_response(cy_future_t* const future);
+cy_response_t cy_response_borrow(const cy_future_t* const future);
+cy_response_t cy_response_move(cy_future_t* const future);
 
-/// Successful response arrival may be masked by non-fatal errors when querying cy_future_error().
+/// Successful response arrival may coexist with non-fatal errors when querying cy_future_error().
 /// This function provides an unambiguous query that directly reports received unique responses regardless of errors.
 uint64_t cy_response_count(const cy_future_t* const future);
 
@@ -304,8 +314,6 @@ void cy_unadvertise(cy_publisher_t* const pub);
 // =====================================================================================================================
 //                                                      SUBSCRIBER
 // =====================================================================================================================
-
-typedef struct cy_subscriber_t cy_subscriber_t;
 
 /// This ought to be enough for any reasonable transport-specific state.
 /// For example, IPv4 with 3 redundant transfers would need (4 bytes IP + 2 bytes port) * 3 = 18 bytes plus padding.
@@ -351,6 +359,106 @@ typedef struct cy_breadcrumb_t
     cy_p2p_context_t p2p_context;
 } cy_breadcrumb_t;
 
+/// Event information for a received message from a topic subscription.
+typedef struct cy_arrival_t
+{
+    /// Messages are shared and reference counted. See cy_message_refcount_inc()/_dec().
+    cy_message_ts_t message;
+
+    /// Use cy_respond() to send a P2P response directly to the publisher of this message if needed.
+    /// Multiple responses can be sent if necessary; each will carry a unique sequence number starting from zero.
+    /// If responses are needed, this instance should be copied by value only once, as it keeps internal state.
+    /// If multiple subscribers will be sending responses, they must coordinate to use a shared breadcrumb instance
+    /// to avoid seqno counter discontinuity. If no responses are needed, this instance can be discarded.
+    ///
+    /// The breadcrumb also contains the hash of the topic that this message was received from.
+    /// For verbatim subscribers, the topic is always the same.
+    /// For pattern subscribers, the topic hash refers to the matched topic, which may change for distinct messages.
+    /// The topic hash can be used to retrieve the topic later using cy_topic_find_by_hash(), and
+    /// -- most importantly! -- it can be used to obtain the topic name substitutions that had to be made to match
+    /// the subscription name pattern if this is a pattern subscriber. Verbatim subscribers have no pattern
+    /// substitutions. See cy_subscriber_substitutions().
+    cy_breadcrumb_t breadcrumb;
+} cy_arrival_t;
+
+/// We intentionally use the exact same API for both verbatim and pattern subscriptions; this is a key design feature.
+///
+/// There may be more than one subscriber with the same name (pattern). The library will only keep one
+/// reference-counted topic; upon message arrival, all matching subscribers will be invoked in an unspecified order.
+/// Each subscriber may use distinct parameters (extent, reordering, etc).
+///
+/// All received messages are stored into a one-message-deep queue in the future instance. The future becomes done
+/// when there is at least one pending message, or when the liveness timeout is enabled and has expired (no messages
+/// seen for the specified time). The application can either poll the future using cy_future_done() or
+/// cy_arrival_count(), or it can set up a callback to be invoked when new messages arrive via cy_future_callback_set().
+/// Received messages can be retrieved using cy_arrival_borrow()/_move().
+///
+/// By default, liveness monitoring is disabled -- a subscriber future will only be marked as done when a new message
+/// is available. If liveness monitoring is enabled, when arrivals cease, the future will materialize after the
+/// liveness timeout with CY_ERR_LIVENESS and the callback will be invoked if set.
+///
+/// Possible errors include:
+///     CY_ERR_MEMORY:      Could not allocate auxiliary state, message dropped. Note that memory exhaustion may
+///                         cause loss at the lower layers of the stack, which will not be detected via this API.
+///     CY_ERR_LIVENESS:    No messages received for the specified timeout (disabled by default).
+///
+/// The regular subscriber does not guarantee that messages arrive in the same order as they are published.
+/// It does, however, guarantee that each arrives at most once.
+cy_future_t* cy_subscribe(cy_t* const cy, const cy_str_t name, const size_t extent);
+
+/// A variant of subscriber that ensures that messages are delivered in the same order they are sent by the remotes,
+/// with ordering guaranteed on a per-remote basis. This is to say that ordering is not ensured for messages that
+/// originate from distinct remotes, as that would require global synchronization which is outside of the scope of
+/// the session layer.
+///
+/// The reordering window specifies the maximum amount of time to delay messages received out of order before they
+/// are forcibly ejected to the application; it must be non-negative. Force ejection implies that if late missing
+/// messages apply later, they will be dropped since ejecting them would violate the ordering constraint.
+cy_future_t* cy_subscribe_ordered(cy_t* const    cy,
+                                  const cy_str_t name,
+                                  const size_t   extent,
+                                  const cy_us_t  reordering_window);
+
+/// Polymorphic type check: true if the specified future is not NULL and is a subscriber.
+bool cy_is_subscriber(const cy_future_t* const future);
+
+/// When a new message is received, the subscribe future becomes done. The message can be accessed via borrow/move.
+/// If no message is available (future not done), returns a default-inited arrival struct with NULL message.
+///
+/// The borrow version provides access to the received message without erasing it from the subscriber instance.
+/// This is useful when a subscriber is used as a sampling port, always keeping the most recent message.
+/// The application may opt to keep the message alive if needed using cy_message_refcount_inc().
+///
+/// The moving version transfers message ownership to the application; the future will transition from done to pending
+/// unless it has encountered a liveness timeout.
+/// The application MUST use cy_message_refcount_dec() when done with the message to release memory.
+///
+/// If the message is not moved by the time the next one arrives, the old message is replaced with the new one
+/// (the application may still retain the old one if needed by adjusting the refcount accordingly).
+cy_arrival_t cy_arrival_borrow(const cy_future_t* const future);
+cy_arrival_t cy_arrival_move(cy_future_t* const future);
+
+/// Number of unique messages successfully received by the subscriber so far.
+uint64_t cy_arrival_count(const cy_future_t* const future);
+
+/// A non-positive value disables the liveness timeout; it is disabled by default.
+/// When enabled, lack of messages for this long resolves the future with CY_ERR_LIVENESS.
+///
+/// When used with ordered subscribers, out of order messages may be interned for up to the reordering_window prior
+/// to ejection, which may cause liveness timeout to be reported even though there are pending interned messages.
+/// A related edge case to be aware of is when an interned message is ejected, given large enough ejection delay,
+/// the liveness timeout may fire immediately afterward since it is measured relative to the original arrival timestamp.
+///
+/// Takes effect immediately, implying that if the last message was received more than timeout ago (or subscriber
+/// constructed more than timeout ago and no messages seen), the liveness error will fire on next spin.
+/// cy_subscriber_timeout_set() will reset CY_ERR_LIVENESS if set regardless of the argument.
+cy_us_t cy_subscriber_timeout(const cy_future_t* const future);
+void    cy_subscriber_timeout_set(cy_future_t* const future, const cy_us_t timeout);
+
+/// Copies the subscriber name into the user-supplied buffer. Max size is CY_TOPIC_NAME_MAX plus NUL-terminator.
+/// The output string is NUL-terminated.
+void cy_subscriber_name(const cy_future_t* const future, char* const out_name);
+
 typedef struct cy_substitution_t
 {
     cy_str_t str;     ///< The substring that matched the substitution token in the pattern. Not NUL-terminated.
@@ -370,68 +478,25 @@ typedef struct cy_substitution_set_t
     const cy_substitution_t* substitutions; ///< A contiguous array of substitutions of size `count`.
 } cy_substitution_set_t;
 
-/// Event information for a received message from a topic subscription.
-typedef struct cy_arrival_t
-{
-    /// The message will be given with refcount=1. If the application needs to keep it after return from the callback,
-    /// it must increment the refcount using cy_message_refcount_inc() to avoid premature destruction.
-    cy_message_ts_t message;
-
-    /// Use cy_respond() to send a P2P response directly to the publisher of this message if needed.
-    /// Multiple responses can be sent if necessary; each will carry a unique sequence number starting from zero.
-    /// If responses are needed, this instance should be copied by value only once, as it keeps internal state.
-    /// If multiple subscribers will be sending responses, they must coordinate to use a shared breadcrumb instance
-    /// to avoid seqno counter discontinuity. If no responses are needed, this instance can be discarded.
-    cy_breadcrumb_t breadcrumb;
-
-    /// The topic that the message was received from; always non-NULL.
-    ///
-    /// For verbatim subscribers, the topic pointer is always the same, and the substitution set is always empty.
-    /// For pattern subscribers, the topic pointer refers to the matched topic instance, which may change,
-    /// and the substitution set contains at least one entry.
-    ///
-    /// The lifetime of the substitutions is bound to the lifetime of the topic, which is guaranteed to remain alive
-    /// as long as there is at least one verbatim subscriber or at least one publisher on it. Topics that only have
-    /// pattern subscribers are eventually destroyed after a long time of inactivity, which is reset after every
-    /// received message (among some other events not necessarily visible to the application).
-    cy_topic_t*           topic;
-    cy_substitution_set_t substitutions;
-} cy_arrival_t;
-
-/// The arrival pointer is mutable to allow moving the message out of it if needed.
-/// The lifetime of the arrival struct ends upon return from the current callback.
-typedef void (*cy_subscriber_callback_t)(cy_subscriber_t*, cy_arrival_t);
-
-// Future note: eventually, we may want to support sampling subscription pattern:
-// keep the last arrival inside the subscriber instance, and add a function to query it outside of the callback.
-
-/// We intentionally use the exact same API for both verbatim and pattern subscriptions; this is a key design feature.
+/// Given a subscriber and a topic, returns the set of pattern name substitutions that have to be made to make
+/// the subscriber name match the topic name. For verbatim subscribers the substitution set is always empty.
+/// See cy_substitution_set_t and cy_arrival_t.
 ///
-/// There may be more than one subscriber with the same name (pattern). The library will only keep one
-/// reference-counted topic; upon message arrival, all matching subscribers will be invoked in an unspecified order.
-/// Each subscriber may use distinct parameters (extent, reordering, etc).
-cy_subscriber_t* cy_subscribe(cy_t* const cy, const cy_str_t name, const size_t extent);
-
-/// The reordering window must be non-negative.
-cy_subscriber_t* cy_subscribe_ordered(cy_t* const    cy,
-                                      const cy_str_t name,
-                                      const size_t   extent,
-                                      const cy_us_t  reordering_window);
-
-cy_user_context_t cy_subscriber_context(const cy_subscriber_t* const self);
-void              cy_subscriber_context_set(cy_subscriber_t* const self, const cy_user_context_t context);
-
-cy_subscriber_callback_t cy_subscriber_callback(const cy_subscriber_t* const self);
-void cy_subscriber_callback_set(cy_subscriber_t* const self, const cy_subscriber_callback_t callback);
-
-/// Copies the subscriber name into the user-supplied buffer. Max size is CY_TOPIC_NAME_MAX plus NUL-terminator.
-/// The output string is NUL-terminated.
-void cy_subscriber_name(const cy_subscriber_t* const self, char* const out_name);
-
-/// No effect if the subscriber pointer is NULL.
-/// Destruction will happen asynchronously at the next event loop update (see spin()).
-/// This is done to enable safe destruction from within a callback.
-void cy_unsubscribe(cy_subscriber_t* const self);
+/// This is a very fast query intended to be used in high-frequency loops; it DOES NOT manipulate strings
+/// but rather returns a pre-computed substitution set. The lifetime of the set is tied to the lifetime of the
+/// topic, which is managed automatically by the library; if data needs to survive the next spin, it must be copied.
+///
+/// This is safe to invoke if any of the pointers are NULL. This guarantee enables the following usage:
+///
+///     cy_substitution_set_t set = cy_subscriber_substitutions(subscriber, cy_topic_find_by_hash(cy, topic_hash));
+///     cy_substitution_set_t set = cy_subscriber_substitutions(subscriber, cy_topic_find_by_name(cy, topic_name));
+///
+/// On invalid usage returns empty/NULL substitutions; for verbatim subscribers the count is zero but pointer is
+/// never NULL.
+///
+/// Complexity is linear in the number of subscribers on a topic unless this is a verbatim subscriber,
+/// in which case the complexity is constant (a single flag check).
+cy_substitution_set_t cy_subscriber_substitutions(const cy_future_t* const future, const cy_topic_t* const topic);
 
 /// Send a best-effort response to a message previously received from a topic subscription.
 /// The response will be sent directly to the publisher using peer-to-peer transport, not affecting other nodes.

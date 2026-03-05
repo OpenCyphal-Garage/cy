@@ -120,11 +120,10 @@ static uint32_t topic_evictions_from_subject_id(const uint64_t hash,
 
 >TODO: Pinned topics on CAN must have no header to ensure backward compatibility, sort this out later.
 
-The transport layer just ferries **opaque blobs between nodes**. The job of the session layer is to build and interpret them. To enable that, the session layer adds small fixed-size headers to messages. All headers carry the header type in the 6 least significant bits of the first byte; the rest is header-specific. All headers have a fixed size of 24 bytes and favor natural alignment where possible to simplify parsing. The following header types are defined:
+The transport layer just ferries **opaque blobs between nodes**. The job of the session layer is to build and interpret them. To enable that, the session layer adds small fixed-size headers to messages. All headers carry the header type in the first byte; the rest is header-specific. All headers have a fixed size of 24 bytes and favor natural alignment where possible to simplify parsing. The following header types are defined:
 
 ```c++
 #define HEADER_BYTES     24U
-#define HEADER_TYPE_MASK 63U
 typedef enum
 {
     header_msg_be   = 0,    ///< Best-effort published message with user payload.
@@ -153,8 +152,7 @@ Each message carries its own _inline_ CRDT gossip state, which allows instant co
 The message tags must be unique across reboots to avoid misattribution; for that, they are randomly initialized and incremented with every published message to enable ordering reconstruction and loss detection. Message tags can be initialized using PRNG with a good seed; the API docs provide examples how this could be achieved (easily) on an embedded system without a hardware TRNG. It follows that tags can (and do) wrap around.
 
 ```bash
-uint6 type
-void2
+uint8  type
 void8
 uint8  incompatibility
 int8   topic_log_age    # floor(log2(topic_age)) if topic_age>0 else -1, like in the gossip message.
@@ -171,8 +169,7 @@ Sent in response to a reliable message publication. Message publications have no
 The ack priority level must match that of the original message.
 
 ```bash
-uint6 type
-void2
+uint8  type
 void24
 uint32 incompatibility
 uint64 topic_hash       # From the acknowledged message.
@@ -188,8 +185,7 @@ For P2P NACKs are well-defined since these interactions are inherently unicast.
 The (n)ack priority level must match that of the original response.
 
 ```bash
-uint6 type
-void2
+uint8  type
 uint8  tag              # Chosen by the responder arbitrarily for ack correlation, if needed.
 uint48 seqno            # Incremented starting from zero for each response to this message; used for streaming.
 uint64 topic_hash       # Topic hash of the published message this response pertains to.
@@ -206,8 +202,7 @@ The TTL field is decremented every time the gossip is forwarded to gossip peers 
 The TTL is only the last line of defence against cycles; each forwarding node must keep a short list of recently seen gossips to prevent redundant transmissions early.
 
 ```bash
-uint6 type
-void2
+uint8  type
 void8
 uint8  ttl              # Must be zero for broadcast gossips.
 int8   topic_log_age    # floor(log2(topic_age)) if topic_age>0 else -1
@@ -224,8 +219,7 @@ utf8[<=CY_TOPIC_NAME_MAX] topic_name  # Has 1 byte length prefix. The name is no
 This is typically broadcast to let every node check if it has any matching topics. On match, responses are sent as the ordinary CRDT gossip message with zero TTL. Responses are usually unicast, but this is not required; the only requirement is that the requester should be likely to receive them.
 
 ```bash
-uint6 type
-void2
+uint8  type
 void24
 uint32 incompatibility
 uint64 incompatibility1

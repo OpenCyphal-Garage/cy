@@ -39,9 +39,14 @@ struct arrival_capture_t final
     std::size_t                   malformed{ 0U };
 };
 
-extern "C" void on_arrival_capture(cy_subscriber_t* const sub, const cy_arrival_t arrival)
+extern "C" void on_arrival_capture(cy_future_t* const sub)
 {
-    auto* const capture = static_cast<arrival_capture_t*>(cy_subscriber_context(sub).ptr[0]);
+    const cy_arrival_t arrival = cy_arrival_move(sub);
+    if (arrival.message.content == nullptr) {
+        return;
+    }
+
+    auto* const capture = static_cast<arrival_capture_t*>(cy_future_context(sub).ptr[0]);
     TEST_ASSERT_NOT_NULL(capture);
 
     std::array<unsigned char, 32> bytes{};
@@ -50,11 +55,16 @@ extern "C" void on_arrival_capture(cy_subscriber_t* const sub, const cy_arrival_
     e2e::app_payload_t payload{};
     if (!e2e::app_payload_unpack(bytes.data(), size, payload)) {
         capture->malformed++;
+        cy_message_refcount_dec(arrival.message.content);
         return;
     }
 
     capture->samples.push_back(arrival_sample_t{
-      .publisher_id = payload.publisher_id, .sequence = payload.sequence, .topic_hash = cy_topic_hash(arrival.topic) });
+      .publisher_id = payload.publisher_id,
+      .sequence     = payload.sequence,
+      .topic_hash   = arrival.breadcrumb.topic_hash,
+    });
+    cy_message_refcount_dec(arrival.message.content);
 }
 
 void set_now_all(e2e::sim_net_t& net, const cy_us_t now)
@@ -222,7 +232,7 @@ struct one_topic_env_t final
 {
     e2e::sim_net_t                 net{};
     std::vector<cy_publisher_t*>   pubs{};
-    std::vector<cy_subscriber_t*>  subs{};
+    std::vector<cy_future_t*>      subs{};
     std::vector<arrival_capture_t> captures{};
     std::vector<std::uint64_t>     next_seq{};
 };
@@ -247,14 +257,14 @@ void one_topic_init(one_topic_env_t&                  env,
     env.next_seq.assign(node_count, 0U);
 
     for (std::size_t i = 0U; i < node_count; i++) {
-        cy_subscriber_t* const sub = cy_subscribe(e2e::sim_net_cy(env.net, i), cy_str(topic_name), 64U);
+        cy_future_t* const sub = cy_subscribe(e2e::sim_net_cy(env.net, i), cy_str(topic_name), 64U);
         TEST_ASSERT_NOT_NULL(sub);
         env.subs.at(i) = sub;
 
         cy_user_context_t ctx = CY_USER_CONTEXT_EMPTY;
         ctx.ptr[0]            = &env.captures.at(i);
-        cy_subscriber_context_set(sub, ctx);
-        cy_subscriber_callback_set(sub, on_arrival_capture);
+        cy_future_context_set(sub, ctx);
+        cy_future_callback_set(sub, on_arrival_capture);
 
         cy_publisher_t* const pub = cy_advertise(e2e::sim_net_cy(env.net, i), cy_str(topic_name));
         TEST_ASSERT_NOT_NULL(pub);
@@ -291,9 +301,9 @@ void one_topic_cleanup(one_topic_env_t& env, cy_us_t& now)
 {
     e2e::sim_net_faults_set(env.net, nullptr, nullptr);
 
-    for (cy_subscriber_t* const sub : env.subs) {
+    for (cy_future_t* const sub : env.subs) {
         if (sub != nullptr) {
-            cy_unsubscribe(sub);
+            cy_future_destroy(sub);
         }
     }
     drive_for(env.net, now, 80'000, false);
@@ -432,12 +442,12 @@ void test_api_consensus_e2e_m05_three_colliding_topics_subject_uniqueness()
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK, e2e::sim_net_init_ex(net, cfg));
 
-    std::vector<arrival_capture_t>             captures(cfg.node_count);
-    std::vector<std::vector<cy_subscriber_t*>> subs(cfg.node_count,
-                                                    std::vector<cy_subscriber_t*>(colliding_topics.size(), nullptr));
-    std::vector<std::vector<cy_publisher_t*>>  pubs(cfg.node_count,
+    std::vector<arrival_capture_t>            captures(cfg.node_count);
+    std::vector<std::vector<cy_future_t*>>    subs(cfg.node_count,
+                                                std::vector<cy_future_t*>(colliding_topics.size(), nullptr));
+    std::vector<std::vector<cy_publisher_t*>> pubs(cfg.node_count,
                                                    std::vector<cy_publisher_t*>(colliding_topics.size(), nullptr));
-    std::vector<std::vector<std::uint64_t>>    seq(cfg.node_count,
+    std::vector<std::vector<std::uint64_t>>   seq(cfg.node_count,
                                                 std::vector<std::uint64_t>(colliding_topics.size(), 0U));
 
     for (std::size_t node = 0U; node < cfg.node_count; node++) {
@@ -446,8 +456,8 @@ void test_api_consensus_e2e_m05_three_colliding_topics_subject_uniqueness()
             TEST_ASSERT_NOT_NULL(subs.at(node).at(topic));
             cy_user_context_t ctx = CY_USER_CONTEXT_EMPTY;
             ctx.ptr[0]            = &captures.at(node);
-            cy_subscriber_context_set(subs.at(node).at(topic), ctx);
-            cy_subscriber_callback_set(subs.at(node).at(topic), on_arrival_capture);
+            cy_future_context_set(subs.at(node).at(topic), ctx);
+            cy_future_callback_set(subs.at(node).at(topic), on_arrival_capture);
 
             pubs.at(node).at(topic) = cy_advertise(e2e::sim_net_cy(net, node), cy_str(colliding_topics.at(topic)));
             TEST_ASSERT_NOT_NULL(pubs.at(node).at(topic));
@@ -520,9 +530,9 @@ void test_api_consensus_e2e_m05_three_colliding_topics_subject_uniqueness()
 
     e2e::sim_net_faults_set(net, nullptr, nullptr);
     for (const auto& row : subs) {
-        for (cy_subscriber_t* const sub : row) {
+        for (cy_future_t* const sub : row) {
             if (sub != nullptr) {
-                cy_unsubscribe(sub);
+                cy_future_destroy(sub);
             }
         }
     }
@@ -553,10 +563,10 @@ void test_api_consensus_e2e_m06_node_restart_rejoin_during_collision_migration()
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK, e2e::sim_net_init_ex(net, cfg));
 
-    std::vector<arrival_capture_t>             captures(node_count);
-    std::vector<std::vector<cy_subscriber_t*>> subs(node_count, std::vector<cy_subscriber_t*>(topic_count, nullptr));
-    std::vector<std::vector<cy_publisher_t*>>  pubs(node_count, std::vector<cy_publisher_t*>(topic_count, nullptr));
-    std::vector<std::vector<std::uint64_t>>    seq(node_count, std::vector<std::uint64_t>(topic_count, 0U));
+    std::vector<arrival_capture_t>            captures(node_count);
+    std::vector<std::vector<cy_future_t*>>    subs(node_count, std::vector<cy_future_t*>(topic_count, nullptr));
+    std::vector<std::vector<cy_publisher_t*>> pubs(node_count, std::vector<cy_publisher_t*>(topic_count, nullptr));
+    std::vector<std::vector<std::uint64_t>>   seq(node_count, std::vector<std::uint64_t>(topic_count, 0U));
 
     const auto create_node_handles = [&](const std::size_t node) {
         for (std::size_t topic = 0U; topic < topic_count; topic++) {
@@ -566,8 +576,8 @@ void test_api_consensus_e2e_m06_node_restart_rejoin_during_collision_migration()
                 TEST_ASSERT_NOT_NULL(subs.at(node).at(topic));
                 cy_user_context_t ctx = CY_USER_CONTEXT_EMPTY;
                 ctx.ptr[0]            = &captures.at(node);
-                cy_subscriber_context_set(subs.at(node).at(topic), ctx);
-                cy_subscriber_callback_set(subs.at(node).at(topic), on_arrival_capture);
+                cy_future_context_set(subs.at(node).at(topic), ctx);
+                cy_future_callback_set(subs.at(node).at(topic), on_arrival_capture);
             }
             if (pubs.at(node).at(topic) == nullptr) {
                 pubs.at(node).at(topic) = cy_advertise(e2e::sim_net_cy(net, node), cy_str(colliding_topics.at(topic)));
@@ -587,7 +597,7 @@ void test_api_consensus_e2e_m06_node_restart_rejoin_during_collision_migration()
         if (round == 14U) {
             for (std::size_t topic = 0U; topic < topic_count; topic++) {
                 if (subs.at(restart_node).at(topic) != nullptr) {
-                    cy_unsubscribe(subs.at(restart_node).at(topic));
+                    cy_future_destroy(subs.at(restart_node).at(topic));
                     subs.at(restart_node).at(topic) = nullptr;
                 }
                 if (pubs.at(restart_node).at(topic) != nullptr) {
@@ -644,9 +654,9 @@ void test_api_consensus_e2e_m06_node_restart_rejoin_during_collision_migration()
 
     e2e::sim_net_faults_set(net, nullptr, nullptr);
     for (const auto& row : subs) {
-        for (cy_subscriber_t* const sub : row) {
+        for (cy_future_t* const sub : row) {
             if (sub != nullptr) {
-                cy_unsubscribe(sub);
+                cy_future_destroy(sub);
             }
         }
     }
@@ -772,10 +782,10 @@ void test_api_consensus_e2e_m09_stale_gossip_replay_does_not_shift_stable_mappin
 
     std::vector<cy_publisher_t*> pubs{};
     pubs.reserve(node_count * topic_count);
-    std::vector<std::vector<cy_publisher_t*>>  by_node(node_count, std::vector<cy_publisher_t*>(topic_count, nullptr));
-    std::vector<std::vector<cy_subscriber_t*>> subs(node_count, std::vector<cy_subscriber_t*>(topic_count, nullptr));
-    std::vector<arrival_capture_t>             captures(node_count);
-    std::vector<std::vector<std::uint64_t>>    seq(node_count, std::vector<std::uint64_t>(topic_count, 0U));
+    std::vector<std::vector<cy_publisher_t*>> by_node(node_count, std::vector<cy_publisher_t*>(topic_count, nullptr));
+    std::vector<std::vector<cy_future_t*>>    subs(node_count, std::vector<cy_future_t*>(topic_count, nullptr));
+    std::vector<arrival_capture_t>            captures(node_count);
+    std::vector<std::vector<std::uint64_t>>   seq(node_count, std::vector<std::uint64_t>(topic_count, 0U));
 
     for (std::size_t node = 0U; node < node_count; node++) {
         for (std::size_t topic = 0U; topic < topic_count; topic++) {
@@ -783,8 +793,8 @@ void test_api_consensus_e2e_m09_stale_gossip_replay_does_not_shift_stable_mappin
             TEST_ASSERT_NOT_NULL(subs.at(node).at(topic));
             cy_user_context_t ctx = CY_USER_CONTEXT_EMPTY;
             ctx.ptr[0]            = &captures.at(node);
-            cy_subscriber_context_set(subs.at(node).at(topic), ctx);
-            cy_subscriber_callback_set(subs.at(node).at(topic), on_arrival_capture);
+            cy_future_context_set(subs.at(node).at(topic), ctx);
+            cy_future_callback_set(subs.at(node).at(topic), on_arrival_capture);
 
             by_node.at(node).at(topic) = cy_advertise(e2e::sim_net_cy(net, node), cy_str(colliding_topics.at(topic)));
             TEST_ASSERT_NOT_NULL(by_node.at(node).at(topic));
@@ -869,9 +879,9 @@ void test_api_consensus_e2e_m09_stale_gossip_replay_does_not_shift_stable_mappin
 
     e2e::sim_net_faults_set(net, nullptr, nullptr);
     for (const auto& row : subs) {
-        for (cy_subscriber_t* const sub : row) {
+        for (cy_future_t* const sub : row) {
             if (sub != nullptr) {
-                cy_unsubscribe(sub);
+                cy_future_destroy(sub);
             }
         }
     }
