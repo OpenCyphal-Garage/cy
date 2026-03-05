@@ -420,7 +420,7 @@ void inject_divergent_gossip(e2e::sim_net_t&     net,
     cy_lane_t lane{};
     lane.id           = remote_id;
     lane.prio         = cy_prio_nominal;
-    lane.p2p.state[0] = static_cast<unsigned char>(remote_id & 0xFFU);
+    lane.ctx.state[0] = static_cast<unsigned char>(remote_id & 0xFFU);
 
     cy_on_message(e2e::sim_net_platform(net, dst_node), lane, nullptr, mts);
 }

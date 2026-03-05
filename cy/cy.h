@@ -206,7 +206,7 @@ cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t deadline, const cy_
 ///
 /// The session layer tracks remote subscribers (called associations) using a simple stateless protocol and
 /// ensures that all live subscribers confirm message reception, retransmitting as necessary, switching between
-/// multicast and P2P strategies as necessary to manage network utilization. The association set management,
+/// multicast and unicast strategies as necessary to manage network utilization. The association set management,
 /// retransmission, ack deduplication, and related bookkeeping are hidden from the application.
 /// The application will observe future failure if no subscriber confirms reception before the deadline.
 ///
@@ -238,7 +238,7 @@ typedef struct cy_response_t
     cy_message_ts_t message;
 } cy_response_t;
 
-/// This is similar to cy_publish_reliable() except that we also wait for the remote(s) to send some P2P response(s).
+/// This is similar to cy_publish_reliable() except that we also wait for the remote(s) to send unicast response(s).
 /// The response timeout is added to the delivery deadline to obtain the total time to wait for the first response;
 /// for subsequent responses it is used as the maximum inter-response interval for liveness monitoring to alert the
 /// application when responses cease to arrive. The application may destroy the future at any moment (e.g., if it
@@ -323,18 +323,18 @@ void cy_unadvertise(cy_publisher_t* const pub);
 #define CY_RESPONSE_CONTEXT_BYTES 24U
 #endif
 
-/// Received transfers are given this copyable instance to allow sending P2P response transfers back to the sender.
+/// Received transfers are given this copyable instance to allow sending unicast response transfers back to the sender.
 /// It can be copied / passed by value. It can be trivially discarded if no response is needed.
 ///
 /// This object avoids linking the topic instance that delivered the original message to avoid lifetime
 /// issues that would occur if the topic is destroyed between the message arrival and the response time.
 /// Instead of referencing the topic, the relevant parameters of the topic are stored here by value.
-typedef struct cy_p2p_context_t
+typedef struct cy_unicast_context_t
 {
     unsigned char state[CY_RESPONSE_CONTEXT_BYTES];
-} cy_p2p_context_t;
+} cy_unicast_context_t;
 
-/// Stores the origin information of a received message to allow sending a P2P response back to the sender.
+/// Stores the origin information of a received message to allow sending a unicast response back to the sender.
 /// None of the fields may be altered by the application.
 ///
 /// The triplet of (remote-ID, topic hash, request tag) uniquely identifies the original message within the network.
@@ -355,8 +355,8 @@ typedef struct cy_breadcrumb_t
     uint64_t topic_hash;  ///< Identifies the topic the original request message was received from.
     uint64_t message_tag; ///< The tag of the original request message this breadcrumb can respond to.
 
-    uint64_t         seqno; ///< Incremented with each response sent; starts at zero.
-    cy_p2p_context_t p2p_context;
+    uint64_t             seqno; ///< Incremented with each response sent; starts at zero.
+    cy_unicast_context_t unicast_ctx;
 } cy_breadcrumb_t;
 
 /// Event information for a received message from a topic subscription.
@@ -365,7 +365,7 @@ typedef struct cy_arrival_t
     /// Messages are shared and reference counted. See cy_message_refcount_inc()/_dec().
     cy_message_ts_t message;
 
-    /// Use cy_respond() to send a P2P response directly to the publisher of this message if needed.
+    /// Use cy_respond() to send a unicast response directly to the publisher of this message if needed.
     /// Multiple responses can be sent if necessary; each will carry a unique sequence number starting from zero.
     /// If responses are needed, this instance should be copied by value only once, as it keeps internal state.
     /// If multiple subscribers will be sending responses, they must coordinate to use a shared breadcrumb instance
@@ -499,7 +499,7 @@ typedef struct cy_substitution_set_t
 cy_substitution_set_t cy_subscriber_substitutions(const cy_future_t* const future, const cy_topic_t* const topic);
 
 /// Send a best-effort response to a message previously received from a topic subscription.
-/// The response will be sent directly to the publisher using peer-to-peer transport, not affecting other nodes.
+/// The response will be sent directly to the publisher using unicast transport, not affecting other nodes.
 /// This can be invoked from a subscription callback or at any later point as long as the breadcrumb is available.
 /// There may be an arbitrary number of responses sent per received message; we call these streamed RPC responses.
 /// Each response will carry a unique sequence number starting from zero, generated automatically by Cy.

@@ -413,7 +413,7 @@ void test_api_pubsub_e2e_f02_persistent_subject_send_failures_cause_future_failu
     cleanup_case(net, now, futures, { sub }, { pub });
 }
 
-void test_api_pubsub_e2e_f03_transient_p2p_send_failures_on_receiver_recover()
+void test_api_pubsub_e2e_f03_transient_unicast_send_failures_on_receiver_recover()
 {
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK, e2e::sim_net_init(net));
@@ -422,7 +422,7 @@ void test_api_pubsub_e2e_f03_transient_p2p_send_failures_on_receiver_recover()
     const std::uint64_t  node_a_id          = e2e::sim_net_node_id(net, e2e::sim_node_a);
     e2e::op_fault_plan_t op_faults{};
     e2e::op_fault_plan_add_fail(op_faults, CY_ERR_MEDIA, [&](const e2e::op_info_t& op) {
-        if ((op.kind != e2e::op_kind_t::p2p_send) || (op.node_index != e2e::sim_node_b) || !op.has_lane_id ||
+        if ((op.kind != e2e::op_kind_t::unicast_send) || (op.node_index != e2e::sim_node_b) || !op.has_lane_id ||
             (op.lane_id != node_a_id)) {
             return false;
         }
@@ -454,12 +454,12 @@ void test_api_pubsub_e2e_f03_transient_p2p_send_failures_on_receiver_recover()
     assert_unordered_complete_unique(capture, 503U, 1U, 8U);
     assert_unordered_unique_only(capture, 503U);
     assert_future_delivery(futures, true);
-    TEST_ASSERT_TRUE(count_failed_ops(net, e2e::op_kind_t::p2p_send) > 0U);
+    TEST_ASSERT_TRUE(count_failed_ops(net, e2e::op_kind_t::unicast_send) > 0U);
 
     cleanup_case(net, now, futures, { sub }, { pub });
 }
 
-void test_api_pubsub_e2e_f04_mixed_subject_and_p2p_send_failures_still_converge()
+void test_api_pubsub_e2e_f04_mixed_subject_and_unicast_send_failures_still_converge()
 {
     e2e::op_fault_plan_t op_faults{};
     e2e::op_fault_plan_add_fail(
@@ -468,11 +468,12 @@ void test_api_pubsub_e2e_f04_mixed_subject_and_p2p_send_failures_still_converge(
       e2e::op_fault_predicate_all_of({ e2e::op_fault_predicate_kind(e2e::op_kind_t::subject_send),
                                        e2e::op_fault_predicate_node(e2e::sim_node_a),
                                        e2e::op_fault_predicate_every_nth(3U) }));
-    e2e::op_fault_plan_add_fail(op_faults,
-                                CY_ERR_MEDIA,
-                                e2e::op_fault_predicate_all_of({ e2e::op_fault_predicate_kind(e2e::op_kind_t::p2p_send),
-                                                                 e2e::op_fault_predicate_node(e2e::sim_node_b),
-                                                                 e2e::op_fault_predicate_every_nth(4U) }));
+    e2e::op_fault_plan_add_fail(
+      op_faults,
+      CY_ERR_MEDIA,
+      e2e::op_fault_predicate_all_of({ e2e::op_fault_predicate_kind(e2e::op_kind_t::unicast_send),
+                                       e2e::op_fault_predicate_node(e2e::sim_node_b),
+                                       e2e::op_fault_predicate_every_nth(4U) }));
 
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK, e2e::sim_net_init(net));
@@ -498,7 +499,7 @@ void test_api_pubsub_e2e_f04_mixed_subject_and_p2p_send_failures_still_converge(
     assert_unordered_unique_only(capture, 504U);
     assert_future_delivery(futures, true);
     TEST_ASSERT_TRUE(count_failed_ops(net, e2e::op_kind_t::subject_send) > 0U);
-    TEST_ASSERT_TRUE(count_failed_ops(net, e2e::op_kind_t::p2p_send) > 0U);
+    TEST_ASSERT_TRUE(count_failed_ops(net, e2e::op_kind_t::unicast_send) > 0U);
 
     cleanup_case(net, now, futures, { sub }, { pub });
 }
@@ -644,7 +645,7 @@ void test_api_pubsub_e2e_f07_asymmetric_node_degradation_eventual_recovery()
 void test_api_pubsub_e2e_f08_failure_storm_then_recovery_preserves_invariants()
 {
     std::size_t          subject_failures = 14U;
-    std::size_t          p2p_failures     = 14U;
+    std::size_t          unicast_failures = 14U;
     std::size_t          spin_failures    = 24U;
     e2e::op_fault_plan_t op_faults{};
     e2e::op_fault_plan_add_fail(op_faults, CY_ERR_MEDIA, [&](const e2e::op_info_t& op) {
@@ -658,13 +659,13 @@ void test_api_pubsub_e2e_f08_failure_storm_then_recovery_preserves_invariants()
         return true;
     });
     e2e::op_fault_plan_add_fail(op_faults, CY_ERR_MEDIA, [&](const e2e::op_info_t& op) {
-        if (op.kind != e2e::op_kind_t::p2p_send) {
+        if (op.kind != e2e::op_kind_t::unicast_send) {
             return false;
         }
-        if (p2p_failures == 0U) {
+        if (unicast_failures == 0U) {
             return false;
         }
-        p2p_failures--;
+        unicast_failures--;
         return true;
     });
     e2e::op_fault_plan_add_fail(op_faults, CY_ERR_MEDIA, [&](const e2e::op_info_t& op) {
@@ -702,7 +703,7 @@ void test_api_pubsub_e2e_f08_failure_storm_then_recovery_preserves_invariants()
     assert_unordered_unique_only(capture, 508U);
     assert_future_delivery(futures, true);
     TEST_ASSERT_TRUE(count_failed_ops(net, e2e::op_kind_t::subject_send) > 0U);
-    TEST_ASSERT_TRUE(count_failed_ops(net, e2e::op_kind_t::p2p_send) > 0U);
+    TEST_ASSERT_TRUE(count_failed_ops(net, e2e::op_kind_t::unicast_send) > 0U);
     TEST_ASSERT_TRUE(count_failed_ops(net, e2e::op_kind_t::spin) > 0U);
 
     cleanup_case(net, now, futures, { sub }, { pub });
@@ -726,8 +727,8 @@ int main()
     UNITY_BEGIN();
     RUN_TEST(test_api_pubsub_e2e_f01_transient_subject_send_failures_recover);
     RUN_TEST(test_api_pubsub_e2e_f02_persistent_subject_send_failures_cause_future_failures);
-    RUN_TEST(test_api_pubsub_e2e_f03_transient_p2p_send_failures_on_receiver_recover);
-    RUN_TEST(test_api_pubsub_e2e_f04_mixed_subject_and_p2p_send_failures_still_converge);
+    RUN_TEST(test_api_pubsub_e2e_f03_transient_unicast_send_failures_on_receiver_recover);
+    RUN_TEST(test_api_pubsub_e2e_f04_mixed_subject_and_unicast_send_failures_still_converge);
     RUN_TEST(test_api_pubsub_e2e_f05_transient_spin_failures_on_publisher_node_recover);
     RUN_TEST(test_api_pubsub_e2e_f06_transient_spin_failures_on_subscriber_node_recover);
     RUN_TEST(test_api_pubsub_e2e_f07_asymmetric_node_degradation_eventual_recovery);

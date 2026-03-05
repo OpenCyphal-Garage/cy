@@ -81,7 +81,7 @@ struct cy_tree_t
 // This limits the gossip poll rate, which should be rather high-frequency to avoid delaying epidemic gossips.
 #define SPIN_BLOCK_MAX (5 * KILO)
 
-// Soft states associated with a remote node publishing on a topic or P2P will be discarded when stale for this long.
+// Soft states associated remotes will be discarded when stale for this long.
 #define SESSION_LIFETIME (60 * MEGA)
 
 #define TREE_NULL ((cy_tree_t){ NULL, { NULL, NULL }, 0 })
@@ -112,9 +112,9 @@ typedef struct cy_list_t
 #define GOSSIP_PEER_COUNT 8
 typedef struct
 {
-    uint64_t         id;
-    cy_p2p_context_t p2p;
-    cy_us_t          last_seen; // BIG_BANG initially.
+    uint64_t             id;
+    cy_unicast_context_t unicast_ctx;
+    cy_us_t              last_seen; // BIG_BANG initially.
 } gossip_peer_t;
 
 // Each unicast epidemic gossip will be forwarded to at most this many unique remote peers.
@@ -186,7 +186,7 @@ struct cy_t
     // Pending network state indexes. Removal is guided by remote nodes and by deadline (via olga).
     cy_tree_t* respond_futures_by_tag;
 
-    size_t p2p_extent;
+    size_t unicast_extent;
 
     cy_us_t ts_started;
     cy_us_t implicit_topic_timeout;
@@ -1064,9 +1064,9 @@ typedef struct
 {
     cy_tree_t index_remote_id;
 
-    uint64_t         remote_id;
-    cy_p2p_context_t p2p_context; // For P2P deliveries (as an alternative to multicast-only), updated regularly.
-    cy_us_t          last_seen;   // Not used for eviction, only for diagnostics and possibly API exposure.
+    uint64_t             remote_id;
+    cy_unicast_context_t unicast_ctx; // For unicast deliveries (as an alternative to multicast), updated regularly.
+    cy_us_t              last_seen;   // Not used for eviction, only for diagnostics and possibly API exposure.
 
     // States related to lifecycle management / eviction.
     size_t   pending_count; // The association cannot be removed unless zero to avoid dangly pointers.
@@ -1097,7 +1097,7 @@ static void association_forget(cy_topic_t* const topic, association_t* const ass
     mem_free(cy, assoc);
 }
 
-// The last seen and P2P context need to be set by the caller afterward.
+// The last seen and unicast context need to be set by the caller afterward.
 static cy_tree_t* association_cavl_factory(void* const user)
 {
     association_factory_context_t* const ctx   = (association_factory_context_t*)user;
@@ -1777,7 +1777,7 @@ static cy_err_t send_gossip_raw(const cy_t* const          cy,
         err = vt->subject_writer_send(cy->platform, writer, dead, priority, message);
     }
     if ((lane != NULL) && (err == CY_OK)) {
-        err = vt->p2p_send(cy->platform, lane, dead, message);
+        err = vt->unicast(cy->platform, lane, dead, message);
     }
     return err;
 }
@@ -2050,7 +2050,7 @@ static void gossip_epidemic_forward(cy_t* const        cy,
             break; // no (more) peers
         }
         blacklist[blacklist_size++] = peer->id; // do not unicast to the same peer twice
-        const cy_lane_t peer_lane   = { .id = peer->id, .p2p = peer->p2p, .prio = lane.prio };
+        const cy_lane_t peer_lane   = { .id = peer->id, .ctx = peer->unicast_ctx, .prio = lane.prio };
         const cy_err_t  err         = send_gossip_raw(cy, ts, ttl, hash, evictions, lage, name, NULL, &peer_lane);
         ON_ASYNC_ERROR_IF(cy, NULL, err);
     }
@@ -2085,8 +2085,8 @@ static void gossip_peer_update(cy_t* const cy, const cy_us_t ts, const cy_lane_t
     }
     if (this_peer != NULL) {
         assert(this_peer->id == lane.id);
-        this_peer->last_seen = ts;
-        this_peer->p2p       = lane.p2p;
+        this_peer->last_seen   = ts;
+        this_peer->unicast_ctx = lane.ctx;
     }
 }
 
@@ -2163,7 +2163,7 @@ static void* wkv_cb_topic_scout_response(const wkv_event_t evt)
 }
 
 // A scout message is simply asking us to check if we have any matching topics, and gossip them ASAP if so.
-// We are at liberty to choose whether to broadcast the matching gossips or to send them P2P directly to the
+// We are at liberty to choose whether to broadcast the matching gossips or to unicast them directly to the
 // asking node; either way the node will receive it. This flexibility allows resource-constrained nodes to handle
 // this the easier way. If we only have a few topics, we don't even need to do anything here since by virtue of
 // having few topics their gossip rate will be high, so the remote will hear about them soon enough.
@@ -2216,27 +2216,27 @@ cy_publisher_t* cy_advertise_client(cy_t* const cy, const cy_str_t name, const s
         topic_sync_implicit(pub->topic);
         assert(!is_implicit(pub->topic));
         const size_t response_extent_with_header = response_extent + HEADER_BYTES;
-        if (response_extent_with_header > cy->p2p_extent) {
+        if (response_extent_with_header > cy->unicast_extent) {
             // Currently, we only increase the extent and leave it at the max. Ideally we should also shrink it when
             // publishers are destroyed. One way to do it without scanning all publishers is to round up the extent
             // of each to a power of 2 and keep a count of how many publishers are at each power-of-2 level (capped
             // 2**32): size_t publisher_counts_by_extent_pow2[32];
-            cy->p2p_extent = response_extent_with_header;
-            cy->platform->vtable->p2p_extent_set(cy->platform, cy->p2p_extent);
+            cy->unicast_extent = response_extent_with_header;
+            cy->platform->vtable->unicast_extent_set(cy->platform, cy->unicast_extent);
         }
     } else {
         mem_free(cy, pub);
     }
     CY_TRACE(cy,
-             "✨ %s topic_count=%zu p2p_extent=%zu res=%jd",
+             "✨ %s topic_count=%zu unicast_extent=%zu res=%jd",
              (res == CY_OK) ? topic_repr(pub->topic).str : "(failed)",
              cavl_count(cy->topics_by_hash),
-             cy->p2p_extent,
+             cy->unicast_extent,
              (intmax_t)res);
     return (res == CY_OK) ? pub : NULL;
 }
 
-// If lane is provided, P2P delivery will be used, otherwise normal multicast on the topic's subject.
+// If lane is provided, unicast delivery will be used, otherwise normal multicast on the topic's subject.
 static cy_err_t do_publish_impl(cy_publisher_t* const  pub,
                                 const cy_us_t          deadline,
                                 const cy_bytes_t       message,
@@ -2256,9 +2256,9 @@ static cy_err_t do_publish_impl(cy_publisher_t* const  pub,
     (void)serialize_u64(&header[16], tag);
     const cy_bytes_t headed_message = { .size = sizeof(header), .data = header, .next = &message };
 
-    // P2P writes do not require a subject writer, so we skip creating one.
+    // Unicast writes do not require a subject writer, so we skip creating one.
     if (lane != NULL) {
-        return vt->p2p_send(cy->platform, lane, deadline, headed_message);
+        return vt->unicast(cy->platform, lane, deadline, headed_message);
     }
 
     // Lazy creation is the simplest option because we have to drop the subject writer on topic reallocation,
@@ -2434,21 +2434,21 @@ static void publish_future_timeout(cy_future_t* const base, const cy_us_t schedu
     // attempt always must be multicast because there may be new subscribers that we don't know about yet;
     // subsequent attempts MAY be unicast per heuristics that are subject to review/improvement.
     //
-    // Potential improvement to consider: the P2P context is updated on received acks only; if stale,
-    // it may cause repeated P2P delivery failures; we could possibly consider this in the heuristic?
+    // Potential improvement to consider: the unicast context is updated on received acks only; if stale,
+    // it may cause repeated unicast delivery failures; we could possibly consider this in the heuristic?
     // We already have the last_seen in the association, we could also use that.
-    const bool       use_p2p = (self->assoc_remaining == 1) && last_attempt; // heuristic subject to review
+    const bool       unicast = (self->assoc_remaining == 1) && last_attempt; // heuristic subject to review
     cy_lane_t        lane    = { 0 };                                        // cppcheck-suppress unreadVariable
     const cy_lane_t* lane_p  = NULL;
-    if (use_p2p) {
+    if (unicast) {
         const size_t assoc_idx = bitmap_clz(self->assoc_knockout, self->assoc_capacity);
         assert(assoc_idx < self->assoc_capacity);
         assert(bitmap_test(self->assoc_knockout, assoc_idx));
         const association_t* const assoc = self->assoc_set[assoc_idx];
         assert(assoc != NULL);
-        lane = (cy_lane_t){ .id = assoc->remote_id, .p2p = assoc->p2p_context, .prio = self->owner->priority };
+        lane = (cy_lane_t){ .id = assoc->remote_id, .ctx = assoc->unicast_ctx, .prio = self->owner->priority };
         CY_TRACE(cy,
-                 "☝️ %s P2P to N%016jx tag=%016jx",
+                 "☝️ %s Unicast to N%016jx tag=%016jx",
                  topic_repr(topic).str,
                  (uintmax_t)assoc->remote_id,
                  (uintmax_t)self->base.key);
@@ -2568,7 +2568,7 @@ cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadli
     }
 
     // Once the fallible operations are completed, it is safe to transmit.
-    // The initial transmission always uses multicast. We can switch to P2P later if only few nodes need retries.
+    // The initial transmission always uses multicast. We can switch to unicast later if only few nodes need retries.
     const cy_err_t res = do_publish(pub, tx_deadline, message, header_msg_rel, &fut->base.key);
     if (res != CY_OK) {
         bytes_undup(cy, fut->data); // No-op if NULL.
@@ -3077,7 +3077,7 @@ static cy_arrival_t make_arrival(const cy_topic_t* const topic,
                                     .topic_hash  = topic->hash,
                                     .message_tag = message_tag,
                                     .seqno       = 0, // Starts a new sequence.
-                                    .p2p_context = lane.p2p };
+                                    .unicast_ctx = lane.ctx };
     return (cy_arrival_t){ .message = message, .breadcrumb = bread };
 }
 
@@ -3110,7 +3110,7 @@ static void subscriber_notify_error(subscriber_t* const self, const cy_err_t err
 // Must be a multiple of 64. Shouldn't be too large because every update requires bit shifting throughout.
 #define DEDUP_HISTORY 512U
 
-// An instance is kept per remote node that publishes messages on a given topic, or P2P.
+// An instance is kept per remote node that publishes messages on a given topic, or unicast.
 // It is used for deduplication of reliable messages received from that remote; duplications occur when the remote
 // doesn't receive (enough) acks and is trying to retransmit while we already have the message from prior attempts.
 // Stale instances are removed on timeout.
@@ -3258,9 +3258,9 @@ typedef struct
 
     // Metadata needed for asynchronous ejection.
     // The topic will be kept alive by our subscription, so there is no lifetime issue. Same for the substitutions.
-    subscriber_t*    subscriber;
-    cy_topic_t*      topic;
-    cy_p2p_context_t p2p_context; // Updated with the latest received message.
+    subscriber_t*        subscriber;
+    cy_topic_t*          topic;
+    cy_unicast_context_t unicast_ctx; // Updated with the latest received message.
 
     uint64_t   tag_baseline;         // First seen tag in this state; subtract from incoming tags for linearization.
     uint64_t   last_ejected_lin_tag; // Linearized tag seen by the application; lesser tags are not allowed.
@@ -3302,7 +3302,7 @@ static void reordering_eject(reordering_t* const self, reordering_slot_t* const 
     assert(slot->message.content != NULL);
     const cy_arrival_t arrival =
       make_arrival(self->topic,
-                   (cy_lane_t){ .id = self->remote_id, .p2p = self->p2p_context, .prio = slot->priority },
+                   (cy_lane_t){ .id = self->remote_id, .ctx = self->unicast_ctx, .prio = slot->priority },
                    slot->lin_tag + self->tag_baseline,
                    slot->message);
     mem_free(cy, slot); // Free the slot before the callback to give the application more memory to work with.
@@ -3415,7 +3415,7 @@ static bool reordering_push(reordering_t* const   self,
         reordering_scan(self, true);
     }
 
-    const cy_lane_t lane = { .id = self->remote_id, .p2p = self->p2p_context, .prio = priority };
+    const cy_lane_t lane = { .id = self->remote_id, .ctx = self->unicast_ctx, .prio = priority };
 
     // The next expected message can be ejected immediately. No need to allocate state, happy fast path, most common.
     if (lin_tag == self->last_ejected_lin_tag + 1U) {
@@ -3615,7 +3615,7 @@ static bool on_message(cy_t* const           cy,
                     assert(rr->remote_id == lane.id);
                     assert(rr->topic == topic);
                     assert(rr->subscriber == sub);
-                    rr->p2p_context = lane.p2p; // keep the latest known return path discovery from the transport
+                    rr->unicast_ctx = lane.ctx; // keep the latest known return path discovery from the transport
                     if (reordering_push(rr, tag, lane.prio, message)) {
                         // NOTE: If the subscriber is destroyed while there are messages interned in the reordering
                         // buffer, the remote might be mislead into thinking that the application has received the
@@ -4022,11 +4022,11 @@ static cy_err_t do_respond(cy_breadcrumb_t* const breadcrumb,
     (void)serialize_u64(&header[16], breadcrumb->message_tag);
     const cy_bytes_t headed_message = { .size = sizeof(header), .data = header, .next = &message };
 
-    // Send the P2P response.
+    // Send the unicast response.
     const cy_lane_t lane = { .id   = breadcrumb->remote_id,
-                             .p2p  = breadcrumb->p2p_context,
+                             .ctx  = breadcrumb->unicast_ctx,
                              .prio = breadcrumb->priority };
-    return breadcrumb->cy->platform->vtable->p2p_send(breadcrumb->cy->platform, &lane, deadline, headed_message);
+    return breadcrumb->cy->platform->vtable->unicast(breadcrumb->cy->platform, &lane, deadline, headed_message);
 }
 
 cy_err_t cy_respond(cy_breadcrumb_t* const breadcrumb, const cy_us_t deadline, const cy_bytes_t message)
@@ -4389,8 +4389,8 @@ cy_t* cy_new(cy_platform_t* const platform)
 
     cy->respond_futures_by_tag = NULL;
 
-    cy->p2p_extent = HEADER_BYTES + 1024U; // Arbitrary initial size; will be refined when publishers are created.
-    cy->platform->vtable->p2p_extent_set(platform, cy->p2p_extent);
+    cy->unicast_extent = HEADER_BYTES + 1024U; // Arbitrary initial size; will be refined when publishers are created.
+    cy->platform->vtable->unicast_extent_set(platform, cy->unicast_extent);
 
     cy->ts_started             = platform->vtable->now(platform);
     cy->implicit_topic_timeout = IMPLICIT_TOPIC_DEFAULT_TIMEOUT_us;
@@ -4542,7 +4542,7 @@ static void gossip_poll(cy_t* const cy, const cy_us_t now)
                     break; // no (more) peers
                 }
                 blacklist[blacklist_size++] = peer->id; // do not unicast to the same peer twice
-                const cy_lane_t lane        = { .id = peer->id, .p2p = peer->p2p, .prio = cy_prio_nominal };
+                const cy_lane_t lane        = { .id = peer->id, .ctx = peer->unicast_ctx, .prio = cy_prio_nominal };
                 const cy_err_t  res         = send_gossip_unicast(cy, now, GOSSIP_TTL, topic, lane);
                 ON_ASYNC_ERROR_IF(cy, topic, res);
                 succeeded = succeeded || (res == CY_OK); // At least one success is enough.
@@ -4688,7 +4688,7 @@ static void on_message_ack(cy_t* const       cy,
     if (ass != NULL) {
         assert(topic->assoc_count > 0);
         ass->last_seen   = ts;
-        ass->p2p_context = lane.p2p;       // Always update the latest return path discovery state.
+        ass->unicast_ctx = lane.ctx;       // Always update the latest return path discovery state.
         if (seqno >= ass->seqno_witness) { // Prevent old pending futures from altering slack.
             ass->slack         = 0;
             ass->seqno_witness = seqno;
@@ -4714,10 +4714,10 @@ static void send_message_ack(cy_t* const     cy,
     header[0]                   = (byte_t)header_msg_ack;
     (void)serialize_u64(&header[8], topic_hash);
     (void)serialize_u64(&header[16], tag);
-    const cy_err_t err = cy->platform->vtable->p2p_send(cy->platform, //
-                                                        &lane,
-                                                        deadline,
-                                                        (cy_bytes_t){ .size = sizeof(header), .data = header });
+    const cy_err_t err = cy->platform->vtable->unicast(cy->platform, //
+                                                       &lane,
+                                                       deadline,
+                                                       (cy_bytes_t){ .size = sizeof(header), .data = header });
     if (err != CY_OK) {
         CY_TRACE(cy,
                  "⚠️ Failed to send message ACK to %016jx for tag %016jx on topic %016jx: %jd",
@@ -4742,10 +4742,10 @@ static void send_response_ack(cy_t* const     cy,
     (void)serialize_u48(&header[2], seqno);
     (void)serialize_u64(&header[8], hash);
     (void)serialize_u64(&header[16], message_tag);
-    const cy_err_t err = cy->platform->vtable->p2p_send(cy->platform, //
-                                                        &lane,
-                                                        deadline,
-                                                        (cy_bytes_t){ .size = sizeof(header), .data = header });
+    const cy_err_t err = cy->platform->vtable->unicast(cy->platform, //
+                                                       &lane,
+                                                       deadline,
+                                                       (cy_bytes_t){ .size = sizeof(header), .data = header });
     if (err != CY_OK) {
         CY_TRACE(cy,
                  "⚠️ Failed to send response %s to %016jx for seqno %016jx: %jd",
@@ -4839,7 +4839,7 @@ void cy_on_message(cy_platform_t* const             platform,
 
         case header_msg_ack: {
             if (subject_reader != NULL) {
-                goto bad_message; // Require ACKs to be P2P only.
+                goto bad_message; // Require ACKs to be unicast only.
             }
             const uint32_t incompatibility = deserialize_u32(&header[4]);
             if (incompatibility != 0) {
@@ -4863,7 +4863,7 @@ void cy_on_message(cy_platform_t* const             platform,
         case header_rsp_be:
         case header_rsp_rel: {
             if (subject_reader != NULL) {
-                goto bad_message; // Require responses to be P2P only.
+                goto bad_message; // Require responses to be unicast only.
             }
             const bool     reliable    = type == header_rsp_rel;
             const byte_t   tag         = header[1];
@@ -4899,7 +4899,7 @@ void cy_on_message(cy_platform_t* const             platform,
         case header_rsp_ack:
         case header_rsp_nack: {
             if (subject_reader != NULL) {
-                goto bad_message; // Require ACKs to be P2P only.
+                goto bad_message; // Require ACKs to be unicast only.
             }
             const byte_t   tag         = header[1];
             const uint64_t seqno       = deserialize_u48(&header[2]);

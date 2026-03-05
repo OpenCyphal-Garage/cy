@@ -17,7 +17,7 @@ typedef struct
 
 typedef struct
 {
-    bool          p2p;
+    bool          unicast;
     uint32_t      subject_id;
     uint64_t      lane_id;
     size_t        size;
@@ -45,10 +45,10 @@ typedef struct
     size_t          rand_sequence_index;
 
     bool fail_subject_send;
-    bool fail_p2p_send;
+    bool fail_unicast_send;
 
     size_t   subject_send_count;
-    size_t   p2p_send_count;
+    size_t   unicast_send_count;
     size_t   subject_reader_destroy_count;
     size_t   subject_writer_destroy_count;
     size_t   async_error_count;
@@ -79,7 +79,7 @@ static size_t flatten_fragments(const cy_bytes_t message, unsigned char* const o
 }
 
 static void capture_send(fixture_t* const self,
-                         const bool       p2p,
+                         const bool       unicast,
                          const uint32_t   subject_id,
                          const uint64_t   lane_id,
                          const cy_bytes_t message)
@@ -89,7 +89,7 @@ static void capture_send(fixture_t* const self,
     }
     send_capture_t* const out = &self->capture[self->capture_count++];
     memset(out, 0, sizeof(*out));
-    out->p2p        = p2p;
+    out->unicast    = unicast;
     out->subject_id = subject_id;
     out->lane_id    = lane_id;
     out->size       = flatten_fragments(message, out->data, sizeof(out->data));
@@ -174,19 +174,19 @@ static void fixture_subject_reader_destroy(cy_platform_t* const platform, cy_sub
     guarded_heap_free(&self->heap, reader);
 }
 
-static cy_err_t fixture_p2p_send(cy_platform_t* const   platform,
-                                 const cy_lane_t* const lane,
-                                 const cy_us_t          deadline,
-                                 const cy_bytes_t       message)
+static cy_err_t fixture_unicast_send(cy_platform_t* const   platform,
+                                     const cy_lane_t* const lane,
+                                     const cy_us_t          deadline,
+                                     const cy_bytes_t       message)
 {
     (void)deadline;
     fixture_t* const self = fixture_from(platform);
-    self->p2p_send_count++;
+    self->unicast_send_count++;
     capture_send(self, true, 0U, (lane != NULL) ? lane->id : 0U, message);
-    return self->fail_p2p_send ? CY_ERR_MEDIA : CY_OK;
+    return self->fail_unicast_send ? CY_ERR_MEDIA : CY_OK;
 }
 
-static void fixture_p2p_extent_set(cy_platform_t* const platform, const size_t extent)
+static void fixture_unicast_extent_set(cy_platform_t* const platform, const size_t extent)
 {
     (void)platform;
     (void)extent;
@@ -219,8 +219,8 @@ static void fixture_init(fixture_t* const self)
     self->vtable.subject_writer_send    = fixture_subject_writer_send;
     self->vtable.subject_reader_new     = fixture_subject_reader_new;
     self->vtable.subject_reader_destroy = fixture_subject_reader_destroy;
-    self->vtable.p2p_send               = fixture_p2p_send;
-    self->vtable.p2p_extent_set         = fixture_p2p_extent_set;
+    self->vtable.unicast                = fixture_unicast_send;
+    self->vtable.unicast_extent_set     = fixture_unicast_extent_set;
     self->vtable.spin                   = fixture_spin;
     self->vtable.now                    = fixture_now;
     self->vtable.realloc                = fixture_realloc;
@@ -269,8 +269,8 @@ static void fixture_set_now(fixture_t* const self, const cy_us_t now) { self->no
 
 static cy_lane_t make_lane(const uint64_t id, const uint8_t marker)
 {
-    cy_lane_t out    = { .id = id, .p2p = { { 0 } }, .prio = cy_prio_nominal };
-    out.p2p.state[0] = marker;
+    cy_lane_t out    = { .id = id, .ctx = { { 0 } }, .prio = cy_prio_nominal };
+    out.ctx.state[0] = marker;
     return out;
 }
 
@@ -299,7 +299,9 @@ static void fixture_set_peer(fixture_t* const self, const size_t index, const ui
     TEST_ASSERT(index < GOSSIP_PEER_COUNT);
     self->cy->gossip_peers[index].id        = id;
     self->cy->gossip_peers[index].last_seen = last_seen;
-    memset(self->cy->gossip_peers[index].p2p.state, (int)(id & 0xFFU), sizeof(self->cy->gossip_peers[index].p2p.state));
+    memset(self->cy->gossip_peers[index].unicast_ctx.state,
+           (int)(id & 0xFFU),
+           sizeof(self->cy->gossip_peers[index].unicast_ctx.state));
 }
 
 static void fixture_on_gossip(fixture_t* const   self,
@@ -469,7 +471,7 @@ static void test_send_gossip_raw_no_transport_is_noop(void)
     const cy_err_t err = send_gossip_raw(fix.cy, 100U, 3U, UINT64_C(0xD100000000000001), 0U, 0, str_empty, NULL, NULL);
     TEST_ASSERT_EQUAL_INT(CY_OK, err);
     TEST_ASSERT_EQUAL_size_t(0U, fix.subject_send_count);
-    TEST_ASSERT_EQUAL_size_t(0U, fix.p2p_send_count);
+    TEST_ASSERT_EQUAL_size_t(0U, fix.unicast_send_count);
     fixture_deinit(&fix);
 }
 
@@ -484,7 +486,7 @@ static void test_send_gossip_raw_writer_and_lane_paths(void)
       fix.cy, 200U, 5U, UINT64_C(0xD100000000000002), 3U, 1, cy_str("gossip/send/raw"), fix.cy->broad_writer, &lane);
     TEST_ASSERT_EQUAL_INT(CY_OK, err);
     TEST_ASSERT_EQUAL_size_t(1U, fix.subject_send_count);
-    TEST_ASSERT_EQUAL_size_t(1U, fix.p2p_send_count);
+    TEST_ASSERT_EQUAL_size_t(1U, fix.unicast_send_count);
     TEST_ASSERT_EQUAL_UINT8(0U, fix.capture[0].ttl); // broadcast forces zero TTL
     TEST_ASSERT_EQUAL_UINT8(0U, fix.capture[1].ttl); // shared frame when both writer and lane are provided
     TEST_ASSERT_EQUAL_UINT64(lane.id, fix.capture[1].lane_id);
@@ -494,7 +496,7 @@ static void test_send_gossip_raw_writer_and_lane_paths(void)
       send_gossip_raw(fix.cy, 201U, 4U, UINT64_C(0xD100000000000003), 1U, 0, str_empty, fix.cy->broad_writer, &lane);
     TEST_ASSERT_EQUAL_INT(CY_ERR_MEDIA, err);
     TEST_ASSERT_EQUAL_size_t(2U, fix.subject_send_count);
-    TEST_ASSERT_EQUAL_size_t(1U, fix.p2p_send_count); // writer failure short-circuits p2p send
+    TEST_ASSERT_EQUAL_size_t(1U, fix.unicast_send_count); // writer failure short-circuits unicast send
     fixture_deinit(&fix);
 }
 
@@ -512,14 +514,14 @@ static void test_on_gossip_peer_fill_update_and_replacement_policy(void)
     gossip_peer_t* peer = gossip_peer_find(fix.cy, UINT64_C(5555));
     TEST_ASSERT_NOT_NULL(peer);
     TEST_ASSERT_EQUAL_INT(10, peer->last_seen);
-    TEST_ASSERT_EQUAL_UINT8(0xA5U, peer->p2p.state[0]);
+    TEST_ASSERT_EQUAL_UINT8(0xA5U, peer->unicast_ctx.state[0]);
 
     const cy_lane_t lane_update = make_lane(UINT64_C(5555), 0x5AU);
     fixture_on_gossip(&fix, 20, 1U, UINT64_C(0x123457), 0U, 0, str_empty, NULL, lane_update);
     peer = gossip_peer_find(fix.cy, UINT64_C(5555));
     TEST_ASSERT_NOT_NULL(peer);
     TEST_ASSERT_EQUAL_INT(20, peer->last_seen);
-    TEST_ASSERT_EQUAL_UINT8(0x5AU, peer->p2p.state[0]);
+    TEST_ASSERT_EQUAL_UINT8(0x5AU, peer->unicast_ctx.state[0]);
 
     fix.cy->gossip_peer_replacement_moratorium_until = 1000;
     const cy_lane_t lane_blocked                     = make_lane(UINT64_C(7777), 0x77U);
@@ -581,15 +583,15 @@ static void test_on_gossip_ttl_zero_and_duplicate_are_not_forwarded(void)
 
     const cy_lane_t lane = make_lane(UINT64_C(99), 0x99U);
     fixture_on_gossip(&fix, now, 0U, UINT64_C(0xA1), 1U, 0, str_empty, NULL, lane);
-    TEST_ASSERT_EQUAL_size_t(0U, fix.p2p_send_count);
+    TEST_ASSERT_EQUAL_size_t(0U, fix.unicast_send_count);
 
     const uint64_t seq[] = { 0U, 1U, 2U, 3U, 4U, 5U };
     fixture_set_random_sequence(&fix, seq, sizeof(seq) / sizeof(seq[0]));
     fixture_on_gossip(&fix, now + 1, 5U, UINT64_C(0xA2), 2U, 0, str_empty, NULL, lane);
-    const size_t first_count = fix.p2p_send_count;
+    const size_t first_count = fix.unicast_send_count;
     TEST_ASSERT_TRUE(first_count > 0U);
     fixture_on_gossip(&fix, now + 2, 5U, UINT64_C(0xA2), 2U, 0, str_empty, NULL, lane);
-    TEST_ASSERT_EQUAL_size_t(first_count, fix.p2p_send_count);
+    TEST_ASSERT_EQUAL_size_t(first_count, fix.unicast_send_count);
 
     fixture_deinit(&fix);
 }
@@ -607,7 +609,7 @@ static void test_on_gossip_forward_decrements_ttl_blacklists_sender_and_limits_f
     const uint64_t seq[] = { 0U, 1U, 2U, 3U };
     fixture_set_random_sequence(&fix, seq, sizeof(seq) / sizeof(seq[0]));
     fixture_on_gossip(&fix, now, 7U, UINT64_C(0xB1), 3U, 1, str_empty, NULL, make_lane(UINT64_C(99), 0x11U));
-    TEST_ASSERT_EQUAL_size_t(GOSSIP_OUTDEGREE, fix.p2p_send_count);
+    TEST_ASSERT_EQUAL_size_t(GOSSIP_OUTDEGREE, fix.unicast_send_count);
     TEST_ASSERT_FALSE(capture_has_lane(&fix, UINT64_C(99)));
     for (size_t i = 0U; i < fix.capture_count; i++) {
         TEST_ASSERT_EQUAL_UINT8(header_gossip, fix.capture[i].type);
@@ -627,7 +629,7 @@ static void test_on_gossip_local_win_suppresses_forward_and_schedules_urgent(voi
     const uint64_t evictions_before = topic->evictions;
     fixture_on_gossip(&fix, 1000, 5U, topic->hash, 4U, 1, str_empty, NULL, make_lane(UINT64_C(50), 0x22U));
     TEST_ASSERT_EQUAL_UINT64(evictions_before, topic->evictions);
-    TEST_ASSERT_EQUAL_size_t(0U, fix.p2p_send_count);
+    TEST_ASSERT_EQUAL_size_t(0U, fix.unicast_send_count);
     TEST_ASSERT_TRUE(is_listed(&fix.cy->list_gossip_urgent, &topic->list_gossip_urgent));
     fixture_deinit(&fix);
 }
@@ -644,7 +646,7 @@ static void test_on_gossip_local_lose_forwards_merged_state(void)
     fixture_set_random_sequence(&fix, seq, sizeof(seq) / sizeof(seq[0]));
     fixture_on_gossip(&fix, 2000, 4U, topic->hash, 9U, 1, str_empty, NULL, make_lane(UINT64_C(40), 0x33U));
     TEST_ASSERT_EQUAL_UINT32(9U, topic->evictions);
-    TEST_ASSERT_TRUE(fix.p2p_send_count > 0U);
+    TEST_ASSERT_TRUE(fix.unicast_send_count > 0U);
     TEST_ASSERT_EQUAL_UINT8(header_gossip, fix.capture[0].type);
     TEST_ASSERT_EQUAL_UINT8(3U, fix.capture[0].ttl);
     TEST_ASSERT_EQUAL_UINT64(topic->hash, fix.capture[0].hash);
@@ -666,12 +668,12 @@ static void test_on_gossip_unknown_out_topic_forward_and_error_reporting(void)
 
     cy_topic_t  dummy_topic = { 0 };
     cy_topic_t* out_topic   = &dummy_topic;
-    fix.fail_p2p_send       = true;
+    fix.fail_unicast_send   = true;
     fixture_on_gossip(
       &fix, now, 3U, UINT64_C(0x1000000000AA0011), 2U, 0, str_empty, &out_topic, make_lane(UINT64_C(999), 0x99U));
     TEST_ASSERT_NULL(out_topic);
-    TEST_ASSERT_TRUE(fix.p2p_send_count > 0U);    // unknown topic gossip forwarded
-    TEST_ASSERT_TRUE(fix.async_error_count > 0U); // forwarding failures reported
+    TEST_ASSERT_TRUE(fix.unicast_send_count > 0U); // unknown topic gossip forwarded
+    TEST_ASSERT_TRUE(fix.async_error_count > 0U);  // forwarding failures reported
     fixture_deinit(&fix);
 }
 
@@ -685,11 +687,11 @@ static void test_on_scout_broadcast_soon_and_unicast_paths(void)
 
     fix.cy->gossip_next = now + (KILO * 50); // <= now+100k, broadcast soon
     on_scout(fix.cy, now, cy_str("gossip/scout/cb/>"), lane);
-    TEST_ASSERT_EQUAL_size_t(0U, fix.p2p_send_count);
+    TEST_ASSERT_EQUAL_size_t(0U, fix.unicast_send_count);
 
     fix.cy->gossip_next = now + (KILO * 200); // > now+100k, unicast scout response
     on_scout(fix.cy, now + 1U, cy_str("gossip/scout/cb/>"), lane);
-    TEST_ASSERT_TRUE(fix.p2p_send_count > 0U);
+    TEST_ASSERT_TRUE(fix.unicast_send_count > 0U);
     TEST_ASSERT_EQUAL_UINT8(header_gossip, fix.capture[fix.capture_count - 1U].type);
     TEST_ASSERT_EQUAL_UINT64(topic->hash, fix.capture[fix.capture_count - 1U].hash);
     fixture_deinit(&fix);
@@ -732,7 +734,7 @@ static void test_gossip_poll_urgent_path_and_unique_unicast(void)
     fixture_set_random_sequence(&fix, seq, sizeof(seq) / sizeof(seq[0]));
     gossip_poll(fix.cy, 3000);
     TEST_ASSERT_EQUAL_size_t(0U, fix.subject_send_count);
-    TEST_ASSERT_EQUAL_size_t(GOSSIP_OUTDEGREE, fix.p2p_send_count);
+    TEST_ASSERT_EQUAL_size_t(GOSSIP_OUTDEGREE, fix.unicast_send_count);
     TEST_ASSERT_NOT_EQUAL(fix.capture[0].lane_id, fix.capture[1].lane_id);
     TEST_ASSERT_FALSE(is_listed(&fix.cy->list_gossip_urgent, &topic->list_gossip_urgent));
     fixture_deinit(&fix);
@@ -754,20 +756,20 @@ static void test_gossip_poll_urgent_rate_limit_same_topic_requeue(void)
 
     schedule_gossip_urgent(topic);
     gossip_poll(fix.cy, t0);
-    const size_t first = fix.p2p_send_count;
+    const size_t first = fix.unicast_send_count;
     TEST_ASSERT_EQUAL_size_t(GOSSIP_OUTDEGREE, first);
 
     schedule_gossip_urgent(topic);
     gossip_poll(fix.cy, t0 + 1);
-    TEST_ASSERT_EQUAL_size_t(first, fix.p2p_send_count); // same fault requeued too soon => rate-limited
+    TEST_ASSERT_EQUAL_size_t(first, fix.unicast_send_count); // same fault requeued too soon => rate-limited
 
     schedule_gossip_urgent(topic);
     gossip_poll(fix.cy, t0 + GOSSIP_DEDUP_TIMEOUT);
-    TEST_ASSERT_EQUAL_size_t(first, fix.p2p_send_count); // strict boundary: still not fresh
+    TEST_ASSERT_EQUAL_size_t(first, fix.unicast_send_count); // strict boundary: still not fresh
 
     schedule_gossip_urgent(topic);
     gossip_poll(fix.cy, t0 + GOSSIP_DEDUP_TIMEOUT + 1);
-    TEST_ASSERT_EQUAL_size_t(first + GOSSIP_OUTDEGREE, fix.p2p_send_count);
+    TEST_ASSERT_EQUAL_size_t(first + GOSSIP_OUTDEGREE, fix.unicast_send_count);
     fixture_deinit(&fix);
 }
 
@@ -789,16 +791,17 @@ static void test_gossip_poll_urgent_rate_limit_repeated_fault_detection(void)
     const cy_lane_t lane = make_lane(UINT64_C(999), 0x99U);
     fixture_on_gossip(&fix, t0, 4U, topic->hash, 4U, 0, str_empty, NULL, lane);
     gossip_poll(fix.cy, t0);
-    const size_t first = fix.p2p_send_count;
+    const size_t first = fix.unicast_send_count;
     TEST_ASSERT_EQUAL_size_t(GOSSIP_OUTDEGREE, first);
 
     fixture_on_gossip(&fix, t0 + 1, 4U, topic->hash, 4U, 0, str_empty, NULL, lane);
     gossip_poll(fix.cy, t0 + 1);
-    TEST_ASSERT_EQUAL_size_t(first, fix.p2p_send_count); // repeated same fault within timeout => no new epidemic send
+    TEST_ASSERT_EQUAL_size_t(first,
+                             fix.unicast_send_count); // repeated same fault within timeout => no new epidemic send
 
     fixture_on_gossip(&fix, t0 + GOSSIP_DEDUP_TIMEOUT + 1, 4U, topic->hash, 4U, 0, str_empty, NULL, lane);
     gossip_poll(fix.cy, t0 + GOSSIP_DEDUP_TIMEOUT + 1);
-    TEST_ASSERT_EQUAL_size_t(first + GOSSIP_OUTDEGREE, fix.p2p_send_count); // allowed again after timeout
+    TEST_ASSERT_EQUAL_size_t(first + GOSSIP_OUTDEGREE, fix.unicast_send_count); // allowed again after timeout
     fixture_deinit(&fix);
 }
 
@@ -811,18 +814,18 @@ static void test_gossip_poll_urgent_drop_when_no_eligible_and_dedup_on_success_o
     fix.cy->gossip_next     = 6000;
     schedule_gossip_urgent(topic);
     gossip_poll(fix.cy, 5000);
-    TEST_ASSERT_EQUAL_size_t(0U, fix.p2p_send_count);
+    TEST_ASSERT_EQUAL_size_t(0U, fix.unicast_send_count);
     TEST_ASSERT_EQUAL_size_t(0U, dedup_seen_count(&fix));
 
     fixture_set_peer(&fix, 0U, UINT64_C(10), 5001);
     fixture_set_peer(&fix, 1U, UINT64_C(20), 5001);
     schedule_gossip_urgent(topic);
-    fix.fail_p2p_send = true;
+    fix.fail_unicast_send = true;
     gossip_poll(fix.cy, 5001);
     TEST_ASSERT_EQUAL_size_t(0U, dedup_seen_count(&fix));
 
     schedule_gossip_urgent(topic);
-    fix.fail_p2p_send = false;
+    fix.fail_unicast_send = false;
     gossip_poll(fix.cy, 5002);
     TEST_ASSERT_TRUE(dedup_seen_count(&fix) > 0U);
     fixture_deinit(&fix);
@@ -843,20 +846,20 @@ static void test_gossip_poll_urgent_failed_epidemic_does_not_rate_limit_retry(vo
     fixture_set_peer(&fix, 2U, UINT64_C(30), t0);
 
     schedule_gossip_urgent(topic);
-    fix.fail_p2p_send = true;
+    fix.fail_unicast_send = true;
     gossip_poll(fix.cy, t0);
-    TEST_ASSERT_EQUAL_size_t(GOSSIP_OUTDEGREE, fix.p2p_send_count); // attempted but failed
-    TEST_ASSERT_EQUAL_size_t(0U, dedup_seen_count(&fix));           // failed epidemic must not update dedup cache
+    TEST_ASSERT_EQUAL_size_t(GOSSIP_OUTDEGREE, fix.unicast_send_count); // attempted but failed
+    TEST_ASSERT_EQUAL_size_t(0U, dedup_seen_count(&fix));               // failed epidemic must not update dedup cache
 
     schedule_gossip_urgent(topic);
-    fix.fail_p2p_send = false;
+    fix.fail_unicast_send = false;
     gossip_poll(fix.cy, t0 + 1);
-    TEST_ASSERT_EQUAL_size_t(2U * GOSSIP_OUTDEGREE, fix.p2p_send_count); // immediate retry allowed
+    TEST_ASSERT_EQUAL_size_t(2U * GOSSIP_OUTDEGREE, fix.unicast_send_count); // immediate retry allowed
     TEST_ASSERT_TRUE(dedup_seen_count(&fix) > 0U);
 
     schedule_gossip_urgent(topic);
     gossip_poll(fix.cy, t0 + 2);
-    TEST_ASSERT_EQUAL_size_t(2U * GOSSIP_OUTDEGREE, fix.p2p_send_count); // now rate-limited by successful send
+    TEST_ASSERT_EQUAL_size_t(2U * GOSSIP_OUTDEGREE, fix.unicast_send_count); // now rate-limited by successful send
     fixture_deinit(&fix);
 }
 
@@ -876,16 +879,16 @@ static void test_gossip_poll_urgent_suppressed_if_same_gossip_was_broadcast_just
 
     gossip_poll(fix.cy, t0);
     TEST_ASSERT_EQUAL_size_t(1U, fix.subject_send_count);
-    TEST_ASSERT_EQUAL_size_t(0U, fix.p2p_send_count);
+    TEST_ASSERT_EQUAL_size_t(0U, fix.unicast_send_count);
 
     schedule_gossip_urgent(topic);
     gossip_poll(fix.cy, t0 + 1);
     TEST_ASSERT_EQUAL_size_t(1U, fix.subject_send_count);
-    TEST_ASSERT_EQUAL_size_t(0U, fix.p2p_send_count); // immediate epidemic resend would be redundant, so suppressed
+    TEST_ASSERT_EQUAL_size_t(0U, fix.unicast_send_count); // immediate epidemic resend would be redundant, so suppressed
 
     schedule_gossip_urgent(topic);
     gossip_poll(fix.cy, t0 + GOSSIP_DEDUP_TIMEOUT + 1);
-    TEST_ASSERT_EQUAL_size_t(GOSSIP_OUTDEGREE, fix.p2p_send_count); // resend allowed once dedup timeout elapsed
+    TEST_ASSERT_EQUAL_size_t(GOSSIP_OUTDEGREE, fix.unicast_send_count); // resend allowed once dedup timeout elapsed
     fixture_deinit(&fix);
 }
 
@@ -908,7 +911,7 @@ static void test_gossip_poll_urgent_failed_send_does_not_evict_existing_dedup_en
     fix.cy->gossip_next = 8000;
     schedule_gossip_urgent(topic);
     gossip_poll(fix.cy, 7000); // no peers => no successful sends => dedup table must remain unchanged.
-    TEST_ASSERT_EQUAL_size_t(0U, fix.p2p_send_count);
+    TEST_ASSERT_EQUAL_size_t(0U, fix.unicast_send_count);
     TEST_ASSERT_TRUE(dedup_has_hash(&fix, oldest_hash));
     TEST_ASSERT_FALSE(dedup_has_hash(&fix, urgent_hash));
     fixture_deinit(&fix);

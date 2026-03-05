@@ -566,7 +566,7 @@ void test_api_pubsub_e2e_a09_response_frame_metadata_is_parsed_per_response_head
     const auto& captures = e2e::sim_net_captures(net);
     bool        found    = false;
     for (const e2e::frame_capture_t& cap : captures) {
-        if ((cap.frame.source != e2e::sim_node_b) || (cap.frame.destination != e2e::sim_node_a) || !cap.frame.p2p ||
+        if ((cap.frame.source != e2e::sim_node_b) || (cap.frame.destination != e2e::sim_node_a) || !cap.frame.unicast ||
             (cap.frame.header_type != 3U)) {
             continue;
         }

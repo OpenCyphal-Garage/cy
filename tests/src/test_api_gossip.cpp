@@ -25,7 +25,7 @@ struct test_subject_reader_t
 
 struct send_capture_t
 {
-    bool                           p2p{ false };
+    bool                           unicast{ false };
     std::uint32_t                  subject_id{ 0U };
     std::uint64_t                  lane_id{ 0U };
     std::size_t                    size{ 0U };
@@ -44,7 +44,7 @@ struct test_platform_t final
     std::uint64_t random_state{ UINT64_C(0x123456789ABCDEF0) };
 
     std::size_t                    subject_send_count{ 0U };
-    std::size_t                    p2p_send_count{ 0U };
+    std::size_t                    unicast_send_count{ 0U };
     std::size_t                    capture_count{ 0U };
     std::array<send_capture_t, 64> captures{};
 };
@@ -75,7 +75,7 @@ std::size_t flatten_fragments(const cy_bytes_t message, unsigned char* const out
 }
 
 void capture_send(test_platform_t* const self,
-                  const bool             p2p,
+                  const bool             unicast,
                   const std::uint32_t    subject_id,
                   const std::uint64_t    lane_id,
                   const cy_bytes_t       message)
@@ -85,7 +85,7 @@ void capture_send(test_platform_t* const self,
     }
     send_capture_t& out = self->captures.at(self->capture_count++);
     out                 = send_capture_t{};
-    out.p2p             = p2p;
+    out.unicast         = unicast;
     out.subject_id      = subject_id;
     out.lane_id         = lane_id;
     out.size            = flatten_fragments(message, out.data.data(), out.data.size());
@@ -143,19 +143,19 @@ extern "C" void platform_subject_reader_destroy(cy_platform_t* const platform, c
     guarded_heap_free(&self->core_heap, reader);
 }
 
-extern "C" cy_err_t platform_p2p_send(cy_platform_t* const   platform,
-                                      const cy_lane_t* const lane,
-                                      const cy_us_t          deadline,
-                                      const cy_bytes_t       message)
+extern "C" cy_err_t platform_unicast_send(cy_platform_t* const   platform,
+                                          const cy_lane_t* const lane,
+                                          const cy_us_t          deadline,
+                                          const cy_bytes_t       message)
 {
     (void)deadline;
     test_platform_t* const self = platform_from(platform);
-    self->p2p_send_count++;
+    self->unicast_send_count++;
     capture_send(self, true, 0U, (lane != nullptr) ? lane->id : 0U, message);
     return CY_OK;
 }
 
-extern "C" void platform_p2p_extent_set(cy_platform_t* const platform, const std::size_t extent)
+extern "C" void platform_unicast_extent_set(cy_platform_t* const platform, const std::size_t extent)
 {
     (void)platform;
     (void)extent;
@@ -205,8 +205,8 @@ void platform_init(test_platform_t& self)
     self.vtable.subject_writer_send    = platform_subject_writer_send;
     self.vtable.subject_reader_new     = platform_subject_reader_new;
     self.vtable.subject_reader_destroy = platform_subject_reader_destroy;
-    self.vtable.p2p_send               = platform_p2p_send;
-    self.vtable.p2p_extent_set         = platform_p2p_extent_set;
+    self.vtable.unicast                = platform_unicast_send;
+    self.vtable.unicast_extent_set     = platform_unicast_extent_set;
     self.vtable.spin                   = platform_spin;
     self.vtable.now                    = platform_now;
     self.vtable.realloc                = platform_realloc;
@@ -295,7 +295,7 @@ void test_api_gossip_parser_rejects_broadcast_nonzero_ttl()
 
     const cy_subject_reader_t broad_reader = { .subject_id = cy_broadcast_subject_id(&p.platform) };
     dispatch_gossip(p,
-                    cy_lane_t{ .id = 1U, .p2p = { { 0 } }, .prio = cy_prio_nominal },
+                    cy_lane_t{ .id = 1U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
                     &broad_reader,
                     1U,
                     0,
@@ -303,7 +303,7 @@ void test_api_gossip_parser_rejects_broadcast_nonzero_ttl()
                     0U,
                     "api/gossip/ttl",
                     100);
-    TEST_ASSERT_EQUAL_size_t(0U, p.p2p_send_count);
+    TEST_ASSERT_EQUAL_size_t(0U, p.unicast_send_count);
     TEST_ASSERT_EQUAL_size_t(0U, p.subject_send_count);
     TEST_ASSERT_EQUAL_size_t(1U, cy_test_message_destroy_count());
     TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_live_count());
@@ -315,20 +315,20 @@ void test_api_gossip_parser_rejects_incompatibility_invalid_lage_and_short_heade
     test_platform_t p{};
     platform_init(p);
     cy_test_message_reset_counters();
-    const cy_lane_t lane = { .id = 2U, .p2p = { { 0 } }, .prio = cy_prio_nominal };
+    const cy_lane_t lane = { .id = 2U, .ctx = { { 0 } }, .prio = cy_prio_nominal };
 
     dispatch_scout(p, lane, 1U, "api/gossip/>", 101);
-    TEST_ASSERT_EQUAL_size_t(0U, p.p2p_send_count);
+    TEST_ASSERT_EQUAL_size_t(0U, p.unicast_send_count);
 
     dispatch_gossip(p, lane, nullptr, 1U, static_cast<std::int8_t>(127), UINT64_C(0x1234), 0U, "x/y", 102);
-    TEST_ASSERT_EQUAL_size_t(0U, p.p2p_send_count);
+    TEST_ASSERT_EQUAL_size_t(0U, p.unicast_send_count);
 
     std::array<unsigned char, 256> wire{};
     const std::size_t              full_size = make_gossip_header(
       wire.data(), wire.size(), 1U, 0, UINT64_C(0x1000000000000002), 0U, cy_str("api/gossip/truncated"));
     TEST_ASSERT_TRUE(full_size > 0U);
     dispatch_raw(p, wire, header_bytes - 6U, lane, nullptr, 103); // header itself is truncated
-    TEST_ASSERT_EQUAL_size_t(0U, p.p2p_send_count);
+    TEST_ASSERT_EQUAL_size_t(0U, p.unicast_send_count);
     platform_deinit(p);
 }
 
@@ -337,19 +337,19 @@ void test_api_gossip_parser_rejects_payload_truncated_and_overlong_name_length()
     test_platform_t p{};
     platform_init(p);
     cy_test_message_reset_counters();
-    const cy_lane_t lane = { .id = 24U, .p2p = { { 0 } }, .prio = cy_prio_nominal };
+    const cy_lane_t lane = { .id = 24U, .ctx = { { 0 } }, .prio = cy_prio_nominal };
 
     std::array<unsigned char, 256> wire{};
     const std::size_t              full_size = make_gossip_header(
       wire.data(), wire.size(), 1U, 0, UINT64_C(0x1000000000000004), 0U, cy_str("api/gossip/truncated"));
     TEST_ASSERT_TRUE(full_size > 0U);
     dispatch_raw(p, wire, header_bytes, lane, nullptr, 110); // header complete, payload omitted
-    TEST_ASSERT_EQUAL_size_t(0U, p.p2p_send_count);
+    TEST_ASSERT_EQUAL_size_t(0U, p.unicast_send_count);
 
     std::array<unsigned char, 256> wire_overlong = wire;
     wire_overlong[header_bytes - 1U]             = static_cast<unsigned char>(CY_TOPIC_NAME_MAX + 1U);
     dispatch_raw(p, wire_overlong, full_size, lane, nullptr, 111);
-    TEST_ASSERT_EQUAL_size_t(0U, p.p2p_send_count);
+    TEST_ASSERT_EQUAL_size_t(0U, p.unicast_send_count);
     platform_deinit(p);
 }
 
@@ -358,7 +358,7 @@ void test_api_gossip_parser_rejects_gossip_incompatibility_u32()
     test_platform_t p{};
     platform_init(p);
     cy_test_message_reset_counters();
-    const cy_lane_t lane = { .id = 21U, .p2p = { { 0 } }, .prio = cy_prio_nominal };
+    const cy_lane_t lane = { .id = 21U, .ctx = { { 0 } }, .prio = cy_prio_nominal };
 
     std::array<unsigned char, 256> wire{};
     const std::size_t              full_size =
@@ -366,7 +366,7 @@ void test_api_gossip_parser_rejects_gossip_incompatibility_u32()
     TEST_ASSERT_TRUE(full_size > 0U);
     wire[4] = 1U; // incompatibility in little-endian u32 field at [4..7]
     dispatch_raw(p, wire, full_size, lane, nullptr, 104);
-    TEST_ASSERT_EQUAL_size_t(0U, p.p2p_send_count);
+    TEST_ASSERT_EQUAL_size_t(0U, p.unicast_send_count);
     TEST_ASSERT_EQUAL_size_t(0U, p.subject_send_count);
     platform_deinit(p);
 }
@@ -376,10 +376,10 @@ void test_api_gossip_parser_rejects_pinned_hash_with_nonzero_evictions()
     test_platform_t p{};
     platform_init(p);
     cy_test_message_reset_counters();
-    const cy_lane_t lane = { .id = 22U, .p2p = { { 0 } }, .prio = cy_prio_nominal };
+    const cy_lane_t lane = { .id = 22U, .ctx = { { 0 } }, .prio = cy_prio_nominal };
 
     dispatch_gossip(p, lane, nullptr, 1U, 0, UINT64_C(1234), 1U, "api/gossip/pinned/reject", 105);
-    TEST_ASSERT_EQUAL_size_t(0U, p.p2p_send_count);
+    TEST_ASSERT_EQUAL_size_t(0U, p.unicast_send_count);
     TEST_ASSERT_NULL(cy_topic_find_by_hash(p.cy, UINT64_C(1234)));
     platform_deinit(p);
 }
@@ -389,10 +389,10 @@ void test_api_scout_parser_rejects_empty_and_truncated_pattern()
     test_platform_t p{};
     platform_init(p);
     cy_test_message_reset_counters();
-    const cy_lane_t lane = { .id = 23U, .p2p = { { 0 } }, .prio = cy_prio_nominal };
+    const cy_lane_t lane = { .id = 23U, .ctx = { { 0 } }, .prio = cy_prio_nominal };
 
     dispatch_scout(p, lane, 0U, "", 106);
-    TEST_ASSERT_EQUAL_size_t(0U, p.p2p_send_count);
+    TEST_ASSERT_EQUAL_size_t(0U, p.unicast_send_count);
 
     std::array<unsigned char, 256> wire{};
     const std::size_t              full_size = make_scout_header(wire.data(), wire.size(), 0U, cy_str("abc"));
@@ -406,7 +406,7 @@ void test_api_scout_parser_rejects_empty_and_truncated_pattern()
     wire_reserved[8U]                            = 1U; // reserved u64 field must be zero
     dispatch_raw(p, wire_reserved, full_size, lane, nullptr, 109);
 
-    TEST_ASSERT_EQUAL_size_t(0U, p.p2p_send_count);
+    TEST_ASSERT_EQUAL_size_t(0U, p.unicast_send_count);
     TEST_ASSERT_EQUAL_size_t(0U, p.subject_send_count);
     platform_deinit(p);
 }
@@ -419,7 +419,7 @@ void test_api_gossip_invalid_frame_does_not_seed_peer_sampler()
 
     const cy_subject_reader_t broad_reader = { .subject_id = cy_broadcast_subject_id(&p.platform) };
     dispatch_gossip(p,
-                    cy_lane_t{ .id = 31U, .p2p = { { 0 } }, .prio = cy_prio_nominal },
+                    cy_lane_t{ .id = 31U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
                     &broad_reader,
                     1U,
                     0,
@@ -429,7 +429,7 @@ void test_api_gossip_invalid_frame_does_not_seed_peer_sampler()
                     108);
 
     dispatch_gossip(p,
-                    cy_lane_t{ .id = 32U, .p2p = { { 0 } }, .prio = cy_prio_nominal },
+                    cy_lane_t{ .id = 32U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
                     nullptr,
                     3U,
                     0,
@@ -437,7 +437,7 @@ void test_api_gossip_invalid_frame_does_not_seed_peer_sampler()
                     0U,
                     "api/gossip/valid/nopeer",
                     109);
-    TEST_ASSERT_EQUAL_size_t(0U, p.p2p_send_count);
+    TEST_ASSERT_EQUAL_size_t(0U, p.unicast_send_count);
     platform_deinit(p);
 }
 
@@ -457,13 +457,13 @@ void test_api_scout_match_triggers_gossip_response_and_fields_are_correct()
     p.now = 1;
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(p.cy));
     p.subject_send_count = 0U;
-    p.p2p_send_count     = 0U;
+    p.unicast_send_count = 0U;
     p.capture_count      = 0U;
 
-    dispatch_scout(p, cy_lane_t{ .id = 99U, .p2p = { { 0 } }, .prio = cy_prio_fast }, 0U, "api/gossip/scout/>", 200);
-    TEST_ASSERT_TRUE(p.p2p_send_count > 0U);
+    dispatch_scout(p, cy_lane_t{ .id = 99U, .ctx = { { 0 } }, .prio = cy_prio_fast }, 0U, "api/gossip/scout/>", 200);
+    TEST_ASSERT_TRUE(p.unicast_send_count > 0U);
     const send_capture_t& c = p.captures.at(p.capture_count - 1U);
-    TEST_ASSERT_TRUE(c.p2p);
+    TEST_ASSERT_TRUE(c.unicast);
     TEST_ASSERT_EQUAL_UINT8(header_gossip, capture_type(c));
     TEST_ASSERT_EQUAL_UINT64(cy_topic_hash(topic), capture_u64(c, 8U));
     TEST_ASSERT_EQUAL_UINT8(0U, c.data[2]); // scout response TTL is zero
@@ -482,12 +482,12 @@ void test_api_scout_broadcast_soon_optimization_suppresses_unicast()
     static const unsigned char msg_byte = 0x42U;
     const cy_bytes_t           msg      = { .size = 1U, .data = &msg_byte, .next = nullptr };
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_publish(pub, p.now + 1000, msg));
-    p.p2p_send_count = 0U;
-    p.capture_count  = 0U;
+    p.unicast_send_count = 0U;
+    p.capture_count      = 0U;
 
     dispatch_scout(
-      p, cy_lane_t{ .id = 77U, .p2p = { { 0 } }, .prio = cy_prio_nominal }, 0U, "api/gossip/broadcast/>", p.now);
-    TEST_ASSERT_EQUAL_size_t(0U, p.p2p_send_count);
+      p, cy_lane_t{ .id = 77U, .ctx = { { 0 } }, .prio = cy_prio_nominal }, 0U, "api/gossip/broadcast/>", p.now);
+    TEST_ASSERT_EQUAL_size_t(0U, p.unicast_send_count);
 
     cy_unadvertise(pub);
     platform_deinit(p);
@@ -504,7 +504,7 @@ void test_api_repair_smoke_duplicate_suppression_and_unknown_topic_no_autocreate
 
     // Prime peer set.
     dispatch_gossip(p,
-                    cy_lane_t{ .id = 10U, .p2p = { { 0 } }, .prio = cy_prio_nominal },
+                    cy_lane_t{ .id = 10U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
                     nullptr,
                     1U,
                     0,
@@ -513,7 +513,7 @@ void test_api_repair_smoke_duplicate_suppression_and_unknown_topic_no_autocreate
                     "x/1",
                     300);
     dispatch_gossip(p,
-                    cy_lane_t{ .id = 11U, .p2p = { { 0 } }, .prio = cy_prio_nominal },
+                    cy_lane_t{ .id = 11U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
                     nullptr,
                     1U,
                     0,
@@ -523,9 +523,9 @@ void test_api_repair_smoke_duplicate_suppression_and_unknown_topic_no_autocreate
                     301);
 
     // Duplicate suppression smoke on forwarded unknown gossip.
-    const std::size_t p2p_before = p.p2p_send_count;
+    const std::size_t unicast_before = p.unicast_send_count;
     dispatch_gossip(p,
-                    cy_lane_t{ .id = 12U, .p2p = { { 0 } }, .prio = cy_prio_nominal },
+                    cy_lane_t{ .id = 12U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
                     nullptr,
                     3U,
                     0,
@@ -533,10 +533,10 @@ void test_api_repair_smoke_duplicate_suppression_and_unknown_topic_no_autocreate
                     1U,
                     "x/3",
                     302);
-    const std::size_t first_forward = p.p2p_send_count;
-    TEST_ASSERT_TRUE(first_forward >= p2p_before);
+    const std::size_t first_forward = p.unicast_send_count;
+    TEST_ASSERT_TRUE(first_forward >= unicast_before);
     dispatch_gossip(p,
-                    cy_lane_t{ .id = 12U, .p2p = { { 0 } }, .prio = cy_prio_nominal },
+                    cy_lane_t{ .id = 12U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
                     nullptr,
                     3U,
                     0,
@@ -544,12 +544,12 @@ void test_api_repair_smoke_duplicate_suppression_and_unknown_topic_no_autocreate
                     1U,
                     "x/3",
                     303);
-    TEST_ASSERT_EQUAL_size_t(first_forward, p.p2p_send_count);
+    TEST_ASSERT_EQUAL_size_t(first_forward, p.unicast_send_count);
 
     // Local-win divergence schedules urgent gossip; observe unicast repair emission after spins.
-    const std::size_t before_repair = p.p2p_send_count;
+    const std::size_t before_repair = p.unicast_send_count;
     dispatch_gossip(p,
-                    cy_lane_t{ .id = 13U, .p2p = { { 0 } }, .prio = cy_prio_nominal },
+                    cy_lane_t{ .id = 13U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
                     nullptr,
                     4U,
                     -1,
@@ -560,11 +560,11 @@ void test_api_repair_smoke_duplicate_suppression_and_unknown_topic_no_autocreate
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(p.cy)); // may broadcast first
     p.now += 1;
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(p.cy)); // urgent pass
-    TEST_ASSERT_TRUE(p.p2p_send_count > before_repair);
+    TEST_ASSERT_TRUE(p.unicast_send_count > before_repair);
 
     // Unknown topic and no pattern subscriber => no implicit topic creation.
     dispatch_gossip(p,
-                    cy_lane_t{ .id = 14U, .p2p = { { 0 } }, .prio = cy_prio_nominal },
+                    cy_lane_t{ .id = 14U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
                     nullptr,
                     1U,
                     0,

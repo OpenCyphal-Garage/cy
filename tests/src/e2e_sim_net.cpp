@@ -271,7 +271,7 @@ op_fault_effect_t op_fault_evaluate_and_capture(sim_node_t& self, op_info_t op)
 
 cy_err_t enqueue_frame(sim_node_t&                       src,
                        const std::size_t                 dst_index,
-                       const bool                        p2p,
+                       const bool                        unicast,
                        const std::uint32_t               subject_id,
                        const cy_prio_t                   priority,
                        const std::vector<unsigned char>& wire)
@@ -280,7 +280,7 @@ cy_err_t enqueue_frame(sim_node_t&                       src,
     frame_info_t base{};
     base.source       = src.index;
     base.destination  = dst_index;
-    base.p2p          = p2p;
+    base.unicast      = unicast;
     base.subject_id   = subject_id;
     base.priority     = priority;
     base.send_time    = src.now;
@@ -341,10 +341,10 @@ cy_err_t enqueue_subject(sim_node_t&                       src,
     return result;
 }
 
-cy_err_t enqueue_p2p(sim_node_t&                       src,
-                     const std::uint64_t               destination_node_id,
-                     const cy_prio_t                   priority,
-                     const std::vector<unsigned char>& wire)
+cy_err_t enqueue_unicast(sim_node_t&                       src,
+                         const std::uint64_t               destination_node_id,
+                         const cy_prio_t                   priority,
+                         const std::vector<unsigned char>& wire)
 {
     const sim_net_t&  net = *src.network;
     const std::size_t ix  = find_node_index_by_id(net, destination_node_id);
@@ -372,11 +372,11 @@ void deliver_frame(sim_net_t& net, const queued_frame_t& frame)
     cy_lane_t lane{};
     lane.id   = net.nodes.at(frame.frame.source).node_id;
     lane.prio = frame.frame.priority;
-    std::memset(lane.p2p.state, 0, sizeof(lane.p2p.state));
-    const std::size_t copy_size = std::min(sizeof(lane.p2p.state), sizeof(lane.id));
-    std::memcpy(lane.p2p.state, &lane.id, copy_size);
+    std::memset(lane.ctx.state, 0, sizeof(lane.ctx.state));
+    const std::size_t copy_size = std::min(sizeof(lane.ctx.state), sizeof(lane.id));
+    std::memcpy(lane.ctx.state, &lane.id, copy_size);
 
-    if (frame.frame.p2p) {
+    if (frame.frame.unicast) {
         cy_on_message(&dst.platform, lane, nullptr, mts);
         return;
     }
@@ -470,10 +470,10 @@ extern "C" void sim_subject_reader_destroy(cy_platform_t* const platform, cy_sub
     guarded_heap_free(&self->core_heap, reader);
 }
 
-extern "C" cy_err_t sim_p2p_send(cy_platform_t* const   platform,
-                                 const cy_lane_t* const lane,
-                                 const cy_us_t          deadline,
-                                 const cy_bytes_t       message)
+extern "C" cy_err_t sim_unicast_send(cy_platform_t* const   platform,
+                                     const cy_lane_t* const lane,
+                                     const cy_us_t          deadline,
+                                     const cy_bytes_t       message)
 {
     if (lane == nullptr) {
         return CY_ERR_ARGUMENT;
@@ -482,7 +482,7 @@ extern "C" cy_err_t sim_p2p_send(cy_platform_t* const   platform,
 
     op_info_t op{};
     op.node_index                     = self->index;
-    op.kind                           = op_kind_t::p2p_send;
+    op.kind                           = op_kind_t::unicast_send;
     op.now                            = self->now;
     op.deadline                       = deadline;
     op.has_lane_id                    = true;
@@ -497,11 +497,11 @@ extern "C" cy_err_t sim_p2p_send(cy_platform_t* const   platform,
     if (!flatten_fragments(message, wire)) {
         return CY_ERR_ARGUMENT;
     }
-    self->p2p_send_count++;
-    return enqueue_p2p(*self, lane->id, lane->prio, wire);
+    self->unicast_send_count++;
+    return enqueue_unicast(*self, lane->id, lane->prio, wire);
 }
 
-extern "C" void sim_p2p_extent_set(cy_platform_t* const platform, const std::size_t extent)
+extern "C" void sim_unicast_extent_set(cy_platform_t* const platform, const std::size_t extent)
 {
     (void)platform;
     (void)extent;
@@ -601,8 +601,8 @@ cy_err_t sim_net_init_ex(sim_net_t& self, const sim_net_config_t& config)
         node.vtable.subject_writer_send    = sim_subject_writer_send;
         node.vtable.subject_reader_new     = sim_subject_reader_new;
         node.vtable.subject_reader_destroy = sim_subject_reader_destroy;
-        node.vtable.p2p_send               = sim_p2p_send;
-        node.vtable.p2p_extent_set         = sim_p2p_extent_set;
+        node.vtable.unicast                = sim_unicast_send;
+        node.vtable.unicast_extent_set     = sim_unicast_extent_set;
         node.vtable.spin                   = sim_spin;
         node.vtable.now                    = sim_now;
         node.vtable.realloc                = sim_realloc;

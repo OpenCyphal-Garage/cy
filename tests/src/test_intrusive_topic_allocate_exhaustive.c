@@ -135,10 +135,10 @@ static void fixture_subject_reader_destroy(cy_platform_t* const platform, cy_sub
     guarded_heap_free(&self->heap, reader);
 }
 
-static cy_err_t fixture_p2p_send(cy_platform_t* const   platform,
-                                 const cy_lane_t* const lane,
-                                 const cy_us_t          deadline,
-                                 const cy_bytes_t       message)
+static cy_err_t fixture_unicast_send(cy_platform_t* const   platform,
+                                     const cy_lane_t* const lane,
+                                     const cy_us_t          deadline,
+                                     const cy_bytes_t       message)
 {
     (void)platform;
     (void)lane;
@@ -147,7 +147,7 @@ static cy_err_t fixture_p2p_send(cy_platform_t* const   platform,
     return CY_OK;
 }
 
-static void fixture_p2p_extent_set(cy_platform_t* const platform, const size_t extent)
+static void fixture_unicast_extent_set(cy_platform_t* const platform, const size_t extent)
 {
     (void)platform;
     (void)extent;
@@ -181,8 +181,8 @@ static void fixture_init(fixture_t* const self)
     self->vtable.subject_writer_send    = fixture_subject_writer_send;
     self->vtable.subject_reader_new     = fixture_subject_reader_new;
     self->vtable.subject_reader_destroy = fixture_subject_reader_destroy;
-    self->vtable.p2p_send               = fixture_p2p_send;
-    self->vtable.p2p_extent_set         = fixture_p2p_extent_set;
+    self->vtable.unicast                = fixture_unicast_send;
+    self->vtable.unicast_extent_set     = fixture_unicast_extent_set;
     self->vtable.spin                   = fixture_spin;
     self->vtable.now                    = fixture_now;
     self->vtable.realloc                = fixture_realloc;

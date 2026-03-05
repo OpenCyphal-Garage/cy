@@ -17,12 +17,12 @@ typedef struct
 
     cy_us_t   now;
     uint64_t  random_state;
-    cy_err_t  p2p_send_result;
-    size_t    p2p_send_count;
+    cy_err_t  unicast_send_result;
+    size_t    unicast_send_count;
     cy_lane_t last_lane;
     cy_us_t   last_deadline;
-    byte_t    last_p2p[HEADER_BYTES];
-    size_t    last_p2p_size;
+    byte_t    last_unicast[HEADER_BYTES];
+    size_t    last_unicast_size;
 
     size_t   async_error_count;
     cy_err_t last_async_error;
@@ -63,7 +63,7 @@ static uint64_t fixture_random(cy_platform_t* const platform)
     return self->random_state;
 }
 
-static void fixture_p2p_extent_set(cy_platform_t* const platform, const size_t extent)
+static void fixture_unicast_extent_set(cy_platform_t* const platform, const size_t extent)
 {
     (void)platform;
     (void)extent;
@@ -76,29 +76,29 @@ static cy_err_t fixture_spin(cy_platform_t* const platform, const cy_us_t deadli
     return CY_OK;
 }
 
-static cy_err_t fixture_p2p_send(cy_platform_t* const   platform,
-                                 const cy_lane_t* const lane,
-                                 const cy_us_t          deadline,
-                                 const cy_bytes_t       message)
+static cy_err_t fixture_unicast_send(cy_platform_t* const   platform,
+                                     const cy_lane_t* const lane,
+                                     const cy_us_t          deadline,
+                                     const cy_bytes_t       message)
 {
     fixture_t* const self = (fixture_t*)platform;
-    self->p2p_send_count++;
+    self->unicast_send_count++;
     if (lane != NULL) {
         self->last_lane = *lane;
     } else {
         memset(&self->last_lane, 0, sizeof(self->last_lane));
     }
-    self->last_deadline = deadline;
-    self->last_p2p_size = 0U;
-    memset(self->last_p2p, 0, sizeof(self->last_p2p));
+    self->last_deadline     = deadline;
+    self->last_unicast_size = 0U;
+    memset(self->last_unicast, 0, sizeof(self->last_unicast));
     for (const cy_bytes_t* seg = &message; seg != NULL; seg = seg->next) {
-        if ((seg->size > 0U) && (seg->data != NULL) && (self->last_p2p_size < sizeof(self->last_p2p))) {
-            const size_t copy_size = smaller(seg->size, sizeof(self->last_p2p) - self->last_p2p_size);
-            memcpy(&self->last_p2p[self->last_p2p_size], seg->data, copy_size);
-            self->last_p2p_size += copy_size;
+        if ((seg->size > 0U) && (seg->data != NULL) && (self->last_unicast_size < sizeof(self->last_unicast))) {
+            const size_t copy_size = smaller(seg->size, sizeof(self->last_unicast) - self->last_unicast_size);
+            memcpy(&self->last_unicast[self->last_unicast_size], seg->data, copy_size);
+            self->last_unicast_size += copy_size;
         }
     }
-    return self->p2p_send_result;
+    return self->unicast_send_result;
 }
 
 static void fixture_on_async_error(cy_t* const       cy,
@@ -121,8 +121,8 @@ static void fixture_init(fixture_t* const self)
     self->platform.subject_id_modulus = (uint32_t)CY_SUBJECT_ID_MODULUS_17bit;
     self->platform.cy                 = &self->cy;
     self->vtable.realloc              = fixture_realloc;
-    self->vtable.p2p_send             = fixture_p2p_send;
-    self->vtable.p2p_extent_set       = fixture_p2p_extent_set;
+    self->vtable.unicast              = fixture_unicast_send;
+    self->vtable.unicast_extent_set   = fixture_unicast_extent_set;
     self->vtable.spin                 = fixture_spin;
     self->vtable.now                  = fixture_now;
     self->vtable.random               = fixture_random;
@@ -135,10 +135,10 @@ static void fixture_init(fixture_t* const self)
     self->new_alloc_count         = 0U;
     self->now                     = 10000;
     self->random_state            = UINT64_C(0x123456789ABCDEF0);
-    self->p2p_send_result         = CY_OK;
+    self->unicast_send_result     = CY_OK;
     self->last_async_error        = CY_OK;
     self->last_deadline           = BIG_BANG;
-    self->last_p2p_size           = 0U;
+    self->last_unicast_size       = 0U;
     self->async_error_count       = 0U;
 }
 
@@ -181,7 +181,7 @@ static cy_lane_t make_lane(const uint64_t remote_id)
     cy_lane_t lane = { 0 };
     lane.id        = remote_id;
     lane.prio      = cy_prio_nominal;
-    memcpy(lane.p2p.state, &lane.id, smaller(sizeof(lane.p2p.state), sizeof(lane.id)));
+    memcpy(lane.ctx.state, &lane.id, smaller(sizeof(lane.ctx.state), sizeof(lane.id)));
     return lane;
 }
 
@@ -263,7 +263,7 @@ static cy_breadcrumb_t make_test_breadcrumb(const fixture_t* const fixture,
         .topic_hash  = topic_hash,
         .message_tag = message_tag,
         .seqno       = seqno,
-        .p2p_context = make_lane(remote_id).p2p,
+        .unicast_ctx = make_lane(remote_id).ctx,
     };
 }
 
@@ -341,13 +341,13 @@ static void test_respond_reliable_initial_send_failure_returns_null(void)
 {
     fixture_t fixture;
     fixture_init(&fixture);
-    fixture.p2p_send_result = CY_ERR_MEDIA;
+    fixture.unicast_send_result = CY_ERR_MEDIA;
 
     cy_breadcrumb_t breadcrumb =
       make_test_breadcrumb(&fixture, UINT64_C(0xAA01), cy_prio_exceptional, UINT64_C(0x1234), UINT64_C(0x5678), 0U);
     const cy_bytes_t msg = { .size = 1U, .data = "A", .next = NULL };
     TEST_ASSERT_NULL(cy_respond_reliable(&breadcrumb, fixture.now + (10 * KILO), msg));
-    TEST_ASSERT_EQUAL_size_t(1U, fixture.p2p_send_count);
+    TEST_ASSERT_EQUAL_size_t(1U, fixture.unicast_send_count);
     TEST_ASSERT_EQUAL_UINT64(1U, breadcrumb.seqno);
     TEST_ASSERT_NULL(fixture.cy.respond_futures_by_tag);
 
@@ -369,10 +369,10 @@ static void test_respond_reliable_ack_success(void)
     cy_future_t* const fut = cy_respond_reliable(&breadcrumb, fixture.now + (80 * KILO), msg);
     TEST_ASSERT_NOT_NULL(fut);
     TEST_ASSERT_EQUAL_UINT64(4U, breadcrumb.seqno);
-    TEST_ASSERT_EQUAL_size_t(1U, fixture.p2p_send_count);
-    TEST_ASSERT_EQUAL_UINT8(header_rsp_rel, fixture.last_p2p[0]);
-    TEST_ASSERT_EQUAL_UINT64(3U, deserialize_u48(&fixture.last_p2p[2]));
-    const byte_t tag = fixture.last_p2p[1];
+    TEST_ASSERT_EQUAL_size_t(1U, fixture.unicast_send_count);
+    TEST_ASSERT_EQUAL_UINT8(header_rsp_rel, fixture.last_unicast[0]);
+    TEST_ASSERT_EQUAL_UINT64(3U, deserialize_u48(&fixture.last_unicast[2]));
+    const byte_t tag = fixture.last_unicast[1];
 
     dispatch_response_control(
       &fixture, (byte_t)header_rsp_ack, tag, 3U, topic_hash, message_tag, remote_id, fixture.now + 1, false);
@@ -397,7 +397,7 @@ static void test_respond_reliable_nack_failure(void)
 
     cy_future_t* const fut = cy_respond_reliable(&breadcrumb, fixture.now + (80 * KILO), msg);
     TEST_ASSERT_NOT_NULL(fut);
-    const byte_t tag = fixture.last_p2p[1];
+    const byte_t tag = fixture.last_unicast[1];
 
     dispatch_response_control(
       &fixture, (byte_t)header_rsp_nack, tag, 9U, topic_hash, message_tag, remote_id, fixture.now + 1, false);
@@ -420,11 +420,11 @@ static void test_respond_reliable_timeout_failure(void)
     const cy_us_t      deadline = fixture.now + (8 * KILO); // one-shot
     cy_future_t* const fut      = cy_respond_reliable(&breadcrumb, deadline, msg);
     TEST_ASSERT_NOT_NULL(fut);
-    TEST_ASSERT_EQUAL_size_t(1U, fixture.p2p_send_count);
+    TEST_ASSERT_EQUAL_size_t(1U, fixture.unicast_send_count);
     fixture_advance_to(&fixture, deadline + 1);
     TEST_ASSERT_TRUE(cy_future_done(fut));
     TEST_ASSERT_EQUAL_INT(CY_ERR_DELIVERY, cy_future_error(fut));
-    TEST_ASSERT_EQUAL_size_t(1U, fixture.p2p_send_count);
+    TEST_ASSERT_EQUAL_size_t(1U, fixture.unicast_send_count);
     cy_future_destroy(fut);
 
     fixture_assert_clean(&fixture);
@@ -445,13 +445,13 @@ static void test_respond_reliable_retransmit_then_ack(void)
     const cy_us_t      deadline   = fixture.now + (5 * ack_to);
     cy_future_t* const fut        = cy_respond_reliable(&breadcrumb, deadline, msg);
     TEST_ASSERT_NOT_NULL(fut);
-    TEST_ASSERT_EQUAL_size_t(1U, fixture.p2p_send_count);
-    const byte_t tag = fixture.last_p2p[1];
+    TEST_ASSERT_EQUAL_size_t(1U, fixture.unicast_send_count);
+    const byte_t tag = fixture.last_unicast[1];
 
     fixture_advance_to(&fixture, fixture.now + ack_to + 1);
     TEST_ASSERT_FALSE(cy_future_done(fut));
-    TEST_ASSERT_EQUAL_size_t(2U, fixture.p2p_send_count);
-    TEST_ASSERT_EQUAL_UINT8(header_rsp_rel, fixture.last_p2p[0]);
+    TEST_ASSERT_EQUAL_size_t(2U, fixture.unicast_send_count);
+    TEST_ASSERT_EQUAL_UINT8(header_rsp_rel, fixture.last_unicast[0]);
 
     dispatch_response_control(&fixture, (byte_t)header_rsp_ack, tag, 2U, hash, msg_tag, remote_id, fixture.now, false);
     TEST_ASSERT_TRUE(cy_future_done(fut));
@@ -474,7 +474,7 @@ static void test_respond_reliable_cancel_ignores_late_ack(void)
 
     cy_future_t* const fut = cy_respond_reliable(&breadcrumb, fixture.now + (100 * KILO), msg);
     TEST_ASSERT_NOT_NULL(fut);
-    const byte_t tag = fixture.last_p2p[1];
+    const byte_t tag = fixture.last_unicast[1];
     cy_future_destroy(fut);
     TEST_ASSERT_NULL(fixture.cy.respond_futures_by_tag);
 
@@ -497,7 +497,7 @@ static void test_respond_reliable_mismatched_ack_ignored(void)
 
     cy_future_t* const fut = cy_respond_reliable(&breadcrumb, fixture.now + (80 * KILO), msg);
     TEST_ASSERT_NOT_NULL(fut);
-    const byte_t tag = fixture.last_p2p[1];
+    const byte_t tag = fixture.last_unicast[1];
 
     dispatch_response_control(
       &fixture, (byte_t)header_rsp_ack, tag, 5U, hash, msg_tag, remote_id + 1U, fixture.now + 1, false);
@@ -527,7 +527,7 @@ static void test_respond_reliable_ack_match_field_mismatch_keeps_future_pending(
     cy_future_t* const fut_base = cy_respond_reliable(&breadcrumb, fixture.now + (80 * KILO), msg);
     TEST_ASSERT_NOT_NULL(fut_base);
     respond_future_t* const fut = (respond_future_t*)fut_base;
-    const byte_t            tag = fixture.last_p2p[1];
+    const byte_t            tag = fixture.last_unicast[1];
 
     const uint64_t original_remote_id   = fut->breadcrumb.remote_id;
     const uint64_t original_message_tag = fut->breadcrumb.message_tag;
@@ -588,11 +588,11 @@ static void test_respond_reliable_key_collision_increments_tag(void)
 
     cy_future_t* const fut1 = cy_respond_reliable(&b1, fixture.now + (80 * KILO), msg);
     TEST_ASSERT_NOT_NULL(fut1);
-    const byte_t tag1 = fixture.last_p2p[1];
+    const byte_t tag1 = fixture.last_unicast[1];
 
     cy_future_t* const fut2 = cy_respond_reliable(&b2, fixture.now + (80 * KILO), msg);
     TEST_ASSERT_NOT_NULL(fut2);
-    const byte_t tag2 = fixture.last_p2p[1];
+    const byte_t tag2 = fixture.last_unicast[1];
     TEST_ASSERT_TRUE(tag1 != tag2);
     TEST_ASSERT_EQUAL_UINT64(1U, b1.seqno);
     TEST_ASSERT_EQUAL_UINT64(1U, b2.seqno);
@@ -625,7 +625,7 @@ static void test_respond_reliable_multicast_ack_rejected(void)
 
     cy_future_t* const fut = cy_respond_reliable(&breadcrumb, fixture.now + (80 * KILO), msg);
     TEST_ASSERT_NOT_NULL(fut);
-    const byte_t tag = fixture.last_p2p[1];
+    const byte_t tag = fixture.last_unicast[1];
 
     dispatch_response_control(
       &fixture, (byte_t)header_rsp_ack, tag, 1U, hash, msg_tag, remote_id, fixture.now + 1, true);
@@ -944,13 +944,13 @@ static void test_send_response_ack_serialization(void)
                       UINT64_C(0x1122334455667788),
                       true,
                       fixture.now + 100U);
-    TEST_ASSERT_EQUAL_size_t(1U, fixture.p2p_send_count);
-    TEST_ASSERT_EQUAL_size_t(HEADER_BYTES, fixture.last_p2p_size);
-    TEST_ASSERT_EQUAL_UINT8(header_rsp_ack, fixture.last_p2p[0]);
-    TEST_ASSERT_EQUAL_UINT8(0x5AU, fixture.last_p2p[1]);
-    TEST_ASSERT_EQUAL_UINT64(UINT64_C(0x0000123456789ABC), deserialize_u48(&fixture.last_p2p[2]));
-    TEST_ASSERT_EQUAL_UINT64(UINT64_C(0x1122334455667788), deserialize_u64(&fixture.last_p2p[8]));
-    TEST_ASSERT_EQUAL_UINT64(UINT64_C(0x0102030405060708), deserialize_u64(&fixture.last_p2p[16]));
+    TEST_ASSERT_EQUAL_size_t(1U, fixture.unicast_send_count);
+    TEST_ASSERT_EQUAL_size_t(HEADER_BYTES, fixture.last_unicast_size);
+    TEST_ASSERT_EQUAL_UINT8(header_rsp_ack, fixture.last_unicast[0]);
+    TEST_ASSERT_EQUAL_UINT8(0x5AU, fixture.last_unicast[1]);
+    TEST_ASSERT_EQUAL_UINT64(UINT64_C(0x0000123456789ABC), deserialize_u48(&fixture.last_unicast[2]));
+    TEST_ASSERT_EQUAL_UINT64(UINT64_C(0x1122334455667788), deserialize_u64(&fixture.last_unicast[8]));
+    TEST_ASSERT_EQUAL_UINT64(UINT64_C(0x0102030405060708), deserialize_u64(&fixture.last_unicast[16]));
 
     send_response_ack(&fixture.cy,
                       lane,
@@ -960,13 +960,13 @@ static void test_send_response_ack_serialization(void)
                       UINT64_C(0x8877665544332211),
                       false,
                       fixture.now + 200U);
-    TEST_ASSERT_EQUAL_size_t(2U, fixture.p2p_send_count);
-    TEST_ASSERT_EQUAL_size_t(HEADER_BYTES, fixture.last_p2p_size);
-    TEST_ASSERT_EQUAL_UINT8(header_rsp_nack, fixture.last_p2p[0]);
-    TEST_ASSERT_EQUAL_UINT8(0x17U, fixture.last_p2p[1]);
-    TEST_ASSERT_EQUAL_UINT64(UINT64_C(0x0000000000000007), deserialize_u48(&fixture.last_p2p[2]));
-    TEST_ASSERT_EQUAL_UINT64(UINT64_C(0x8877665544332211), deserialize_u64(&fixture.last_p2p[8]));
-    TEST_ASSERT_EQUAL_UINT64(UINT64_C(0xFFEEDDCCBBAA0099), deserialize_u64(&fixture.last_p2p[16]));
+    TEST_ASSERT_EQUAL_size_t(2U, fixture.unicast_send_count);
+    TEST_ASSERT_EQUAL_size_t(HEADER_BYTES, fixture.last_unicast_size);
+    TEST_ASSERT_EQUAL_UINT8(header_rsp_nack, fixture.last_unicast[0]);
+    TEST_ASSERT_EQUAL_UINT8(0x17U, fixture.last_unicast[1]);
+    TEST_ASSERT_EQUAL_UINT64(UINT64_C(0x0000000000000007), deserialize_u48(&fixture.last_unicast[2]));
+    TEST_ASSERT_EQUAL_UINT64(UINT64_C(0x8877665544332211), deserialize_u64(&fixture.last_unicast[8]));
+    TEST_ASSERT_EQUAL_UINT64(UINT64_C(0xFFEEDDCCBBAA0099), deserialize_u64(&fixture.last_unicast[16]));
 
     fixture_assert_clean(&fixture);
 }

@@ -51,9 +51,9 @@ typedef struct cy_udp_posix_t
 
     udpard_tx_t      udpard_tx;
     udpard_rx_t      udpard_rx;
-    udpard_rx_port_t p2p_port;
+    udpard_rx_port_t unicast_port;
 
-    udp_wrapper_t sock[CY_UDP_POSIX_IFACE_COUNT_MAX]; // All TX and P2P RX.
+    udp_wrapper_t sock[CY_UDP_POSIX_IFACE_COUNT_MAX]; // All TX and unicast RX.
     uint32_t      local_ip[CY_UDP_POSIX_IFACE_COUNT_MAX];
     uint16_t      local_tx_port[CY_UDP_POSIX_IFACE_COUNT_MAX];
     uint16_t      iface_bitmap; // Bitmap of valid interfaces based on local_ip[].
@@ -320,8 +320,8 @@ struct subject_reader_t
     subject_reader_t* next;
 };
 
-// We use the same handler for both subject messages and P2P messages, since they both use the same ingestion callback.
-// The difference here is that P2P messages have no associated reader instance.
+// We use the same handler for both subject and unicast messages, since they both use the same ingestion callback.
+// The difference here is that unicast messages have no associated reader instance.
 static void v_on_msg(udpard_rx_t* const rx, udpard_rx_port_t* const port, const udpard_rx_transfer_t tr)
 {
     cy_udp_posix_t* const owner = rx->user;
@@ -329,9 +329,9 @@ static void v_on_msg(udpard_rx_t* const rx, udpard_rx_port_t* const port, const 
                                     .content   = make_message(owner, tr.payload_size_stored, tr.payload) };
     if (msg.content != NULL) {
         cy_lane_t lane = { .id = tr.remote.uid, .prio = (cy_prio_t)tr.priority };
-        static_assert(sizeof(tr.remote.endpoints) <= sizeof(lane.p2p), "");
-        memcpy(&lane.p2p, tr.remote.endpoints, sizeof(tr.remote.endpoints));
-        cy_on_message(&owner->base, lane, (cy_subject_reader_t*)port->user, msg); // user is NULL for P2P
+        static_assert(sizeof(tr.remote.endpoints) <= sizeof(lane.ctx), "");
+        memcpy(&lane.ctx, tr.remote.endpoints, sizeof(tr.remote.endpoints));
+        cy_on_message(&owner->base, lane, (cy_subject_reader_t*)port->user, msg); // user is NULL for unicast
     } else {
         udpard_fragment_free_all(tr.payload, udpard_make_deleter(owner->mem));
         owner->stats.message_loss_count++;
@@ -488,30 +488,30 @@ static void v_subject_reader_tombstone(cy_platform_t* const platform, cy_subject
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// P2P
+// UNICAST
 
-static cy_err_t v_p2p_send(cy_platform_t* const   base,
-                           const cy_lane_t* const lane,
-                           const cy_us_t          deadline,
-                           const cy_bytes_t       message)
+static cy_err_t v_unicast_send(cy_platform_t* const   base,
+                               const cy_lane_t* const lane,
+                               const cy_us_t          deadline,
+                               const cy_bytes_t       message)
 {
     cy_udp_posix_t* const owner = (cy_udp_posix_t*)base;
-    // Unbox the P2P context.
+    // Unbox the unicast context.
     udpard_udpip_ep_t endpoints[UDPARD_IFACE_COUNT_MAX] = { 0 };
-    static_assert(sizeof(endpoints) <= sizeof(lane->p2p), "");
-    memcpy(endpoints, &lane->p2p, sizeof(udpard_udpip_ep_t) * UDPARD_IFACE_COUNT_MAX);
+    static_assert(sizeof(endpoints) <= sizeof(lane->ctx), "");
+    memcpy(endpoints, &lane->ctx, sizeof(udpard_udpip_ep_t) * UDPARD_IFACE_COUNT_MAX);
     // Push the message.
     // We may need better error reporting in libudpard, this is a bit unwieldy.
     const uint64_t e_oom      = owner->udpard_tx.errors_oom;
     const uint64_t e_capacity = owner->udpard_tx.errors_capacity;
     //
-    const bool ok = udpard_tx_push_p2p(&owner->udpard_tx,
-                                       cy_udp_posix_now(),
-                                       deadline,
-                                       (udpard_prio_t)lane->prio,
-                                       endpoints,
-                                       cy_bytes_to_udpard_bytes(message),
-                                       NULL);
+    const bool ok = udpard_tx_push_unicast(&owner->udpard_tx,
+                                           cy_udp_posix_now(),
+                                           deadline,
+                                           (udpard_prio_t)lane->prio,
+                                           endpoints,
+                                           cy_bytes_to_udpard_bytes(message),
+                                           NULL);
     // Report the result.
     CY_TRACE(owner->base.cy, "💬 N%016jx res=%d", (uintmax_t)lane->id, ok);
     if (ok) {
@@ -526,16 +526,16 @@ static cy_err_t v_p2p_send(cy_platform_t* const   base,
     return CY_ERR_ARGUMENT;
 }
 
-static void v_p2p_extent_set(cy_platform_t* const base, const size_t extent)
+static void v_unicast_extent_set(cy_platform_t* const base, const size_t extent)
 {
     cy_udp_posix_t* const owner = (cy_udp_posix_t*)base;
-    // In this transport, the P2P extent is trivial to change -- just update a variable; no dependent states to update.
+    // In this transport, the unicast extent is trivial to change -- just update a variable; no dependent states.
     // We are aware that changing the extent may sometimes, under very specific circumstances involving out-of-order
     // frame arrival, cause some in-progress transfers to be lost, but it's exceedingly unlikely and we normally use
-    // reliable delivery for P2P. To minimize the impact, we liberally increase the size at every update.
-    if (extent > owner->p2p_port.extent) {
-        owner->p2p_port.extent = extent * 2; // increase to minimize disturbance
-        CY_TRACE(owner->base.cy, "📏 P2P response extent increased to %zu bytes", owner->p2p_port.extent);
+    // reliable delivery for unicast. To minimize the impact, we liberally increase the size at every update.
+    if (extent > owner->unicast_port.extent) {
+        owner->unicast_port.extent = extent * 2; // increase to minimize disturbance
+        CY_TRACE(owner->base.cy, "📏 Unicast response extent increased to %zu bytes", owner->unicast_port.extent);
     }
 }
 
@@ -597,9 +597,9 @@ static void read_socket(cy_udp_posix_t* const   self,
     }
 
     // Pass the data buffer into LibUDPard then into Cy for further processing. It takes ownership of the buffer.
-    assert((reader == NULL) || !reader->port.is_p2p);
+    assert((reader == NULL) || !reader->port.is_unicast);
     const bool pushok = udpard_rx_port_push(&self->udpard_rx,
-                                            (reader != NULL) ? &reader->port : &self->p2p_port,
+                                            (reader != NULL) ? &reader->port : &self->unicast_port,
                                             ts,
                                             remote_ep,
                                             dgram,
@@ -627,7 +627,7 @@ static cy_err_t spin_once_until(cy_udp_posix_t* const self, const cy_us_t deadli
         }
     }
     // Fill out the RX awaitable array. The total number of RX sockets is the interface count times the number of
-    // subject readers plus P2P RX sockets (exactly one per iface).
+    // subject readers plus unicast RX sockets (exactly one per iface).
     // This is a rather cumbersome operation as we need to traverse subject readers; perhaps we should switch to epoll?
     const size_t      max_rx_count = CY_UDP_POSIX_IFACE_COUNT_MAX * (self->stats.subject_reader_count + 1);
     size_t            rx_count     = 0;
@@ -656,7 +656,7 @@ static cy_err_t spin_once_until(cy_udp_posix_t* const self, const cy_us_t deadli
         if (udp_wrapper_is_open(&self->sock[i])) {
             assert(rx_count < max_rx_count);
             rx_await[rx_count]         = &self->sock[i];
-            rx_readers[rx_count]       = NULL; // A P2P socket has no associated topic.
+            rx_readers[rx_count]       = NULL; // A unicast socket has no associated topic.
             rx_iface_indexes[rx_count] = i;
             rx_count++;
         }
@@ -728,16 +728,15 @@ static uint64_t v_random(cy_platform_t* const base)
 // PUBLIC API
 
 static const cy_platform_vtable_t platform_vtable = {
-    // SUBJECT WRITER
+    // MULTICAST
     .subject_writer_new     = v_subject_writer_new,
     .subject_writer_destroy = v_subject_writer_destroy,
     .subject_writer_send    = v_subject_writer_send,
-    // SUBJECT READER
     .subject_reader_new     = v_subject_reader_new,
     .subject_reader_destroy = v_subject_reader_tombstone,
-    // P2P
-    .p2p_send       = v_p2p_send,
-    .p2p_extent_set = v_p2p_extent_set,
+    // UNICAST
+    .unicast            = v_unicast_send,
+    .unicast_extent_set = v_unicast_extent_set,
     // EVENT LOOP
     .spin = v_spin,
     // MISC
@@ -821,11 +820,12 @@ cy_platform_t* cy_udp_posix_new(const uint64_t uid,
     self->udpard_tx.user = self;
     self->udpard_rx.user = self;
 
-    // Initialize the udpard P2P RX port.
+    // Initialize the udpard unicast RX port.
     // We start with an arbitrarily chosen sensible initial extent, which will be increased later as needed.
-    const size_t                         initial_extent = UDPARD_MTU_DEFAULT;
-    static const udpard_rx_port_vtable_t rx_p2p_vtable  = { .on_message = v_on_msg };
-    if (!udpard_rx_port_new_p2p(&self->p2p_port, initial_extent, make_udpard_rx_mem_resources(self), &rx_p2p_vtable)) {
+    const size_t                         initial_extent    = UDPARD_MTU_DEFAULT;
+    static const udpard_rx_port_vtable_t rx_unicast_vtable = { .on_message = v_on_msg };
+    if (!udpard_rx_port_new_unicast(
+          &self->unicast_port, initial_extent, make_udpard_rx_mem_resources(self), &rx_unicast_vtable)) {
         udpard_tx_free(&self->udpard_tx);
         free(self);
         return NULL;
@@ -843,7 +843,7 @@ cy_platform_t* cy_udp_posix_new(const uint64_t uid,
 
     // Cleanup on error.
     if (res != CY_OK) {
-        udpard_rx_port_free(&self->udpard_rx, &self->p2p_port);
+        udpard_rx_port_free(&self->udpard_rx, &self->unicast_port);
         udpard_tx_free(&self->udpard_tx);
         for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
             udp_wrapper_close(&self->sock[i]); // The handle may be invalid, but we don't care.
@@ -853,7 +853,7 @@ cy_platform_t* cy_udp_posix_new(const uint64_t uid,
     }
 
     // Finish.
-    assert(self->p2p_port.is_p2p);
+    assert(self->unicast_port.is_unicast);
     self->stats       = (cy_udp_posix_stats_t){ 0 };
     self->reader_head = NULL;
     self->reader_tail = NULL;
@@ -935,7 +935,7 @@ void cy_udp_posix_destroy(cy_platform_t* const base)
         assert(self->stats.subject_reader_count == 0);
         assert(self->stats.subject_writer_count == 0);
         assert(self->base.cy == NULL); // must be unlinked beforehand
-        udpard_rx_port_free(&self->udpard_rx, &self->p2p_port);
+        udpard_rx_port_free(&self->udpard_rx, &self->unicast_port);
         udpard_tx_free(&self->udpard_tx);
         for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
             udp_wrapper_close(&self->sock[i]); // The handle may be invalid, but we don't care.

@@ -15,7 +15,7 @@ struct frame_info_t final
     std::size_t   source{ 0U };
     std::size_t   destination{ 0U };
 
-    bool          p2p{ false };
+    bool          unicast{ false };
     std::uint32_t subject_id{ 0U };
     cy_prio_t     priority{ cy_prio_nominal };
 
@@ -37,7 +37,7 @@ using frame_predicate_t = std::function<bool(const frame_info_t&)>;
 enum class op_kind_t : std::uint8_t
 {
     subject_send,
-    p2p_send,
+    unicast_send,
     spin,
 };
 

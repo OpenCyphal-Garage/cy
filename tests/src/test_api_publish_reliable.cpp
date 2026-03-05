@@ -47,12 +47,12 @@ struct test_platform_t final
     cy_us_t                                      last_multicast_deadline{ 0 };
     cy_us_t                                      last_reliable_multicast_deadline{ 0 };
 
-    std::size_t                             p2p_count{ 0U };
-    std::array<unsigned char, header_bytes> last_p2p{};
-    std::size_t                             p2p_extent{ 0U };
-    bool                                    fail_next_p2p_send{ false };
-    cy_us_t                                 last_p2p_deadline{ 0 };
-    cy_us_t                                 last_reliable_p2p_deadline{ 0 };
+    std::size_t                             unicast_count{ 0U };
+    std::array<unsigned char, header_bytes> last_unicast{};
+    std::size_t                             unicast_extent{ 0U };
+    bool                                    fail_next_unicast_send{ false };
+    cy_us_t                                 last_unicast_deadline{ 0 };
+    cy_us_t                                 last_reliable_unicast_deadline{ 0 };
 };
 
 test_platform_t* platform_from(cy_platform_t* const platform)
@@ -137,40 +137,41 @@ extern "C" void platform_subject_reader_destroy(cy_platform_t* const platform, c
     guarded_heap_free(&self->core_heap, reader);
 }
 
-extern "C" cy_err_t platform_p2p_send(cy_platform_t* const   platform,
-                                      const cy_lane_t* const lane,
-                                      const cy_us_t          deadline,
-                                      const cy_bytes_t       message)
+extern "C" cy_err_t platform_unicast_send(cy_platform_t* const   platform,
+                                          const cy_lane_t* const lane,
+                                          const cy_us_t          deadline,
+                                          const cy_bytes_t       message)
 {
     (void)lane;
 
     test_platform_t* const self = platform_from(platform);
-    self->p2p_count++;
-    self->last_p2p_deadline = deadline;
-    self->last_p2p.fill(0U);
+    self->unicast_count++;
+    self->last_unicast_deadline = deadline;
+    self->last_unicast.fill(0U);
 
     std::size_t copied = 0U;
-    for (const cy_bytes_t* frag = &message; (frag != nullptr) && (copied < self->last_p2p.size()); frag = frag->next) {
+    for (const cy_bytes_t* frag = &message; (frag != nullptr) && (copied < self->last_unicast.size());
+         frag                   = frag->next) {
         if ((frag->size == 0U) || (frag->data == nullptr)) {
             continue;
         }
-        const std::size_t to_copy = std::min(self->last_p2p.size() - copied, frag->size);
-        std::memcpy(self->last_p2p.data() + copied, frag->data, to_copy);
+        const std::size_t to_copy = std::min(self->last_unicast.size() - copied, frag->size);
+        std::memcpy(self->last_unicast.data() + copied, frag->data, to_copy);
         copied += to_copy;
     }
-    if ((self->last_p2p[0] & 63U) == 1U) {
-        self->last_reliable_p2p_deadline = deadline;
+    if ((self->last_unicast[0] & 63U) == 1U) {
+        self->last_reliable_unicast_deadline = deadline;
     }
-    if (self->fail_next_p2p_send) {
-        self->fail_next_p2p_send = false;
+    if (self->fail_next_unicast_send) {
+        self->fail_next_unicast_send = false;
         return CY_ERR_MEDIA;
     }
     return CY_OK;
 }
 
-extern "C" void platform_p2p_extent_set(cy_platform_t* const platform, const std::size_t extent)
+extern "C" void platform_unicast_extent_set(cy_platform_t* const platform, const std::size_t extent)
 {
-    platform_from(platform)->p2p_extent = extent;
+    platform_from(platform)->unicast_extent = extent;
 }
 
 extern "C" cy_err_t platform_spin(cy_platform_t* const platform, const cy_us_t deadline)
@@ -296,7 +297,7 @@ void dispatch_ack(test_platform_t* const self,
     message.timestamp = timestamp;
     message.content   = msg;
 
-    const cy_lane_t lane = { .id = remote_id, .p2p = { { 0 } }, .prio = cy_prio_nominal };
+    const cy_lane_t lane = { .id = remote_id, .ctx = { { 0 } }, .prio = cy_prio_nominal };
     cy_on_message(&self->platform, lane, nullptr, message);
 }
 
@@ -314,7 +315,7 @@ void dispatch_ack_with_incompatibility(test_platform_t* const self,
     message.timestamp = timestamp;
     message.content   = msg;
 
-    const cy_lane_t lane = { .id = remote_id, .p2p = { { 0 } }, .prio = cy_prio_nominal };
+    const cy_lane_t lane = { .id = remote_id, .ctx = { { 0 } }, .prio = cy_prio_nominal };
     cy_on_message(&self->platform, lane, nullptr, message);
 }
 
@@ -400,8 +401,8 @@ void platform_init(test_platform_t* const self)
     self->vtable.subject_reader_new     = platform_subject_reader_new;
     self->vtable.subject_reader_destroy = platform_subject_reader_destroy;
 
-    self->vtable.p2p_send       = platform_p2p_send;
-    self->vtable.p2p_extent_set = platform_p2p_extent_set;
+    self->vtable.unicast            = platform_unicast_send;
+    self->vtable.unicast_extent_set = platform_unicast_extent_set;
 
     self->vtable.spin    = platform_spin;
     self->vtable.now     = platform_now;
@@ -688,11 +689,11 @@ void test_single_remaining_not_last_attempt_stays_multicast()
     const std::uint64_t hash     = topic_hash_for(platform, topic_name);
     TEST_ASSERT_NOT_NULL(fut);
 
-    const std::size_t p2p_before       = platform.p2p_count;
+    const std::size_t unicast_before   = platform.unicast_count;
     const std::size_t multicast_before = platform.reliable_multicast_count;
     const cy_us_t     t0               = platform.now;
     spin_to(platform, t0 + ACK_TIMEOUT + 1);
-    TEST_ASSERT_EQUAL_size_t(p2p_before, platform.p2p_count);
+    TEST_ASSERT_EQUAL_size_t(unicast_before, platform.unicast_count);
     TEST_ASSERT_TRUE(platform.reliable_multicast_count > multicast_before);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0xA123), platform.now);
@@ -916,12 +917,12 @@ void test_last_attempt_no_further_retransmission()
     test_end(platform);
 }
 
-void test_p2p_retry_single_remaining()
+void test_unicast_retry_single_remaining()
 {
     test_platform_t platform{};
     test_begin(platform);
 
-    static const char* const topic_name = "reliable/p2p_retry_single_remaining";
+    static const char* const topic_name = "reliable/unicast_retry_single_remaining";
     cy_publisher_t* const    pub        = setup_publisher(platform, topic_name);
     build_association(platform, pub, topic_name, UINT64_C(0x1234));
     build_association(platform, pub, topic_name, UINT64_C(0x5678));
@@ -936,10 +937,10 @@ void test_p2p_retry_single_remaining()
     dispatch_ack(&platform, tag, hash, UINT64_C(0x1234), platform.now);
     assert_future_state(fut, false, CY_OK);
 
-    const std::size_t p2p_before = platform.p2p_count;
-    const cy_us_t     t0         = platform.now;
+    const std::size_t unicast_before = platform.unicast_count;
+    const cy_us_t     t0             = platform.now;
     spin_to(platform, t0 + ACK_TIMEOUT + 1);
-    TEST_ASSERT_TRUE(platform.p2p_count > p2p_before);
+    TEST_ASSERT_TRUE(platform.unicast_count > unicast_before);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0x5678), platform.now);
     assert_publish_state(fut, true, CY_OK, true);
@@ -1092,12 +1093,12 @@ void test_scheduler_lag_near_deadline_no_associations_ack_still_succeeds()
     test_end(platform);
 }
 
-void test_scheduler_lag_near_deadline_single_remaining_uses_p2p_and_clamps_deadline()
+void test_scheduler_lag_near_deadline_single_remaining_uses_unicast_and_clamps_deadline()
 {
     test_platform_t platform{};
     test_begin(platform);
 
-    static const char* const topic_name = "reliable/scheduler_lag_near_deadline_single_remaining_p2p";
+    static const char* const topic_name = "reliable/scheduler_lag_near_deadline_single_remaining_unicast";
     cy_publisher_t* const    pub        = setup_publisher(platform, topic_name);
     build_association(platform, pub, topic_name, UINT64_C(0xD501));
     build_association(platform, pub, topic_name, UINT64_C(0xD502));
@@ -1112,11 +1113,11 @@ void test_scheduler_lag_near_deadline_single_remaining_uses_p2p_and_clamps_deadl
     dispatch_ack(&platform, tag, hash, UINT64_C(0xD501), platform.now);
     assert_future_state(fut, false, CY_OK);
 
-    const std::size_t p2p_before_spin = platform.p2p_count;
+    const std::size_t unicast_before_spin = platform.unicast_count;
     spin_to(platform, deadline - ACK_TIMEOUT + 1);
     assert_future_state(fut, false, CY_ERR_LAG);
-    TEST_ASSERT_TRUE(platform.p2p_count > p2p_before_spin);
-    TEST_ASSERT_EQUAL_INT64(deadline, platform.last_reliable_p2p_deadline);
+    TEST_ASSERT_TRUE(platform.unicast_count > unicast_before_spin);
+    TEST_ASSERT_EQUAL_INT64(deadline, platform.last_reliable_unicast_deadline);
 
     spin_to(platform, deadline + 1);
     assert_publish_state(fut, true, CY_ERR_LAG, true);
@@ -1148,7 +1149,7 @@ void test_scheduler_lag_near_deadline_single_remaining_ack_after_lag_succeeds()
 
     spin_to(platform, deadline - ACK_TIMEOUT + 1);
     assert_future_state(fut, false, CY_ERR_LAG);
-    TEST_ASSERT_EQUAL_INT64(deadline, platform.last_reliable_p2p_deadline);
+    TEST_ASSERT_EQUAL_INT64(deadline, platform.last_reliable_unicast_deadline);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0xD602), platform.now);
     assert_publish_state(fut, true, CY_ERR_LAG, true);
@@ -1603,10 +1604,10 @@ void test_send_message_ack_error_path()
     message.timestamp = platform.now;
     message.content   = msg;
 
-    const cy_lane_t lane = { .id = UINT64_C(0xED01), .p2p = { { 0 } }, .prio = cy_prio_nominal };
+    const cy_lane_t lane = { .id = UINT64_C(0xED01), .ctx = { { 0 } }, .prio = cy_prio_nominal };
 
-    const std::size_t p2p_count_before = platform.p2p_count;
-    platform.fail_next_p2p_send        = true;
+    const std::size_t unicast_count_before = platform.unicast_count;
+    platform.fail_next_unicast_send        = true;
     cy_on_message(&platform.platform, lane, nullptr, message);
     message.timestamp += 1;
 
@@ -1620,8 +1621,8 @@ void test_send_message_ack_error_path()
     message.content = msg_ok;
     cy_on_message(&platform.platform, lane, nullptr, message);
 
-    TEST_ASSERT_EQUAL_size_t(p2p_count_before + 2U, platform.p2p_count);
-    TEST_ASSERT_FALSE(platform.fail_next_p2p_send);
+    TEST_ASSERT_EQUAL_size_t(unicast_count_before + 2U, platform.unicast_count);
+    TEST_ASSERT_FALSE(platform.fail_next_unicast_send);
 
     cy_future_destroy(sub);
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
@@ -1813,14 +1814,14 @@ int main()
     RUN_TEST(test_retransmission_send_error_is_sticky_across_retries);
     RUN_TEST(test_exponential_backoff_second_timeout);
     RUN_TEST(test_last_attempt_no_further_retransmission);
-    RUN_TEST(test_p2p_retry_single_remaining);
+    RUN_TEST(test_unicast_retry_single_remaining);
     RUN_TEST(test_tight_deadline_no_retransmission);
     RUN_TEST(test_tight_deadline_ack_succeeds);
     RUN_TEST(test_scheduler_lag_at_deadline_no_retransmission);
     RUN_TEST(test_scheduler_lag_past_deadline_no_retransmission);
     RUN_TEST(test_scheduler_lag_near_deadline_clamps_multicast_retry_deadline);
     RUN_TEST(test_scheduler_lag_near_deadline_no_associations_ack_still_succeeds);
-    RUN_TEST(test_scheduler_lag_near_deadline_single_remaining_uses_p2p_and_clamps_deadline);
+    RUN_TEST(test_scheduler_lag_near_deadline_single_remaining_uses_unicast_and_clamps_deadline);
     RUN_TEST(test_scheduler_lag_near_deadline_single_remaining_ack_after_lag_succeeds);
     RUN_TEST(test_future_destroy_pending_cancels);
     RUN_TEST(test_future_callback_on_success);

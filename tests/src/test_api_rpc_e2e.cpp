@@ -398,7 +398,7 @@ request_wire_info_t last_request_wire(const e2e::sim_net_t& net)
         if (cap.dropped) {
             continue;
         }
-        if ((cap.frame.source == e2e::sim_node_a) && (cap.frame.destination == e2e::sim_node_b) && !cap.frame.p2p &&
+        if ((cap.frame.source == e2e::sim_node_a) && (cap.frame.destination == e2e::sim_node_b) && !cap.frame.unicast &&
             (cap.frame.header_type == header_msg_rel) && cap.frame.has_tag && cap.frame.has_topic_hash) {
             out.tag        = cap.frame.tag;
             out.topic_hash = cap.frame.topic_hash;
@@ -438,8 +438,8 @@ void inject_response_wire(e2e::sim_net_t&                   net,
     cy_lane_t lane{};
     lane.id   = (remote_id_override == 0U) ? e2e::sim_net_node_id(net, e2e::sim_node_b) : remote_id_override;
     lane.prio = cy_prio_nominal;
-    std::memset(lane.p2p.state, 0, sizeof(lane.p2p.state));
-    std::memcpy(lane.p2p.state, &lane.id, std::min(sizeof(lane.p2p.state), sizeof(lane.id)));
+    std::memset(lane.ctx.state, 0, sizeof(lane.ctx.state));
+    std::memcpy(lane.ctx.state, &lane.id, std::min(sizeof(lane.ctx.state), sizeof(lane.id)));
 
     cy_message_ts_t mts{};
     mts.timestamp = timestamp;
@@ -460,7 +460,7 @@ std::vector<response_control_t> response_controls_since(const e2e::sim_net_t& ne
     const auto&                     captures = e2e::sim_net_captures(net);
     for (std::size_t i = start_index; i < captures.size(); i++) {
         const e2e::frame_capture_t& cap = captures.at(i);
-        if (cap.dropped || !cap.frame.p2p || (cap.frame.source != e2e::sim_node_a) ||
+        if (cap.dropped || !cap.frame.unicast || (cap.frame.source != e2e::sim_node_a) ||
             (cap.frame.destination != e2e::sim_node_b)) {
             continue;
         }
@@ -1632,7 +1632,7 @@ void test_api_rpc_e2e_r26_respond_reliable_retransmit_media_error_notifies_then_
                                 CY_ERR_MEDIA,
                                 e2e::op_fault_predicate_all_of(
                                   { e2e::op_fault_predicate_node(e2e::sim_node_b),
-                                    e2e::op_fault_predicate_kind(e2e::op_kind_t::p2p_send),
+                                    e2e::op_fault_predicate_kind(e2e::op_kind_t::unicast_send),
                                     e2e::op_fault_predicate_deadline(30'000, std::numeric_limits<cy_us_t>::max()) }));
 
     e2e::sim_net_t net{};

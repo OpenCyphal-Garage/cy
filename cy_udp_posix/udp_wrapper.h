@@ -46,7 +46,7 @@ udp_wrapper_t udp_wrapper_new(void);
 bool udp_wrapper_is_open(const udp_wrapper_t* const self);
 
 /// Initialize a socket for use with LibUDPard for transmission of datagrams to arbitrary remote endpoints,
-/// including multicast, and for the reception of unicast P2P traffic.
+/// including multicast, and for the reception of unicast traffic.
 /// The local iface address is used to specify the egress interface for multicast traffic sent over this socket.
 /// Per LibUDPard design, there is one TX socket per redundant interface, so the application needs to invoke
 /// this function once per interface.

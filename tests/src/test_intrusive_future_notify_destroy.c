@@ -32,22 +32,22 @@ typedef struct
     size_t   fail_size_count;
     uint8_t  fail_multicast_header;
     size_t   fail_multicast_count;
-    uint8_t  fail_p2p_header;
-    size_t   fail_p2p_count;
+    uint8_t  fail_unicast_header;
+    size_t   fail_unicast_count;
     cy_err_t fail_send_error;
     size_t   multicast_count;
-    size_t   p2p_count;
-    cy_us_t  p2p_extent;
+    size_t   unicast_count;
+    cy_us_t  unicast_extent;
     size_t   async_error_count;
     cy_err_t last_async_error;
     uint16_t last_async_error_line;
 
     uint8_t last_multicast_header;
-    uint8_t last_p2p_header;
+    uint8_t last_unicast_header;
     byte_t  last_multicast[HEADER_BYTES];
     size_t  last_multicast_size;
-    byte_t  last_p2p[HEADER_BYTES + 16U];
-    size_t  last_p2p_size;
+    byte_t  last_unicast[HEADER_BYTES + 16U];
+    size_t  last_unicast_size;
 } fixture_t;
 
 typedef struct
@@ -198,29 +198,29 @@ static void fixture_subject_reader_destroy(cy_platform_t* const platform, cy_sub
     guarded_heap_free(&self->core_heap, reader);
 }
 
-static cy_err_t fixture_p2p_send(cy_platform_t* const   platform,
-                                 const cy_lane_t* const lane,
-                                 const cy_us_t          deadline,
-                                 const cy_bytes_t       message)
+static cy_err_t fixture_unicast_send(cy_platform_t* const   platform,
+                                     const cy_lane_t* const lane,
+                                     const cy_us_t          deadline,
+                                     const cy_bytes_t       message)
 {
     (void)lane;
     (void)deadline;
     fixture_t* const self = fixture_from(platform);
-    self->p2p_count++;
-    memset(self->last_p2p, 0, sizeof(self->last_p2p));
-    gather_bytes(self->last_p2p, sizeof(self->last_p2p), message, &self->last_p2p_size);
-    self->last_p2p_header = (self->last_p2p_size > 0U) ? (self->last_p2p[0]) : 0xFFU;
-    if ((self->fail_p2p_count > 0U) && (self->last_p2p_header == self->fail_p2p_header)) {
-        self->fail_p2p_count--;
+    self->unicast_count++;
+    memset(self->last_unicast, 0, sizeof(self->last_unicast));
+    gather_bytes(self->last_unicast, sizeof(self->last_unicast), message, &self->last_unicast_size);
+    self->last_unicast_header = (self->last_unicast_size > 0U) ? (self->last_unicast[0]) : 0xFFU;
+    if ((self->fail_unicast_count > 0U) && (self->last_unicast_header == self->fail_unicast_header)) {
+        self->fail_unicast_count--;
         return self->fail_send_error;
     }
     return CY_OK;
 }
 
-static void fixture_p2p_extent_set(cy_platform_t* const platform, const size_t extent)
+static void fixture_unicast_extent_set(cy_platform_t* const platform, const size_t extent)
 {
     fixture_t* const self = fixture_from(platform);
-    self->p2p_extent      = (cy_us_t)extent;
+    self->unicast_extent  = (cy_us_t)extent;
 }
 
 static cy_err_t fixture_spin(cy_platform_t* const platform, const cy_us_t deadline)
@@ -262,9 +262,9 @@ static void fixture_init(fixture_t* const self)
     self->fail_after                    = SIZE_MAX;
     self->fail_send_error               = CY_ERR_MEDIA;
     self->fail_multicast_header         = 0xFFU;
-    self->fail_p2p_header               = 0xFFU;
+    self->fail_unicast_header           = 0xFFU;
     self->last_multicast_header         = 0xFFU;
-    self->last_p2p_header               = 0xFFU;
+    self->last_unicast_header           = 0xFFU;
     self->last_async_error              = CY_OK;
     self->last_async_error_line         = 0U;
     self->platform.vtable               = &self->vtable;
@@ -276,8 +276,8 @@ static void fixture_init(fixture_t* const self)
     self->vtable.subject_writer_send    = fixture_subject_writer_send;
     self->vtable.subject_reader_new     = fixture_subject_reader_new;
     self->vtable.subject_reader_destroy = fixture_subject_reader_destroy;
-    self->vtable.p2p_send               = fixture_p2p_send;
-    self->vtable.p2p_extent_set         = fixture_p2p_extent_set;
+    self->vtable.unicast                = fixture_unicast_send;
+    self->vtable.unicast_extent_set     = fixture_unicast_extent_set;
     self->vtable.spin                   = fixture_spin;
     self->vtable.now                    = fixture_now;
     self->vtable.random                 = fixture_random;
@@ -312,14 +312,14 @@ static void fixture_fail_multicast_header(fixture_t* const self,
     self->fail_send_error       = error;
 }
 
-static void fixture_fail_p2p_header(fixture_t* const self,
-                                    const uint8_t    header_type,
-                                    const size_t     count,
-                                    const cy_err_t   error)
+static void fixture_fail_unicast_header(fixture_t* const self,
+                                        const uint8_t    header_type,
+                                        const size_t     count,
+                                        const cy_err_t   error)
 {
-    self->fail_p2p_header = header_type;
-    self->fail_p2p_count  = count;
-    self->fail_send_error = error;
+    self->fail_unicast_header = header_type;
+    self->fail_unicast_count  = count;
+    self->fail_send_error     = error;
 }
 
 static void fixture_fail_alloc_size(fixture_t* const self, const size_t size, const size_t count)
@@ -356,7 +356,7 @@ static cy_lane_t make_lane(const uint64_t remote_id, const cy_prio_t prio)
     cy_lane_t lane = { 0 };
     lane.id        = remote_id;
     lane.prio      = prio;
-    memcpy(lane.p2p.state, &lane.id, smaller(sizeof(lane.p2p.state), sizeof(lane.id)));
+    memcpy(lane.ctx.state, &lane.id, smaller(sizeof(lane.ctx.state), sizeof(lane.id)));
     return lane;
 }
 
@@ -480,26 +480,26 @@ static uint64_t last_outgoing_hash_multicast(const fixture_t* const self)
 
 static uint8_t last_outgoing_rsp_tag(const fixture_t* const self)
 {
-    TEST_ASSERT_TRUE(self->last_p2p_size >= HEADER_BYTES);
-    return self->last_p2p[1];
+    TEST_ASSERT_TRUE(self->last_unicast_size >= HEADER_BYTES);
+    return self->last_unicast[1];
 }
 
 static uint64_t last_outgoing_rsp_seqno(const fixture_t* const self)
 {
-    TEST_ASSERT_TRUE(self->last_p2p_size >= HEADER_BYTES);
-    return deserialize_u48_local(&self->last_p2p[2]);
+    TEST_ASSERT_TRUE(self->last_unicast_size >= HEADER_BYTES);
+    return deserialize_u48_local(&self->last_unicast[2]);
 }
 
 static uint64_t last_outgoing_rsp_hash(const fixture_t* const self)
 {
-    TEST_ASSERT_TRUE(self->last_p2p_size >= HEADER_BYTES);
-    return deserialize_u64_local(&self->last_p2p[8]);
+    TEST_ASSERT_TRUE(self->last_unicast_size >= HEADER_BYTES);
+    return deserialize_u64_local(&self->last_unicast[8]);
 }
 
 static uint64_t last_outgoing_rsp_message_tag(const fixture_t* const self)
 {
-    TEST_ASSERT_TRUE(self->last_p2p_size >= HEADER_BYTES);
-    return deserialize_u64_local(&self->last_p2p[16]);
+    TEST_ASSERT_TRUE(self->last_unicast_size >= HEADER_BYTES);
+    return deserialize_u64_local(&self->last_unicast[16]);
 }
 
 static void test_publish_notify_ack_completion_destroy(void)
@@ -1032,7 +1032,7 @@ static cy_breadcrumb_t make_breadcrumb(const fixture_t* const fixture,
         .topic_hash  = topic_hash,
         .message_tag = message_tag,
         .seqno       = seqno,
-        .p2p_context = make_lane(remote_id, prio).p2p,
+        .unicast_ctx = make_lane(remote_id, prio).ctx,
     };
 }
 
@@ -1105,7 +1105,7 @@ static void test_respond_notify_pending_media_error_destroy(void)
 
     destroy_capture_t cap = { 0 };
     set_destroy_callback(fut, &cap);
-    fixture_fail_p2p_header(&fixture, header_rsp_rel, 1U, CY_ERR_MEDIA);
+    fixture_fail_unicast_header(&fixture, header_rsp_rel, 1U, CY_ERR_MEDIA);
     fixture_spin_to(&fixture,
                     fixture.now + derive_ack_timeout(fixture.cy->ack_baseline_timeout, cy_prio_exceptional) + 1);
 

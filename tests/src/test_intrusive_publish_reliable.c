@@ -18,8 +18,8 @@ typedef struct
     cy_err_t last_async_error;
     uint16_t last_async_error_line;
 
-    cy_err_t p2p_send_result;
-    size_t   p2p_send_count;
+    cy_err_t unicast_send_result;
+    size_t   unicast_send_count;
 } fixture_t;
 
 static void* fixture_realloc(cy_platform_t* const platform, void* const ptr, const size_t size)
@@ -34,17 +34,17 @@ static void* fixture_realloc(cy_platform_t* const platform, void* const ptr, con
     return guarded_heap_realloc(&self->heap, ptr, size);
 }
 
-static cy_err_t fixture_p2p_send(cy_platform_t* const   platform,
-                                 const cy_lane_t* const lane,
-                                 const cy_us_t          deadline,
-                                 const cy_bytes_t       message)
+static cy_err_t fixture_unicast_send(cy_platform_t* const   platform,
+                                     const cy_lane_t* const lane,
+                                     const cy_us_t          deadline,
+                                     const cy_bytes_t       message)
 {
     (void)lane;
     (void)deadline;
     (void)message;
     fixture_t* const self = (fixture_t*)platform;
-    self->p2p_send_count++;
-    return self->p2p_send_result;
+    self->unicast_send_count++;
+    return self->unicast_send_result;
 }
 
 static void fixture_on_async_error(cy_t* const       cy,
@@ -67,13 +67,13 @@ static void fixture_init(fixture_t* const self)
     self->platform.subject_id_modulus = (uint32_t)CY_SUBJECT_ID_MODULUS_17bit;
     self->platform.cy                 = &self->cy;
     self->vtable.realloc              = fixture_realloc;
-    self->vtable.p2p_send             = fixture_p2p_send;
+    self->vtable.unicast              = fixture_unicast_send;
     self->cy.platform                 = &self->platform;
     self->cy.async_error_handler      = fixture_on_async_error;
     self->fail_after                  = SIZE_MAX;
     self->new_alloc_count             = 0;
     self->last_async_error            = CY_OK;
-    self->p2p_send_result             = CY_OK;
+    self->unicast_send_result         = CY_OK;
 }
 
 static void fixture_set_fail_after(fixture_t* const self, const size_t fail_after)
@@ -454,7 +454,7 @@ static void test_on_message_ack_stale_seqno_lag_ignored(void)
     topic.pub_tag_baseline = UINT64_C(1000);
     topic.pub_seqno        = UINT64_C(100005);
 
-    const cy_lane_t lane = { .id = 42U, .p2p = { { 0 } }, .prio = cy_prio_nominal };
+    const cy_lane_t lane = { .id = 42U, .ctx = { { 0 } }, .prio = cy_prio_nominal };
     on_message_ack(&fixture.cy, &topic, UINT64_C(1001), 0, lane);
 
     TEST_ASSERT_EQUAL_size_t(0U, topic.assoc_count);
@@ -476,7 +476,7 @@ static void test_on_message_ack_allocation_failure_reports_async_error(void)
     topic.pub_seqno        = UINT64_C(2);
 
     fixture_set_fail_after(&fixture, 0U);
-    const cy_lane_t lane = { .id = 43U, .p2p = { { 0 } }, .prio = cy_prio_nominal };
+    const cy_lane_t lane = { .id = 43U, .ctx = { { 0 } }, .prio = cy_prio_nominal };
     on_message_ack(&fixture.cy, &topic, UINT64_C(501), 0, lane);
 
     TEST_ASSERT_EQUAL_size_t(1U, fixture.async_error_count);
@@ -498,7 +498,7 @@ static void test_on_message_ack_older_than_witness_keeps_witness(void)
     topic.pub_tag_baseline = UINT64_C(1000);
     topic.pub_seqno        = UINT64_C(3);
 
-    const cy_lane_t lane = { .id = 44U, .p2p = { { 0 } }, .prio = cy_prio_nominal };
+    const cy_lane_t lane = { .id = 44U, .ctx = { { 0 } }, .prio = cy_prio_nominal };
     on_message_ack(&fixture.cy, &topic, UINT64_C(1002), 10, lane);
     TEST_ASSERT_EQUAL_size_t(1U, topic.assoc_count);
 
@@ -520,12 +520,12 @@ static void test_send_message_ack_error_path(void)
 {
     fixture_t fixture;
     fixture_init(&fixture);
-    fixture.p2p_send_result = CY_ERR_MEDIA;
+    fixture.unicast_send_result = CY_ERR_MEDIA;
 
-    const cy_lane_t lane = { .id = 45U, .p2p = { { 0 } }, .prio = cy_prio_nominal };
+    const cy_lane_t lane = { .id = 45U, .ctx = { { 0 } }, .prio = cy_prio_nominal };
     send_message_ack(&fixture.cy, lane, UINT64_C(1), UINT64_C(2), 100);
 
-    TEST_ASSERT_EQUAL_size_t(1U, fixture.p2p_send_count);
+    TEST_ASSERT_EQUAL_size_t(1U, fixture.unicast_send_count);
     TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&fixture.heap));
     TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&fixture.heap));
 }
@@ -535,10 +535,10 @@ static void test_send_message_ack_success_path(void)
     fixture_t fixture;
     fixture_init(&fixture);
 
-    const cy_lane_t lane = { .id = 46U, .p2p = { { 0 } }, .prio = cy_prio_nominal };
+    const cy_lane_t lane = { .id = 46U, .ctx = { { 0 } }, .prio = cy_prio_nominal };
     send_message_ack(&fixture.cy, lane, UINT64_C(3), UINT64_C(4), 100);
 
-    TEST_ASSERT_EQUAL_size_t(1U, fixture.p2p_send_count);
+    TEST_ASSERT_EQUAL_size_t(1U, fixture.unicast_send_count);
     TEST_ASSERT_EQUAL_size_t(0U, fixture.async_error_count);
     TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&fixture.heap));
     TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&fixture.heap));

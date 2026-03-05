@@ -173,7 +173,7 @@ static reordering_t* make_dynamic_reordering(reorder_env_t* const self,
 {
     reordering_context_t ctx = {
         .now        = now,
-        .lane       = { .id = remote_id, .p2p = { { 0 } }, .prio = cy_prio_nominal },
+        .lane       = { .id = remote_id, .ctx = { { 0 } }, .prio = cy_prio_nominal },
         .subscriber = &self->sub,
         .topic      = &self->topic,
         .tag        = tag,
@@ -880,7 +880,7 @@ static void test_reordering_cavl_compare(void)
 
     reordering_context_t ctx = {
         .now        = 0,
-        .lane       = { .id = 42U, .p2p = { { 0 } }, .prio = cy_prio_nominal },
+        .lane       = { .id = 42U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
         .subscriber = &env.sub,
         .topic      = &env.topic,
         .tag        = 0,
@@ -916,7 +916,7 @@ static void test_reordering_factory_out_of_memory(void)
 
     reordering_context_t ctx = {
         .now        = 0,
-        .lane       = { .id = 42U, .p2p = { { 0 } }, .prio = cy_prio_nominal },
+        .lane       = { .id = 42U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
         .subscriber = &env.sub,
         .topic      = &env.topic,
         .tag        = 8U,

@@ -111,7 +111,7 @@ std::uint64_t capture_fingerprint(const e2e::frame_capture_t& cap)
     h               = mix_hash(h, cap.frame.sequence);
     h               = mix_hash(h, cap.frame.source);
     h               = mix_hash(h, cap.frame.destination);
-    h               = mix_hash(h, cap.frame.p2p ? 1U : 0U);
+    h               = mix_hash(h, cap.frame.unicast ? 1U : 0U);
     h               = mix_hash(h, cap.frame.subject_id);
     h               = mix_hash(h, cap.frame.priority);
     h               = mix_hash(h, static_cast<std::uint64_t>(cap.frame.send_time));

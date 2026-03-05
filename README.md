@@ -186,7 +186,7 @@ void on_message(cy_subscriber_t* subscriber, cy_arrival_t arrival)
 ### ↩️ Respond to messages: RPC & streaming
 
 Observe that the message callback provides an option to send a response back to the publisher directly using
-a direct P2P channel.
+unicast service.
 If the application expects a response, then the correct publishing function to use is `cy_request()`:
 
 ```c++

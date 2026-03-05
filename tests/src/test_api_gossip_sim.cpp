@@ -48,7 +48,7 @@ struct sim_node_t final
     sim_subject_reader_t* readers{ nullptr };
 
     std::size_t subject_send_count{ 0U };
-    std::size_t p2p_send_count{ 0U };
+    std::size_t unicast_send_count{ 0U };
 
     std::uint64_t last_msg_be_hash{ 0U };
     std::uint32_t last_msg_be_subject_id{ 0U };
@@ -60,7 +60,7 @@ struct sim_event_t
     std::uint64_t                            order{ 0U };
     std::size_t                              src_index{ 0U };
     std::size_t                              dst_index{ 0U };
-    bool                                     p2p{ false };
+    bool                                     unicast{ false };
     std::uint32_t                            subject_id{ 0U };
     cy_prio_t                                prio{ cy_prio_nominal };
     std::size_t                              size{ 0U };
@@ -136,7 +136,7 @@ std::size_t find_node_index_by_id(const sim_network_t& net, const std::uint64_t 
 void queue_event(sim_network_t&                                  net,
                  const sim_node_t&                               src,
                  const std::size_t                               dst_index,
-                 const bool                                      p2p,
+                 const bool                                      unicast,
                  const std::uint32_t                             subject_id,
                  const cy_prio_t                                 prio,
                  const std::array<unsigned char, max_wire_size>& data,
@@ -155,7 +155,7 @@ void queue_event(sim_network_t&                                  net,
     ev.order      = order;
     ev.src_index  = src.index;
     ev.dst_index  = dst_index;
-    ev.p2p        = p2p;
+    ev.unicast    = unicast;
     ev.subject_id = subject_id;
     ev.prio       = prio;
     ev.size       = size;
@@ -181,11 +181,11 @@ void enqueue_subject(sim_node_t&                                     src,
     }
 }
 
-void enqueue_p2p(sim_node_t&                                     src,
-                 const std::uint64_t                             dst_id,
-                 const cy_prio_t                                 prio,
-                 const std::array<unsigned char, max_wire_size>& data,
-                 const std::size_t                               size)
+void enqueue_unicast(sim_node_t&                                     src,
+                     const std::uint64_t                             dst_id,
+                     const cy_prio_t                                 prio,
+                     const std::array<unsigned char, max_wire_size>& data,
+                     const std::size_t                               size)
 {
     sim_network_t&    net       = *src.network;
     const std::size_t dst_index = find_node_index_by_id(net, dst_id);
@@ -263,22 +263,23 @@ extern "C" void sim_subject_reader_destroy(cy_platform_t* const platform, cy_sub
     guarded_heap_free(&self->core_heap, reader);
 }
 
-extern "C" cy_err_t sim_p2p_send(cy_platform_t* const   platform,
-                                 const cy_lane_t* const lane,
-                                 const cy_us_t          deadline,
-                                 const cy_bytes_t       message)
+extern "C" cy_err_t sim_unicast_send(cy_platform_t* const   platform,
+                                     const cy_lane_t* const lane,
+                                     const cy_us_t          deadline,
+                                     const cy_bytes_t       message)
 {
     (void)deadline;
     sim_node_t* const self = node_from(platform);
-    self->p2p_send_count++;
+    self->unicast_send_count++;
 
     std::array<unsigned char, max_wire_size> data{};
     const std::size_t                        size = flatten_fragments(message, data.data(), data.size());
-    enqueue_p2p(*self, (lane != nullptr) ? lane->id : 0U, (lane != nullptr) ? lane->prio : cy_prio_nominal, data, size);
+    enqueue_unicast(
+      *self, (lane != nullptr) ? lane->id : 0U, (lane != nullptr) ? lane->prio : cy_prio_nominal, data, size);
     return CY_OK;
 }
 
-extern "C" void sim_p2p_extent_set(cy_platform_t* const platform, const std::size_t extent)
+extern "C" void sim_unicast_extent_set(cy_platform_t* const platform, const std::size_t extent)
 {
     (void)platform;
     (void)extent;
@@ -337,8 +338,8 @@ void network_node_init(sim_network_t& net, const std::size_t index)
     node.vtable.subject_writer_send    = sim_subject_writer_send;
     node.vtable.subject_reader_new     = sim_subject_reader_new;
     node.vtable.subject_reader_destroy = sim_subject_reader_destroy;
-    node.vtable.p2p_send               = sim_p2p_send;
-    node.vtable.p2p_extent_set         = sim_p2p_extent_set;
+    node.vtable.unicast                = sim_unicast_send;
+    node.vtable.unicast_extent_set     = sim_unicast_extent_set;
     node.vtable.spin                   = sim_spin;
     node.vtable.now                    = sim_now;
     node.vtable.realloc                = sim_realloc;
@@ -401,9 +402,9 @@ void deliver_event(sim_network_t& net, const sim_event_t& ev)
     cy_lane_t lane{};
     lane.id           = net.nodes.at(ev.src_index).node_id;
     lane.prio         = ev.prio;
-    lane.p2p.state[0] = static_cast<unsigned char>(lane.id & 0xFFU);
+    lane.ctx.state[0] = static_cast<unsigned char>(lane.id & 0xFFU);
 
-    if (ev.p2p) {
+    if (ev.unicast) {
         cy_on_message(&dst.platform, lane, nullptr, mts);
     } else {
         const sim_subject_reader_t* const reader = find_reader(dst, ev.subject_id);
@@ -480,7 +481,7 @@ void inject_gossip(sim_node_t&         node,
     cy_lane_t lane{};
     lane.id           = remote_id;
     lane.prio         = cy_prio_nominal;
-    lane.p2p.state[0] = static_cast<unsigned char>(remote_id & 0xFFU);
+    lane.ctx.state[0] = static_cast<unsigned char>(remote_id & 0xFFU);
     cy_on_message(&node.platform, lane, nullptr, mts);
 }
 

@@ -148,7 +148,7 @@ std::uint64_t capture_fingerprint(const e2e::frame_capture_t& cap)
     h               = mix_hash(h, cap.frame.sequence);
     h               = mix_hash(h, cap.frame.source);
     h               = mix_hash(h, cap.frame.destination);
-    h               = mix_hash(h, cap.frame.p2p ? 1U : 0U);
+    h               = mix_hash(h, cap.frame.unicast ? 1U : 0U);
     h               = mix_hash(h, cap.frame.subject_id);
     h               = mix_hash(h, cap.frame.priority);
     h               = mix_hash(h, static_cast<std::uint64_t>(cap.frame.send_time));
@@ -223,7 +223,7 @@ void inject_divergent_gossip(e2e::sim_net_t&     net,
     cy_lane_t lane{};
     lane.id           = remote_id;
     lane.prio         = cy_prio_nominal;
-    lane.p2p.state[0] = static_cast<unsigned char>(remote_id & 0xFFU);
+    lane.ctx.state[0] = static_cast<unsigned char>(remote_id & 0xFFU);
 
     cy_on_message(e2e::sim_net_platform(net, dst_node), lane, nullptr, mts);
 }

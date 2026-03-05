@@ -49,9 +49,9 @@ struct test_platform_t final
     cy_us_t       now{ 0 };
     std::uint64_t random_state{ 1U };
 
-    std::size_t                   p2p_count{ 0U };
-    std::array<unsigned char, 16> last_p2p{};
-    std::size_t                   p2p_extent{ 0U };
+    std::size_t                   unicast_count{ 0U };
+    std::array<unsigned char, 16> last_unicast{};
+    std::size_t                   unicast_extent{ 0U };
 };
 
 test_platform_t* platform_from(cy_platform_t* const platform)
@@ -116,34 +116,35 @@ extern "C" void platform_subject_reader_destroy(cy_platform_t* const platform, c
     guarded_heap_free(&self->core_heap, reader);
 }
 
-extern "C" cy_err_t platform_p2p_send(cy_platform_t* const   platform,
-                                      const cy_lane_t* const lane,
-                                      const cy_us_t          deadline,
-                                      const cy_bytes_t       message)
+extern "C" cy_err_t platform_unicast_send(cy_platform_t* const   platform,
+                                          const cy_lane_t* const lane,
+                                          const cy_us_t          deadline,
+                                          const cy_bytes_t       message)
 {
     (void)lane;
     (void)deadline;
 
     test_platform_t* const self = platform_from(platform);
-    self->p2p_count++;
-    self->last_p2p.fill(0U);
+    self->unicast_count++;
+    self->last_unicast.fill(0U);
 
     std::size_t copied = 0U;
-    for (const cy_bytes_t* frag = &message; (frag != nullptr) && (copied < self->last_p2p.size()); frag = frag->next) {
+    for (const cy_bytes_t* frag = &message; (frag != nullptr) && (copied < self->last_unicast.size());
+         frag                   = frag->next) {
         if ((frag->size == 0U) || (frag->data == nullptr)) {
             continue;
         }
         const std::size_t to_copy =
-          ((self->last_p2p.size() - copied) < frag->size) ? (self->last_p2p.size() - copied) : frag->size;
-        std::memcpy(self->last_p2p.data() + copied, frag->data, to_copy);
+          ((self->last_unicast.size() - copied) < frag->size) ? (self->last_unicast.size() - copied) : frag->size;
+        std::memcpy(self->last_unicast.data() + copied, frag->data, to_copy);
         copied += to_copy;
     }
     return CY_OK;
 }
 
-extern "C" void platform_p2p_extent_set(cy_platform_t* const platform, const std::size_t extent)
+extern "C" void platform_unicast_extent_set(cy_platform_t* const platform, const std::size_t extent)
 {
-    platform_from(platform)->p2p_extent = extent;
+    platform_from(platform)->unicast_extent = extent;
 }
 
 extern "C" cy_err_t platform_spin(cy_platform_t* const platform, const cy_us_t deadline)
@@ -242,8 +243,8 @@ void platform_init(test_platform_t* const self)
     self->vtable.subject_reader_new     = platform_subject_reader_new;
     self->vtable.subject_reader_destroy = platform_subject_reader_destroy;
 
-    self->vtable.p2p_send       = platform_p2p_send;
-    self->vtable.p2p_extent_set = platform_p2p_extent_set;
+    self->vtable.unicast            = platform_unicast_send;
+    self->vtable.unicast_extent_set = platform_unicast_extent_set;
 
     self->vtable.spin    = platform_spin;
     self->vtable.now     = platform_now;
@@ -288,7 +289,7 @@ void dispatch_message(test_platform_t* const  self,
     std::array<unsigned char, header_bytes + 1U> wire{};
     make_message_header(wire.data(), type, tag, cy_topic_hash(topic));
     wire[header_bytes]       = payload_byte;
-    const cy_lane_t     lane = { .id = remote_id, .p2p = { { 0 } }, .prio = cy_prio_nominal };
+    const cy_lane_t     lane = { .id = remote_id, .ctx = { { 0 } }, .prio = cy_prio_nominal };
     cy_message_t* const msg  = cy_test_message_make(&self->message_heap, wire.data(), wire.size());
     TEST_ASSERT_NOT_NULL(msg);
 
@@ -333,12 +334,12 @@ void test_api_malformed_header_drops_message()
     cy_message_ts_t mts{};
     mts.timestamp        = 10;
     mts.content          = msg;
-    const cy_lane_t lane = { .id = 1234U, .p2p = { { 0 } }, .prio = cy_prio_nominal };
+    const cy_lane_t lane = { .id = 1234U, .ctx = { { 0 } }, .prio = cy_prio_nominal };
 
     cy_on_message(&platform.platform, lane, nullptr, mts);
     TEST_ASSERT_EQUAL_size_t(1, cy_test_message_destroy_count());
     TEST_ASSERT_EQUAL_size_t(0, cy_test_message_live_count());
-    TEST_ASSERT_EQUAL_size_t(0, platform.p2p_count);
+    TEST_ASSERT_EQUAL_size_t(0, platform.unicast_count);
 
     platform_deinit(&platform);
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&platform.message_heap));
@@ -365,11 +366,11 @@ void test_api_inline_msg_rejects_nonzero_incompatibility()
     make_message_header(wire.data(), header_msg_best_effort, UINT64_C(101), cy_topic_hash(topic));
     wire[2]              = 1U; // incompatibility
     wire[header_bytes]   = 0x11U;
-    const cy_lane_t lane = { .id = UINT64_C(0x901), .p2p = { { 0 } }, .prio = cy_prio_nominal };
+    const cy_lane_t lane = { .id = UINT64_C(0x901), .ctx = { { 0 } }, .prio = cy_prio_nominal };
 
     dispatch_raw(&platform, wire.data(), wire.size(), lane, nullptr, 200);
     TEST_ASSERT_EQUAL_size_t(0U, capture.count);
-    TEST_ASSERT_EQUAL_size_t(0U, platform.p2p_count);
+    TEST_ASSERT_EQUAL_size_t(0U, platform.unicast_count);
 
     cy_future_destroy(sub);
     TEST_ASSERT_EQUAL_UINT8(CY_OK, cy_spin_once(platform.cy));
@@ -398,11 +399,11 @@ void test_api_inline_msg_rejects_invalid_lage()
     make_message_header(wire.data(), header_msg_best_effort, UINT64_C(106), cy_topic_hash(topic));
     wire[3]              = static_cast<unsigned char>(127); // invalid lage (> LAGE_MAX)
     wire[header_bytes]   = 0x66U;
-    const cy_lane_t lane = { .id = UINT64_C(0x906), .p2p = { { 0 } }, .prio = cy_prio_nominal };
+    const cy_lane_t lane = { .id = UINT64_C(0x906), .ctx = { { 0 } }, .prio = cy_prio_nominal };
 
     dispatch_raw(&platform, wire.data(), wire.size(), lane, nullptr, 205);
     TEST_ASSERT_EQUAL_size_t(0U, capture.count);
-    TEST_ASSERT_EQUAL_size_t(0U, platform.p2p_count);
+    TEST_ASSERT_EQUAL_size_t(0U, platform.unicast_count);
 
     cy_future_destroy(sub);
     TEST_ASSERT_EQUAL_UINT8(CY_OK, cy_spin_once(platform.cy));
@@ -431,11 +432,11 @@ void test_api_inline_msg_rejects_pinned_hash_nonzero_evictions()
     make_message_header(wire.data(), header_msg_best_effort, UINT64_C(102), cy_topic_hash(topic));
     wire[4]              = 1U; // evictions in little-endian u32 field [4..7]
     wire[header_bytes]   = 0x22U;
-    const cy_lane_t lane = { .id = UINT64_C(0x902), .p2p = { { 0 } }, .prio = cy_prio_nominal };
+    const cy_lane_t lane = { .id = UINT64_C(0x902), .ctx = { { 0 } }, .prio = cy_prio_nominal };
 
     dispatch_raw(&platform, wire.data(), wire.size(), lane, nullptr, 201);
     TEST_ASSERT_EQUAL_size_t(0U, capture.count);
-    TEST_ASSERT_EQUAL_size_t(0U, platform.p2p_count);
+    TEST_ASSERT_EQUAL_size_t(0U, platform.unicast_count);
 
     cy_future_destroy(sub);
     TEST_ASSERT_EQUAL_UINT8(CY_OK, cy_spin_once(platform.cy));
@@ -470,11 +471,11 @@ void test_api_inline_msg_rejects_multicast_subject_mismatch()
     std::array<unsigned char, header_bytes + 1U> wire{};
     make_message_header(wire.data(), header_msg_best_effort, UINT64_C(103), hash);
     wire[header_bytes]   = 0x33U;
-    const cy_lane_t lane = { .id = UINT64_C(0x903), .p2p = { { 0 } }, .prio = cy_prio_nominal };
+    const cy_lane_t lane = { .id = UINT64_C(0x903), .ctx = { { 0 } }, .prio = cy_prio_nominal };
 
     dispatch_raw(&platform, wire.data(), wire.size(), lane, &reader, 202);
     TEST_ASSERT_EQUAL_size_t(0U, capture.count);
-    TEST_ASSERT_EQUAL_size_t(0U, platform.p2p_count);
+    TEST_ASSERT_EQUAL_size_t(0U, platform.unicast_count);
 
     cy_future_destroy(sub);
     TEST_ASSERT_EQUAL_UINT8(CY_OK, cy_spin_once(platform.cy));
@@ -483,32 +484,32 @@ void test_api_inline_msg_rejects_multicast_subject_mismatch()
     TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&platform.message_heap));
 }
 
-void test_api_inline_msg_p2p_skips_subject_consistency_check()
+void test_api_inline_msg_unicast_skips_subject_consistency_check()
 {
     test_platform_t platform{};
     platform_init(&platform);
     cy_test_message_reset_counters();
 
     arrival_capture_t  capture{};
-    cy_future_t* const sub = cy_subscribe(platform.cy, cy_str("rx/inline/p2p/consistency"), 256U);
+    cy_future_t* const sub = cy_subscribe(platform.cy, cy_str("rx/inline/unicast/consistency"), 256U);
     TEST_ASSERT_NOT_NULL(sub);
     cy_user_context_t context = CY_USER_CONTEXT_EMPTY;
     context.ptr[0]            = &capture;
     cy_future_context_set(sub, context);
     cy_future_callback_set(sub, on_arrival_capture);
 
-    const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("rx/inline/p2p/consistency"));
+    const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("rx/inline/unicast/consistency"));
     TEST_ASSERT_NOT_NULL(topic);
     std::array<unsigned char, header_bytes + 1U> wire{};
     make_message_header(wire.data(), header_msg_best_effort, UINT64_C(104), cy_topic_hash(topic));
     wire[4]              = 1U; // mismatched evictions would alter multicast subject mapping
     wire[header_bytes]   = 0x44U;
-    const cy_lane_t lane = { .id = UINT64_C(0x904), .p2p = { { 0 } }, .prio = cy_prio_nominal };
+    const cy_lane_t lane = { .id = UINT64_C(0x904), .ctx = { { 0 } }, .prio = cy_prio_nominal };
 
     dispatch_raw(&platform, wire.data(), wire.size(), lane, nullptr, 203);
     TEST_ASSERT_EQUAL_size_t(1U, capture.count);
     TEST_ASSERT_EQUAL_UINT64(UINT64_C(104), capture.tags[0]);
-    TEST_ASSERT_EQUAL_size_t(0U, platform.p2p_count);
+    TEST_ASSERT_EQUAL_size_t(0U, platform.unicast_count);
 
     cy_future_destroy(sub);
     TEST_ASSERT_EQUAL_UINT8(CY_OK, cy_spin_once(platform.cy));
@@ -541,7 +542,7 @@ void test_api_inline_msg_unknown_topic_collision_path_smoke()
     std::array<unsigned char, header_bytes + 1U> wire{};
     make_message_header(wire.data(), header_msg_best_effort, UINT64_C(105), remote_hash);
     wire[header_bytes]   = 0x55U;
-    const cy_lane_t lane = { .id = UINT64_C(0x905), .p2p = { { 0 } }, .prio = cy_prio_nominal };
+    const cy_lane_t lane = { .id = UINT64_C(0x905), .ctx = { { 0 } }, .prio = cy_prio_nominal };
 
     dispatch_raw(&platform, wire.data(), wire.size(), lane, &reader, 204);
     TEST_ASSERT_EQUAL_size_t(0U, capture.count);
@@ -577,8 +578,8 @@ void test_api_reliable_duplicate_acked_once_to_application()
 
     TEST_ASSERT_EQUAL_size_t(1, capture.count);
     TEST_ASSERT_EQUAL_UINT64(0x1234U, capture.tags[0]);
-    TEST_ASSERT_EQUAL_size_t(2, platform.p2p_count);
-    TEST_ASSERT_EQUAL_UINT8(header_msg_ack, static_cast<std::uint8_t>(platform.last_p2p[0] & 63U));
+    TEST_ASSERT_EQUAL_size_t(2, platform.unicast_count);
+    TEST_ASSERT_EQUAL_UINT8(header_msg_ack, static_cast<std::uint8_t>(platform.last_unicast[0] & 63U));
     TEST_ASSERT_EQUAL_size_t(0, cy_test_message_live_count());
 
     cy_future_destroy(sub);
@@ -610,7 +611,7 @@ void test_api_ordered_subscriber_timeout_flush()
     dispatch_message(&platform, topic, header_msg_best_effort, 8U, 0xBBU, 100, 0x41U);
     dispatch_message(&platform, topic, header_msg_best_effort, 9U, 0xBBU, 101, 0x42U);
     TEST_ASSERT_EQUAL_size_t(0, capture.count);
-    TEST_ASSERT_EQUAL_size_t(0, platform.p2p_count);
+    TEST_ASSERT_EQUAL_size_t(0, platform.unicast_count);
 
     platform.now = 1000;
     TEST_ASSERT_EQUAL_UINT8(CY_OK, cy_spin_once(platform.cy));
@@ -1068,7 +1069,7 @@ void test_api_subscriber_substitutions_contract()
           std::array<unsigned char, 256U> wire{};
           const std::size_t size = make_gossip_header(wire.data(), wire.size(), 3U, 0, hash, 0U, cy_str(topic_name));
           TEST_ASSERT_TRUE(size > 0U);
-          const cy_lane_t lane = { .id = remote_id, .p2p = { { 0 } }, .prio = cy_prio_nominal };
+          const cy_lane_t lane = { .id = remote_id, .ctx = { { 0 } }, .prio = cy_prio_nominal };
           dispatch_raw(&platform, wire.data(), size, lane, nullptr, 200);
       };
     dispatch_gossip(match_topic_hash, match_topic_name, UINT64_C(0xE1));
@@ -1213,7 +1214,7 @@ int main()
     RUN_TEST(test_api_inline_msg_rejects_invalid_lage);
     RUN_TEST(test_api_inline_msg_rejects_pinned_hash_nonzero_evictions);
     RUN_TEST(test_api_inline_msg_rejects_multicast_subject_mismatch);
-    RUN_TEST(test_api_inline_msg_p2p_skips_subject_consistency_check);
+    RUN_TEST(test_api_inline_msg_unicast_skips_subject_consistency_check);
     RUN_TEST(test_api_inline_msg_unknown_topic_collision_path_smoke);
     RUN_TEST(test_api_reliable_duplicate_acked_once_to_application);
     RUN_TEST(test_api_ordered_subscriber_timeout_flush);

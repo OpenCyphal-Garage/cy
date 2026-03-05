@@ -75,7 +75,7 @@ struct sim_node_t final
     sim_subject_reader_t* readers{ nullptr };
 
     std::size_t subject_send_count{ 0U };
-    std::size_t p2p_send_count{ 0U };
+    std::size_t unicast_send_count{ 0U };
 };
 
 struct sim_net_config_t final

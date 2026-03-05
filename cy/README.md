@@ -11,8 +11,8 @@ The Cyphal transport layer is borrowed from Cyphal v1.0 with only minimal change
 
 The transport layer provides _unreliable_ _deduplicated_ (at most one) _unordered_ delivery of messages either to:
 
+- A specified _remote node_ (unicast).
 - A _group of subscribers_ on a given _subject_ identified with a numerical subject-ID (IGMP group, CAN ID, etc).
-- A specified _remote node_ direct peer-to-peer (_P2P_).
 
 An exception is applied to the single _broadcast subject_ that takes the highest subject-ID: deduplication is not required on it to improve scalability; the session layer accepts occasional message duplication on this subject. This exception is due to the fact that all nodes participate in the broadcast subject, which may put strain on the smaller nodes.
 
@@ -180,7 +180,7 @@ uint64 tag              # From the acknowledged message.
 
 Response tags are not used for ordering recovery since there is a seqno available, and there is no risk of reboot misattribution -- they are only needed for acknowledgement correlation and as such they are much narrower and there is no monotonicity requirement, the sender can choose values arbitrarily.
 
-For P2P NACKs are well-defined since these interactions are inherently unicast.
+For unicast, NACKs are well-defined since these interactions are inherently unicast.
 
 The (n)ack priority level must match that of the original response.
 
