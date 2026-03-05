@@ -236,15 +236,12 @@ void wait_all_futures(e2e::sim_net_t& net, cy_us_t& now, const std::vector<cy_fu
     }
 }
 
-void assert_publish_futures(const std::vector<cy_future_t*>& futures,
-                            const cy_err_t                   expected_error,
-                            const bool                       expected_delivered)
+void assert_publish_futures(const std::vector<cy_future_t*>& futures, const cy_err_t expected_error)
 {
     for (cy_future_t* const fut : futures) {
         TEST_ASSERT_NOT_NULL(fut);
         TEST_ASSERT_TRUE(cy_future_done(fut));
         TEST_ASSERT_EQUAL_INT(expected_error, cy_future_error(fut));
-        TEST_ASSERT_EQUAL_INT(expected_delivered ? 1 : 0, cy_publish_delivered(fut) ? 1 : 0);
     }
 }
 
@@ -355,7 +352,7 @@ void test_api_pubsub_e2e_a03_reliable_happy_unordered()
 
     TEST_ASSERT_EQUAL_size_t(0U, capture.malformed);
     assert_unordered_complete_unique(capture, 103U, 1U, 8U);
-    assert_publish_futures(futures, CY_OK, true);
+    assert_publish_futures(futures, CY_OK);
 
     cleanup_case(net, now, futures, { sub }, { pub });
 }
@@ -385,7 +382,7 @@ void test_api_pubsub_e2e_a04_reliable_happy_ordered()
     TEST_ASSERT_EQUAL_size_t(0U, capture.malformed);
     assert_unordered_complete_unique(capture, 104U, 1U, 8U);
     assert_ordered_strictly_increasing(capture, 104U);
-    assert_publish_futures(futures, CY_OK, true);
+    assert_publish_futures(futures, CY_OK);
 
     cleanup_case(net, now, futures, { sub }, { pub });
 }
@@ -414,7 +411,7 @@ void test_api_pubsub_e2e_a05_reliable_burst_no_faults_unordered()
 
     TEST_ASSERT_EQUAL_size_t(0U, capture.malformed);
     assert_unordered_complete_unique(capture, 105U, 1U, 24U);
-    assert_publish_futures(futures, CY_OK, true);
+    assert_publish_futures(futures, CY_OK);
 
     cleanup_case(net, now, futures, { sub }, { pub });
 }
@@ -444,7 +441,7 @@ void test_api_pubsub_e2e_a06_reliable_burst_no_faults_ordered()
     TEST_ASSERT_EQUAL_size_t(0U, capture.malformed);
     assert_unordered_complete_unique(capture, 106U, 1U, 24U);
     assert_ordered_strictly_increasing(capture, 106U);
-    assert_publish_futures(futures, CY_OK, true);
+    assert_publish_futures(futures, CY_OK);
 
     cleanup_case(net, now, futures, { sub }, { pub });
 }

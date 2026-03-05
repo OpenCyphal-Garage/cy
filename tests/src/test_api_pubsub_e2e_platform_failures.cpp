@@ -237,12 +237,12 @@ void assert_no_malformed(const arrival_capture_t& capture, const char* const lab
     TEST_FAIL_MESSAGE(msg.c_str());
 }
 
-void assert_future_delivery(const std::vector<cy_future_t*>& futures, const bool expected_delivered)
+void assert_future_error(const std::vector<cy_future_t*>& futures, const cy_err_t expected_error)
 {
     for (cy_future_t* const fut : futures) {
         TEST_ASSERT_NOT_NULL(fut);
         TEST_ASSERT_TRUE(cy_future_done(fut));
-        TEST_ASSERT_EQUAL_INT(expected_delivered ? 1 : 0, cy_publish_delivered(fut) ? 1 : 0);
+        TEST_ASSERT_EQUAL_INT(expected_error, cy_future_error(fut));
     }
 }
 
@@ -361,7 +361,7 @@ void test_api_pubsub_e2e_f01_transient_subject_send_failures_recover()
     assert_no_malformed(capture, "f01");
     assert_unordered_complete_unique(capture, 501U, 1U, 8U);
     assert_unordered_unique_only(capture, 501U);
-    assert_future_delivery(futures, true);
+    assert_future_error(futures, CY_OK);
     TEST_ASSERT_TRUE(count_failed_ops(net, e2e::op_kind_t::subject_send) > 0U);
 
     cleanup_case(net, now, futures, { sub }, { pub });
@@ -405,7 +405,7 @@ void test_api_pubsub_e2e_f02_persistent_subject_send_failures_cause_future_failu
     assert_no_malformed(capture, "f02");
     TEST_ASSERT_TRUE(sequences_for(capture, 502U).empty());
     if (!futures.empty()) {
-        assert_future_delivery(futures, false);
+        assert_future_error(futures, CY_ERR_DELIVERY);
     }
     TEST_ASSERT_TRUE(immediate_publish_failures > 0U);
     TEST_ASSERT_TRUE(count_failed_ops(net, e2e::op_kind_t::subject_send) >= immediate_publish_failures);
@@ -453,7 +453,7 @@ void test_api_pubsub_e2e_f03_transient_unicast_send_failures_on_receiver_recover
     assert_no_malformed(capture, "f03");
     assert_unordered_complete_unique(capture, 503U, 1U, 8U);
     assert_unordered_unique_only(capture, 503U);
-    assert_future_delivery(futures, true);
+    assert_future_error(futures, CY_OK);
     TEST_ASSERT_TRUE(count_failed_ops(net, e2e::op_kind_t::unicast_send) > 0U);
 
     cleanup_case(net, now, futures, { sub }, { pub });
@@ -497,7 +497,7 @@ void test_api_pubsub_e2e_f04_mixed_subject_and_unicast_send_failures_still_conve
     assert_no_malformed(capture, "f04");
     assert_unordered_complete_unique(capture, 504U, 1U, 10U);
     assert_unordered_unique_only(capture, 504U);
-    assert_future_delivery(futures, true);
+    assert_future_error(futures, CY_OK);
     TEST_ASSERT_TRUE(count_failed_ops(net, e2e::op_kind_t::subject_send) > 0U);
     TEST_ASSERT_TRUE(count_failed_ops(net, e2e::op_kind_t::unicast_send) > 0U);
 
@@ -542,7 +542,7 @@ void test_api_pubsub_e2e_f05_transient_spin_failures_on_publisher_node_recover()
     assert_no_malformed(capture, "f05");
     assert_unordered_complete_unique(capture, 505U, 1U, 6U);
     assert_unordered_unique_only(capture, 505U);
-    assert_future_delivery(futures, true);
+    assert_future_error(futures, CY_OK);
     TEST_ASSERT_TRUE(count_failed_ops(net, e2e::op_kind_t::spin) > 0U);
 
     cleanup_case(net, now, futures, { sub }, { pub });
@@ -586,7 +586,7 @@ void test_api_pubsub_e2e_f06_transient_spin_failures_on_subscriber_node_recover(
     assert_no_malformed(capture, "f06");
     assert_unordered_complete_unique(capture, 506U, 1U, 6U);
     assert_unordered_unique_only(capture, 506U);
-    assert_future_delivery(futures, true);
+    assert_future_error(futures, CY_OK);
     TEST_ASSERT_TRUE(count_failed_ops(net, e2e::op_kind_t::spin) > 0U);
 
     cleanup_case(net, now, futures, { sub }, { pub });
@@ -635,7 +635,7 @@ void test_api_pubsub_e2e_f07_asymmetric_node_degradation_eventual_recovery()
     assert_no_malformed(capture, "f07");
     assert_unordered_complete_unique(capture, 507U, 1U, 8U);
     assert_unordered_unique_only(capture, 507U);
-    assert_future_delivery(futures, true);
+    assert_future_error(futures, CY_OK);
     TEST_ASSERT_TRUE(count_failed_ops(net, e2e::op_kind_t::subject_send) > 0U);
     TEST_ASSERT_TRUE(count_failed_ops(net, e2e::op_kind_t::spin) > 0U);
 
@@ -701,7 +701,7 @@ void test_api_pubsub_e2e_f08_failure_storm_then_recovery_preserves_invariants()
     assert_no_malformed(capture, "f08");
     assert_unordered_complete_unique(capture, 508U, 1U, 10U);
     assert_unordered_unique_only(capture, 508U);
-    assert_future_delivery(futures, true);
+    assert_future_error(futures, CY_OK);
     TEST_ASSERT_TRUE(count_failed_ops(net, e2e::op_kind_t::subject_send) > 0U);
     TEST_ASSERT_TRUE(count_failed_ops(net, e2e::op_kind_t::unicast_send) > 0U);
     TEST_ASSERT_TRUE(count_failed_ops(net, e2e::op_kind_t::spin) > 0U);

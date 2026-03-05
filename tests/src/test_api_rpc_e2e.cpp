@@ -1217,7 +1217,7 @@ void test_api_rpc_e2e_r15_publish_failure_after_response_keeps_future_alive_unti
     assert_request_state(request, false, CY_ERR_DELIVERY);
 
     drive_for(net, now, 80'000);
-    assert_request_state(request, true, CY_ERR_DELIVERY);
+    assert_request_state(request, true, CY_ERR_LIVENESS);
 
     e2e::sim_net_faults_set(net, nullptr);
     cleanup_case(net, now, { request }, { server_sub }, { client });

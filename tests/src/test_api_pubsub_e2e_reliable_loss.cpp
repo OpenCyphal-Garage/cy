@@ -195,15 +195,12 @@ bool wait_all_futures(e2e::sim_net_t& net, cy_us_t& now, const std::vector<cy_fu
     return false;
 }
 
-void assert_publish_futures(const std::vector<cy_future_t*>& futures,
-                            const cy_err_t                   expected_error,
-                            const bool                       expected_delivered)
+void assert_publish_futures(const std::vector<cy_future_t*>& futures, const cy_err_t expected_error)
 {
     for (cy_future_t* const fut : futures) {
         TEST_ASSERT_NOT_NULL(fut);
         TEST_ASSERT_TRUE(cy_future_done(fut));
         TEST_ASSERT_EQUAL_INT(expected_error, cy_future_error(fut));
-        TEST_ASSERT_EQUAL_INT(expected_delivered ? 1 : 0, cy_publish_delivered(fut) ? 1 : 0);
     }
 }
 
@@ -272,7 +269,7 @@ void test_api_pubsub_e2e_b01_drop_first_data_frame_for_each_message()
 
     TEST_ASSERT_EQUAL_size_t(0U, capture.malformed);
     assert_unordered_complete_unique(capture, 201U, 1U, 10U);
-    assert_publish_futures(futures, CY_OK, true);
+    assert_publish_futures(futures, CY_OK);
 
     cleanup_case(net, now, futures, { sub }, { pub });
 }
@@ -313,7 +310,7 @@ void test_api_pubsub_e2e_b02_drop_every_nth_data_frame()
 
     TEST_ASSERT_EQUAL_size_t(0U, capture.malformed);
     assert_unordered_complete_unique(capture, 202U, 1U, 10U);
-    assert_publish_futures(futures, CY_OK, true);
+    assert_publish_futures(futures, CY_OK);
 
     cleanup_case(net, now, futures, { sub }, { pub });
 }
@@ -352,7 +349,7 @@ void test_api_pubsub_e2e_b03_mid_stream_burst_data_loss_window()
 
     TEST_ASSERT_EQUAL_size_t(0U, capture.malformed);
     assert_unordered_complete_unique(capture, 203U, 1U, 10U);
-    assert_publish_futures(futures, CY_OK, true);
+    assert_publish_futures(futures, CY_OK);
 
     cleanup_case(net, now, futures, { sub }, { pub });
 }
@@ -389,7 +386,7 @@ void test_api_pubsub_e2e_b04_drop_first_ack_for_each_message()
     TEST_ASSERT_EQUAL_size_t(0U, capture.malformed);
     assert_unordered_complete_unique(capture, 204U, 1U, 10U);
     assert_unordered_unique_only(capture, 204U);
-    assert_publish_futures(futures, CY_OK, true);
+    assert_publish_futures(futures, CY_OK);
 
     cleanup_case(net, now, futures, { sub }, { pub });
 }
@@ -434,7 +431,7 @@ void test_api_pubsub_e2e_b05_drop_acks_for_first_k_retry_cycles_then_recover()
     TEST_ASSERT_EQUAL_size_t(0U, capture.malformed);
     assert_unordered_complete_unique(capture, 205U, 1U, 8U);
     assert_unordered_unique_only(capture, 205U);
-    assert_publish_futures(futures, CY_OK, true);
+    assert_publish_futures(futures, CY_OK);
 
     cleanup_case(net, now, futures, { sub }, { pub });
 }
@@ -490,7 +487,7 @@ void test_api_pubsub_e2e_b06_mixed_data_and_ack_loss_pattern()
     TEST_ASSERT_EQUAL_size_t(0U, capture.malformed);
     assert_unordered_complete_unique(capture, 206U, 1U, 10U);
     assert_unordered_unique_only(capture, 206U);
-    assert_publish_futures(futures, CY_OK, true);
+    assert_publish_futures(futures, CY_OK);
 
     cleanup_case(net, now, futures, { sub }, { pub });
 }
@@ -529,7 +526,7 @@ void test_api_pubsub_e2e_b07_one_way_partition_a_to_b_then_heal_before_deadlines
     TEST_ASSERT_EQUAL_size_t(0U, capture.malformed);
     assert_unordered_complete_unique(capture, 207U, 1U, 8U);
     assert_unordered_unique_only(capture, 207U);
-    assert_publish_futures(futures, CY_OK, true);
+    assert_publish_futures(futures, CY_OK);
 
     cleanup_case(net, now, futures, { sub }, { pub });
 }
@@ -567,7 +564,7 @@ void test_api_pubsub_e2e_b08_one_way_partition_b_to_a_ack_blackout_then_heal()
     TEST_ASSERT_EQUAL_size_t(0U, capture.malformed);
     assert_unordered_complete_unique(capture, 208U, 1U, 8U);
     assert_unordered_unique_only(capture, 208U);
-    assert_publish_futures(futures, CY_OK, true);
+    assert_publish_futures(futures, CY_OK);
 
     cleanup_case(net, now, futures, { sub }, { pub });
 }
@@ -603,7 +600,7 @@ void test_api_pubsub_e2e_b09_full_partition_interval_then_heal_within_deadlines(
     TEST_ASSERT_EQUAL_size_t(0U, capture.malformed);
     assert_unordered_complete_unique(capture, 209U, 1U, 8U);
     assert_unordered_unique_only(capture, 209U);
-    assert_publish_futures(futures, CY_OK, true);
+    assert_publish_futures(futures, CY_OK);
 
     cleanup_case(net, now, futures, { sub }, { pub });
 }
@@ -638,7 +635,7 @@ void test_api_pubsub_e2e_b10_partition_longer_than_deadline_expected_failures()
 
     TEST_ASSERT_EQUAL_size_t(0U, capture.malformed);
     TEST_ASSERT_TRUE(sequences_for(capture, 210U).empty());
-    assert_publish_futures(futures, CY_ERR_DELIVERY, false);
+    assert_publish_futures(futures, CY_ERR_DELIVERY);
 
     cleanup_case(net, now, futures, { sub }, { pub });
 }
@@ -668,12 +665,10 @@ void test_api_pubsub_e2e_b11_late_ack_after_failure_does_not_resurrect_future()
     TEST_ASSERT_TRUE(wait_all_futures(net, now, futures));
     TEST_ASSERT_TRUE(cy_future_done(fut));
     TEST_ASSERT_EQUAL_INT(CY_ERR_DELIVERY, cy_future_error(fut));
-    TEST_ASSERT_FALSE(cy_publish_delivered(fut));
 
     drive_for(net, now, 320'000);
     TEST_ASSERT_TRUE(cy_future_done(fut));
     TEST_ASSERT_EQUAL_INT(CY_ERR_DELIVERY, cy_future_error(fut));
-    TEST_ASSERT_FALSE(cy_publish_delivered(fut));
 
     TEST_ASSERT_EQUAL_size_t(0U, capture.malformed);
     assert_unordered_complete_unique(capture, 211U, 1U, 1U);
@@ -722,7 +717,7 @@ void test_api_pubsub_e2e_b12_transient_ack_send_media_failures_on_receiver_side_
     TEST_ASSERT_EQUAL_size_t(drop_first_acks, std::min<std::size_t>(ack_seen, drop_first_acks));
     assert_unordered_complete_unique(capture, 212U, 1U, 8U);
     assert_unordered_unique_only(capture, 212U);
-    assert_publish_futures(futures, CY_OK, true);
+    assert_publish_futures(futures, CY_OK);
 
     cleanup_case(net, now, futures, { sub }, { pub });
 }

@@ -2309,7 +2309,8 @@ typedef struct
 
     bool     done;
     bool     acknowledged;
-    cy_err_t error; ///< High-priority errors override low-priority ones. Future is notified on error.
+    bool     compromised; ///< Association reachability data invalid, do not update slack.
+    cy_err_t error;       ///< Stores most recently seen error. New errors overwrite old ones.
 
     // Retransmission states.
     const cy_bytes_t* data;
@@ -2326,11 +2327,7 @@ typedef struct
 } publish_future_t;
 
 static bool     publish_future_done(const cy_future_t* const base) { return ((const publish_future_t*)base)->done; }
-static cy_err_t publish_future_error(const cy_future_t* const base)
-{
-    const publish_future_t* const self = (const publish_future_t*)base;
-    return (self->error != CY_OK) ? self->error : ((self->acknowledged || !self->done) ? CY_OK : CY_ERR_DELIVERY);
-}
+static cy_err_t publish_future_error(const cy_future_t* const base) { return ((const publish_future_t*)base)->error; }
 
 // When we're done with the future, we need to update the shared states of our associations.
 static void publish_future_release_associations(publish_future_t* const self)
@@ -2346,7 +2343,7 @@ static void publish_future_release_associations(publish_future_t* const self)
         // Also, don't register any ack loss if at least one publication has failed, that is obvious.
         const uint64_t seqno = self->base.key - topic->pub_tag_baseline;
         assert(seqno < (1ULL << 48U)); // sanity/math check -- values above 2**48 are unreachable in practice.
-        if (bitmap_test(self->assoc_knockout, i) && (seqno >= ass->seqno_witness) && (self->error == CY_OK)) {
+        if (bitmap_test(self->assoc_knockout, i) && (seqno >= ass->seqno_witness) && (!self->compromised)) {
             ass->slack++;
         }
 
@@ -2365,11 +2362,12 @@ static void publish_future_release_associations(publish_future_t* const self)
 }
 
 // Invalidates the future -- the user callback may destroy it. Expect finalization & further access invalid.
-static void publish_future_materialize(publish_future_t* const self)
+static void publish_future_materialize(publish_future_t* const self, const cy_err_t error)
 {
     assert(!self->done);
     self->done           = true;
     const cy_t* const cy = self->owner->topic->cy;
+    self->error          = error;
     future_deadline_disarm(&self->base);
     future_index_remove(&self->base, &self->owner->topic->pub_futures_by_tag);
     publish_future_release_associations(self);
@@ -2411,12 +2409,13 @@ static void publish_future_timeout(cy_future_t* const base, const cy_us_t schedu
     // it means that there is a strong scheduler lag that prevented us from completing some of the attempts fully,
     // and we can no longer rely on reachability information. We may still transmit but with only a short ACK timeout.
     const bool sched_lag_error = (self->data != NULL) && (now >= (self->deadline - self->ack_timeout));
-    self->error = ((self->error == CY_OK) && sched_lag_error) ? CY_ERR_LAG : self->error; // Weak error, no overwrite.
+    self->compromised          = self->compromised || sched_lag_error;
+    self->error                = sched_lag_error ? CY_ERR_LAG : self->error; // Weak error, may be overwritten below.
 
     // Check completion.
     assert(!self->done);
     if ((self->data == NULL) || (now >= self->deadline)) { // This is the final poll.
-        publish_future_materialize(self);                  // The future may be successful depending on received acks.
+        publish_future_materialize(self, self->acknowledged ? CY_OK : CY_ERR_DELIVERY);
         return;
     }
 
@@ -2458,7 +2457,8 @@ static void publish_future_timeout(cy_future_t* const base, const cy_us_t schedu
     // Send the message.
     const cy_err_t er = do_publish_impl(self->owner, ack_deadline, *self->data, header_msg_rel, self->base.key, lane_p);
     ON_ASYNC_ERROR_IF(cy, topic, er);
-    self->error = (er != CY_OK) ? er : self->error; // Send errors are strong, overriding prior errors if any.
+    self->compromised = self->compromised || (er != CY_OK);
+    self->error       = (er != CY_OK) ? er : self->error; // May overwrite lag error because this one is stronger.
 
     // Schedule the next poll event.
     // If there is going to be another attempt, schedule the next timeout to fire when it's time to transmit;
@@ -2484,8 +2484,8 @@ static void publish_future_dispose(cy_future_t* const base)
 {
     publish_future_t* const self = (publish_future_t*)base;
     if (!self->done) {
-        self->error = (self->error == CY_OK) ? CY_ERR_CANCELED : self->error; // Avoid slack adjustment.
-        publish_future_materialize(self);
+        self->compromised = true; // Prevent slack adjustment because we're disposing early.
+        publish_future_materialize(self, CY_OK);
     }
     assert(self->done);
     assert(self->assoc_capacity == 0);
@@ -2515,7 +2515,7 @@ static void publish_future_on_ack(publish_future_t* const self, const uint64_t r
         self->assoc_remaining--;
     }
     if (self->assoc_remaining == 0) { // also handles the case of no known associations at publication
-        publish_future_materialize(self);
+        publish_future_materialize(self, CY_OK);
     }
 }
 
@@ -2602,11 +2602,6 @@ cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadli
     return &fut->base;
 }
 
-bool cy_publish_delivered(const cy_future_t* const future)
-{
-    return (future != NULL) && (future->vtable == &publish_future_vtable) && ((publish_future_t*)future)->acknowledged;
-}
-
 // How many most recently received seqnos to keep in the bitmap.
 // The value is a compromise between practically possible delays and memory usage; ideally we want <=64B per remote.
 // Duplicates older than this are nacked.
@@ -2636,9 +2631,8 @@ typedef struct
     cy_us_t     liveness_timeout; // Inter-response timeout for stream liveness monitoring.
 
     bool         finalized; // Staying behind to handle possible duplicate responses to ack/nack correctly.
-    bool         oom;       // OOM flag is sticky because a single OOM implies that the response set is incomplete.
     cy_future_t* publish;
-    cy_err_t     publish_error;
+    cy_err_t     error; // Most recently seen error.
 
     uint64_t      response_count; // Unique responses after deduplication from all remotes combined.
     cy_response_t last_response;  // Overwritten when new responses arrive.
@@ -2672,16 +2666,16 @@ static void request_publish_callback(cy_future_t* const fut)
     request_future_t* const self = (request_future_t*)cy_future_context(fut).ptr[0];
     assert(self->publish == fut);
     assert(!self->finalized);
-    self->publish_error = cy_future_error(fut); // Record publish error but keep going.
-    if (cy_future_done(fut)) {                  // In case there are intermediate updates. May be uncoverable.
-        const bool fatal = !cy_publish_delivered(fut);
+    const cy_err_t err = cy_future_error(fut);
+    if (cy_future_done(fut)) { // In case there are intermediate updates. May be uncoverable.
         cy_future_destroy(fut);
         self->publish = NULL;
-        if ((self->response_count == 0) && fatal) {
-            future_deadline_disarm(&self->base); // We are exceedingly unlikely to succeed, fail early.
+        if ((self->response_count == 0) && (err != CY_OK)) {
+            future_deadline_disarm(&self->base); // Unlikely to succeed, fail early.
         }
     }
-    if (self->publish_error != CY_OK) {
+    if (err != CY_OK) { // Report every error.
+        self->error = err;
         future_notify(&self->base); // Invalidates self; expect finalization.
     }
 }
@@ -2723,9 +2717,9 @@ static bool request_on_response(request_future_t* const self,
                                                          &factory_ctx,
                                                          request_future_remote_cavl_factory);
         if (remote == NULL) {
-            self->oom = true;
+            self->error = CY_ERR_MEMORY;
             ON_ASYNC_ERROR(cy, self->topic, CY_ERR_MEMORY);
-            future_deadline_disarm(&self->base); // Escalate major failure. Response set cannot be valid anymore.
+            future_deadline_disarm(&self->base); // Unlikely to succeed, fail early.
             future_notify(&self->base);          // Invalidates the future.
             return false;                        // Cannot accept, tell the sender about that.
         }
@@ -2758,6 +2752,7 @@ static bool request_on_response(request_future_t* const self,
     future_deadline_arm(&self->base, message.timestamp + self->liveness_timeout);
 
     // Notify the application that a new response is available.
+    self->error = CY_OK;
     future_notify(&self->base); // Invalidates self; expect finalization.
     return true;
 }
@@ -2784,29 +2779,16 @@ static bool request_future_done(const cy_future_t* const base)
     assert(!self->finalized);                                                             // use after free?
     return (self->last_response.message.content != NULL) || !future_deadline_armed(base); // got response or timed out
 }
-
-static cy_err_t request_future_error(const cy_future_t* const base)
-{
-    const request_future_t* const self = (const request_future_t*)base;
-    assert(!self->finalized);
-    if (self->oom) {
-        return CY_ERR_MEMORY;
-    }
-    if (self->publish_error != CY_OK) {
-        return self->publish_error;
-    }
-    if (!future_deadline_armed(base)) {
-        return CY_ERR_LIVENESS;
-    }
-    return CY_OK;
-}
+static cy_err_t request_future_error(const cy_future_t* const base) { return ((const request_future_t*)base)->error; }
 
 static void request_future_timeout(cy_future_t* const base, const cy_us_t scheduled, const cy_us_t now)
 {
     (void)scheduled;
     (void)now;
     request_future_t* const self = (request_future_t*)base;
+    assert(!future_deadline_armed(base));
     if (!self->finalized) {
+        self->error = CY_ERR_LIVENESS;
         future_notify(base); // Expect finalization call.
     } else {
         request_future_destroy(self);
@@ -3004,7 +2986,7 @@ typedef struct subscriber_t
 
     uint64_t     message_count;
     cy_arrival_t last_arrival;
-    cy_err_t     error;
+    cy_err_t     error; // Most recently seen error. Updated on every error.
     bool         disposed;
 
     subscriber_params_t params;
@@ -3021,15 +3003,10 @@ static bool subscriber_done(const cy_future_t* const base)
     }
     return (self->params.liveness_timeout > 0) && !future_deadline_armed(base);
 }
-
-static cy_err_t subscriber_error(const cy_future_t* const base)
-{
-    const subscriber_t* const self = (const subscriber_t*)base;
-    assert(!self->disposed); // use after free
-    return self->error;
-}
+static cy_err_t subscriber_error(const cy_future_t* const base) { return ((const subscriber_t*)base)->error; }
 
 static void subscriber_destroy(subscriber_t* const self);
+static void subscriber_notify_error(subscriber_t* const self, const cy_err_t error);
 
 static void subscriber_timeout(cy_future_t* const base, cy_us_t scheduled, cy_us_t now)
 {
@@ -3038,8 +3015,7 @@ static void subscriber_timeout(cy_future_t* const base, cy_us_t scheduled, cy_us
     subscriber_t* const self = (subscriber_t*)base;
     assert((self->root != NULL) && (self->root->cy == base->cy));
     if (!self->disposed) {
-        self->error = CY_ERR_LIVENESS;
-        future_notify(base);
+        subscriber_notify_error(self, CY_ERR_LIVENESS);
     } else {
         subscriber_destroy(self); // self invalidated
     }
@@ -3093,9 +3069,8 @@ static void subscriber_notify(subscriber_t* const self, const cy_arrival_t arriv
     if (self->params.liveness_timeout > 0) {
         future_deadline_arm(&self->base, arrival.message.timestamp + self->params.liveness_timeout);
     }
-    self->error = CY_OK;
     assert(self->base.vtable->done(&self->base));
-    future_notify(&self->base);
+    subscriber_notify_error(self, CY_OK);
 }
 
 static void subscriber_notify_error(subscriber_t* const self, const cy_err_t error)
@@ -4046,7 +4021,7 @@ typedef struct
     cy_breadcrumb_t breadcrumb;
     byte_t          tag;
 
-    cy_err_t error;
+    cy_err_t error; // Most recently seen error. New errors overwrite old ones.
 
     const cy_bytes_t* data;
     cy_us_t           ack_timeout;
@@ -4067,7 +4042,7 @@ static void respond_future_timeout(cy_future_t* const base, const cy_us_t schedu
     // it means that there is a strong scheduler lag that prevented us from completing some of the attempts fully,
     // and we can no longer rely on reachability information. We may still transmit but with only a short ACK timeout.
     const bool sched_lag_error = (self->data != NULL) && (now >= (self->deadline - self->ack_timeout));
-    self->error = ((self->error == CY_OK) && sched_lag_error) ? CY_ERR_LAG : self->error; // Weak error, no overwrite.
+    self->error                = sched_lag_error ? CY_ERR_LAG : self->error; // May be overridden below.
 
     // Check completion.
     if ((self->data == NULL) || (now >= self->deadline)) { // This is the final poll.
@@ -4088,7 +4063,7 @@ static void respond_future_timeout(cy_future_t* const base, const cy_us_t schedu
     // Send the message.
     const cy_err_t er = do_respond(&self->breadcrumb, ack_deadline, *self->data, header_rsp_rel, self->tag);
     ON_ASYNC_ERROR_IF(cy, NULL, er);
-    self->error = (er != CY_OK) ? er : self->error; // Send errors are strong, overriding prior errors if any.
+    self->error = (er != CY_OK) ? er : self->error; // Send errors are strong, overriding lag errors.
 
     // Schedule the next poll event.
     // If there is going to be another attempt, schedule the next timeout to fire when it's time to transmit;

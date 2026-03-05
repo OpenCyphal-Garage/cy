@@ -197,7 +197,7 @@ static void test_publish_future_done_error_done_unacknowledged_delivery_failure(
     memset(&fut, 0, sizeof(fut));
     fut.done         = true;
     fut.acknowledged = false;
-    fut.error        = CY_OK;
+    fut.error        = CY_ERR_DELIVERY;
     TEST_ASSERT_TRUE(publish_future_done(&fut.base));
     TEST_ASSERT_EQUAL_INT(CY_ERR_DELIVERY, publish_future_error(&fut.base));
 }
@@ -269,7 +269,7 @@ static publish_future_t* make_publish_future_with_one_assoc(fixture_t* const    
     return fut;
 }
 
-static void test_release_no_slack_when_error(void)
+static void test_release_no_slack_when_compromised(void)
 {
     fixture_t fixture;
     fixture_init(&fixture);
@@ -281,7 +281,7 @@ static void test_release_no_slack_when_error(void)
 
     bitmap_set(fut->assoc_knockout, 0U);
     ass.seqno_witness = 10U;
-    fut->error        = CY_ERR_LAG;
+    fut->compromised  = true;
 
     publish_future_release_associations(fut);
 
@@ -571,7 +571,7 @@ int main(void)
     RUN_TEST(test_publish_future_done_error_done_acknowledged_success);
     RUN_TEST(test_publish_future_done_error_done_acknowledged_with_error_overrides);
     RUN_TEST(test_publish_future_done_error_pending_with_error_reports_immediately);
-    RUN_TEST(test_release_no_slack_when_error);
+    RUN_TEST(test_release_no_slack_when_compromised);
     RUN_TEST(test_release_no_slack_when_not_knocked_out);
     RUN_TEST(test_release_slack_incremented_when_conditions_met);
     RUN_TEST(test_release_no_slack_when_seqno_behind_witness);

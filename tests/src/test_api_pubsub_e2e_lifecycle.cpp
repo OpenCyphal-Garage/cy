@@ -369,7 +369,7 @@ void summarize_futures(const std::vector<future_state_t>& futures,
         }
         if (!cy_future_done(item.future)) {
             pending++;
-        } else if (cy_publish_delivered(item.future)) {
+        } else if (cy_future_error(item.future) == CY_OK) {
             success++;
         } else {
             failure++;

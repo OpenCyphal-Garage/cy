@@ -44,7 +44,6 @@ extern "C"
 #define CY_ERR_DELIVERY 8  // Reliable message (publication or response) was not acknowledged by the remote(s).
 #define CY_ERR_LIVENESS 9  // Message (publication or response) did not arrive on time.
 #define CY_ERR_NACK     10 // Explicitly rejected by the remote.
-#define CY_ERR_CANCELED 11 // Future canceled before it could normally complete.
 
 typedef uint_fast8_t cy_err_t;
 typedef int64_t      cy_us_t; ///< Monotonic microsecond timestamp. Signed to permit arithmetics in the past.
@@ -191,14 +190,6 @@ cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t deadline, const cy_
 
 /// Publish a reliable one-way message.
 ///
-/// The error is OK when the required acks are received without errors.
-/// If acks not received before the timeout, the status is ERR_DELIVERY.
-/// If transmission fails at the platform layer, the error from the platform layer is assigned as-is.
-/// If at least one attempt could not complete fully due to a strong scheduler lag (update delay), status is ERR_LAG.
-/// Errors are non-fatal: attempts to deliver will continue regardless until canceled or timed out, but the
-/// future callback (if set) is triggered on every error, and the future remains non-done until acked or timed out
-/// (or destroyed by the application).
-///
 /// Reliable messages consume more memory for associated states and are a greater burden on the network and nodes
 /// compared to best-effort messages. A best-effort message is simply sent out to the network expecting the transport
 /// to deliver it to all interested parties (do its best, no guarantees). A reliable message requires every recipient
@@ -213,14 +204,18 @@ cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t deadline, const cy_
 /// The first publication on a topic will assume success upon arrival of the first acknowledgement; the association set
 /// will be built in the background following the first publication; all subsequent publications will use & update it.
 ///
+/// Errors are non-fatal: attempts to deliver will continue regardless until canceled or timed out, but the
+/// future callback (if set) is triggered on every error, and the future remains non-done until acked or timed out
+/// (or destroyed by the application).
+/// Newer errors override older ones; to handle every error, callback is needed.
+/// Platform errors encountered on send are forwarded as-is. Other possible errors include:
+/// CY_OK: Message delivered successfully.
+/// CY_ERR_DELIVERY: Message not delivered.
+/// CY_ERR_LAG: Strong scheduler lag prevented full ack timeout utilization; reachability information incomplete.
+///
 /// TODO API for querying the tracked associations and per-remote delivery success may be added in the future since it
 ///   is expected that some applications would benefit from the knowledge of which specific remotes accept their data.
 cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadline, const cy_bytes_t message);
-
-/// Successful delivery may be masked by non-fatal errors when querying cy_future_error().
-/// This function provides an unambiguous query that ignores errors and only checks if delivery was acknowledged.
-/// The result is only valid when the future is no longer pending.
-bool cy_publish_delivered(const cy_future_t* const future);
 
 /// Models a single response to a request sent with cy_request(). There may be several of those received from different
 /// remote nodes and also multiple response messages from the same remote node if response streaming is used.
@@ -264,7 +259,7 @@ typedef struct cy_response_t
 /// Responses may arrive out of order depending on the behavior of the underlying network; the library does not attempt
 /// to reconstruct the original seqno ordering. It is guaranteed that each response arrives at most once. If multiple
 /// ordering-sensitive responses are expected, the application should monitor the seqno field, which starts at zero
-/// per remote and is incremented with each response.
+/// per remote and is incremented with each response from that remote.
 cy_future_t* cy_request(cy_publisher_t* const pub,
                         const cy_us_t         delivery_deadline, // Attempt to reliably deliver the request until this
                         const cy_us_t         response_timeout,  // NB: this is relative time, not a deadline!
@@ -286,8 +281,7 @@ bool cy_is_request(const cy_future_t* const future);
 cy_response_t cy_response_borrow(const cy_future_t* const future);
 cy_response_t cy_response_move(cy_future_t* const future);
 
-/// Successful response arrival may coexist with non-fatal errors when querying cy_future_error().
-/// This function provides an unambiguous query that directly reports received unique responses regardless of errors.
+/// Number of responses received so far.
 uint64_t cy_response_count(const cy_future_t* const future);
 
 /// Defaults to cy_prio_nominal for all newly created publishers.
@@ -397,13 +391,14 @@ typedef struct cy_arrival_t
 /// is available. If liveness monitoring is enabled, when arrivals cease, the future will materialize after the
 /// liveness timeout with CY_ERR_LIVENESS and the callback will be invoked if set.
 ///
-/// Possible errors include:
-///     CY_ERR_MEMORY:      Could not allocate auxiliary state, message dropped. Note that memory exhaustion may
-///                         cause loss at the lower layers of the stack, which will not be detected via this API.
-///     CY_ERR_LIVENESS:    No messages received for the specified timeout (disabled by default).
-///
 /// The regular subscriber does not guarantee that messages arrive in the same order as they are published.
 /// It does, however, guarantee that each arrives at most once.
+///
+/// Possible errors include:
+/// CY_OK: No errors. If done, message received successfully.
+/// CY_ERR_MEMORY: Could not allocate auxiliary state, message dropped. Note that memory exhaustion may cause loss
+/// at the lower layers of the stack, which will not be detected via this API.
+/// CY_ERR_LIVENESS: No messages received for the specified timeout (disabled by default).
 cy_future_t* cy_subscribe(cy_t* const cy, const cy_str_t name, const size_t extent);
 
 /// A variant of subscriber that ensures that messages are delivered in the same order they are sent by the remotes,
@@ -517,11 +512,9 @@ cy_err_t cy_respond(cy_breadcrumb_t* const breadcrumb, const cy_us_t deadline, c
 ///
 /// The future materializes (becomes done) either on timeout, or upon (N)ACK arrival. The user can check the outcome
 /// using cy_future_error():
-///     CY_OK:              ACK received (remote application accepted the response).
-///     CY_ERR_NACK:        remote replied with NACK.
-///     CY_ERR_DELIVERY:    remote did not respond before the timeout: network connectivity issue or remote is down.
-/// These are the only possible error states that may occur at the time when the future is resolved. Additional
-/// transient errors may occur while delivery is in progress, in particular errors originating from the platform layer.
+/// CY_OK: ACK received, remote application accepted the response.
+/// CY_ERR_NACK: Remote replied with NACK; application did not accept the response.
+/// CY_ERR_DELIVERY: Remote did not respond before the timeout: network connectivity issue or remote is down.
 cy_future_t* cy_respond_reliable(cy_breadcrumb_t* const breadcrumb, const cy_us_t deadline, const cy_bytes_t message);
 
 // =====================================================================================================================
