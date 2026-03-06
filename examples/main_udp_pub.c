@@ -73,40 +73,44 @@ static struct config_t load_config(const int argc, const char* const argv[])
     return cfg;
 }
 
-#if 0 // NOLINT(readability-avoid-unconditional-preprocessor-if)
-
 static void on_result(cy_future_t* const future)
 {
-    const cy_topic_t* const topic      = cy_future_context(future).ptr[0];
-    const cy_str_t         topic_name = cy_topic_name(topic); // The returned topic name is NUL-terminated in this case
-    const cy_future_status_t status    = cy_future_status(future);
-    // cy_t* const cy = cy_topic_owner(topic);  // Sometimes it's needed.
-    if (status == cy_future_pending) { // Future not complete yet, this is an intermediate progress update.
+    const cy_topic_t* const topic = cy_future_context(future).ptr[0];
+    const cy_str_t          topic_name =
+      (topic != NULL) ? cy_topic_name(topic) : cy_str("<unknown>"); // Topic names are NUL-terminated.
+    if (!cy_future_done(future)) { // Future not complete yet, this is an intermediate progress update.
         (void)fprintf(stderr, "➡️ '%s' request delivered; waiting for response...\n", topic_name.str);
-    } else if (status == cy_future_success) {
-        const cy_request_result_t* const result = cy_future_result(future);
-        const size_t                     size   = cy_message_size(result->response.message.content);
-        unsigned char                    data[size];
-        cy_message_read(result->response.message.content, 0, size, data);
+        return;
+    }
+
+    const cy_err_t err = cy_future_error(future);
+    if (err == CY_OK) {
+        const cy_response_t response = cy_response_move(future);
+        if (response.message.content == NULL) {
+            (void)fprintf(stderr, "⌛ topic='%s' response missing despite success state ❌\n", topic_name.str);
+            cy_future_destroy(future);
+            return;
+        }
+        const size_t  size = cy_message_size(response.message.content);
+        unsigned char data[size];
+        cy_message_read(response.message.content, 0, size, data);
         char* const dump = hexdump(size, data, 32); // just a simple visualization aid unrelated to the API
         (void)fprintf(stderr,
                       "↩️ ts=%09ju remote=%016jx seqno=%ju sz=%06zu topic='%s' response ✅\n%s\n",
-                      (uintmax_t)result->response.message.timestamp,
-                      (uintmax_t)result->response.remote_id,
-                      (uintmax_t)result->response.seqno,
+                      (uintmax_t)response.message.timestamp,
+                      (uintmax_t)response.remote_id,
+                      (uintmax_t)response.seqno,
                       size,
                       topic_name.str,
-                      dump);
+                      (dump != NULL) ? dump : "<hexdump failed>");
         free(dump);
-        cy_future_destroy(future); // This will also destroy the message because we haven't done cy_message_move().
+        cy_message_refcount_dec(response.message.content);
+        cy_future_destroy(future);
     } else {
-        assert(status == cy_future_failure);
-        (void)fprintf(stderr, "⌛ topic='%s' response timed out ❌\n", topic_name.str);
+        (void)fprintf(stderr, "⌛ topic='%s' response failed err=%jd ❌\n", topic_name.str, (intmax_t)err);
         cy_future_destroy(future);
     }
 }
-
-#endif
 
 int main(const int argc, const char* const argv[])
 {
@@ -153,10 +157,9 @@ int main(const int argc, const char* const argv[])
                 char msg[256];
                 (void)sprintf(
                   msg, "Hello from %016jx! The current time is %jd us.", (uintmax_t)cfg.local_uid, (intmax_t)now);
-#if 0 // NOLINT(readability-avoid-unconditional-preprocessor-if)
                 cy_future_t* const future = cy_request(publishers[i], //
                                                        now + (MEGA * 2),
-                                                       now + (MEGA * 10),
+                                                       MEGA * 10,
                                                        (cy_bytes_t){ .size = strlen(msg), .data = msg });
                 if (future == NULL) {
                     (void)fprintf(stderr, "cy_request\n");
@@ -164,15 +167,6 @@ int main(const int argc, const char* const argv[])
                 }
                 cy_future_context_set(future, (cy_user_context_t){ { (void*)cy_publisher_topic(publishers[i]) } });
                 cy_future_callback_set(future, on_result);
-#else
-                const cy_err_t err_pub = cy_publish(publishers[i], //
-                                                    now + (MEGA * 2),
-                                                    (cy_bytes_t){ .size = strlen(msg), .data = msg });
-                if (err_pub != CY_OK) {
-                    (void)fprintf(stderr, "cy_publish: %jd\n", (intmax_t)err_pub);
-                    break;
-                }
-#endif
             }
             next_publish_at += 5 * MEGA;
         }

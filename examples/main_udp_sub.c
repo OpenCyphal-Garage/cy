@@ -77,32 +77,41 @@ static struct config_t load_config(const int argc, const char* const argv[])
     return cfg;
 }
 
-// ReSharper disable once CppParameterMayBeConstPtrOrRef
-static void on_message(cy_subscriber_t* const subscriber, cy_arrival_t arrival)
+static void on_message(cy_future_t* const subscriber)
 {
-    (void)subscriber;
+    const cy_arrival_t arrival = cy_arrival_move(subscriber);
+    if (arrival.message.content == NULL) {
+        return;
+    }
+
     const size_t  payload_size = cy_message_size(arrival.message.content);
     unsigned char payload_copy[payload_size];
     cy_message_read(arrival.message.content, 0, payload_size, payload_copy);
-    const char* const dump = hexdump(payload_size, payload_copy, 32);
+    char* const                 dump  = hexdump(payload_size, payload_copy, 32);
+    const cy_topic_t* const     topic = cy_topic_find_by_hash(arrival.breadcrumb.cy, arrival.breadcrumb.topic_hash);
+    const cy_substitution_set_t substitutions = cy_subscriber_substitutions(subscriber, topic);
+    const char* const           topic_name    = (topic != NULL) ? cy_topic_name(topic).str : "<unknown>";
     (void)fprintf(stderr,
                   "💬 ts=%09ju sz=%06zu sbt=%zu topic='%s'\n%s\n",
                   (uintmax_t)arrival.message.timestamp,
                   payload_size,
-                  arrival.substitutions.count,
-                  cy_topic_name(arrival.topic).str,
-                  dump);
+                  substitutions.count,
+                  topic_name,
+                  (dump != NULL) ? dump : "<hexdump failed>");
+    free(dump);
     // Optionally, send a response to the publisher of this message.
     // The stack knows the identity of the publisher and can deliver a response directly to it.
     // It is possible to stream multiple responses for a single message (the breadcrumb can be copied).
     if ((rand() % 2) == 0) {
-        const cy_err_t err = cy_respond(&arrival.breadcrumb, // Using best-effort delivery in this example.
+        cy_breadcrumb_t breadcrumb = arrival.breadcrumb;
+        const cy_err_t  err        = cy_respond(&breadcrumb, // Using best-effort delivery in this example.
                                         arrival.message.timestamp + MEGA,
                                         (cy_bytes_t){ .size = 2, .data = ":3" });
         if (err != CY_OK) {
             (void)fprintf(stderr, "cy_respond: %jd\n", (intmax_t)err);
         }
     }
+    cy_message_refcount_dec(arrival.message.content);
 }
 
 int main(const int argc, const char* const argv[])
@@ -126,17 +135,15 @@ int main(const int argc, const char* const argv[])
     }
 
     // Create subscribers.
-    cy_subscriber_t* subscribers[cfg.sub_count];
-    bool             response_delivery_flags[cfg.sub_count];
+    cy_future_t* subscribers[cfg.sub_count];
     for (size_t i = 0; i < cfg.sub_count; i++) {
-        subscribers[i] = cy_subscribe(cy, cy_str(cfg.subs[i].name), MEGA);
+        subscribers[i] = cfg.subs[i].ordered ? cy_subscribe_ordered(cy, cy_str(cfg.subs[i].name), MEGA, MEGA)
+                                             : cy_subscribe(cy, cy_str(cfg.subs[i].name), MEGA);
         if (subscribers[i] == NULL) {
-            (void)fprintf(stderr, "cy_subscribe: NULL\n");
+            (void)fprintf(stderr, "cy_subscribe(_ordered): NULL\n");
             return 1;
         }
-        cy_subscriber_context_set(subscribers[i], (cy_user_context_t){ .ptr = { &response_delivery_flags[i] } });
-        cy_subscriber_callback_set(subscribers[i], on_message);
-        response_delivery_flags[i] = false;
+        cy_future_callback_set(subscribers[i], on_message);
     }
 
     // Spin the event loop.
