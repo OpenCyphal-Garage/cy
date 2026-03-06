@@ -242,6 +242,7 @@ One idea that was considered to improve epidemic gossips was to include a Bloom 
 
 #### Prior art
 
+- [SWIM](https://en.wikipedia.org/wiki/SWIM_Protocol)
 - [HyParView](https://asc.di.fct.unl.pt/~jleitao/pdf/dsn07-leitao.pdf)
 - [Epidemic broadcast trees](https://asc.di.fct.unl.pt/~jleitao/pdf/srds07-leitao.pdf)
 - [Gossip-based peer sampling](https://www.inf.u-szeged.hu/~jelasity/cikkek/tocs05.pdf)

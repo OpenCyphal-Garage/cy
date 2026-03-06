@@ -1014,7 +1014,8 @@ static void topic_destroy(cy_topic_t* const topic);
 // future messages on this topic will likely be acknowledged by this remote. One practical implication is that given
 // multiple pending deliveries, the association may survive as long as at least one of them is acknowledged.
 //
-// The slack counter tracks the number of missed acks. When it exceeds the limit, the association is considered
+// The slack counter tracks the number of missed acks. In other works a related concept may be referred to as
+// "suspicion", e.g., SWIM extensions. When it exceeds the limit, the association is considered
 // unresponsive and is removed. In the simple scenario with one pending delivery (future) at a time, it would
 // simply be reset to zero on every received ack. However, when concurrent deliveries (futures) are involved,
 // there exists a race condition that requires separate handling. Suppose we have pending publications A and B:
