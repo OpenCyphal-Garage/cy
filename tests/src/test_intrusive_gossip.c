@@ -634,7 +634,7 @@ static void test_on_gossip_local_win_suppresses_forward_and_schedules_urgent(voi
     fixture_deinit(&fix);
 }
 
-static void test_on_gossip_local_lose_forwards_merged_state(void)
+static void test_on_gossip_local_lose_suppresses_forward_and_schedules_urgent(void)
 {
     fixture_t fix;
     fixture_init(&fix);
@@ -646,11 +646,8 @@ static void test_on_gossip_local_lose_forwards_merged_state(void)
     fixture_set_random_sequence(&fix, seq, sizeof(seq) / sizeof(seq[0]));
     fixture_on_gossip(&fix, 2000, 4U, topic->hash, 9U, 1, str_empty, NULL, make_lane(UINT64_C(40), 0x33U));
     TEST_ASSERT_EQUAL_UINT32(9U, topic->evictions);
-    TEST_ASSERT_TRUE(fix.unicast_send_count > 0U);
-    TEST_ASSERT_EQUAL_UINT8(header_gossip, fix.capture[0].type);
-    TEST_ASSERT_EQUAL_UINT8(3U, fix.capture[0].ttl);
-    TEST_ASSERT_EQUAL_UINT64(topic->hash, fix.capture[0].hash);
-    TEST_ASSERT_EQUAL_UINT32(topic->evictions, fix.capture[0].evictions);
+    TEST_ASSERT_EQUAL_size_t(0U, fix.unicast_send_count); // known-topic local-loss no longer forwards
+    TEST_ASSERT_TRUE(is_listed(&fix.cy->list_gossip_urgent, &topic->list_gossip_urgent));
     fixture_deinit(&fix);
 }
 
@@ -697,6 +694,26 @@ static void test_on_scout_broadcast_soon_and_unicast_paths(void)
     fixture_deinit(&fix);
 }
 
+static void test_on_scout_broadcast_soon_non_tail_triggers_unicast_and_reports_errors(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+    fixture_make_explicit_topic(&fix, "gossip/scout/multi/a", 0U);
+    fixture_make_explicit_topic(&fix, "gossip/scout/multi/b", 0U);
+    const cy_lane_t lane = make_lane(UINT64_C(0xD00D), 0xD0U);
+    const cy_us_t   now  = 2000U;
+
+    fix.cy->gossip_next       = now + (KILO * 10); // broadcast soon
+    fix.fail_unicast_send     = true;
+    const size_t async_before = fix.async_error_count;
+    on_scout(fix.cy, now, cy_str("gossip/scout/multi/>"), lane);
+
+    TEST_ASSERT_EQUAL_size_t(1U, fix.unicast_send_count); // non-tail match still uses unicast
+    TEST_ASSERT_TRUE(capture_has_lane(&fix, lane.id));
+    TEST_ASSERT_TRUE(fix.async_error_count > async_before);
+    fixture_deinit(&fix);
+}
+
 static void test_gossip_poll_broadcast_path_due_and_dedup_success_only(void)
 {
     fixture_t fix;
@@ -740,7 +757,7 @@ static void test_gossip_poll_urgent_path_and_unique_unicast(void)
     fixture_deinit(&fix);
 }
 
-static void test_gossip_poll_urgent_rate_limit_same_topic_requeue(void)
+static void test_gossip_poll_urgent_requeue_sends_again_without_rate_limit(void)
 {
     fixture_t fix;
     fixture_init(&fix);
@@ -761,19 +778,19 @@ static void test_gossip_poll_urgent_rate_limit_same_topic_requeue(void)
 
     schedule_gossip_urgent(topic);
     gossip_poll(fix.cy, t0 + 1);
-    TEST_ASSERT_EQUAL_size_t(first, fix.unicast_send_count); // same fault requeued too soon => rate-limited
+    TEST_ASSERT_EQUAL_size_t(first + GOSSIP_OUTDEGREE, fix.unicast_send_count); // immediate resend is allowed
 
     schedule_gossip_urgent(topic);
     gossip_poll(fix.cy, t0 + GOSSIP_DEDUP_TIMEOUT);
-    TEST_ASSERT_EQUAL_size_t(first, fix.unicast_send_count); // strict boundary: still not fresh
+    TEST_ASSERT_EQUAL_size_t(first + ((size_t)2U * GOSSIP_OUTDEGREE), fix.unicast_send_count);
 
     schedule_gossip_urgent(topic);
     gossip_poll(fix.cy, t0 + GOSSIP_DEDUP_TIMEOUT + 1);
-    TEST_ASSERT_EQUAL_size_t(first + GOSSIP_OUTDEGREE, fix.unicast_send_count);
+    TEST_ASSERT_EQUAL_size_t(first + ((size_t)3U * GOSSIP_OUTDEGREE), fix.unicast_send_count);
     fixture_deinit(&fix);
 }
 
-static void test_gossip_poll_urgent_rate_limit_repeated_fault_detection(void)
+static void test_gossip_poll_urgent_repeated_fault_detection_sends_without_rate_limit(void)
 {
     fixture_t fix;
     fixture_init(&fix);
@@ -796,12 +813,11 @@ static void test_gossip_poll_urgent_rate_limit_repeated_fault_detection(void)
 
     fixture_on_gossip(&fix, t0 + 1, 4U, topic->hash, 4U, 0, str_empty, NULL, lane);
     gossip_poll(fix.cy, t0 + 1);
-    TEST_ASSERT_EQUAL_size_t(first,
-                             fix.unicast_send_count); // repeated same fault within timeout => no new epidemic send
+    TEST_ASSERT_EQUAL_size_t(first + GOSSIP_OUTDEGREE, fix.unicast_send_count);
 
     fixture_on_gossip(&fix, t0 + GOSSIP_DEDUP_TIMEOUT + 1, 4U, topic->hash, 4U, 0, str_empty, NULL, lane);
     gossip_poll(fix.cy, t0 + GOSSIP_DEDUP_TIMEOUT + 1);
-    TEST_ASSERT_EQUAL_size_t(first + GOSSIP_OUTDEGREE, fix.unicast_send_count); // allowed again after timeout
+    TEST_ASSERT_EQUAL_size_t(first + ((size_t)2U * GOSSIP_OUTDEGREE), fix.unicast_send_count);
     fixture_deinit(&fix);
 }
 
@@ -859,11 +875,11 @@ static void test_gossip_poll_urgent_failed_epidemic_does_not_rate_limit_retry(vo
 
     schedule_gossip_urgent(topic);
     gossip_poll(fix.cy, t0 + 2);
-    TEST_ASSERT_EQUAL_size_t(2U * GOSSIP_OUTDEGREE, fix.unicast_send_count); // now rate-limited by successful send
+    TEST_ASSERT_EQUAL_size_t(3U * GOSSIP_OUTDEGREE, fix.unicast_send_count);
     fixture_deinit(&fix);
 }
 
-static void test_gossip_poll_urgent_suppressed_if_same_gossip_was_broadcast_just_now(void)
+static void test_gossip_poll_urgent_not_suppressed_if_same_gossip_was_broadcast_just_now(void)
 {
     fixture_t fix;
     fixture_init(&fix);
@@ -884,11 +900,11 @@ static void test_gossip_poll_urgent_suppressed_if_same_gossip_was_broadcast_just
     schedule_gossip_urgent(topic);
     gossip_poll(fix.cy, t0 + 1);
     TEST_ASSERT_EQUAL_size_t(1U, fix.subject_send_count);
-    TEST_ASSERT_EQUAL_size_t(0U, fix.unicast_send_count); // immediate epidemic resend would be redundant, so suppressed
+    TEST_ASSERT_EQUAL_size_t(GOSSIP_OUTDEGREE, fix.unicast_send_count);
 
     schedule_gossip_urgent(topic);
     gossip_poll(fix.cy, t0 + GOSSIP_DEDUP_TIMEOUT + 1);
-    TEST_ASSERT_EQUAL_size_t(GOSSIP_OUTDEGREE, fix.unicast_send_count); // resend allowed once dedup timeout elapsed
+    TEST_ASSERT_EQUAL_size_t(2U * GOSSIP_OUTDEGREE, fix.unicast_send_count);
     fixture_deinit(&fix);
 }
 
@@ -937,16 +953,17 @@ int main(void)
     RUN_TEST(test_on_gossip_ttl_zero_and_duplicate_are_not_forwarded);
     RUN_TEST(test_on_gossip_forward_decrements_ttl_blacklists_sender_and_limits_fanout);
     RUN_TEST(test_on_gossip_local_win_suppresses_forward_and_schedules_urgent);
-    RUN_TEST(test_on_gossip_local_lose_forwards_merged_state);
+    RUN_TEST(test_on_gossip_local_lose_suppresses_forward_and_schedules_urgent);
     RUN_TEST(test_on_gossip_unknown_out_topic_forward_and_error_reporting);
     RUN_TEST(test_on_scout_broadcast_soon_and_unicast_paths);
+    RUN_TEST(test_on_scout_broadcast_soon_non_tail_triggers_unicast_and_reports_errors);
     RUN_TEST(test_gossip_poll_broadcast_path_due_and_dedup_success_only);
     RUN_TEST(test_gossip_poll_urgent_path_and_unique_unicast);
-    RUN_TEST(test_gossip_poll_urgent_rate_limit_same_topic_requeue);
-    RUN_TEST(test_gossip_poll_urgent_rate_limit_repeated_fault_detection);
+    RUN_TEST(test_gossip_poll_urgent_requeue_sends_again_without_rate_limit);
+    RUN_TEST(test_gossip_poll_urgent_repeated_fault_detection_sends_without_rate_limit);
     RUN_TEST(test_gossip_poll_urgent_drop_when_no_eligible_and_dedup_on_success_only);
     RUN_TEST(test_gossip_poll_urgent_failed_epidemic_does_not_rate_limit_retry);
-    RUN_TEST(test_gossip_poll_urgent_suppressed_if_same_gossip_was_broadcast_just_now);
+    RUN_TEST(test_gossip_poll_urgent_not_suppressed_if_same_gossip_was_broadcast_just_now);
     RUN_TEST(test_gossip_poll_urgent_failed_send_does_not_evict_existing_dedup_entries);
     return UNITY_END();
 }

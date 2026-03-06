@@ -161,8 +161,20 @@ cy_gen_test_arch_matrix(test_api_publish_reliable 11 "CY_CONFIG_TRACE=1"
         src/test_api_publish_reliable.cpp
         ${cy_api_common_sources}
 )
+cy_gen_test_arch_matrix(test_api_core_contracts 11 "CY_CONFIG_TRACE=1"
+        src/test_api_core_contracts.cpp
+        ${cy_api_common_sources}
+)
 cy_gen_test_arch_matrix(test_api_gossip 11 "CY_CONFIG_TRACE=1"
         src/test_api_gossip.cpp
+        ${cy_api_common_sources}
+)
+cy_gen_test_arch_matrix(test_api_parser_adversarial 11 "CY_CONFIG_TRACE=1"
+        src/test_api_parser_adversarial.cpp
+        ${cy_api_common_sources}
+)
+cy_gen_test_arch_matrix(test_api_state_machine_fuzz 11 "CY_CONFIG_TRACE=1"
+        src/test_api_state_machine_fuzz.cpp
         ${cy_api_common_sources}
 )
 cy_gen_test_arch_matrix(test_api_gossip_sim 11 "CY_CONFIG_TRACE=1"

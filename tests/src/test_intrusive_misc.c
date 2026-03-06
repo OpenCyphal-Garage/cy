@@ -9,6 +9,7 @@ typedef struct
     cy_platform_vtable_t vtable;
     cy_t                 cy;
     guarded_heap_t       heap;
+    uint64_t             random_state;
 
     size_t fail_after;      ///< Fail N-th new allocation if new_alloc_count >= fail_after.
     size_t new_alloc_count; ///< Counts new allocations only, excludes realloc/free.
@@ -26,6 +27,13 @@ static void* fixture_realloc(cy_platform_t* const platform, void* const ptr, con
     return guarded_heap_realloc(&self->heap, ptr, size);
 }
 
+static uint64_t fixture_random(cy_platform_t* const platform)
+{
+    fixture_t* const self = (fixture_t*)platform;
+    self->random_state    = (self->random_state * UINT64_C(6364136223846793005)) + UINT64_C(1);
+    return self->random_state;
+}
+
 static void fixture_init(fixture_t* const self)
 {
     memset(self, 0, sizeof(*self));
@@ -34,7 +42,9 @@ static void fixture_init(fixture_t* const self)
     self->platform.subject_id_modulus = (uint32_t)CY_SUBJECT_ID_MODULUS_17bit;
     self->platform.cy                 = &self->cy;
     self->vtable.realloc              = fixture_realloc;
+    self->vtable.random               = fixture_random;
     self->cy.platform                 = &self->platform;
+    self->random_state                = UINT64_C(0x123456789ABCDEF0);
     self->fail_after                  = SIZE_MAX;
     self->new_alloc_count             = 0;
 }
@@ -515,6 +525,51 @@ static void test_bitmap_shift_right_branch_matrix(void)
     assert_bitmap_shift_case(128U, -64, word0, word1, word2);
 }
 
+static void test_internal_helpers_branch_matrix(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+
+    TEST_ASSERT_EQUAL_INT64(0, pow2us(-1));
+    TEST_ASSERT_EQUAL_INT64(1, pow2us(0));
+    TEST_ASSERT_EQUAL_INT64(INT64_MAX, pow2us(63));
+
+    TEST_ASSERT_EQUAL_INT64(42, random_int(&fixture.cy, 42, 42));
+    const int64_t rnd = random_int(&fixture.cy, -5, 5);
+    TEST_ASSERT_TRUE((rnd >= -5) && (rnd < 5));
+
+    TEST_ASSERT_FALSE(chance(&fixture.cy, 0U));
+    TEST_ASSERT_TRUE(chance(&fixture.cy, 1U));
+
+    TEST_ASSERT_EQUAL_size_t(0U, choice(&fixture.cy, 0U));
+    TEST_ASSERT_TRUE(choice(&fixture.cy, 3U) < 3U);
+
+#if CY_CONFIG_TRACE
+    char     hex_buf[17] = { 0 };
+    cy_str_t hex         = to_hex(UINT64_C(0x1A2B), 16U, hex_buf);
+    TEST_ASSERT_EQUAL_size_t(4U, hex.len);
+    TEST_ASSERT_EQUAL_MEMORY("1a2b", hex.str, hex.len);
+
+    hex = to_hex(0U, 8U, NULL);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, hex.len);
+    TEST_ASSERT_NULL(hex.str);
+#endif
+
+    bitmap_t bm[1] = { UINT64_C(0xFFFFFFFFFFFFFFFF) };
+    bitmap_reset(NULL, 1U);
+    bitmap_reset(bm, 1U);
+    TEST_ASSERT_EQUAL_UINT64(0U, bm[0]);
+    TEST_ASSERT_FALSE(bitmap_test_bounded(bm, 1U, 1U));
+
+    TEST_ASSERT_FALSE(is_prime_u32(1U));
+    TEST_ASSERT_TRUE(is_prime_u32(2U));
+    TEST_ASSERT_FALSE(is_prime_u32(4U));
+    TEST_ASSERT_FALSE(is_prime_u32(9U));
+    TEST_ASSERT_TRUE(is_prime_u32(17U));
+    TEST_ASSERT_TRUE(is_valid_subject_id_modulus((uint32_t)CY_SUBJECT_ID_MODULUS_17bit));
+    TEST_ASSERT_FALSE(is_valid_subject_id_modulus(4U));
+}
+
 void setUp(void) {}
 
 void tearDown(void) {}
@@ -538,5 +593,6 @@ int main(void)
     RUN_TEST(test_bitmap_shift_large_shift_clears_bitmap);
     RUN_TEST(test_bitmap_shift_left_branch_matrix);
     RUN_TEST(test_bitmap_shift_right_branch_matrix);
+    RUN_TEST(test_internal_helpers_branch_matrix);
     return UNITY_END();
 }

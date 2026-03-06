@@ -180,7 +180,7 @@ uint64 tag              # From the acknowledged message.
 
 Response tags are not used for ordering recovery since there is a seqno available, and there is no risk of reboot misattribution -- they are only needed for acknowledgement correlation and as such they are much narrower and there is no monotonicity requirement, the sender can choose values arbitrarily.
 
-For unicast, NACKs are well-defined since these interactions are inherently unicast.
+For unicast, NACKs are well-defined since these interactions are unicast.
 
 The (n)ack priority level must match that of the original response.
 
@@ -236,7 +236,9 @@ The topic to subject-ID mapping is done via a CRDT described in the formal speci
 
 The broadcast gossip rate is constant on a large time interval, but short-term it is variable due to intentional dithering, which is introduced to enable duplicate gossip suppression, similar to GAAP/ZMAAP. Removal of duplicates speeds up topic discovery and consensus repair.
 
-While broadcast gossips are robust, they are inherently slow. To improve CRDT repair time, Cyphal v1.1 includes epidemic unicast gossips, roughly derived from Cyclon/HyParView etc. Each node holds a randomly chosen set of remotes that are likely to be currently online, called "gossip peers"; the gossip peer set is refreshed stochastically. When consensus needs repair, the affected topics are scheduled to be broadcast-gossiped at the next opportunity (the broadcast rate is fixed so all we can do is to alter the schedule not the rate), and epidemic unicast gossips of the affected topics are emitted immediately to a randomly chosen small subset of the gossip peers (typ. 2 peers only) with some positive TTL (typ. ~16). Every peer upon reception of epidemic gossips will update its own CRDT state and forward the gossips (updated from the local CRDT state as necessary) unless they lost arbitration to local state, in which case new gossips with the newer CRDT state will be emitted instead.
+While broadcast gossips are robust, they are slow. To improve CRDT repair time, Cyphal v1.1 includes epidemic unicast gossips, roughly derived from Cyclon/HyParView etc. Each node holds a randomly chosen set of remotes that are likely to be currently online, called "gossip peers"; the gossip peer set is refreshed stochastically. When consensus needs repair, the affected topics are scheduled to be broadcast-gossiped at the next opportunity (the broadcast rate is fixed so all we can do is to alter the schedule not the rate), and epidemic unicast gossips of the affected topics are emitted immediately to a randomly chosen small subset of the gossip peers (typ. 2 peers only) with some positive TTL (typ. ~16). Every peer upon reception of epidemic gossips will update its own CRDT state and forward the gossips (updated from the local CRDT state as necessary) unless they lost arbitration to local state, in which case new gossips with the newer CRDT state will be emitted instead.
+
+One idea that was considered to improve epidemic gossips was to include a Bloom filter of non-pinned topic hashes known to gossip sender, such that the peer registry of its peers would indicate which peers are likely to know a given topic. The idea was rejected because it is unlikely to help with epidemic mixing meaningfully and adds complexity. It might be a good seed for potential improvement ideas in the future though.
 
 #### Prior art
 

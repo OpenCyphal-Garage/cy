@@ -1742,6 +1742,63 @@ void test_api_rpc_e2e_r27_respond_reliable_lag_paths()
     run_case(+10'000, false); // Timeout fires after deadline: immediate completion branch.
 }
 
+void test_api_rpc_e2e_r28_request_introspection_and_borrow_contract()
+{
+    e2e::sim_net_t net{};
+    TEST_ASSERT_EQUAL_INT(CY_OK, e2e::sim_net_init(net));
+    cy_us_t now = 0;
+
+    static constexpr const char* topic_name = "rpc/r28/topic";
+    cy_publisher_t* const        client     = make_client(net, topic_name);
+    server_context_t             server{};
+    cy_future_t* const           server_sub = make_server_subscriber(net, topic_name, server);
+
+    set_now(net, now);
+    cy_future_t* const request = request_once(client, now, 28U, 1U, 220'000, 220'000);
+    TEST_ASSERT_NOT_NULL(request);
+    TEST_ASSERT_TRUE(cy_is_request(request));
+    TEST_ASSERT_FALSE(cy_is_request(nullptr));
+
+    const auto         payload = e2e::app_payload_pack(28U, 2U);
+    const cy_bytes_t   msg     = { .size = payload.size(), .data = payload.data(), .next = nullptr };
+    cy_future_t* const publish = cy_publish_reliable(client, now + 220'000, msg);
+    TEST_ASSERT_NOT_NULL(publish);
+    TEST_ASSERT_FALSE(cy_is_request(publish));
+
+    cy_future_t* const subscriber = cy_subscribe(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("rpc/r28/sub"), 64U);
+    TEST_ASSERT_NOT_NULL(subscriber);
+    TEST_ASSERT_FALSE(cy_is_request(subscriber));
+
+    TEST_ASSERT_TRUE(wait_until_done(net, now, request, wait_timeout_us));
+    assert_request_state(request, true, CY_OK);
+    TEST_ASSERT_EQUAL_UINT64(1U, cy_response_count(request));
+
+    const cy_response_t borrow_1 = cy_response_borrow(request);
+    const cy_response_t borrow_2 = cy_response_borrow(request);
+    TEST_ASSERT_NOT_NULL(borrow_1.message.content);
+    TEST_ASSERT_NOT_NULL(borrow_2.message.content);
+    TEST_ASSERT_TRUE(borrow_1.message.content == borrow_2.message.content);
+    TEST_ASSERT_TRUE(cy_future_done(request));
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_future_error(request));
+
+    e2e::app_payload_t unpacked{};
+    TEST_ASSERT_TRUE(unpack_response_payload(borrow_1, unpacked));
+    TEST_ASSERT_EQUAL_UINT32(server.response_publisher_id, unpacked.publisher_id);
+    TEST_ASSERT_EQUAL_UINT64(1U, unpacked.sequence);
+
+    const cy_response_t moved = cy_response_move(request);
+    TEST_ASSERT_NOT_NULL(moved.message.content);
+    TEST_ASSERT_TRUE(moved.message.content == borrow_1.message.content);
+    cy_message_refcount_dec(moved.message.content);
+
+    TEST_ASSERT_FALSE(cy_future_done(request));
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_future_error(request));
+    TEST_ASSERT_NULL(cy_response_borrow(request).message.content);
+    TEST_ASSERT_NULL(cy_response_borrow(publish).message.content);
+
+    cleanup_case(net, now, { request, publish }, { server_sub, subscriber }, { client });
+}
+
 } // namespace
 
 extern "C" void setUp()
@@ -1787,5 +1844,6 @@ int main()
     RUN_TEST(test_api_rpc_e2e_r25_respond_reliable_tag_exhaustion_returns_null);
     RUN_TEST(test_api_rpc_e2e_r26_respond_reliable_retransmit_media_error_notifies_then_times_out);
     RUN_TEST(test_api_rpc_e2e_r27_respond_reliable_lag_paths);
+    RUN_TEST(test_api_rpc_e2e_r28_request_introspection_and_borrow_contract);
     return UNITY_END();
 }

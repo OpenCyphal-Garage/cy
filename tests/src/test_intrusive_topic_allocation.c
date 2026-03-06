@@ -24,6 +24,7 @@ typedef struct
 
     size_t fail_alloc_count;
     size_t fail_alloc_size;
+    bool   fail_subject_send;
     bool   fail_subject_writer_new;
     bool   fail_subject_reader_new;
 
@@ -79,12 +80,12 @@ static cy_err_t fixture_subject_writer_send(cy_platform_t* const       platform,
                                             const cy_prio_t            priority,
                                             const cy_bytes_t           message)
 {
-    (void)platform;
+    fixture_t* const self = fixture_from(platform);
     (void)writer;
     (void)deadline;
     (void)priority;
     (void)message;
-    return CY_OK;
+    return self->fail_subject_send ? CY_ERR_MEDIA : CY_OK;
 }
 
 static cy_subject_reader_t* fixture_subject_reader_new(cy_platform_t* const platform,
@@ -514,6 +515,153 @@ static void test_topic_subscribe_if_matching_oom_coupling_rolls_back_topic(void)
     fixture_deinit(&fix);
 }
 
+static void test_subscribe_guard_and_allocation_failure_paths(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    char overlong[CY_TOPIC_NAME_MAX + 2U];
+    memset(overlong, 'a', sizeof(overlong));
+    overlong[sizeof(overlong) - 1U] = '\0';
+    TEST_ASSERT_NULL(cy_subscribe(fix.cy, (cy_str_t){ .len = CY_TOPIC_NAME_MAX + 1U, .str = overlong }, 16U));
+
+    fix.fail_alloc_size  = sizeof(subscriber_t);
+    fix.fail_alloc_count = 1U;
+    TEST_ASSERT_NULL(cy_subscribe(fix.cy, cy_str("alloc/sub/future-oom"), 16U));
+    fix.fail_alloc_count = 0U;
+    fix.fail_alloc_size  = 0U;
+
+    fix.fail_alloc_size  = sizeof(subscriber_root_t);
+    fix.fail_alloc_count = 1U;
+    TEST_ASSERT_NULL(cy_subscribe(fix.cy, cy_str("alloc/sub/root-oom"), 16U));
+    fix.fail_alloc_count = 0U;
+    fix.fail_alloc_size  = 0U;
+
+    subscriber_root_t* root = NULL;
+    fix.fail_alloc_size     = 0U;
+    fix.fail_alloc_count    = 1U;
+    TEST_ASSERT_EQUAL_INT(CY_ERR_MEMORY, ensure_subscriber_root(fix.cy, cy_str("alloc/sub/node-oom"), &root));
+    TEST_ASSERT_NULL(root);
+    TEST_ASSERT_NULL(wkv_get(&fix.cy->subscribers_by_name, cy_str("alloc/sub/node-oom")));
+
+    root                 = NULL;
+    fix.fail_alloc_size  = sizeof(cy_topic_t);
+    fix.fail_alloc_count = 1U;
+    TEST_ASSERT_EQUAL_INT(CY_ERR_MEMORY, ensure_subscriber_root(fix.cy, cy_str("alloc/sub/topic-ensure-oom"), &root));
+    TEST_ASSERT_NULL(root);
+    TEST_ASSERT_NULL(wkv_get(&fix.cy->subscribers_by_name, cy_str("alloc/sub/topic-ensure-oom")));
+
+    fixture_deinit(&fix);
+}
+
+static void test_ensure_subscriber_root_pattern_index_oom(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    const cy_str_t    pattern = cy_str("alloc/sub/pattern/index/*");
+    wkv_node_t* const pre     = wkv_set(&fix.cy->subscribers_by_name, pattern);
+    TEST_ASSERT_NOT_NULL(pre);
+    TEST_ASSERT_NULL(pre->value);
+
+    fix.fail_alloc_size     = sizeof(wkv_node_t);
+    fix.fail_alloc_count    = 1U;
+    subscriber_root_t* root = NULL;
+    TEST_ASSERT_EQUAL_INT(CY_ERR_MEMORY, ensure_subscriber_root(fix.cy, pattern, &root));
+    TEST_ASSERT_NULL(root);
+    TEST_ASSERT_NULL(wkv_get(&fix.cy->subscribers_by_name, pattern));
+    TEST_ASSERT_TRUE(wkv_is_empty(&fix.cy->subscribers_by_pattern));
+    fixture_deinit(&fix);
+}
+
+static void test_subscribe_pattern_coupling_oom_rolls_back(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    static const char* const topic_name = "alloc/sub/coupling/fail/topic";
+    const uint64_t           hash       = topic_hash(cy_str(topic_name));
+    cy_topic_t* const        topic      = fixture_make_explicit_topic(&fix, topic_name, hash);
+    TEST_ASSERT_NULL(topic->couplings);
+
+    fix.fail_alloc_size    = sizeof(cy_topic_coupling_t) + sizeof(cy_substitution_t);
+    fix.fail_alloc_count   = 1U;
+    cy_future_t* const sub = cy_subscribe(fix.cy, cy_str("alloc/sub/coupling/fail/*"), 32U);
+    TEST_ASSERT_NULL(sub);
+    TEST_ASSERT_NULL(topic->couplings);
+    TEST_ASSERT_TRUE(wkv_is_empty(&fix.cy->subscribers_by_name));
+    TEST_ASSERT_TRUE(wkv_is_empty(&fix.cy->subscribers_by_pattern));
+    topic->pub_count = 0U;
+    topic_sync_implicit(topic);
+    fixture_deinit(&fix);
+}
+
+static void test_subscribe_existing_root_refreshes_reader_extent(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    static const char* const topic_name = "alloc/sub/extent/refresh";
+    const uint64_t           hash       = topic_hash(cy_str(topic_name));
+    cy_topic_t* const        topic      = fixture_make_explicit_topic(&fix, topic_name, hash);
+
+    cy_future_t* const sub_small = cy_subscribe(fix.cy, cy_str("alloc/sub/extent/*"), 8U);
+    TEST_ASSERT_NOT_NULL(sub_small);
+    TEST_ASSERT_NOT_NULL(topic->sub_reader);
+    const size_t reader_destroy_before = fix.subject_reader_destroy_count;
+
+    cy_future_t* const sub_large = cy_subscribe(fix.cy, cy_str("alloc/sub/>"), 1024U);
+    TEST_ASSERT_NOT_NULL(sub_large);
+    TEST_ASSERT_NOT_NULL(topic->sub_reader);
+    TEST_ASSERT_EQUAL_size_t(reader_destroy_before + 1U, fix.subject_reader_destroy_count);
+
+    cy_future_t* const sub_same_root = cy_subscribe(fix.cy, cy_str("alloc/sub/extent/*"), 16U);
+    TEST_ASSERT_NOT_NULL(sub_same_root);
+
+    cy_future_destroy(sub_small);
+    cy_future_destroy(sub_large);
+    cy_future_destroy(sub_same_root);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(fix.cy));
+    topic->pub_count = 0U;
+    topic_sync_implicit(topic);
+    fixture_deinit(&fix);
+}
+
+static void test_pattern_root_scout_retry_paths(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    const cy_str_t pattern = cy_str("alloc/sub/scout/retry/*");
+
+    fix.fail_subject_send    = true;
+    cy_future_t* const first = cy_subscribe(fix.cy, pattern, 32U);
+    TEST_ASSERT_NOT_NULL(first);
+    const size_t async_after_first = fix.async_error_count;
+    TEST_ASSERT_TRUE(async_after_first > 0U);
+    const wkv_node_t* const node = wkv_get(&fix.cy->subscribers_by_name, pattern);
+    TEST_ASSERT_NOT_NULL(node);
+    subscriber_root_t* const root = (subscriber_root_t*)node->value;
+    TEST_ASSERT_NOT_NULL(root);
+    TEST_ASSERT_TRUE(root->needs_scouting);
+
+    cy_future_t* const second = cy_subscribe(fix.cy, pattern, 48U);
+    TEST_ASSERT_NOT_NULL(second);
+    TEST_ASSERT_TRUE(fix.async_error_count > async_after_first);
+    TEST_ASSERT_TRUE(root->needs_scouting);
+
+    fix.fail_subject_send    = false;
+    cy_future_t* const third = cy_subscribe(fix.cy, pattern, 64U);
+    TEST_ASSERT_NOT_NULL(third);
+    TEST_ASSERT_FALSE(root->needs_scouting);
+
+    cy_future_destroy(first);
+    cy_future_destroy(second);
+    cy_future_destroy(third);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(fix.cy));
+    fixture_deinit(&fix);
+}
+
 static void test_topic_new_error_duplicate_name(void)
 {
     fixture_t fix;
@@ -706,7 +854,8 @@ static void test_on_gossip_known_topic_equal_lage_prefers_higher_evictions(void)
     topic_merge_lage(topic_win, now, 5);
     topic_allocate(topic_win, 6U, now);
     TEST_ASSERT_EQUAL_UINT32(6U, topic_win->evictions);
-    TEST_ASSERT_TRUE(on_gossip_known_topic(fix.cy, now, topic_win, 5U, topic_lage(topic_win, now)));
+    TEST_ASSERT_EQUAL_INT(crdt_local_win,
+                          on_gossip_known_topic(fix.cy, now, topic_win, 5U, topic_lage(topic_win, now)));
     TEST_ASSERT_EQUAL_UINT32(6U, topic_win->evictions);
     TEST_ASSERT_TRUE(is_listed(&fix.cy->list_gossip_urgent, &topic_win->list_gossip_urgent));
 
@@ -714,7 +863,8 @@ static void test_on_gossip_known_topic_equal_lage_prefers_higher_evictions(void)
       fixture_make_explicit_topic(&fix, "alloc/divergence/eviction-lose", UINT64_C(0x1000000000001170));
     topic_merge_lage(topic_lose, now, 5);
     topic_allocate(topic_lose, 6U, now);
-    TEST_ASSERT_FALSE(on_gossip_known_topic(fix.cy, now, topic_lose, 9U, topic_lage(topic_lose, now)));
+    TEST_ASSERT_EQUAL_INT(crdt_local_loss,
+                          on_gossip_known_topic(fix.cy, now, topic_lose, 9U, topic_lage(topic_lose, now)));
     TEST_ASSERT_EQUAL_UINT32(9U, topic_lose->evictions);
 
     topic_win->pub_count  = 0U;
@@ -792,18 +942,19 @@ static void test_on_gossip_known_topic_divergence_paths(void)
 
     topic_merge_lage(t1, 50 * MEGA, 5);
     const uint32_t ev_before = t1->evictions;
-    TEST_ASSERT_TRUE(on_gossip_known_topic(fix.cy, 50 * MEGA, t1, ev_before + 1U, 1));
+    TEST_ASSERT_EQUAL_INT(crdt_local_win, on_gossip_known_topic(fix.cy, 50 * MEGA, t1, ev_before + 1U, 1));
     TEST_ASSERT_EQUAL_UINT32(ev_before, t1->evictions);
     TEST_ASSERT_TRUE(is_listed(&fix.cy->list_gossip_urgent, &t1->list_gossip_urgent));
 
     topic_merge_lage(t2, 60 * MEGA, 1);
-    TEST_ASSERT_FALSE(on_gossip_known_topic(fix.cy, 60 * MEGA, t2, t2->evictions + 3U, 8));
+    TEST_ASSERT_EQUAL_INT(crdt_local_loss, on_gossip_known_topic(fix.cy, 60 * MEGA, t2, t2->evictions + 3U, 8));
     TEST_ASSERT_EQUAL_UINT32(3U, t2->evictions);
     TEST_ASSERT_TRUE(topic_lage(t2, 60 * MEGA) >= 4);
 
     schedule_gossip(t1);
     schedule_gossip(t2);
-    TEST_ASSERT_FALSE(on_gossip_known_topic(fix.cy, 70 * MEGA, t1, t1->evictions, topic_lage(t1, 70 * MEGA)));
+    TEST_ASSERT_EQUAL_INT(crdt_consensus,
+                          on_gossip_known_topic(fix.cy, 70 * MEGA, t1, t1->evictions, topic_lage(t1, 70 * MEGA)));
     TEST_ASSERT_TRUE(fix.cy->list_gossip.head == &t1->list_gossip);
     t1->pub_count = 0U;
     t2->pub_count = 0U;
@@ -822,11 +973,11 @@ static void test_on_gossip_unknown_topic_collision_paths(void)
     const uint32_t    remote_evictions = 0U;
     topic_merge_lage(mine, 100 * MEGA, 4);
 
-    TEST_ASSERT_TRUE(on_gossip_unknown_topic(fix.cy, 100 * MEGA, remote, remote_evictions, 1));
+    TEST_ASSERT_EQUAL_INT(crdt_local_win, on_gossip_unknown_topic(fix.cy, 100 * MEGA, remote, remote_evictions, 1));
     TEST_ASSERT_TRUE(is_listed(&fix.cy->list_gossip_urgent, &mine->list_gossip_urgent));
 
     const uint32_t before = mine->evictions;
-    TEST_ASSERT_FALSE(on_gossip_unknown_topic(fix.cy, 110 * MEGA, remote, remote_evictions, 8));
+    TEST_ASSERT_EQUAL_INT(crdt_local_loss, on_gossip_unknown_topic(fix.cy, 110 * MEGA, remote, remote_evictions, 8));
     TEST_ASSERT_TRUE(mine->evictions > before);
     fixture_deinit(&fix);
 }
@@ -998,6 +1149,11 @@ int main(void)
     RUN_TEST(test_topic_subscribe_if_matching_oom_topic_new);
     RUN_TEST(test_topic_subscribe_if_matching_rejects_invalid_and_no_match);
     RUN_TEST(test_topic_subscribe_if_matching_oom_coupling_rolls_back_topic);
+    RUN_TEST(test_subscribe_guard_and_allocation_failure_paths);
+    RUN_TEST(test_ensure_subscriber_root_pattern_index_oom);
+    RUN_TEST(test_subscribe_pattern_coupling_oom_rolls_back);
+    RUN_TEST(test_subscribe_existing_root_refreshes_reader_extent);
+    RUN_TEST(test_pattern_root_scout_retry_paths);
     RUN_TEST(test_topic_new_error_duplicate_name);
     RUN_TEST(test_topic_new_error_duplicate_hash_rolls_back_name_index);
     RUN_TEST(test_topic_new_pinned_starts_implicit_and_not_gossiped);
