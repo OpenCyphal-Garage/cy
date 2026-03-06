@@ -7,7 +7,7 @@
 _pub/sub without steroids_
 
 [![CI](https://github.com/OpenCyphal-Garage/cy/actions/workflows/main.yml/badge.svg)](https://github.com/OpenCyphal-Garage/cy/actions/workflows/main.yml)
-[![Coverage](https://coveralls.io/repos/github/OpenCyphal-Garage/cy/badge.svg)](https://coveralls.io/github/OpenCyphal-Garage/cy?branch=coverage)
+[![Coverage](https://coveralls.io/repos/github/OpenCyphal-Garage/cy/badge.svg)](https://coveralls.io/github/OpenCyphal-Garage/cy)
 [![Website](https://img.shields.io/badge/website-opencyphal.org-black?color=1700b3)](https://opencyphal.org/)
 [![Forum](https://img.shields.io/discourse/https/forum.opencyphal.org/users.svg?logo=discourse&color=1700b3)](https://forum.opencyphal.org)
 
@@ -315,3 +315,4 @@ direction LR
     _subscriber_root "1" o-- "*" subscriber
     note "Automatically managed private entities are prefixed with '_'"
 ```
+
