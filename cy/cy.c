@@ -570,30 +570,6 @@ static size_t bitmap_clz(const bitmap_t* const bitmap, const size_t bit_count)
     return bit_count;
 }
 
-// True if at least one bit is set.
-static bool bitmap_any(const bitmap_t* const bitmap, const size_t bit_count)
-{
-    if (bitmap != NULL) {
-        const size_t words = BITMAP_WORDS(bit_count);
-        for (size_t i = 0; i < words; i++) {
-            bitmap_t bits = bitmap[i];
-            if (i == (words - 1U)) { // Ignore padding bits when bit_count is not a multiple of 64.
-                const size_t tail = bit_count % 64U;
-                if (tail > 0U) {
-                    bits &= (1ULL << tail) - 1ULL;
-                }
-            }
-            if (bits != 0U) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
-// True if no bits are set.
-static bool bitmap_none(const bitmap_t* const bitmap, const size_t bit_count) { return !bitmap_any(bitmap, bit_count); }
-
 // Shift left or right by the specified number of bits. Newly inserted bits are zeroed.
 // Positive amount shifts left, negative amount shifts right.
 static void bitmap_shift(bitmap_t* const bitmap, const size_t bit_count, const intmax_t shift_amount)
@@ -1183,8 +1159,6 @@ static int32_t cavl_comp_topic_subject_id(const void* const user, const cy_tree_
     return (outer > inner) ? +1 : -1;
 }
 
-static bool topic_has_subscribers(const cy_topic_t* const topic) { return topic->couplings != NULL; }
-
 static int_fast8_t topic_lage(const cy_topic_t* const topic, const cy_us_t now)
 {
     return log2_floor((uint64_t)later(0, (now - topic->ts_origin) / MEGA));
@@ -1625,6 +1599,7 @@ static cy_err_t topic_new(cy_t* const        cy,
         *out_topic = topic;
     }
     CY_TRACE(cy, "✨ %s topic_count=%zu", topic_repr(topic).str, cavl_count(cy->topics_by_hash));
+    (void)cavl_count; // Suppress unused function warning when tracing is disabled.
     return 0;
 
 fail:

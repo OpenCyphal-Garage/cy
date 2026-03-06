@@ -433,36 +433,6 @@ static void test_bitmap_clz_branch_matrix(void)
     TEST_ASSERT_EQUAL_size_t(69U, bitmap_clz(bm128, 128U));
 }
 
-static void test_bitmap_any_none_branch_matrix(void)
-{
-    bitmap_t bm130[3] = { 0, 0, 0 };
-    bitmap_t bm65[2]  = { 0, 0 };
-    bitmap_t bm128[2] = { 0, 0 };
-
-    TEST_ASSERT_FALSE(bitmap_any(NULL, 5U));
-    TEST_ASSERT_TRUE(bitmap_none(NULL, 5U));
-
-    TEST_ASSERT_FALSE(bitmap_any(bm130, 0U));
-    TEST_ASSERT_TRUE(bitmap_none(bm130, 0U));
-    TEST_ASSERT_FALSE(bitmap_any(bm130, 130U));
-    TEST_ASSERT_TRUE(bitmap_none(bm130, 130U));
-
-    bm130[0] = UINT64_C(1) << 11U;
-    TEST_ASSERT_TRUE(bitmap_any(bm130, 130U));
-    TEST_ASSERT_FALSE(bitmap_none(bm130, 130U));
-
-    bm65[1] = UINT64_C(1) << 1U; // out-of-range for count=65.
-    TEST_ASSERT_FALSE(bitmap_any(bm65, 65U));
-    TEST_ASSERT_TRUE(bitmap_none(bm65, 65U));
-    bm65[1] = UINT64_C(1) << 0U; // bit 64 is valid.
-    TEST_ASSERT_TRUE(bitmap_any(bm65, 65U));
-    TEST_ASSERT_FALSE(bitmap_none(bm65, 65U));
-
-    bm128[1] = UINT64_C(1) << 63U; // tail=0 path.
-    TEST_ASSERT_TRUE(bitmap_any(bm128, 128U));
-    TEST_ASSERT_FALSE(bitmap_none(bm128, 128U));
-}
-
 static void test_bitmap_shift_guard_noop_paths(void)
 {
     bitmap_t bm[3]       = { UINT64_C(0xAAAAAAAAAAAAAAAA), UINT64_C(0x0123456789ABCDEF), UINT64_C(0xFEDCBA9876543210) };
@@ -588,7 +558,6 @@ int main(void)
     RUN_TEST(test_bitmap_new_zero_init_and_oom);
     RUN_TEST(test_bitmap_set_clear_test_cross_word);
     RUN_TEST(test_bitmap_clz_branch_matrix);
-    RUN_TEST(test_bitmap_any_none_branch_matrix);
     RUN_TEST(test_bitmap_shift_guard_noop_paths);
     RUN_TEST(test_bitmap_shift_large_shift_clears_bitmap);
     RUN_TEST(test_bitmap_shift_left_branch_matrix);
