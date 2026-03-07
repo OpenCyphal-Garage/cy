@@ -8,6 +8,7 @@ _pub/sub without steroids_
 
 [![CI](https://github.com/OpenCyphal-Garage/cy/actions/workflows/main.yml/badge.svg)](https://github.com/OpenCyphal-Garage/cy/actions/workflows/main.yml)
 [![Coverage](https://coveralls.io/repos/github/OpenCyphal-Garage/cy/badge.svg)](https://coveralls.io/github/OpenCyphal-Garage/cy)
+[![Distributed consensus demo](https://img.shields.io/badge/visualization-gerasim.opencyphal.org-black?color=ff00aa)](https://gerasim.opencyphal.org/)
 [![Website](https://img.shields.io/badge/website-opencyphal.org-black?color=1700b3)](https://opencyphal.org/)
 [![Forum](https://img.shields.io/discourse/https/forum.opencyphal.org/users.svg?logo=discourse&color=1700b3)](https://forum.opencyphal.org)
 
@@ -37,6 +38,88 @@ On an embedded system, one may also prefer to use [`o1heap`](https://github.com/
 management, but this is not a hard dependency -- any allocator will work. O1Heap is the recommended choice for embedded
 platforms due to its hard determinism and low fragmentation.
 
+## 🖌 Design in a nutshell
+
+Cyphal v1.1 is a session layer built on top of the Cyphal v1.0 transport layers.
+The session layer provides named topics by automatically mapping topic names to subject-IDs.
+The mapping is done by maintaining a distributed allocation table based on a CRDT,
+which is kept consistent across the network using a gossip protocol.
+The session layer also provides a powerful pattern subscription mechanism that allows applications to discover
+topics and subscribe to them on the fly.
+A new RPC mechanism is available that allows sending responses and streaming data back to the publisher.
+Additional features include tunable reliability, liveness monitoring, ordered delivery, etc.
+
+🌐 A live demo of the distributed consensus algorithm can be found at <https://gerasim.opencyphal.org>.
+
+For a more comprehensive design overview, refer to [`cy/README.md`](cy/README.md);
+formal verification models can be found in `formal/`.
+
+```mermaid
+%%{init: {"theme": "base", "themeVariables": {"primaryColor": "#1e293b", "primaryTextColor": "#e2e8f0", "primaryBorderColor": "#475569", "lineColor": "#64748b", "secondaryColor": "#1e293b", "background": "#0f172a", "mainBkg": "#1e293b", "nodeBorder": "#475569", "clusterBkg": "#ffffff08", "clusterBorder": "#47556944", "edgeLabelBackground": "#0f172a", "fontSize": "13px"}, "flowchart": {"curve": "basis", "padding": 14, "nodeSpacing": 18, "rankSpacing": 32}}}%%
+graph TB
+
+  subgraph API["APPLICATION"]
+    direction LR
+    A1["<b>cy_new · cy_destroy</b><br/>cy_update · cy_spin"]
+    A2["<b>cy_advertise</b><br/>cy_unadvertise"]
+    A3["<b>cy_publish</b><br/>cy_publish_reliable"]
+    A4["<b>cy_request</b><br/>cy_respond"]
+    A5["<b>cy_subscribe</b><br/>cy_unsubscribe"]
+  end
+
+  subgraph ENGINE["PROTOCOL ENGINE — cy.c"]
+    direction LR
+    G["<b>Distributed Consensus</b><br/>Epidemic bcast + ucast<br/>Peer Sampler<br/>Dedup · TTL · LRU"]
+    P["<b>Publisher</b><br/>Subject Writer · priority<br/>tag · seqno<br/>Publish Future · ACK<br/>reliable delivery"]
+    T{{"<b>Distributed Allocation Table<br/>(CRDT)</b><br/>topic hash → subject-ID<br/>allocation · eviction<br/>implicit / explicit<br/>indexes: hash · sid · name"}}
+    S["<b>Subscriber</b><br/>Subject Reader · coupling<br/>patterns · dedup<br/>reorder · deliver<br/>associations · liveness"]
+  end
+
+  subgraph RT["RUNTIME"]
+    direction LR
+    F["<b>Future</b><br/>callback · timeout<br/>key index"]
+    O["<b>Olga Scheduler</b><br/>EDF queue"]
+    D["<b>Data Structures</b><br/>bitmap · list<br/>cavl2.h AVL tree<br/>wild_key_value.h trie"]
+    M["<b>Memory</b><br/>alloc · chunked dup<br/>serialization"]
+  end
+
+  subgraph PL["PLATFORM — cy_platform.h"]
+    direction LR
+    X1["Subject Reader / Writer"]
+    X2["Unicast · Broadcast"]
+    X3["realloc · now · random"]
+  end
+
+  A1 --> T
+  A2 & A3 & A4 --> P
+  A5 --> S
+
+  P <--> T
+  S <--> T
+  G <--> T
+
+  G --> F
+  P --> O
+  T --> D
+  S --> M
+
+  F --> X1
+  O --> X2
+  M --> X3
+
+  classDef api fill:#14532d,stroke:#22c55e,color:#bbf7d0,font-weight:bold
+  classDef core fill:#1e3a5f,stroke:#3b82f6,color:#bfdbfe
+  classDef topic fill:#312e81,stroke:#818cf8,color:#c7d2fe,font-weight:bold
+  classDef rt fill:#292524,stroke:#78716c,color:#d6d3d1
+  classDef plat fill:#4a1d7a,stroke:#a855f7,color:#e9d5ff
+
+  class A1,A2,A3,A4,A5 api
+  class P,S,G core
+  class T topic
+  class F,O,D,M rt
+  class X1,X2,X3 plat
+```
+
 ## 📚 API crash course
 
 The library offers a very compact API.
@@ -44,7 +127,6 @@ It is fully asynchronous/non-blocking; if necessary, synchronous wrappers can be
 
 The specifics of setting up a local node depend on the platform and transport used,
 unlike the rest of the API, which is entirely platform- and transport-agnostic.
-Here is an example for Cyphal/UDP on POSIX systems:
 
 ```c++
 #include <cy.h>             // platform- and transport-agnostic Cyphal API
@@ -53,6 +135,7 @@ Here is an example for Cyphal/UDP on POSIX systems:
 int main(void)
 {
     // Set up the platform layer that connects Cy to the underlying transport and OS.
+    // Here we're using Cyphal/UDP on POSIX as an example.
     cy_platform_t* platform = cy_udp_posix_new();
     if (platform == NULL) { ... }
 
@@ -167,9 +250,7 @@ state estimation, etc.
 
 One powerful feature is pattern subscriptions -- a kind of automatic service discovery.
 When a pattern subscription is created, the local node will scout the network for topics matching the specified
-pattern and will automatically subscribe to them as they appear, and unsubscribe when they disappear;
-a pattern subscription will continuously monitor the network for matching topics and subscribe automatically when
-they appear, and unsubscribe when they disappear.
+pattern and will automatically subscribe to them as they appear, and unsubscribe when they disappear.
 
 Cy *intentionally uses the same API* for both verbatim and pattern subscriptions,
 as this enables flexible configuration at the time of integration/runtime as opposed to compile time only.
@@ -181,7 +262,7 @@ To create a pattern subscription, simply use a topic name that contains substitu
   `sensors/engine/temperature`, etc.
 
 Cyphal is designed to be lightweight and efficient, which is why we don't support substitution characters *within*
-name segments; e.g., `sensor*/eng>` will be treated as a literal topic name.
+name segments; e.g., `sensor*/eng>` will be treated as a verbatim topic name rather than a pattern.
 
 When a message is received, the subscriber future becomes done:
 
@@ -250,15 +331,19 @@ for (size_t i = 0; i < subs.count; i++) {
 It is also possible to monitor subscriber liveness and alert the application via its callback when messages cease to
 arrive; see the API docs for details.
 
-### ↩️ RPC & streaming
+### 🔄 RPC & streaming
 
 Cyphal v1.1 implements RPC with optional streaming directly on top of pub/sub by allowing subscribers to optionally
 respond to any received message. Such responses are unicast directly back to the publisher, and are invisible to
 other nodes on the network.
-Streaming is simply a special case of RPC where the server sends multiple responses to a single request.
 
-If there are multiple subscribers on a topic, then each may respond, in which case the client will receive multiple
-responses separately from each server (subscriber). This can be used to implement anycast-like redundant topologies.
+Streaming is simply a special case of RPC where the server (i.e., subscriber) sends multiple responses
+to the same request. Each request carries a non-wrapping seqno that starts from zero and is incremented by one
+for each subsequent response.
+
+If there are multiple subscribers on a topic, then each may respond, in which case the client (i.e., publisher)
+will receive multiple responses separately from each server (subscriber).
+This can be used to implement anycast-like redundant topologies.
 
 Protocol-wise, there is no difference between a regular published message and a request, but in the Cy API the
 distinction is important because the library needs to know where to dispatch responses received for a given message.
@@ -349,45 +434,3 @@ For example, to subscribe to subject-ID 1234, use the topic name `#04d2`.
 
 Cyphal v1.1 has no RPC in the same way as Cyphal/CAN v1.0 does; instead, it uses pub/sub for everything, including
 request/response interactions. Thus, to use RPC in a legacy CAN network, a low-level CAN transport access is required.
-
-## 🛠 Development
-
-The main development environment is the test suite under `tests/`, please refer there for specific instructions.
-
-### 📝 Design notes
-
-Pattern subscriptions are perhaps the most convoluted part of the library because patterns imply that a single
-subscription can match multiple topics, and a single topic may match multiple subscriptions under different names. The
-library introduces dynamically allocated coupling objects that link a topic with the matching subscribers. Also, the
-library has to manage the lifetime of subscriptions created automatically on a pattern match; such subscriptions and
-their topics are called "implicit" and they expire automatically when there is no activity for a certain large
-predefined timeout.
-
-```mermaid
-classDiagram
-direction LR
-    class cy {
-        +advertise()
-        +subscribe()
-    }
-    class publisher {
-        +publish()
-    }
-    class subscriber {
-        +callback
-    }
-    class future {
-        +callback
-    }
-    cy "1" o-- "*" _topic
-    cy "1" o-- "*" _subscriber_root
-    cy "1" --> "*" future
-    _topic "1" o-- "*" _coupling
-    _topic "1" <-- "*" publisher
-    publisher "1" <-- "*" future
-    _coupling "*" --> "1" _subscriber_root
-    _subscriber_root "1" o-- "*" subscriber
-    note "Automatically managed private entities are prefixed with '_'"
-```
-
-For a more comprehensive design overview, refer to `cy/README.md` and `formal/`.

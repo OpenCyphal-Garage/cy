@@ -261,3 +261,39 @@ Multicast group assignment to named topics:
 All nodes are trusted and there are no malicious actors. The protocol is designed to be robust against network faults and adverse conditions, but not against intentional attacks.
 
 Security features are likely to be introduced as optional extensions of the protocol at a later stage, once the core has stabilized. Feedback, suggestions, and feature requests are welcome on the [OpenCyphal Forum](https://forum.opencyphal.org).
+
+## Implementation-specific notes
+
+Pattern subscriptions are perhaps the most convoluted part of the library because patterns imply that a single
+subscription can match multiple topics, and a single topic may match multiple subscriptions under different names. The
+library introduces dynamically allocated coupling objects that link a topic with the matching subscribers. Also, the
+library has to manage the lifetime of subscriptions created automatically on a pattern match; such subscriptions and
+their topics are called "implicit" and they expire automatically when there is no activity for a certain large
+predefined timeout.
+
+```mermaid
+classDiagram
+direction LR
+    class cy {
+        +advertise()
+        +subscribe()
+    }
+    class publisher {
+        +publish()
+    }
+    class subscriber {
+        +callback
+    }
+    class future {
+        +callback
+    }
+    cy "1" o-- "*" _topic
+    cy "1" o-- "*" _subscriber_root
+    cy "1" --> "*" future
+    _topic "1" o-- "*" _coupling
+    _topic "1" <-- "*" publisher
+    publisher "1" <-- "*" future
+    _coupling "*" --> "1" _subscriber_root
+    _subscriber_root "1" o-- "*" subscriber
+    note "Automatically managed private entities are prefixed with '_'"
+```
