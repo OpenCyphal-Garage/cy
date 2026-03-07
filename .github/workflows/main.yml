@@ -98,6 +98,9 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           file: build/coverage/cy.cobertura.xml
           format: cobertura
+          base-path: ${{ github.workspace }}
+          git-branch: ${{ github.ref_name }}
+          git-commit: ${{ github.sha }}
       - if: ${{ steps.coveralls_upload.outcome == 'failure' }}
         run: |
           echo "::warning::Coveralls upload failed (likely Coveralls API issue). Continuing without failing CI."
