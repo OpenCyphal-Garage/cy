@@ -153,9 +153,9 @@ static void on_stream_request(cy_subscriber_t* const sub, cy_arrival_t* const ar
 int main(void)
 {
     cy_udp_posix_t cy_udp;
-    const cy_err_t res = cy_udp_posix_new_simple(&cy_udp);
+    const cy_err_t res = cy_udp_posix_new(&cy_udp);
     if (res != CY_OK) {
-        (void)fprintf(stderr, "cy_udp_posix_new_simple: %jd\n", (intmax_t)res);
+        (void)fprintf(stderr, "cy_udp_posix_new: %jd\n", (intmax_t)res);
         return 1;
     }
     cy_t* const cy = &cy_udp.base;

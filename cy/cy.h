@@ -260,6 +260,9 @@ typedef struct cy_response_t
 /// to reconstruct the original seqno ordering. It is guaranteed that each response arrives at most once. If multiple
 /// ordering-sensitive responses are expected, the application should monitor the seqno field, which starts at zero
 /// per remote and is incremented with each response from that remote.
+///
+/// We may also provide a function for querying the delivery status, such that the client is aware if the remote(s)
+/// have acknowledged the request.
 cy_future_t* cy_request(cy_publisher_t* const pub,
                         const cy_us_t         delivery_deadline, // Attempt to reliably deliver the request until this
                         const cy_us_t         response_timeout,  // NB: this is relative time, not a deadline!

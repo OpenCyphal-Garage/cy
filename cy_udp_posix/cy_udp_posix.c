@@ -513,7 +513,7 @@ static cy_err_t v_unicast_send(cy_platform_t* const   base,
                                            cy_bytes_to_udpard_bytes(message),
                                            NULL);
     // Report the result.
-    CY_TRACE(owner->base.cy, "💬 N%016jx res=%d", (uintmax_t)lane->id, ok);
+    CY_TRACE(owner->base.cy, "💬 N%016jx %s", (uintmax_t)lane->id, ok ? "OK" : "FAILURE");
     if (ok) {
         return CY_OK;
     }
@@ -768,9 +768,42 @@ static bool v_tx_eject(udpard_tx_t* const tx, udpard_tx_ejection_t* const ej)
     return res != 0; // either transmitted successfully or dropped due to error
 }
 
-cy_platform_t* cy_udp_posix_new(const uint64_t uid,
-                                const uint32_t local_iface_address[CY_UDP_POSIX_IFACE_COUNT_MAX],
-                                const size_t   tx_queue_capacity)
+cy_platform_t* cy_udp_posix_new(void)
+{
+    const uint64_t uid = eui64_semirandom();
+    if (uid == 0) {
+        return NULL;
+    }
+    uint32_t      ifaces[CY_UDP_POSIX_IFACE_COUNT_MAX] = { 0 };
+    const int16_t n_if = udp_wrapper_get_default_ifaces(CY_UDP_POSIX_IFACE_COUNT_MAX, ifaces);
+    if (n_if < 0) {
+        return NULL; // return err_from_udp_wrapper(n_if);
+    }
+    assert(n_if > 0);
+    cy_udp_posix_t* const self = (cy_udp_posix_t*)cy_udp_posix_new_manual(uid, ifaces, 50000);
+    if (self == NULL) {
+        return NULL;
+    }
+#if CY_CONFIG_TRACE
+    CY_TRACE(self->base.cy, "🏷 Semirandom EUI-64 %016jx", (uintmax_t)uid);
+    for (int16_t i = 0; i < n_if; i++) {
+        const uint32_t f = ifaces[i];
+        CY_TRACE(self->base.cy,
+                 "🔌 Autodetected default iface #%d of %d: %ju.%ju.%ju.%ju",
+                 i,
+                 n_if,
+                 (uintmax_t)((f >> 24U) & 0xFFU),
+                 (uintmax_t)((f >> 16U) & 0xFFU),
+                 (uintmax_t)((f >> 8U) & 0xFFU),
+                 (uintmax_t)(f & 0xFFU));
+    }
+#endif
+    return (cy_platform_t*)self;
+}
+
+cy_platform_t* cy_udp_posix_new_manual(const uint64_t uid,
+                                       const uint32_t local_iface_address[CY_UDP_POSIX_IFACE_COUNT_MAX],
+                                       const size_t   tx_queue_capacity)
 {
     cy_udp_posix_t* const self = calloc(1, sizeof(cy_udp_posix_t));
     if (self == NULL) {
@@ -858,39 +891,6 @@ cy_platform_t* cy_udp_posix_new(const uint64_t uid,
     self->reader_head = NULL;
     self->reader_tail = NULL;
     return &self->base;
-}
-
-cy_platform_t* cy_udp_posix_new_auto(void)
-{
-    const uint64_t uid = eui64_semirandom();
-    if (uid == 0) {
-        return NULL;
-    }
-    uint32_t      ifaces[CY_UDP_POSIX_IFACE_COUNT_MAX] = { 0 };
-    const int16_t n_if = udp_wrapper_get_default_ifaces(CY_UDP_POSIX_IFACE_COUNT_MAX, ifaces);
-    if (n_if < 0) {
-        return NULL; // return err_from_udp_wrapper(n_if);
-    }
-    assert(n_if > 0);
-    cy_udp_posix_t* const self = (cy_udp_posix_t*)cy_udp_posix_new(uid, ifaces, 50000);
-    if (self == NULL) {
-        return NULL;
-    }
-#if CY_CONFIG_TRACE
-    CY_TRACE(self->base.cy, "🏷 Semirandom EUI-64 %016jx", (uintmax_t)uid);
-    for (int16_t i = 0; i < n_if; i++) {
-        const uint32_t f = ifaces[i];
-        CY_TRACE(self->base.cy,
-                 "🔌 Autodetected default iface #%d of %d: %ju.%ju.%ju.%ju",
-                 i,
-                 n_if,
-                 (uintmax_t)((f >> 24U) & 0xFFU),
-                 (uintmax_t)((f >> 16U) & 0xFFU),
-                 (uintmax_t)((f >> 8U) & 0xFFU),
-                 (uintmax_t)(f & 0xFFU));
-    }
-#endif
-    return (cy_platform_t*)self;
 }
 
 cy_err_t cy_udp_posix_set_default_names(const cy_platform_t* base)

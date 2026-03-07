@@ -51,17 +51,18 @@ typedef struct cy_udp_posix_stats_t
     cy_udp_posix_stats_socket_t sock_rx;
 } cy_udp_posix_stats_t;
 
-/// Unused interfaces should have zero addresses; to parse IP address strings see cy_udp_parse_iface_address().
-/// Returns NULL on error.
-cy_platform_t* cy_udp_posix_new(const uint64_t uid,
-                                const uint32_t local_iface_address[CY_UDP_POSIX_IFACE_COUNT_MAX],
-                                const size_t   tx_queue_capacity);
-
-/// A constructor helper that automatically assigns the node parameters that fit most applications:
+/// The default factory that automatically assigns the node parameters that fit most applications:
 /// - A semi-random EUI-64: 20 most significant bits are host-specific, the lower 44 bits are random.
 /// - The local interfaces are chosen per the defaults configured on the local system.
 /// - The TX queue capacity is set to a reasonable large value.
-cy_platform_t* cy_udp_posix_new_auto(void);
+cy_platform_t* cy_udp_posix_new(void);
+
+/// A manual alternative that allows specifying the exact iface addresses etc.
+/// Unused interfaces should have zero addresses; to parse IP address strings see cy_udp_parse_iface_address().
+/// Returns NULL on error.
+cy_platform_t* cy_udp_posix_new_manual(const uint64_t uid,
+                                       const uint32_t local_iface_address[CY_UDP_POSIX_IFACE_COUNT_MAX],
+                                       const size_t   tx_queue_capacity);
 
 /// Sets up the default home and namespace on the linked Cy instance. Must be invoked after cy_new().
 /// The default home is the fixed-length zero-padded lowercase hex UID (16 lowercase digits). E.g., `0123456789abcdef`.

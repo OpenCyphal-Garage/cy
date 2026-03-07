@@ -61,9 +61,9 @@ static struct config_t load_config(const int argc, const char* const argv[])
     // Print the actual configs we're using.
     (void)fprintf(stderr, "ifaces:");
     for (size_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
-        (void)fprintf(stderr, " 0x%08jx", (uintmax_t)cfg.iface_address[i]);
+        (void)fprintf(stderr, " 0x%08x", (unsigned)cfg.iface_address[i]);
     }
-    (void)fprintf(stderr, "\nuid: 0x%016jx\n", (uintmax_t)cfg.local_uid);
+    (void)fprintf(stderr, "\nuid: 0x%016llx\n", (unsigned long long)cfg.local_uid);
     (void)fprintf(stderr, "tx_queue_frames: %zu\n", cfg.tx_queue_capacity);
     (void)fprintf(stderr, "publications:\n");
     for (size_t i = 0; i < cfg.pub_count; i++) {
@@ -78,38 +78,32 @@ static void on_result(cy_future_t* const future)
     const cy_topic_t* const topic = cy_future_context(future).ptr[0];
     const cy_str_t          topic_name =
       (topic != NULL) ? cy_topic_name(topic) : cy_str("<unknown>"); // Topic names are NUL-terminated.
-    if (!cy_future_done(future)) { // Future not complete yet, this is an intermediate progress update.
-        (void)fprintf(stderr, "➡️ '%s' request delivered; waiting for response...\n", topic_name.str);
+    const cy_err_t err = cy_future_error(future);
+    if (!cy_future_done(future)) { // Future not complete yet, this is an intermediate update.
+        (void)fprintf(stderr, "➡️ '%s' request error: %d...\n", topic_name.str, err);
         return;
     }
-
-    const cy_err_t err = cy_future_error(future);
     if (err == CY_OK) {
         const cy_response_t response = cy_response_move(future);
-        if (response.message.content == NULL) {
-            (void)fprintf(stderr, "⌛ topic='%s' response missing despite success state ❌\n", topic_name.str);
-            cy_future_destroy(future);
-            return;
-        }
+        assert(response.message.content != NULL); // guaranteed because we're done and OK.
         const size_t  size = cy_message_size(response.message.content);
         unsigned char data[size];
         cy_message_read(response.message.content, 0, size, data);
         char* const dump = hexdump(size, data, 32); // just a simple visualization aid unrelated to the API
         (void)fprintf(stderr,
-                      "↩️ ts=%09ju remote=%016jx seqno=%ju sz=%06zu topic='%s' response ✅\n%s\n",
-                      (uintmax_t)response.message.timestamp,
-                      (uintmax_t)response.remote_id,
-                      (uintmax_t)response.seqno,
+                      "↩️ ts=%.6f remote=%016llx seqno=%llu sz=%06zu topic='%s' response ✅\n%s\n",
+                      1e-6 * (double)response.message.timestamp,
+                      (unsigned long long)response.remote_id,
+                      (unsigned long long)response.seqno,
                       size,
                       topic_name.str,
                       (dump != NULL) ? dump : "<hexdump failed>");
         free(dump);
-        cy_message_refcount_dec(response.message.content);
-        cy_future_destroy(future);
+        cy_message_refcount_dec(response.message.content); // release the message when no longer needed
     } else {
-        (void)fprintf(stderr, "⌛ topic='%s' response failed err=%jd ❌\n", topic_name.str, (intmax_t)err);
-        cy_future_destroy(future);
+        (void)fprintf(stderr, "⌛ topic='%s' response failed err=%d ❌\n", topic_name.str, err);
     }
+    cy_future_destroy(future);
 }
 
 int main(const int argc, const char* const argv[])
@@ -119,7 +113,7 @@ int main(const int argc, const char* const argv[])
 
     // Set up the platform layer that connects Cy to the underlying transport and OS.
     // This is the only part of the code that is platform-specific; the rest is all portable Cy API usage.
-    cy_platform_t* const platform = cy_udp_posix_new(cfg.local_uid, cfg.iface_address, cfg.tx_queue_capacity);
+    cy_platform_t* const platform = cy_udp_posix_new_manual(cfg.local_uid, cfg.iface_address, cfg.tx_queue_capacity);
     if (platform == NULL) {
         (void)fprintf(stderr, "cy_udp_posix_new\n");
         return 1;
@@ -147,16 +141,18 @@ int main(const int argc, const char* const argv[])
     while (true) {
         const cy_err_t err_spin = cy_spin_until(cy, next_publish_at);
         if (err_spin != CY_OK) {
-            (void)fprintf(stderr, "cy_udp_posix_spin_once: %jd\n", (intmax_t)err_spin);
+            (void)fprintf(stderr, "cy_udp_posix_spin_once: %d\n", err_spin);
             break;
         }
-        // Publish messages. This only involves the abstract Cy API.
+        // Publish messages.
         const cy_us_t now = cy_now(cy);
         if (now >= next_publish_at) {
             for (size_t i = 0; i < cfg.pub_count; i++) {
                 char msg[256];
-                (void)sprintf(
-                  msg, "Hello from %016jx! The current time is %jd us.", (uintmax_t)cfg.local_uid, (intmax_t)now);
+                (void)sprintf(msg,
+                              "Hello from %016llx! The current time is %.6f s.",
+                              (unsigned long long)cfg.local_uid,
+                              1e-6 * (double)now);
                 cy_future_t* const future = cy_request(publishers[i], //
                                                        now + (MEGA * 2),
                                                        MEGA * 10,

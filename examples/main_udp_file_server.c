@@ -75,9 +75,9 @@ static void on_file_read_msg(cy_subscriber_t* const subscriber, cy_arrival_t* co
 int main(void)
 {
     cy_udp_posix_t cy_udp;
-    cy_err_t       res = cy_udp_posix_new_simple(&cy_udp);
+    cy_err_t       res = cy_udp_posix_new(&cy_udp);
     if (res != CY_OK) {
-        errx(res, "cy_udp_posix_new_simple");
+        errx(res, "cy_udp_posix_new");
     }
     cy_t* const cy = &cy_udp.base;
 

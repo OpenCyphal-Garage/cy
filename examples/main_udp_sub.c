@@ -44,7 +44,7 @@ static struct config_t load_config(const int argc, const char* const argv[])
         if ((arg_kv_hash("iface") == arg.key_hash) && (iface_count < CY_UDP_POSIX_IFACE_COUNT_MAX)) {
             cfg.iface_address[iface_count++] = cy_udp_parse_iface_address(arg.value);
         } else if (arg_kv_hash("uid") == arg.key_hash) {
-            cfg.local_uid = strtoull(arg.value, NULL, 0);
+            cfg.local_uid = (uint64_t)strtoull(arg.value, NULL, 0);
         } else if (arg_kv_hash("txq") == arg.key_hash) {
             cfg.tx_queue_capacity = strtoul(arg.value, NULL, 0);
         } else if ((arg_kv_hash("sub") == arg.key_hash) || (arg_kv_hash("subord") == arg.key_hash)) {
@@ -65,9 +65,9 @@ static struct config_t load_config(const int argc, const char* const argv[])
     // Print the actual configs we're using.
     (void)fprintf(stderr, "ifaces:");
     for (size_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
-        (void)fprintf(stderr, " 0x%08jx", (uintmax_t)cfg.iface_address[i]);
+        (void)fprintf(stderr, " 0x%08x", (unsigned)cfg.iface_address[i]);
     }
-    (void)fprintf(stderr, "\nuid: 0x%016jx\n", (uintmax_t)cfg.local_uid);
+    (void)fprintf(stderr, "\nuid: 0x%016llx\n", (unsigned long long)cfg.local_uid);
     (void)fprintf(stderr, "tx_queue_frames: %zu\n", cfg.tx_queue_capacity);
     (void)fprintf(stderr, "subscriptions:\n");
     for (size_t i = 0; i < cfg.sub_count; i++) {
@@ -79,8 +79,23 @@ static struct config_t load_config(const int argc, const char* const argv[])
 
 static void on_message(cy_future_t* const subscriber)
 {
+    if (!cy_future_done(subscriber)) { // Message not available yet, this is an error update.
+        char subscriber_name[CY_TOPIC_NAME_MAX];
+        cy_subscriber_name(subscriber, subscriber_name);
+        (void)fprintf(stderr, "➡️ '%s' request error: %d...\n", subscriber_name, cy_future_error(subscriber));
+        return;
+    }
     const cy_arrival_t arrival = cy_arrival_move(subscriber);
+
+    // Liveness monitoring is an optional feature that is enabled via cy_subscriber_timeout_set().
+    // If disabled, the future may only be done when a new message is pending.
     if (arrival.message.content == NULL) {
+        char subscriber_name[CY_TOPIC_NAME_MAX];
+        cy_subscriber_name(subscriber, subscriber_name);
+        (void)fprintf(stderr,
+                      "➡️ '%s' liveness timeout: no messages in %.3f seconds\n",
+                      subscriber_name,
+                      1e-6 * (double)cy_subscriber_timeout(subscriber));
         return;
     }
 
@@ -92,8 +107,8 @@ static void on_message(cy_future_t* const subscriber)
     const cy_substitution_set_t substitutions = cy_subscriber_substitutions(subscriber, topic);
     const char* const           topic_name    = (topic != NULL) ? cy_topic_name(topic).str : "<unknown>";
     (void)fprintf(stderr,
-                  "💬 ts=%09ju sz=%06zu sbt=%zu topic='%s'\n%s\n",
-                  (uintmax_t)arrival.message.timestamp,
+                  "💬 ts=%.6f sz=%06zu sbt=%zu topic='%s'\n%s\n",
+                  1e-6 * (double)arrival.message.timestamp,
                   payload_size,
                   substitutions.count,
                   topic_name,
@@ -108,8 +123,10 @@ static void on_message(cy_future_t* const subscriber)
                                         arrival.message.timestamp + MEGA,
                                         (cy_bytes_t){ .size = 2, .data = ":3" });
         if (err != CY_OK) {
-            (void)fprintf(stderr, "cy_respond: %jd\n", (intmax_t)err);
+            (void)fprintf(stderr, "cy_respond: %d\n", err);
         }
+    } else {
+        (void)fprintf(stderr, "not responding, the remote will time out\n");
     }
     cy_message_refcount_dec(arrival.message.content);
 }
@@ -121,7 +138,7 @@ int main(const int argc, const char* const argv[])
 
     // Set up the platform layer that connects Cy to the underlying transport and OS.
     // This is the only part of the code that is platform-specific; the rest is all portable Cy API usage.
-    cy_platform_t* const platform = cy_udp_posix_new(cfg.local_uid, cfg.iface_address, cfg.tx_queue_capacity);
+    cy_platform_t* const platform = cy_udp_posix_new_manual(cfg.local_uid, cfg.iface_address, cfg.tx_queue_capacity);
     if (platform == NULL) {
         (void)fprintf(stderr, "cy_udp_posix_new\n");
         return 1;
@@ -140,7 +157,7 @@ int main(const int argc, const char* const argv[])
         subscribers[i] = cfg.subs[i].ordered ? cy_subscribe_ordered(cy, cy_str(cfg.subs[i].name), MEGA, MEGA)
                                              : cy_subscribe(cy, cy_str(cfg.subs[i].name), MEGA);
         if (subscribers[i] == NULL) {
-            (void)fprintf(stderr, "cy_subscribe(_ordered): NULL\n");
+            (void)fprintf(stderr, "cy_subscribe(): NULL\n");
             return 1;
         }
         cy_future_callback_set(subscribers[i], on_message);
@@ -150,7 +167,7 @@ int main(const int argc, const char* const argv[])
     while (true) {
         const cy_err_t err_spin = cy_spin_until(cy, cy_now(cy) + MEGA);
         if (err_spin != CY_OK) {
-            (void)fprintf(stderr, "cy_udp_posix_spin_once: %jd\n", (intmax_t)err_spin);
+            (void)fprintf(stderr, "cy_spin_until: %d\n", err_spin);
             break;
         }
     }

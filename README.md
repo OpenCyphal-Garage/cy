@@ -52,7 +52,7 @@ Here is an example for Cyphal/UDP on POSIX systems:
 int main(void)
 {
     // Set up the platform layer that connects Cy to the underlying transport and OS.
-    cy_platform_t* platform = cy_udp_posix_new_auto();
+    cy_platform_t* platform = cy_udp_posix_new();
     if (platform == NULL) { ... }
 
     // Set up the local Cyphal node instance.
@@ -315,4 +315,3 @@ direction LR
     _subscriber_root "1" o-- "*" subscriber
     note "Automatically managed private entities are prefixed with '_'"
 ```
-

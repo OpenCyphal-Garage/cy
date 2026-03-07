@@ -47,9 +47,9 @@ int main(const int argc, char* argv[])
     // SET UP THE NODE.
     cy_udp_posix_t cy_udp;
     {
-        const cy_err_t res = cy_udp_posix_new_simple(&cy_udp);
+        const cy_err_t res = cy_udp_posix_new(&cy_udp);
         if (res != CY_OK) {
-            errx(res, "cy_udp_posix_new_simple");
+            errx(res, "cy_udp_posix_new");
         }
     }
     cy_t* const cy = &cy_udp.base;
