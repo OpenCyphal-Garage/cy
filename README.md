@@ -38,7 +38,7 @@ On an embedded system, one may also prefer to use [`o1heap`](https://github.com/
 management, but this is not a hard dependency -- any allocator will work. O1Heap is the recommended choice for embedded
 platforms due to its hard determinism and low fragmentation.
 
-## 🖌 Design in a nutshell
+## 💡 Design in a nutshell
 
 Cyphal v1.1 is a session layer built on top of the Cyphal v1.0 transport layers.
 The session layer provides named topics by automatically mapping topic names to subject-IDs.
