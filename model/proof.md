@@ -1,8 +1,8 @@
 # Convergence proof for topic allocation CRDT
 
 The model applies to:
-- the formal operators in `Core.tla` (`AllocateTopic`, `AcceptGossip`, `Converged`);
-- the implementation in `cy/cy.c` (`topic_allocate`, `on_gossip_known_topic`, `on_gossip_unknown_topic`),
+- the formal operators in `tlaplus/Core.tla` (`AllocateTopic`, `AcceptGossip`, `Converged`);
+- the implementation in `cy.c` (`topic_allocate`, `on_gossip_known_topic`, `on_gossip_unknown_topic`),
   under the assumptions listed below.
 
 ## Model

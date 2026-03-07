@@ -52,7 +52,7 @@ Additional features include tunable reliability, liveness monitoring, ordered de
 🌐 A live demo of the distributed consensus algorithm can be found at <https://gerasim.opencyphal.org>.
 
 For a more comprehensive design overview, refer to [`cy/README.md`](cy/README.md);
-formal verification models can be found in `formal/`.
+formal verification models can be found in `model/`.
 
 ```mermaid
 %%{init: {"theme": "base", "themeVariables": {"primaryColor": "#1e293b", "primaryTextColor": "#e2e8f0", "primaryBorderColor": "#475569", "lineColor": "#64748b", "secondaryColor": "#1e293b", "background": "#0f172a", "mainBkg": "#1e293b", "nodeBorder": "#475569", "clusterBkg": "#ffffff08", "clusterBorder": "#47556944", "edgeLabelBackground": "#0f172a", "fontSize": "13px"}, "flowchart": {"curve": "basis", "padding": 14, "nodeSpacing": 18, "rankSpacing": 32}}}%%
