@@ -1,3 +1,0 @@
-CompileFlags:
-  CompilationDatabase: build
-  Add: [-DCY_CONFIG_TRACE=1, -m32]

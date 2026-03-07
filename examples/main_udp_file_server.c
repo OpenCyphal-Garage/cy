@@ -1,14 +1,14 @@
-#include "cy_udp_posix.h"
+#include <cy.h>
+#include <cy_udp_posix.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <errno.h>
-#include <err.h>
 
 #define MEGA 1000000LL
 
-#define PATH_MAX 2048
-#define DATA_MAX 4096
+#define PATH_MAX_LEN 2048
+#define DATA_MAX     4096
 
 // Request schema:
 //     uint64           read_offset
@@ -16,18 +16,26 @@
 // Response schema:
 //     uint32           errno
 //     byte[<=DATA_MAX] data
-static void on_file_read_msg(cy_subscriber_t* const subscriber, cy_arrival_t* const arv)
+static void on_file_read_msg(cy_future_t* const subscriber)
 {
-    (void)subscriber;
+    if (!cy_future_done(subscriber)) {
+        (void)fprintf(stderr, "subscriber error: %d\n", cy_future_error(subscriber));
+        return;
+    }
+    cy_arrival_t arv = cy_arrival_move(subscriber);
+    if (arv.message.content == NULL) {
+        return;
+    }
 
     // Deserialize the payload, assuming the local machine is little-endian, for simplicity.
     uint64_t read_offset = 0;
     uint16_t path_len    = 0;
-    char     file_name[PATH_MAX + 1];
-    if ((8 != cy_message_read(&arv->message.content, 0, 8, &read_offset)) ||
-        (2 != cy_message_read(&arv->message.content, 8, 2, &path_len)) || (path_len == 0) || (path_len > PATH_MAX) ||
-        (path_len != cy_message_read(&arv->message.content, 10, path_len, file_name))) {
-        (void)fprintf(stderr, "Malformed request of size %zu\n", cy_message_size(arv->message.content));
+    char     file_name[PATH_MAX_LEN + 1];
+    if ((8 != cy_message_read(arv.message.content, 0, 8, &read_offset)) ||
+        (2 != cy_message_read(arv.message.content, 8, 2, &path_len)) || (path_len == 0) || (path_len > PATH_MAX_LEN) ||
+        (path_len != cy_message_read(arv.message.content, 10, path_len, file_name))) {
+        (void)fprintf(stderr, "Malformed request of size %zu\n", cy_message_size(arv.message.content));
+        cy_message_refcount_dec(arv.message.content);
         return;
     }
     file_name[path_len] = '\0';
@@ -54,45 +62,51 @@ static void on_file_read_msg(cy_subscriber_t* const subscriber, cy_arrival_t* co
 
     // Send the response back to the client using reliable delivery.
     (void)fprintf(stderr,
-                  "Responding: file='%s' offset=%ju size=%ju error=%ju\n",
+                  "Responding: file='%s' offset=%lu size=%lu error=%u\n",
                   file_name,
-                  (uintmax_t)read_offset,
-                  (uintmax_t)response.data_len,
-                  (uintmax_t)response.error);
+                  (unsigned long)read_offset,
+                  (unsigned long)response.data_len,
+                  response.error);
     cy_future_t* const future =
-      cy_respond_reliable(arv->breadcrumb,
-                          arv->message.timestamp + (10 * MEGA),
+      cy_respond_reliable(&arv.breadcrumb,
+                          arv.message.timestamp + (10 * MEGA),
                           (cy_bytes_t){ .size = 4 + 2 + response.data_len, .data = &response });
     // We want the stack to retransmit until the client acknowledges reception, but we don't care about the result.
     // If we simply destroy the future, the transmission will be cancelled, so instead we set up auto-destruction.
     if (future != NULL) {
-        cy_future_callback_set(future, &cy_future_destroy);
+        cy_future_callback_set(future, &cy_future_destroy); // Will auto-destroy when done.
     } else {
         (void)fprintf(stderr, "FAILED TO RESPOND\n");
     }
+    cy_message_refcount_dec(arv.message.content);
 }
 
 int main(void)
 {
-    cy_udp_posix_t cy_udp;
-    cy_err_t       res = cy_udp_posix_new(&cy_udp);
-    if (res != CY_OK) {
-        errx(res, "cy_udp_posix_new");
+    cy_platform_t* const platform = cy_udp_posix_new();
+    if (platform == NULL) {
+        (void)fprintf(stderr, "cy_udp_posix_new\n");
+        return 1;
     }
-    cy_t* const cy = &cy_udp.base;
+    cy_t* const cy = cy_new(platform);
+    if (cy == NULL) {
+        (void)fprintf(stderr, "cy_new\n");
+        return 1;
+    }
 
-    cy_subscriber_t* const sub_file_read = cy_subscribe(cy, cy_str("file/read"), 1024);
+    cy_future_t* const sub_file_read = cy_subscribe(cy, cy_str("file/read"), 1024);
     if (sub_file_read == NULL) {
-        errx(res, "cy_subscribe");
+        (void)fprintf(stderr, "cy_subscribe\n");
+        return 1;
     }
-    cy_subscriber_callback_set(sub_file_read, &on_file_read_msg);
+    cy_future_callback_set(sub_file_read, &on_file_read_msg);
 
     while (true) {
-        res = cy_udp_posix_spin_once(&cy_udp);
+        const cy_err_t res = cy_spin_once(cy);
         if (res != CY_OK) {
-            errx(res, "cy_udp_posix_spin_once");
+            (void)fprintf(stderr, "cy_spin_once: %d\n", res);
+            return 1;
         }
     }
-    // ReSharper disable once CppDFAUnreachableCode
     return 0;
 }

@@ -13,10 +13,10 @@ target_link_libraries(udp_pub cy_udp_posix_trace)
 target_link_libraries(udp_sub cy_udp_posix_trace)
 
 # UDP file transfer examples.
-#add_executable(udp_file_server main_udp_file_server.c)
-#add_executable(udp_file_client main_udp_file_client.c)
-#target_link_libraries(udp_file_server cy_udp_posix_trace)
-#target_link_libraries(udp_file_client cy_udp_posix_trace)
+add_executable(udp_file_server main_udp_file_server.c)
+add_executable(udp_file_client main_udp_file_client.c)
+target_link_libraries(udp_file_server cy_udp_posix_trace)
+target_link_libraries(udp_file_client cy_udp_posix_trace)
 
 # UDP streaming examples.
 #add_executable(udp_streaming_server main_udp_streaming_server.c)

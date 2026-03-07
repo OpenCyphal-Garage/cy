@@ -776,29 +776,10 @@ cy_platform_t* cy_udp_posix_new(void)
     }
     uint32_t      ifaces[CY_UDP_POSIX_IFACE_COUNT_MAX] = { 0 };
     const int16_t n_if = udp_wrapper_get_default_ifaces(CY_UDP_POSIX_IFACE_COUNT_MAX, ifaces);
-    if (n_if < 0) {
+    if (n_if <= 0) {
         return NULL; // return err_from_udp_wrapper(n_if);
     }
-    assert(n_if > 0);
-    cy_udp_posix_t* const self = (cy_udp_posix_t*)cy_udp_posix_new_manual(uid, ifaces, 50000);
-    if (self == NULL) {
-        return NULL;
-    }
-#if CY_CONFIG_TRACE
-    CY_TRACE(self->base.cy, "🏷 Semirandom EUI-64 %016jx", (uintmax_t)uid);
-    for (int16_t i = 0; i < n_if; i++) {
-        const uint32_t f = ifaces[i];
-        CY_TRACE(self->base.cy,
-                 "🔌 Autodetected default iface #%d of %d: %ju.%ju.%ju.%ju",
-                 i,
-                 n_if,
-                 (uintmax_t)((f >> 24U) & 0xFFU),
-                 (uintmax_t)((f >> 16U) & 0xFFU),
-                 (uintmax_t)((f >> 8U) & 0xFFU),
-                 (uintmax_t)(f & 0xFFU));
-    }
-#endif
-    return (cy_platform_t*)self;
+    return cy_udp_posix_new_manual(uid, ifaces, 50000);
 }
 
 cy_platform_t* cy_udp_posix_new_manual(const uint64_t uid,
