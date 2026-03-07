@@ -4,24 +4,26 @@ cmake_minimum_required(VERSION 3.24)
 project(cy_examples CXX)
 enable_testing()
 
-# Cy trace logging helper.
-add_library(cy_trace_stderr STATIC cy_trace_stderr.c)
-target_link_libraries(cy_trace_stderr PUBLIC cy)
+include_directories(SYSTEM "${CMAKE_SOURCE_DIR}/lib")
 
 # UDP node examples.
 add_executable(udp_pub main_udp_pub.c)
 add_executable(udp_sub main_udp_sub.c)
-target_link_libraries(udp_pub cy_udp_posix cy_trace_stderr)
-target_link_libraries(udp_sub cy_udp_posix cy_trace_stderr)
+add_executable(udp_time_pub main_udp_time_pub.c)
+add_executable(udp_echo main_udp_echo.c)
+target_link_libraries(udp_pub cy_udp_posix_trace)
+target_link_libraries(udp_sub cy_udp_posix_trace)
+target_link_libraries(udp_time_pub cy_udp_posix_trace)
+target_link_libraries(udp_echo cy_udp_posix_trace)
 
 # UDP file transfer examples.
 add_executable(udp_file_server main_udp_file_server.c)
 add_executable(udp_file_client main_udp_file_client.c)
-target_link_libraries(udp_file_server cy_udp_posix cy_trace_stderr)
-target_link_libraries(udp_file_client cy_udp_posix cy_trace_stderr)
+target_link_libraries(udp_file_server cy_udp_posix_trace)
+target_link_libraries(udp_file_client cy_udp_posix_trace)
 
 # UDP streaming examples.
 add_executable(udp_streaming_server main_udp_streaming_server.c)
 add_executable(udp_streaming_client main_udp_streaming_client.c)
-target_link_libraries(udp_streaming_server cy_udp_posix cy_trace_stderr)
-target_link_libraries(udp_streaming_client cy_udp_posix cy_trace_stderr)
+target_link_libraries(udp_streaming_server cy_udp_posix_trace)
+target_link_libraries(udp_streaming_client cy_udp_posix_trace)

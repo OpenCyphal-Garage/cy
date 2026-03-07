@@ -1,4 +1,6 @@
-# Model-based formal verification
+# Formal specification and verification
+
+For the formal proof write-up refer to **[PROOF.md](./PROOF.md)**.
 
 All operations defined on topics are extracted into `Core.tla`, where the operations are implemented as
 pure functions (called "operators" in TLA+ terminology).

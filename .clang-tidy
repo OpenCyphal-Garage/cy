@@ -1,4 +1,5 @@
 InheritParentConfig: true
+WarningsAsErrors: '*'
 Checks: >-
   boost-*,
   bugprone-*,
@@ -13,6 +14,8 @@ Checks: >-
   performance-*,
   portability-*,
   readability-*,
+  misc-const-correctness,
+  readability-non-const-parameter,
   -cppcoreguidelines-avoid-const-or-ref-data-members,
   -cppcoreguidelines-avoid-do-while,
   -google-readability-todo,
@@ -42,3 +45,24 @@ Checks: >-
   -*macro-to-enum,
   -*-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
   -*-avoid-pragma-once,
+  -*-avoid-nested-conditional-operator,
+  -*-static-cast-downcast,
+  -*-prefer-static-over-anonymous-namespace,
+  -*-avoid-unchecked-container-access,
+  -*-pointer-arithmetic,
+  -*-use-using,
+  -*-use-enum-class,
+  -*-enum-size,
+  -*-macro-usage,
+  -*-deprecated-headers,
+  -*-nested-conditional-operator,
+  -*-security.ArrayBound,
+CheckOptions:
+  - key: misc-const-correctness.TransformPointersAsValues
+    value: 'true'
+  - key: misc-const-correctness.TransformReferences
+    value: 'true'
+  - key: misc-const-correctness.TransformValues
+    value: 'true'
+  - key: misc-const-correctness.WarnPointersAsValues
+    value: 'true'

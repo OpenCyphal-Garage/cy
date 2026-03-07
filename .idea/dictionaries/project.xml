@@ -2,7 +2,9 @@
   <dictionary name="project">
     <words>
       <w>Autodetected</w>
+      <w>Cyclon</w>
       <w>Zenoh</w>
+      <w>Zubax</w>
       <w>acks</w>
       <w>ards</w>
       <w>autodetected</w>
@@ -14,15 +16,18 @@
       <w>csma</w>
       <w>cyphal</w>
       <w>cyudp</w>
+      <w>deinit</w>
       <w>dgrams</w>
       <w>dscp</w>
       <w>gaap</w>
       <w>gettime</w>
+      <w>hexdumps</w>
       <w>homeful</w>
       <w>ifaces</w>
       <w>iiiiiiii</w>
       <w>incompat</w>
       <w>issuecomment</w>
+      <w>jfyi</w>
       <w>kibi</w>
       <w>kirienko</w>
       <w>libcanard</w>
@@ -36,14 +41,21 @@
       <w>opencyphal</w>
       <w>pktinfo</w>
       <w>popcount</w>
+      <w>prevprime</w>
       <w>pushok</w>
+      <w>readmes</w>
+      <w>refcounting</w>
       <w>remappings</w>
       <w>reuseport</w>
       <w>rnid</w>
       <w>rtps</w>
       <w>seqno</w>
+      <w>seqnos</w>
       <w>splitmix</w>
+      <w>stayin</w>
+      <w>strfmt</w>
       <w>subord</w>
+      <w>suppr</w>
       <w>tfer</w>
       <w>tombstoned</w>
       <w>tonumber</w>
@@ -51,6 +63,7 @@
       <w>udpard</w>
       <w>udpip</w>
       <w>unadvertise</w>
+      <w>undup</w>
       <w>unremap</w>
       <w>usec</w>
       <w>vtbl</w>
