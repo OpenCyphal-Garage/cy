@@ -87,11 +87,11 @@ jobs:
       # Export Cobertura report for Coveralls, tracking only cy/cy.c.
       - run: |
           gcovr \
-            --root "$GITHUB_WORKSPACE" \
-            --object-directory "$GITHUB_WORKSPACE/build" \
+            --root . \
+            --object-directory build \
             --filter '^cy/cy[.]c$' \
             --xml-pretty \
-            --output "$GITHUB_WORKSPACE/build/coverage/cy.cobertura.xml" \
+            --output build/coverage/cy.cobertura.xml \
             --print-summary
       - id: coveralls_upload
         uses: coverallsapp/github-action@v2
