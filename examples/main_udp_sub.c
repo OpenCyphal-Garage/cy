@@ -29,7 +29,7 @@ struct config_t
     struct config_subscription_t* subs;
 };
 
-static struct config_t load_config(const int argc, const char* const argv[])
+static struct config_t load_config(const int argc, char* const argv[])
 {
     struct config_t cfg = {
         .local_uid         = eui64_semirandom(),
@@ -100,9 +100,13 @@ static void on_message(cy_future_t* const subscriber)
     }
 
     const size_t  payload_size = cy_message_size(arrival.message.content);
-    unsigned char payload_copy[payload_size];
-    cy_message_read(arrival.message.content, 0, payload_size, payload_copy);
-    char* const                 dump  = hexdump(payload_size, payload_copy, 32);
+    unsigned char payload_copy[(payload_size > 0U) ? payload_size : 1U];
+    const void*   payload = NULL;
+    if (payload_size > 0U) {
+        (void)cy_message_read(arrival.message.content, 0, payload_size, payload_copy);
+        payload = payload_copy;
+    }
+    char* const                 dump  = hexdump(payload_size, payload, 32);
     const cy_topic_t* const     topic = cy_topic_find_by_hash(arrival.breadcrumb.cy, arrival.breadcrumb.topic_hash);
     const cy_substitution_set_t substitutions = cy_subscriber_substitutions(subscriber, topic);
     const char* const           topic_name    = (topic != NULL) ? cy_topic_name(topic).str : "<unknown>";
@@ -131,7 +135,7 @@ static void on_message(cy_future_t* const subscriber)
     cy_message_refcount_dec(arrival.message.content);
 }
 
-int main(const int argc, const char* const argv[])
+int main(const int argc, char* const argv[])
 {
     srand((unsigned)time(NULL));
     const struct config_t cfg = load_config(argc, argv);

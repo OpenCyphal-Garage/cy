@@ -28,7 +28,7 @@ struct config_t
     struct config_publication_t* pubs;
 };
 
-static struct config_t load_config(const int argc, const char* const argv[])
+static struct config_t load_config(const int argc, char* const argv[])
 {
     struct config_t cfg = {
         .local_uid         = eui64_semirandom(),
@@ -87,9 +87,13 @@ static void on_result(cy_future_t* const future)
         const cy_response_t response = cy_response_move(future);
         assert(response.message.content != NULL); // guaranteed because we're done and OK.
         const size_t  size = cy_message_size(response.message.content);
-        unsigned char data[size];
-        cy_message_read(response.message.content, 0, size, data);
-        char* const dump = hexdump(size, data, 32); // just a simple visualization aid unrelated to the API
+        unsigned char data[(size > 0U) ? size : 1U];
+        const void*   payload = NULL;
+        if (size > 0U) {
+            (void)cy_message_read(response.message.content, 0, size, data);
+            payload = data;
+        }
+        char* const dump = hexdump(size, payload, 32); // just a simple visualization aid unrelated to the API
         (void)fprintf(stderr,
                       "↩️ ts=%.6f remote=%016llx seqno=%llu sz=%06zu topic='%s' response ✅\n%s\n",
                       1e-6 * (double)response.message.timestamp,
@@ -106,7 +110,7 @@ static void on_result(cy_future_t* const future)
     cy_future_destroy(future);
 }
 
-int main(const int argc, const char* const argv[])
+int main(const int argc, char* const argv[])
 {
     srand((unsigned)time(NULL));
     const struct config_t cfg = load_config(argc, argv);
