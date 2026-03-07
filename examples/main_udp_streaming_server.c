@@ -1,6 +1,7 @@
 // A tiny streaming server demo: receive a request and stream reliable responses.
 
-#include "cy_udp_posix.h"
+#include <cy.h>
+#include <cy_udp_posix.h>
 #include <rapidhash.h>
 
 #include <assert.h>
@@ -43,7 +44,7 @@ typedef struct
 
 static uint64_t make_stream_id(const cy_breadcrumb_t* const b)
 {
-    const uint64_t key[3] = { b->remote_id, b->topic_hash, b->transfer_id };
+    const uint64_t key[3] = { b->remote_id, b->topic_hash, b->message_tag };
     return rapidhash(key, sizeof(key)); // collisions are astronomically unlikely; safe for all practical purposes
 }
 
@@ -76,60 +77,86 @@ static void reset_stream(stream_state_t* const s)
 
 static void on_response_future_update(cy_future_t* const future)
 {
-    assert(cy_future_status(future) != cy_future_pending); // the response future does not emit intermediate updates
-
     stream_state_t* const s = (stream_state_t*)cy_future_context(future).ptr[0];
     assert((s != NULL) && (s->pending_response == future));
     assert(s->remaining > 0);
     s->pending_response = NULL;
 
-    const cy_response_result_t* const res = (const cy_response_result_t*)cy_future_result(future);
-    if (cy_future_status(future) == cy_future_success) {
+    const cy_err_t err = cy_future_error(future);
+    if (!cy_future_done(future)) {
+        (void)fprintf(stderr,
+                      "stream response transient error: stream_id=%016jx seqno=%ju remaining=%ju error=%d\n",
+                      (uintmax_t)s->stream_id,
+                      (uintmax_t)s->breadcrumb.seqno,
+                      (uintmax_t)s->remaining,
+                      err);
+        return;
+    }
+
+    if (err == CY_OK) {
         s->remaining--;
         s->next_send_at = cy_now(s->breadcrumb.cy) + s->period_us;
         (void)fprintf(stderr,
                       "stream response delivered: stream_id=%016jx seqno=%ju remaining=%ju\n",
                       (uintmax_t)s->stream_id,
-                      (uintmax_t)res->seqno,
+                      (uintmax_t)s->breadcrumb.seqno,
                       (uintmax_t)s->remaining);
         if (s->remaining == 0) {
             (void)fprintf(stderr, "stream completed: stream_id=%016jx\n", (uintmax_t)s->stream_id);
             reset_stream(s);
         }
+    } else if (err == CY_ERR_NACK) {
+        (void)fprintf(stderr,
+                      "STREAM CLOSED BY CLIENT, stopping stream_id=%016jx seqno=%ju remaining=%ju\n",
+                      (uintmax_t)s->stream_id,
+                      (uintmax_t)s->breadcrumb.seqno,
+                      (uintmax_t)s->remaining);
+        reset_stream(s);
     } else {
         (void)fprintf(stderr,
-                      "CLIENT UNREACHABLE, stopping stream_id=%016jx seqno=%ju remaining=%ju\n",
+                      "CLIENT UNREACHABLE, stopping stream_id=%016jx seqno=%ju remaining=%ju error=%d\n",
                       (uintmax_t)s->stream_id,
-                      (uintmax_t)res->seqno,
-                      (uintmax_t)s->remaining);
+                      (uintmax_t)s->breadcrumb.seqno,
+                      (uintmax_t)s->remaining,
+                      err);
         reset_stream(s);
     }
     cy_future_destroy(future);
 }
 
-static void on_stream_request(cy_subscriber_t* const sub, cy_arrival_t* const arv)
+static void on_stream_request(cy_future_t* const subscriber)
 {
-    stream_table_t* const table = (stream_table_t*)cy_subscriber_context(sub).ptr[0];
+    if (!cy_future_done(subscriber)) {
+        return;
+    }
+    cy_arrival_t arv = cy_arrival_move(subscriber);
+    if (arv.message.content == NULL) {
+        return;
+    }
+
+    stream_table_t* const table = (stream_table_t*)cy_future_context(subscriber).ptr[0];
     assert(table != NULL);
-    assert((arv != NULL) && (arv->breadcrumb != NULL));
 
     // Parse the request payload and apply limits.
     stream_request_t req = { 0 };
-    if (cy_message_read(&arv->message.content, 0, sizeof(req), &req) != sizeof(req)) {
+    if (cy_message_read(arv.message.content, 0, sizeof(req), &req) != sizeof(req)) {
+        cy_message_refcount_dec(arv.message.content);
         return; // malformed request -- payload too short, ignore
     }
     if (req.period_ms < 100) {
         req.period_ms = 100;
     }
     if (req.count == 0) {
+        cy_message_refcount_dec(arv.message.content);
         return; // nothing to do; the stream scheduler requires at least one message
     }
 
     // Find or allocate a stream slot for this stream ID.
-    const uint64_t        stream_id = make_stream_id(arv->breadcrumb);
+    const uint64_t        stream_id = make_stream_id(&arv.breadcrumb);
     stream_state_t* const s         = get_stream(table, stream_id);
     if (s == NULL) {
         (void)fprintf(stderr, "stream table full, dropping request\n");
+        cy_message_refcount_dec(arv.message.content);
         return;
     }
 
@@ -137,48 +164,47 @@ static void on_stream_request(cy_subscriber_t* const sub, cy_arrival_t* const ar
     reset_stream(s);
     s->remaining    = req.count;
     s->period_us    = (cy_us_t)req.period_ms * 1000;
-    s->next_send_at = cy_now(arv->breadcrumb->cy);
+    s->next_send_at = cy_now(arv.breadcrumb.cy);
     s->stream_id    = stream_id;
-    s->breadcrumb   = *arv->breadcrumb; // breadcrumb copied by value
+    s->breadcrumb   = arv.breadcrumb;
     (void)fprintf(stderr,
-                  "new stream: id=%016jx remote=%016jx topic=%016jx transfer=%016jx count=%ju period_ms=%ju\n",
+                  "new stream: id=%016jx remote=%016jx topic=%016jx tag=%016jx count=%ju period_ms=%ju\n",
                   (uintmax_t)s->stream_id,
                   (uintmax_t)s->breadcrumb.remote_id,
                   (uintmax_t)s->breadcrumb.topic_hash,
-                  (uintmax_t)s->breadcrumb.transfer_id,
+                  (uintmax_t)s->breadcrumb.message_tag,
                   (uintmax_t)req.count,
                   (uintmax_t)req.period_ms);
+    cy_message_refcount_dec(arv.message.content);
 }
 
 int main(void)
 {
-    cy_udp_posix_t cy_udp;
-    const cy_err_t res = cy_udp_posix_new(&cy_udp);
-    if (res != CY_OK) {
-        (void)fprintf(stderr, "cy_udp_posix_new: %jd\n", (intmax_t)res);
+    cy_t* const cy = cy_new(cy_udp_posix_new());
+    if (cy == NULL) {
+        (void)fprintf(stderr, "cy_new\n");
         return 1;
     }
-    cy_t* const cy = &cy_udp.base;
 
     // Subscribe to the request topic.
-    cy_subscriber_t* const sub = cy_subscribe(cy, cy_str(TOPIC_NAME), RESPONSE_MAX);
+    cy_future_t* const sub = cy_subscribe(cy, cy_str(TOPIC_NAME), RESPONSE_MAX);
     if (sub == NULL) {
-        (void)fprintf(stderr, "cy_subscribe: NULL\n");
+        (void)fprintf(stderr, "cy_subscribe\n");
         return 1;
     }
 
     // Set up the in-memory stream table and attach it to the subscriber context.
     stream_state_t streams[STREAM_MAX] = { 0 };
     stream_table_t table               = { .streams = streams, .count = STREAM_MAX };
-    cy_subscriber_context_set(sub, (cy_user_context_t){ .ptr = { &table } });
-    cy_subscriber_callback_set(sub, &on_stream_request);
+    cy_future_context_set(sub, (cy_user_context_t){ .ptr = { &table } });
+    cy_future_callback_set(sub, &on_stream_request);
     (void)fprintf(stderr, "streaming server ready on '%s'\n", TOPIC_NAME);
 
     // Run the event loop and emit responses at the requested cadence.
     while (true) {
-        const cy_err_t err_spin = cy_udp_posix_spin_once(&cy_udp);
+        const cy_err_t err_spin = cy_spin_once(cy);
         if (err_spin != CY_OK) {
-            (void)fprintf(stderr, "cy_udp_posix_spin_once: %jd\n", (intmax_t)err_spin);
+            (void)fprintf(stderr, "cy_spin_once: %d\n", err_spin);
             return 1;
         }
 
