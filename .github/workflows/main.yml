@@ -94,6 +94,11 @@ jobs:
       - id: coveralls_upload
         uses: coverallsapp/github-action@v2
         continue-on-error: true
+        env:
+          COVERALLS_SERVICE_NAME: github
+          COVERALLS_SERVICE_JOB_ID: ${{ github.run_id }}
+          COVERALLS_SERVICE_BRANCH: ${{ github.ref_name }}
+          COVERALLS_SERVICE_BUILD_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           file: build/coverage/cy.cobertura.xml
