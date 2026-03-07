@@ -104,6 +104,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          export CI_COMMIT_ID="$GITHUB_SHA"
+          export CI_AUTHOR_NAME="$(git show -s --format=%aN "$GITHUB_SHA")"
+          export CI_AUTHOR_EMAIL="$(git show -s --format=%aE "$GITHUB_SHA")"
+          export CI_COMMITTER_NAME="$(git show -s --format=%cN "$GITHUB_SHA")"
+          export CI_COMMITTER_EMAIL="$(git show -s --format=%cE "$GITHUB_SHA")"
+          export CI_COMMIT_MESSAGE="$(git show -s --format=%s "$GITHUB_SHA")"
           mkdir -p "$HOME/bin"
           curl -fsSLo "$HOME/bin/coveralls-linux-x86_64.tar.gz" \
             https://github.com/coverallsapp/coverage-reporter/releases/latest/download/coveralls-linux-x86_64.tar.gz
