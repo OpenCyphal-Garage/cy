@@ -78,7 +78,7 @@ if (my_pub == NULL) { ... }  // handle error
 Publish a message asynchronously (non-blocking) using best-effort delivery:
 
 ```c++
-cy_us_t deadline = cy_now(cy) + 100_000; // the message must be sent within 0.1 seconds from now
+cy_us_t deadline = cy_now(cy) + 100'000; // the message must be sent within 0.1 seconds from now
 cy_err_t err = cy_publish(my_pub, deadline, (cy_bytes_t){.size = 13, .data = "Hello Cyphal!"}); // nonblocking
 if (err != CY_OK) { ... }
 ```
@@ -86,7 +86,7 @@ if (err != CY_OK) { ... }
 Publish a message asynchronously using reliable delivery; the progress and outcome can be checked via the future:
 
 ```c++
-cy_us_t    deadline = cy_now(cy) + 2_000_000; // keep trying to deliver the message for up to 2 seconds
+cy_us_t    deadline = cy_now(cy) + 2'000'000; // keep trying to deliver the message for up to 2 seconds
 cy_bytes_t message = {.size = 34, .data = "Would you like to hear a TCP joke?"};
 cy_future_t* future = cy_publish_reliable(my_pub, deadline, message);
 if (future == NULL) { ... }  // handle error
@@ -98,7 +98,7 @@ The future can be polled to check the delivery outcome:
 ```c++
 if (cy_future_done(future)) {
     switch (cy_future_error(future)) {
-        case CY_ERR_OK:         // message was delivered successfully
+        case CY_OK:             // message was delivered successfully
             break;
         case CY_ERR_DELIVERY:   // message could not be delivered before the deadline
             break;
@@ -161,7 +161,7 @@ error handling, etc. Actions that are specific to a particular future type (e.g.
 are accessed via type-specific functions that check the polymorphic future type safely at runtime.
 
 Aside from `cy_subscribe()` there is also `cy_subscribe_ordered()` if the application requires the messages to
-arrive strictly in the publication order -- some transports may deliver messages out of order and Cy will
+arrive strictly in the publication order per remote -- some transports may deliver messages out of order and Cy will
 reconstruct the original order. This can be vital for certain applications that deal with streamed data, real-time
 state estimation, etc.
 
@@ -197,7 +197,7 @@ if (cy_future_done(subscription)) {
 
     // This is how you can access the message metadata if needed.
     cy_us_t timestamp = arrival.message.timestamp;
-    cy_topic_t* topic = cy_topic_find_by_hash(arrival.breadcrumb.topic_hash);
+    cy_topic_t* topic = cy_topic_find_by_hash(arrival.breadcrumb.cy, arrival.breadcrumb.topic_hash);
     cy_str_t topic_name = cy_topic_name(topic);
 
     // Print the message; hexdump() is just a helper, not part of the library.
@@ -236,14 +236,14 @@ The pattern matching information is available with each `cy_arrival_t`:
 ```c++
 // Already shown above:
 cy_arrival_t arrival = cy_arrival_borrow(subscription);
-cy_topic_t* topic = cy_topic_find_by_hash(arrival.breadcrumb.topic_hash);
+cy_topic_t* topic = cy_topic_find_by_hash(arrival.breadcrumb.cy, arrival.breadcrumb.topic_hash);
 
 // Retrieve the substitutions -- very efficient, no string matching is done (everything is precomputed):
 cy_substitution_set_t subs = cy_subscriber_substitutions(subscription, topic);
 printf("Topic name %s matched with %zu substitutions:\n", cy_topic_name(topic), subs.count);
 for (size_t i = 0; i < subs.count; i++) {
     cy_substitution_t s = subs.substitutions[i];
-    printf("Substitution #%zu matched token #%zu with %s\n", i, s.ordinal, s.str);
+    printf("Substitution #%zu matched token #%zu with %.*s\n", i, s.ordinal, (int)s.str.len, s.str.str);
 }
 ```
 
@@ -265,8 +265,8 @@ distinction is important because the library needs to know where to dispatch res
 Hence there is a separate function for sending messages for which responses are expected: `cy_request()`:
 
 ```c++
-cy_us_t delivery_deadline = cy_now(cy) + 3_000_000; // request must be acknowledged by the remote within 3 seconds
-cy_us_t response_timeout  = 1_000_000;              // first response must arrive within 1 second after that
+cy_us_t delivery_deadline = cy_now(cy) + 3'000'000; // request must be acknowledged by the remote within 3 seconds
+cy_us_t response_timeout  = 1'000'000;              // first response must arrive within 1 second after that
 cy_future_t* future = cy_request(my_pub, delivery_deadline, response_timeout, message);
 if (future == NULL) { ... }  // handle error
 ```
@@ -281,7 +281,7 @@ void on_response(cy_future_t* future)
         // Response is either recieved or has timed out.
         switch (error) {
 
-            case CY_ERR_OK:                                         // Response received successfully.
+            case CY_OK:                                             // Response received successfully.
                 cy_response_t response = cy_response_move(future);  // The future will become pending again.
                 uint64_t subscriber_node_id = response.remote_id;   // Identity of the responding node.
                 uint64_t stream_seqno = response.seqno;             // 0 = first response, 1 = second, etc.

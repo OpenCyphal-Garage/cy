@@ -17,8 +17,8 @@
 // Request payload (little-endian, for demo simplicity).
 typedef struct
 {
-    uint32_t count;
-    uint32_t period_ms;
+    uint32_t count;     // cppcheck-suppress unusedStructMember
+    uint32_t period_ms; // cppcheck-suppress unusedStructMember
 } stream_request_t;
 
 typedef struct
