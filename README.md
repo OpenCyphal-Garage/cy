@@ -16,7 +16,7 @@ _pub/sub without steroids_
 -----
 
 A C implementation of Cyphal v1.1: robust decentralized zero-configuration pub/sub with tunable reliability
-and service discovery in only a couple thousand lines of straightforward C.
+and service discovery in only a few thousand lines of straightforward C.
 Runs anywhere, including small baremetal MCUs.
 The key design goals are simplicity and robustness.
 
@@ -27,9 +27,11 @@ or add this repository as a submodule.
 The following external dependencies are required, all single-header-only:
 
 - [`cavl2.h`](https://github.com/pavel-kirienko/cavl) --- An AVL tree (Pavel Kirienko, MIT license).
-- [`wild_key_value.h`](https://github.com/pavel-kirienko/wild_key_value) --- A key-value container with fast pattern matching & key routing (Pavel Kirienko, MIT license).
+- [`wild_key_value.h`](https://github.com/pavel-kirienko/wild_key_value) --- A key-value container with fast pattern
+  matching & key routing (Pavel Kirienko, MIT license).
 - [`olga_scheduler.h`](https://github.com/Zubax/olga_scheduler) --- A simple event loop (Zubax Robotics, MIT license).
-- [`rapidhash.h`](https://github.com/Nicoshev/rapidhash) --- A good 64-bit hash (Nicolas De Carli, BSD 2-clause license).
+- [`rapidhash.h`](https://github.com/Nicoshev/rapidhash) --- A good 64-bit hash (Nicolas De Carli, BSD 2-clause
+  license).
 
 On an embedded system, one may also prefer to use [`o1heap`](https://github.com/pavel-kirienko/o1heap) for memory
 management, but this is not a hard dependency -- any allocator will work. O1Heap is the recommended choice for embedded
@@ -37,9 +39,8 @@ platforms due to its hard determinism and low fragmentation.
 
 ## 📚 API crash course
 
-The library is extremely simple and easy to use on any platform.
-The entire API header is just a few hundred lines of code, mostly comments.
-The API is fully asynchronous/non-blocking; if necessary, synchronous wrappers can be implemented on top of it.
+The library offers a very compact API.
+It is fully asynchronous/non-blocking; if necessary, synchronous wrappers can be implemented on top of it.
 
 The specifics of setting up a local node depend on the platform and transport used,
 unlike the rest of the API, which is entirely platform- and transport-agnostic.
@@ -67,7 +68,7 @@ The library uses Pascal strings represented as `cy_str_t` throughout;
 these strings are normally not nul-terminated, unless specifically noted otherwise.
 Use `cy_str(const char*)` to create such strings from ordinary C strings.
 
-### 📢 Publish messages
+### 📢 Publish messages on a topic
 
 ```c++
 cy_publisher_t* my_pub = cy_advertise(cy, cy_str("my/topic"));
@@ -78,11 +79,11 @@ Publish a message asynchronously (non-blocking) using best-effort delivery:
 
 ```c++
 cy_us_t deadline = cy_now(cy) + 100_000; // the message must be sent within 0.1 seconds from now
-cy_err_t err = cy_publish(my_pub, deadline, (cy_bytes_t){.size = 13, .data = "Hello Cyphal!"});
+cy_err_t err = cy_publish(my_pub, deadline, (cy_bytes_t){.size = 13, .data = "Hello Cyphal!"}); // nonblocking
 if (err != CY_OK) { ... }
 ```
 
-Publish a message asynchronously using reliable delivery; the outcome can be checked via the returned future:
+Publish a message asynchronously using reliable delivery; the progress and outcome can be checked via the future:
 
 ```c++
 cy_us_t    deadline = cy_now(cy) + 2_000_000; // keep trying to deliver the message for up to 2 seconds
@@ -95,29 +96,38 @@ There may be an arbitrary number of pending reliable messages per publisher, eac
 The future can be polled to check the delivery outcome:
 
 ```c++
-cy_future_status_t status = cy_future_status(future);
-if (status == cy_future_pending) {
-    // wait some more
-} else if (status == cy_future_success) {
-    // message was delivered successfully
+if (cy_future_done(future)) {
+    switch (cy_future_error(future)) {
+        case CY_ERR_OK:         // message was delivered successfully
+            break;
+        case CY_ERR_DELIVERY:   // message could not be delivered before the deadline
+            break;
+        default:                // some other error, e.g., failed to send
+            break;
+    }
 } else {
-    // message could not be delivered within the specified deadline
-    assert(status == cy_future_failure);
+    // wait some more
 }
 ```
 
-Instead of polling, one can also attach a callback to be invoked once the future has materialized;
-to pass arbitrary context data to the callback, use `cy_user_context_t`:
+Instead of polling, one can also attach a callback to be invoked once the future has materialized or an error has
+occurred; to pass arbitrary context data to the callback, use `cy_user_context_t`:
 
 ```c++
-cy_future_context_set(future, (cy_user_context_t){ { "🐈", (void*)123456 } });
-cy_future_callback_set(future, on_future_done);
+cy_future_context_set(future, (cy_user_context_t){ { "🐈", this } });
+cy_future_callback_set(future, on_future_update);
 ```
+
 ```c++
-void on_future_done(cy_future_t* future)
+void on_future_update(cy_future_t* future)
 {
     cy_user_context_t ctx = cy_future_context(future);
-    // Query the future as you normally would.
+    cy_err_t error = cy_future_error(future);
+    if (cy_future_done(future)) {
+        // The future has materialized; check the error to see if it has succeeded or something went wrong.
+    } else {
+        // Check the error and optionally log it or update perfcounters. No action is necessary.
+    }
 }
 ```
 
@@ -129,70 +139,135 @@ cy_future_destroy(future);
 ```
 
 If you don't care about the future outcome, you can set it up for auto-destruction upon materialization as shown below.
-Usually, destroying the future immediately upon creation is not what you want because the associated action would be
-cancelled right away.
+Do not destroy unwanted futures right away because that cancels the associated operation.
 
 ```c++
 cy_future_callback_set(future, cy_future_destroy);  // Will destroy itself when done, no need to keep the reference.
 ```
 
-### 📩 Subscribe to messages
+### 📩 Subscribe to topics and receive messages
 
 `cy_subscribe()` covers most use cases:
 
 ```c++
-size_t extent = 1024 * 100;  // max message size in bytes; excess truncated
-cy_subscriber_t* my_sub = cy_subscribe(cy, cy_str("my/topic"), extent);
-if (my_sub == NULL) { ... }  // handle error
-cy_subscriber_context_set(my_sub, (cy_user_context_t){ { "🐱", NULL } }); // optional context
-cy_subscriber_callback_set(my_sub, on_message); // callback invoked upon message arrival
+size_t extent = 1024 * 100;         // max message size in bytes; excess truncated
+cy_future_t* subscription = cy_subscribe(cy, cy_str("my/topic"), extent);
+if (subscription == NULL) { ... }   // handle error
 ```
 
-There is also `cy_subscribe_ordered()` if the application requires the messages to arrive strictly in the publication
-order -- some transports may deliver messages out of order and Cy will reconstruct the original order.
+Future again! Everything that can produce results after some time (like delivery confirmation or message arrival)
+is represented as a future in Cy. Futures have a shared interface for common tasks like checking if done, callbacks,
+error handling, etc. Actions that are specific to a particular future type (e.g., retrieving received message)
+are accessed via type-specific functions that check the polymorphic future type safely at runtime.
+
+Aside from `cy_subscribe()` there is also `cy_subscribe_ordered()` if the application requires the messages to
+arrive strictly in the publication order -- some transports may deliver messages out of order and Cy will
+reconstruct the original order. This can be vital for certain applications that deal with streamed data, real-time
+state estimation, etc.
 
 One powerful feature is pattern subscriptions -- a kind of automatic service discovery.
 When a pattern subscription is created, the local node will scout the network for topics matching the specified
-pattern and will automatically subscribe to them as they appear, and unsubscribe when they disappear.
-Cy *intentionally uses the same API* for both concrete and pattern subscriptions,
+pattern and will automatically subscribe to them as they appear, and unsubscribe when they disappear;
+a pattern subscription will continuously monitor the network for matching topics and subscribe automatically when
+they appear, and unsubscribe when they disappear.
+
+Cy *intentionally uses the same API* for both verbatim and pattern subscriptions,
 as this enables flexible configuration at the time of integration/runtime as opposed to compile time only.
 To create a pattern subscription, simply use a topic name that contains substitution wildcards:
 
-* `*` -- matches a single name segment; e.g., `sensors/?/temperature` matches `sensors/engine/temperature` and `sensors/cabin/temperature`.
-* `>` -- matches zero or more name segments; e.g., `sensors/>` matches `sensors`, `sensors/engine/temperature`, etc.
+* `*` -- matches a single name segment; e.g., `sensors/*/temperature` matches `sensors/engine/temperature` and
+  `sensors/cabin/temperature` and so on.
+* `>` -- matches zero or more name segments at the end; e.g., `sensors/>` matches `sensors`,
+  `sensors/engine/temperature`, etc.
 
 Cyphal is designed to be lightweight and efficient, which is why we don't support substitution characters *within*
 name segments; e.g., `sensor*/eng>` will be treated as a literal topic name.
 
-The message arrival callback looks like this for all subscribers (ordered, unordered, verbatim, pattern):
+When a message is received, the subscriber future becomes done:
 
 ```c++
-void on_message(cy_subscriber_t* subscriber, cy_arrival_t arrival)
-{
-    cy_user_context_t ctx = cy_subscriber_context(subscriber);  // retrieve the context if needed
-    // You can see the name substitutions that had to be made to match the topic name pattern, if one used,
-    // by inspecting arrival.substitutions; in verbatim subscriptions the substitutions list is empty.
-    // The exact name of the matched topic is available as cy_topic_name(arrival.topic).
+if (cy_future_done(subscription)) {
+    // Retrieve the last received message. The queue depth is 1, newer messages overwrite older ones.
+    cy_arrival_t arrival = cy_arrival_borrow(subscription);
+
+    // Read the payload from the message.
     size_t  size = cy_message_size(arrival.message.content);
     unsigned char data[size];
-    cy_message_read(arrival.message.content, 0, size, data);  // feel free to read only the parts of interest
+    cy_message_read(arrival.message.content, 0, size, data); // feel free to read only the parts of interest
+
+    // This is how you can access the message metadata if needed.
+    cy_us_t timestamp = arrival.message.timestamp;
+    cy_topic_t* topic = cy_topic_find_by_hash(arrival.breadcrumb.topic_hash);
+    cy_str_t topic_name = cy_topic_name(topic);
+
+    // Print the message; hexdump() is just a helper, not part of the library.
     char* dump = hexdump(size, data, 32);
-    printf("Received message on topic %s:\n%s\n", cy_topic_name(arrival.topic).str, dump);
-    // If relevant, one can optionally send a response back to the publisher here using cy_respond():
-    cy_err_t err = cy_respond(&arrival.breadcrumb, deadline, response_data);
+    printf("Received message on topic %s at %.3f:\n%s\n", topic_name.str, 1e-6 * timestamp, dump);
+
+    // One can optionally send a response back to the publisher using cy_respond() or cy_respond_reliable();
+    // see more about RPC & streaming in the next section.
+} else {
+    // No message has arrived yet, check back later.
 }
 ```
 
-### ↩️ Respond to messages: RPC & streaming
-
-Observe that the message callback provides an option to send a response back to the publisher directly using
-unicast service.
-If the application expects a response, then the correct publishing function to use is `cy_request()`:
+Polling like above is useful when one needs a sampling subscriber that just stores the most recently received message,
+but often one would want to set up a callback to be invoked when a message arrives, which has been shown earlier --
+it uses the same future callback API. The callback will be also triggered on transient errors, so one will have
+to check if the future is done in the handler:
 
 ```c++
-cy_us_t request_deadline  = cy_now(cy) + 3_000_000; // request must be acknowledged by the remote within 3 seconds
-cy_us_t response_deadline = cy_now(cy) + 6_000_000; // give up waiting for the first response after 6 seconds
-cy_future_t* future = cy_request(my_pub, request_deadline, response_deadline, message);
+void on_message(cy_future_t* subscription)
+{
+    if (cy_future_done(subscription)) {
+        // A message has arrived, process it as shown above.
+    } else {
+        cy_err_t error = cy_future_error(subscription);
+        // A transient error has occurred; report it or increment perfcounters, but no action is necessary.
+    }
+}
+```
+
+If a pattern subscription is used, then it is often needed to know which pattern substitutions were made to match the
+topic name, like when `system/primary/sensor/0/data` matches `system/*/sensor/*/data`,
+we want to know that `primary` and `0` were the substitutions for the two `*` tokens.
+The pattern matching information is available with each `cy_arrival_t`:
+
+```c++
+// Already shown above:
+cy_arrival_t arrival = cy_arrival_borrow(subscription);
+cy_topic_t* topic = cy_topic_find_by_hash(arrival.breadcrumb.topic_hash);
+
+// Retrieve the substitutions -- very efficient, no string matching is done (everything is precomputed):
+cy_substitution_set_t subs = cy_subscriber_substitutions(subscription, topic);
+printf("Topic name %s matched with %zu substitutions:\n", cy_topic_name(topic), subs.count);
+for (size_t i = 0; i < subs.count; i++) {
+    cy_substitution_t s = subs.substitutions[i];
+    printf("Substitution #%zu matched token #%zu with %s\n", i, s.ordinal, s.str);
+}
+```
+
+It is also possible to monitor subscriber liveness and alert the application via its callback when messages cease to
+arrive; see the API docs for details.
+
+### ↩️ RPC & streaming
+
+Cyphal v1.1 implements RPC with optional streaming directly on top of pub/sub by allowing subscribers to optionally
+respond to any received message. Such responses are unicast directly back to the publisher, and are invisible to
+other nodes on the network.
+Streaming is simply a special case of RPC where the server sends multiple responses to a single request.
+
+If there are multiple subscribers on a topic, then each may respond, in which case the client will receive multiple
+responses separately from each server (subscriber). This can be used to implement anycast-like redundant topologies.
+
+Protocol-wise, there is no difference between a regular published message and a request, but in the Cy API the
+distinction is important because the library needs to know where to dispatch responses received for a given message.
+Hence there is a separate function for sending messages for which responses are expected: `cy_request()`:
+
+```c++
+cy_us_t delivery_deadline = cy_now(cy) + 3_000_000; // request must be acknowledged by the remote within 3 seconds
+cy_us_t response_timeout  = 1_000_000;              // first response must arrive within 1 second after that
+cy_future_t* future = cy_request(my_pub, delivery_deadline, response_timeout, message);
 if (future == NULL) { ... }  // handle error
 ```
 
@@ -201,40 +276,51 @@ As usual, the future can be polled, or we can set up a callback to be invoked wh
 ```c++
 void on_response(cy_future_t* future)
 {
-    cy_future_status_t status = cy_future_status(future);
-    if (status == cy_future_pending) {
-        // Intermediate progress update: request delivery has been confirmed, waiting for the response now.
-    } else if (status == cy_future_success) {
-        cy_request_result_t* const result = cy_future_result(future);
-        cy_us_t response_arrival_timestamp = result->response.message.timestamp;
-        const size_t  size = cy_message_size(result->response.message.content);
-        unsigned char data[size];
-        cy_message_read(result->response.message.content, 0, size, data);
-        // Process the response data!
-        
-        // We can destroy the future if we don't expect any further responses;
-        // alternatively, it can be kept alive to continue listening for more responses,
-        // in which case it will remain in the 'success' state until destroyed.
-        //cy_future_destroy(future);
-    } else {
-        assert(status == cy_future_failure);
-        cy_request_result_t* const result = cy_future_result(future);
-        if (result->request.acknowledgements == 0) {
-            // The request could not be delivered.
-        } else {
-            // The request was delivered, but no response was received.
+    cy_err_t error = cy_future_error(future);
+    if (cy_future_done(future)) {
+        // Response is either recieved or has timed out.
+        switch (error) {
+
+            case CY_ERR_OK:                                         // Response received successfully.
+                cy_response_t response = cy_response_move(future);  // The future will become pending again.
+                uint64_t subscriber_node_id = response.remote_id;   // Identity of the responding node.
+                uint64_t stream_seqno = response.seqno;             // 0 = first response, 1 = second, etc.
+                cy_us_t timestamp = response.message.timestamp;     // Response arrival time.
+                cy_message_t* message = response.message.content;
+                // Read the response payload as shown above for messages, using cy_message_read() etc.
+                break;
+            
+            case CY_ERR_LIVENESS:   // Response did not arrive.
+                break;
+            
+            default:                // Some other error, e.g., from the transport layer.
+                break;
         }
-        cy_future_destroy(future);
+        // We can destroy the future if no further responses are needed/expected.
+        // If we keep it alive, future responses will be reported; the future will become done again.
+        if (no_more_responses_needed) {
+            cy_future_destroy(future); // Invalidates the future.
+        }
+    } else {
+        // A transient error has occurred; report it or increment perfcounters, but no action is necessary.
     }
 }
 ```
 
+The request future will trigger a liveness error if response messages cease to arrive for longer than the timeout
+configured at the original `cy_request()` call; i.e., timeout monitoring does not stop after the first response.
+
+Subscribers respond to messages using `cy_respond()` or `cy_respond_reliable()`,
+which are very similar to `cy_publish()` and `cy_publish_reliable()`.
+
 If streaming is used, then normally it will be done using reliable delivery via `cy_respond_reliable()`,
-as reliable messages inform the server whether the remote side is still present and is accepting the data.
-As soon as the remote fails to confirm a message (once all delivery attempts have failed),
-the future will materialize with failure, hinting the server to cease streaming.
-This reachability-based flow control is crude and is only intended as a guardrail against unexpected connectivity
-failure; normally, one should explicitly request the server to stop sending data using a separate request.
+as reliable messages inform the server whether the remote side is accepting the response messages:
+- If the remote client accepts a response, the `cy_respond_reliable()` future will materialize with `CY_OK`,
+  indicating that streaming may proceed.
+- If the remote client application is no longer interested in the responses, it will destroy the future, causing all
+  subsequent responses to be NACK-ed by the client, and the server's future will materialize with `CY_ERR_NACK`.
+- If the remote client node is not reachable due to being down or disconnected, the server's future will
+  materialize with `CY_ERR_DELIVERY` after the delivery deadline expires.
 
 ### ⚙ Event loop
 
@@ -250,23 +336,7 @@ while (true)
 }
 ```
 
-That's it! See the `examples/` folder for more complete examples.
-
-## 🎨 Prior art
-
-### [Group Address Allocation Protocol (GAAP)](https://datatracker.ietf.org/doc/html/draft-ietf-pim-gaap-03)
-
-This is a form of a distributed consensus protocol that assigns unique numeric identifiers (multicast group addresses)
-to string keys. Cyphal v1.1 solves essentially the same problem where it finds a unique subject-ID per topic name.
-The difference of GAAP is that instead of CRDT, it relies on the conventional claim/deny approach.
-
-### [Zeroconf Multicast Address Allocation Protocol (ZMAAP)](https://datatracker.ietf.org/doc/html/draft-ietf-zeroconf-zmaap-02)
-
-Similar to GAAP.
-
-### Well-known decentralized pub/sub systems
-
-These include DDS, Zenoh, etc. Cyphal does not attempt to directly compete with these, but instead offers an alternative for applications where the complexity of the competitors is undesirable.
+That's it! See the `examples/` folder for more complete examples, and read the API docs in [`cy.h`](cy/cy.h).
 
 ## 🚌 Compatibility with Cyphal/CAN v1.0
 
@@ -277,17 +347,21 @@ where `abcd` is the subject-ID of the topic as a hexadecimal number,
 and the part before `#` is arbitrary and does not influence the topic hash (it is only meaningful for pattern matching).
 For example, to subscribe to subject-ID 1234, use the topic name `#04d2`.
 
-Cyphal v1.1 has no RPC in the same way as Cyphal/CAN v1.0 does; instead, it uses pub/sub for everything, including request/response interactions. Thus, to use RPC in a legacy CAN network, a low-level CAN transport access is required.
+Cyphal v1.1 has no RPC in the same way as Cyphal/CAN v1.0 does; instead, it uses pub/sub for everything, including
+request/response interactions. Thus, to use RPC in a legacy CAN network, a low-level CAN transport access is required.
 
 ## 🛠 Development
 
 The main development environment is the test suite under `tests/`, please refer there for specific instructions.
 
-The code must be Clang-Formatted; use `make format` to do that.
-
 ### 📝 Design notes
 
-Pattern subscriptions are perhaps the most convoluted part of the library because patterns imply that a single subscription can match multiple topics, and a single topic may match multiple subscriptions under different names. The library introduces dynamically allocated coupling objects that link a topic with the matching subscribers. Also, the library has to manage the lifetime of subscriptions created automatically on a pattern match; such subscriptions and their topics are called "implicit" and they expire automatically when there is no activity for a certain large predefined timeout.
+Pattern subscriptions are perhaps the most convoluted part of the library because patterns imply that a single
+subscription can match multiple topics, and a single topic may match multiple subscriptions under different names. The
+library introduces dynamically allocated coupling objects that link a topic with the matching subscribers. Also, the
+library has to manage the lifetime of subscriptions created automatically on a pattern match; such subscriptions and
+their topics are called "implicit" and they expire automatically when there is no activity for a certain large
+predefined timeout.
 
 ```mermaid
 classDiagram
@@ -315,3 +389,5 @@ direction LR
     _subscriber_root "1" o-- "*" subscriber
     note "Automatically managed private entities are prefixed with '_'"
 ```
+
+For a more comprehensive design overview, refer to `cy/README.md` and `formal/`.

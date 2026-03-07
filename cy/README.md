@@ -242,12 +242,19 @@ One idea that was considered to improve epidemic gossips was to include a Bloom 
 
 #### Prior art
 
+Distributed consensus:
+
 - [SWIM](https://en.wikipedia.org/wiki/SWIM_Protocol)
 - [HyParView](https://asc.di.fct.unl.pt/~jleitao/pdf/dsn07-leitao.pdf)
 - [Epidemic broadcast trees](https://asc.di.fct.unl.pt/~jleitao/pdf/srds07-leitao.pdf)
 - [Gossip-based peer sampling](https://www.inf.u-szeged.hu/~jelasity/cikkek/tocs05.pdf)
 - [Cyclon](https://www.cs.unibo.it/babaoglu/courses/csns/resources/tutorials/cyclon.pdf)
 - [Chord](https://en.wikipedia.org/wiki/Chord_%28peer-to-peer%29)
+
+Multicast group assignment to named topics:
+
+- [Group Address Allocation Protocol (GAAP)](https://datatracker.ietf.org/doc/html/draft-ietf-pim-gaap-03)
+- [Zeroconf Multicast Address Allocation Protocol (ZMAAP)](https://datatracker.ietf.org/doc/html/draft-ietf-zeroconf-zmaap-02)
 
 ## Security/threat model
 
