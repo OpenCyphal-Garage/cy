@@ -60,7 +60,7 @@ graph TB
 
   subgraph API["APPLICATION"]
     direction LR
-    A1["<b>cy_new · cy_destroy</b><br/>cy_update · cy_spin"]
+    A1["<b>cy_new · cy_destroy</b><br/>cy_spin"]
     A2["<b>cy_advertise</b><br/>cy_unadvertise"]
     A3["<b>cy_publish</b><br/>cy_publish_reliable"]
     A4["<b>cy_request</b><br/>cy_respond"]

@@ -208,7 +208,7 @@ struct cy_t
     gossip_dedup_t gossip_dedup[GOSSIP_DEDUP_CAPACITY];
     gossip_peer_t  gossip_peers[GOSSIP_PEER_COUNT];
 
-    // Slow topic iteration state. Updated every cy_update(); when NULL, restart from scratch.
+    // Slow topic iteration state. Updated every spin; when NULL, restart from scratch.
     cy_topic_t* topic_iter;
 
     cy_async_error_handler_t async_error_handler;
