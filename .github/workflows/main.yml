@@ -92,20 +92,25 @@ jobs:
             --output build/coverage/cy.cobertura.xml \
             --print-summary
       - id: coveralls_upload
-        uses: coverallsapp/github-action@v2
         continue-on-error: true
         env:
+          COVERALLS_REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COVERALLS_GIT_BRANCH: ${{ github.ref_name }}
+          COVERALLS_GIT_COMMIT: ${{ github.sha }}
           COVERALLS_SERVICE_NAME: github
           COVERALLS_SERVICE_JOB_ID: ${{ github.run_id }}
           COVERALLS_SERVICE_BRANCH: ${{ github.ref_name }}
           COVERALLS_SERVICE_BUILD_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          file: build/coverage/cy.cobertura.xml
-          format: cobertura
-          base-path: ${{ github.workspace }}
-          git-branch: ${{ github.ref_name }}
-          git-commit: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/bin"
+          curl -fsSLo "$HOME/bin/coveralls-linux-x86_64.tar.gz" \
+            https://github.com/coverallsapp/coverage-reporter/releases/latest/download/coveralls-linux-x86_64.tar.gz
+          tar -xzf "$HOME/bin/coveralls-linux-x86_64.tar.gz" -C "$HOME/bin"
+          "$HOME/bin/coveralls" report \
+            --base-path "$GITHUB_WORKSPACE" \
+            --format cobertura \
+            build/coverage/cy.cobertura.xml
       - if: ${{ steps.coveralls_upload.outcome == 'failure' }}
         run: |
           echo "::warning::Coveralls upload failed (likely Coveralls API issue). Continuing without failing CI."
