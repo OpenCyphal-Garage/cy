@@ -70,7 +70,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
-      - run: pip install --break-system-packages gcovr==7.2
+      - run: pip install --break-system-packages gcovr
       # language=bash
       - run: >
           cmake
@@ -84,41 +84,20 @@ jobs:
       - run: cd $GITHUB_WORKSPACE/build && make coverage
       # Export Cobertura report for Coveralls, tracking only cy/cy.c.
       - run: |
+          cd "$GITHUB_WORKSPACE/build"
           gcovr \
-            --root . \
-            --object-directory build \
-            --filter '^cy/cy[.]c$' \
+            --root "$GITHUB_WORKSPACE" \
+            --filter '.*/cy/cy\.c$' \
             --xml-pretty \
-            --output build/coverage/cy.cobertura.xml \
+            --output "$GITHUB_WORKSPACE/build/coverage/cy.cobertura.xml" \
             --print-summary
       - id: coveralls_upload
+        uses: coverallsapp/github-action@v2
         continue-on-error: true
-        env:
-          COVERALLS_REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          COVERALLS_GIT_BRANCH: ${{ github.ref_name }}
-          COVERALLS_GIT_COMMIT: ${{ github.sha }}
-          COVERALLS_SERVICE_NAME: github
-          COVERALLS_SERVICE_JOB_ID: ${{ github.run_id }}
-          COVERALLS_SERVICE_BRANCH: ${{ github.ref_name }}
-          COVERALLS_SERVICE_BUILD_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$GITHUB_WORKSPACE"
-          export CI_COMMIT_ID="$GITHUB_SHA"
-          export CI_AUTHOR_NAME="$(git show -s --format=%aN "$GITHUB_SHA")"
-          export CI_AUTHOR_EMAIL="$(git show -s --format=%aE "$GITHUB_SHA")"
-          export CI_COMMITTER_NAME="$(git show -s --format=%cN "$GITHUB_SHA")"
-          export CI_COMMITTER_EMAIL="$(git show -s --format=%cE "$GITHUB_SHA")"
-          export CI_COMMIT_MESSAGE="$(git show -s --format=%s "$GITHUB_SHA")"
-          mkdir -p "$HOME/bin"
-          curl -fsSLo "$HOME/bin/coveralls-linux-x86_64.tar.gz" \
-            https://github.com/coverallsapp/coverage-reporter/releases/latest/download/coveralls-linux-x86_64.tar.gz
-          tar -xzf "$HOME/bin/coveralls-linux-x86_64.tar.gz" -C "$HOME/bin"
-          "$HOME/bin/coveralls" report \
-            --base-path "$GITHUB_WORKSPACE" \
-            --format cobertura \
-            build/coverage/cy.cobertura.xml
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          file: build/coverage/cy.cobertura.xml
+          format: cobertura
       - if: ${{ steps.coveralls_upload.outcome == 'failure' }}
         run: |
           echo "::warning::Coveralls upload failed (likely Coveralls API issue). Continuing without failing CI."
