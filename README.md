@@ -54,72 +54,6 @@ Additional features include tunable reliability, liveness monitoring, ordered de
 For a more comprehensive design overview, refer to [`cy/README.md`](cy/README.md);
 formal verification models can be found in `model/`.
 
-```mermaid
-%%{init: {"theme": "base", "themeVariables": {"primaryColor": "#1e293b", "primaryTextColor": "#e2e8f0", "primaryBorderColor": "#475569", "lineColor": "#64748b", "secondaryColor": "#1e293b", "background": "#0f172a", "mainBkg": "#1e293b", "nodeBorder": "#475569", "clusterBkg": "#ffffff08", "clusterBorder": "#47556944", "edgeLabelBackground": "#0f172a", "fontSize": "13px"}, "flowchart": {"curve": "basis", "padding": 14, "nodeSpacing": 18, "rankSpacing": 32}}}%%
-graph TB
-
-  subgraph API["APPLICATION"]
-    direction LR
-    A1["<b>cy_new · cy_destroy</b><br/>cy_spin"]
-    A2["<b>cy_advertise</b><br/>cy_unadvertise"]
-    A3["<b>cy_publish</b><br/>cy_publish_reliable"]
-    A4["<b>cy_request</b><br/>cy_respond"]
-    A5["<b>cy_subscribe</b><br/>cy_unsubscribe"]
-  end
-
-  subgraph ENGINE["PROTOCOL ENGINE — cy.c"]
-    direction LR
-    G["<b>Distributed Consensus</b><br/>Epidemic bcast + ucast<br/>Peer Sampler<br/>Dedup · TTL · LRU"]
-    P["<b>Publisher</b><br/>Subject Writer · priority<br/>tag · seqno<br/>Publish Future · ACK<br/>reliable delivery"]
-    T{{"<b>Distributed Allocation Table<br/>(CRDT)</b><br/>topic hash → subject-ID<br/>allocation · eviction<br/>implicit / explicit<br/>indexes: hash · sid · name"}}
-    S["<b>Subscriber</b><br/>Subject Reader · coupling<br/>patterns · dedup<br/>reorder · deliver<br/>associations · liveness"]
-  end
-
-  subgraph RT["RUNTIME"]
-    direction LR
-    F["<b>Future</b><br/>callback · timeout<br/>key index"]
-    O["<b>Olga Scheduler</b><br/>EDF queue"]
-    D["<b>Data Structures</b><br/>bitmap · list<br/>cavl2.h AVL tree<br/>wild_key_value.h trie"]
-    M["<b>Memory</b><br/>alloc · chunked dup<br/>serialization"]
-  end
-
-  subgraph PL["PLATFORM — cy_platform.h"]
-    direction LR
-    X1["Subject Reader / Writer"]
-    X2["Unicast · Broadcast"]
-    X3["realloc · now · random"]
-  end
-
-  A1 --> T
-  A2 & A3 & A4 --> P
-  A5 --> S
-
-  P <--> T
-  S <--> T
-  G <--> T
-
-  G --> F
-  P --> O
-  T --> D
-  S --> M
-
-  F --> X1
-  O --> X2
-  M --> X3
-
-  classDef api fill:#14532d,stroke:#22c55e,color:#bbf7d0,font-weight:bold
-  classDef core fill:#1e3a5f,stroke:#3b82f6,color:#bfdbfe
-  classDef topic fill:#312e81,stroke:#818cf8,color:#c7d2fe,font-weight:bold
-  classDef rt fill:#292524,stroke:#78716c,color:#d6d3d1
-  classDef plat fill:#4a1d7a,stroke:#a855f7,color:#e9d5ff
-
-  class A1,A2,A3,A4,A5 api
-  class P,S,G core
-  class T topic
-  class F,O,D,M rt
-  class X1,X2,X3 plat
-```
-
 ## 📚 API crash course
 
 The library offers a very compact API.
@@ -228,6 +162,8 @@ Do not destroy unwanted futures right away because that cancels the associated o
 cy_future_callback_set(future, cy_future_destroy);  // Will destroy itself when done, no need to keep the reference.
 ```
 
+The examples folder contains a simple publisher example `main_udp_time_pub.c`.
+
 ### 📩 Subscribe to topics and receive messages
 
 `cy_subscribe()` covers most use cases:
@@ -330,6 +266,8 @@ for (size_t i = 0; i < subs.count; i++) {
 
 It is also possible to monitor subscriber liveness and alert the application via its callback when messages cease to
 arrive; see the API docs for details.
+
+The examples folder contains a simple subscriber example `main_udp_echo.c`.
 
 ### 🔄 RPC & streaming
 
