@@ -66,6 +66,9 @@ jobs:
   test_coverage:
     runs-on: ubuntu-latest
     container: ghcr.io/opencyphal/toolshed:ts24.4.3
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -82,7 +85,7 @@ jobs:
       - run: cd $GITHUB_WORKSPACE/build && make -j"$(nproc)"
       - run: cd $GITHUB_WORKSPACE/build && make test
       - run: cd $GITHUB_WORKSPACE/build && make coverage
-      # Export Cobertura report for Coveralls, tracking only cy/cy.c.
+      # Export Cobertura report for Codecov, tracking only cy/cy.c.
       - run: |
           cd "$GITHUB_WORKSPACE/build"
           gcovr \
@@ -91,16 +94,11 @@ jobs:
             --xml-pretty \
             --output "$GITHUB_WORKSPACE/build/coverage/cy.cobertura.xml" \
             --print-summary
-      - id: coveralls_upload
-        uses: coverallsapp/github-action@v2
-        continue-on-error: true
+      - uses: codecov/codecov-action@v5
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          file: build/coverage/cy.cobertura.xml
-          format: cobertura
-      - if: ${{ steps.coveralls_upload.outcome == 'failure' }}
-        run: |
-          echo "::warning::Coveralls upload failed (likely Coveralls API issue). Continuing without failing CI."
+          use_oidc: true
+          files: build/coverage/cy.cobertura.xml
+          fail_ci_if_error: false
       - uses: actions/upload-artifact@v4
         with:
           name: coverage-report

@@ -7,7 +7,7 @@
 _pub/sub without steroids_
 
 [![CI](https://github.com/OpenCyphal-Garage/cy/actions/workflows/main.yml/badge.svg)](https://github.com/OpenCyphal-Garage/cy/actions/workflows/main.yml)
-[![Coverage](https://coveralls.io/repos/github/OpenCyphal-Garage/cy/badge.svg)](https://coveralls.io/github/OpenCyphal-Garage/cy)
+[![Coverage](https://codecov.io/gh/OpenCyphal-Garage/cy/graph/badge.svg)](https://codecov.io/gh/OpenCyphal-Garage/cy)
 [![Distributed consensus demo](https://img.shields.io/badge/visualization-gerasim.opencyphal.org-black?color=ff00aa)](https://gerasim.opencyphal.org/)
 [![Website](https://img.shields.io/badge/website-opencyphal.org-black?color=1700b3)](https://opencyphal.org/)
 [![Forum](https://img.shields.io/discourse/https/forum.opencyphal.org/users.svg?logo=discourse&color=1700b3)](https://forum.opencyphal.org)
