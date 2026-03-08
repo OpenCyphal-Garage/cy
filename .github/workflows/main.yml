@@ -1,7 +1,5 @@
-name: Main Workflow
-on: [push, pull_request]
-env:
-  LLVM_VERSION: 20
+name: CI
+on: [push]
 
 jobs:
   test_debug_with_static_analysis:
