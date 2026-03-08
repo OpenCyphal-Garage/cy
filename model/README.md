@@ -9,7 +9,7 @@ Each node carries a short (ca. couple dozen) list of most recently seen gossip m
 
 The network load and reach were evaluated for different gossip TTL (forward count) and outdegree (forward targets per hop) for representative network sizes.
 
-With dedup cache enabled and without it; notice the network load and propagation rate trade-offs:
+With dedup cache enabled and without it; notice the network load and propagation rate trade-offs (note: TTL=x as defined in the protocol corresponds to x+1 gossip forwarding hops):
 
 <table>
   <tr>
@@ -22,6 +22,9 @@ With dedup cache enabled and without it; notice the network load and propagation
   </tr>
 </table>
 
-Using N=300 as a representative network size to tune the stack parameters for, we chose gossip TTL 11, forwarding outdegree d=2.
+Using N=300 as a representative network size to tune the stack parameters for, we choose the following parameters:
+
+- for urgent gossips on consensus repair: TTL 10 (11 hops), forwarding outdegree d=2
+- for periodic background gossips: TTL 1 (2 hops: original plus one forward), forwarding outdegree d=2
 
 The size of the dedup cache should approximate the maximum number of concurrent gossips in flight; nodes do not have to agree on a particular number since it does not affect wire compatibility but rather caps the peak gossip traffic. More resource-rich nodes may implement larger dedup caches while smaller (MCU-powered) nodes may carry much smaller caches (at least 1 entry is better than nothing); this naturally delegates the load regulation to the more powerful nodes without the need to actively synchronize node roles. Storing the cache in a simple linear array in memory means that capacities above ~16 might be unreasonable because at that point linear lookup becomes inefficient, calling for more sophisticated containers.

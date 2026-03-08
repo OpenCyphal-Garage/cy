@@ -1,5 +1,12 @@
 name: CI
-on: [push]
+on:
+  push:
+    paths-ignore:
+      - "model/**"
+      - "papers/**"
+      - "tools/**"
+      - "**/*.md"
+      - "**/*.pdf"
 
 jobs:
   test_debug_with_static_analysis:
