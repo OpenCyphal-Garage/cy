@@ -3,6 +3,7 @@
     <words>
       <w>Autodetected</w>
       <w>Cyclon</w>
+      <w>Enroute</w>
       <w>Zenoh</w>
       <w>Zubax</w>
       <w>acks</w>
@@ -19,6 +20,7 @@
       <w>deinit</w>
       <w>dgrams</w>
       <w>dscp</w>
+      <w>enroute</w>
       <w>gaap</w>
       <w>gettime</w>
       <w>hexdumps</w>

@@ -2,13 +2,16 @@
 
 #![allow(dead_code, unused_variables, unused_mut)]
 
-use clap::{error::ErrorKind, CommandFactory, Parser};
-use rand::rngs::SmallRng;
+use clap::{CommandFactory, Parser, error::ErrorKind};
 use rand::SeedableRng;
+use rand::rngs::SmallRng;
+use rand::{Rng, RngCore};
+use std::cell::RefCell;
 use std::cmp::min;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::RangeInclusive;
 use std::process::ExitCode;
+use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// All durations are specified in seconds unless explicitly noted otherwise.
@@ -173,6 +176,8 @@ enum CrdtMergeOutcome {
     LocalLoss,
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+
 #[derive(Debug, Clone)]
 struct Node {
     id: u16,
@@ -214,11 +219,7 @@ impl Node {
         loop {
             let subject_id = moving.subject_id(subject_id_modulus);
             let collided_hash = self.topics_by_hash.iter().find_map(|(hash, topic)| {
-                if topic.subject_id(subject_id_modulus) == subject_id {
-                    Some(*hash)
-                } else {
-                    None
-                }
+                if topic.subject_id(subject_id_modulus) == subject_id { Some(*hash) } else { None }
             });
             match collided_hash {
                 Some(hash) => {
@@ -256,6 +257,69 @@ impl Node {
         todo!("simulation step is not implemented yet")
     }
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+
+struct Network<'a> {
+    /// Messages that are currently in transit, indexed by the destination node, then by delivery time.
+    /// A tiebreaker is added in case we roll the same delivery time for distinct messages.
+    /// Note that messages may be delivered out of order, depending on how the propagation delay is rolled.
+    enroute: BTreeMap<u16, BTreeMap<(Duration, u64), GossipMessage>>,
+
+    /// Assuming that nodes have contiguous IDs from 0 to node_count-1; used for broadcasting.
+    node_count: usize,
+    delay_range: RangeInclusive<Duration>,
+    loss_probability: f64,
+
+    /// Propagation statistics for debugging and analysis.
+    count_sent_per_node: BTreeMap<u16, u64>,
+    count_received_per_node: BTreeMap<u16, u64>,
+    count_lost: u64,
+
+    /// Shared states.
+    now: &'a Duration,
+    rng: Rc<RefCell<SmallRng>>,
+}
+
+impl<'a> Network<'a> {
+    fn unicast_gossip(&mut self, destination: u16, message: GossipMessage) {
+        assert!((destination as usize) < self.node_count);
+        self.count_sent_per_node.entry(message.sender_id).and_modify(|c| *c += 1).or_insert(1);
+        if self.rng.borrow_mut().gen_bool(self.loss_probability) {
+            self.count_lost += 1;
+            return;
+        }
+        let delay = self.rng.borrow_mut().gen_range(self.delay_range.clone());
+        let delivery_time = *self.now + delay;
+        let tiebreaker = self.rng.borrow_mut().next_u64();
+        // This is where we may introduce reordering, which is good.
+        self.enroute.entry(destination).or_default().insert((delivery_time, tiebreaker), message);
+    }
+
+    fn broadcast_gossip(&mut self, message: GossipMessage) {
+        assert!(self.node_count <= u16::MAX as usize);
+        assert!((message.sender_id as usize) < self.node_count);
+        for destination in 0..(self.node_count as u16) {
+            if destination != message.sender_id {
+                self.unicast_gossip(destination, message.clone());
+            }
+        }
+    }
+
+    fn pull(&mut self, now: Duration, destination: u16) -> Option<GossipMessage> {
+        if let Some(dest_queue) = self.enroute.get_mut(&destination) {
+            if let Some((&(delivery_time, tie), message)) = dest_queue.iter().next() {
+                if delivery_time <= now {
+                    self.count_received_per_node.entry(destination).and_modify(|c| *c += 1).or_insert(1);
+                    return dest_queue.remove(&(delivery_time, tie));
+                }
+            }
+        }
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 struct Snapshot {
@@ -346,6 +410,8 @@ impl Simulation {
     }
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+
 fn main() -> ExitCode {
     // Set up the configuration.
     let mut config = Config::parse();
@@ -391,11 +457,7 @@ fn topic_subject_id(hash: u64, evictions: u16, modulus: u16) -> u16 {
 
 fn left_wins_collision(local: &Topic, now: Duration, remote_lage: i8, remote_hash: u64) -> bool {
     let local_lage = local.lage(now);
-    if local_lage != remote_lage {
-        local_lage > remote_lage
-    } else {
-        local.hash < remote_hash
-    }
+    if local_lage != remote_lage { local_lage > remote_lage } else { local.hash < remote_hash }
 }
 
 fn generate_seed() -> u64 {
@@ -467,6 +529,25 @@ fn parse_duration(s: &str) -> Result<Duration, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    fn make_test_network<'a>(now: &'a Duration, node_count: usize) -> Network<'a> {
+        Network {
+            enroute: BTreeMap::new(),
+            node_count,
+            delay_range: Duration::ZERO..=Duration::ZERO,
+            loss_probability: 0.0,
+            count_sent_per_node: BTreeMap::new(),
+            count_received_per_node: BTreeMap::new(),
+            count_lost: 0,
+            now,
+            rng: Rc::new(RefCell::new(SmallRng::seed_from_u64(0xBAD5_EED))),
+        }
+    }
+
+    fn make_test_gossip(sender_id: u16) -> GossipMessage {
+        GossipMessage { sender_id, ttl: 0, outdegree: 0, hash: 0x1234_5678_9ABC_DEF0, evictions: 0, lage: -1 }
+    }
 
     #[test]
     fn lage_conversion_matches_model_examples() {
@@ -518,5 +599,29 @@ mod tests {
         assert!(subjects.contains(&(1, 1, 0)));
         assert!(subjects.contains(&(2, 2, 0)));
         assert!(subjects.contains(&(12, 5, 2)));
+    }
+
+    #[test]
+    fn network_broadcast_rejects_node_count_above_u16_max() {
+        let now = Duration::ZERO;
+        let mut network = make_test_network(&now, (u16::MAX as usize) + 1);
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            network.broadcast_gossip(make_test_gossip(0));
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn network_broadcast_rejects_sender_id_out_of_range() {
+        let now = Duration::ZERO;
+        let mut network = make_test_network(&now, 3);
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            network.broadcast_gossip(make_test_gossip(3));
+        }));
+
+        assert!(result.is_err());
     }
 }

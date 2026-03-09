@@ -10,6 +10,9 @@ on:
       - "**/*.png"
       - "**/*.pdf"
       - ".gitignore"
+      - ".idea/**"
+      - ".zed/**"
+      - ".vscode/**"
 
 jobs:
   test_debug_with_static_analysis:
