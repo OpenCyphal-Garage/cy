@@ -124,7 +124,7 @@ jobs:
         with:
           submodules: true
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --locked --manifest-path model/montecarlo/Cargo.toml
+      - run: cargo test --manifest-path model/montecarlo/Cargo.toml
 
   compile_arm:
     runs-on: ubuntu-latest
