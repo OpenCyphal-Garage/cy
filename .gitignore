@@ -27,6 +27,8 @@
 *.profraw
 *.luarc*
 .scannerwork
+target/
+Cargo.lock
 build*/
 cmake*build*/
 .ipynb_checkpoints

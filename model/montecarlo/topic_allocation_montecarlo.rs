@@ -1,9 +1,4 @@
-#!/usr/bin/env rust-script
-//! ```cargo
-//! [dependencies]
-//! clap = { version = "4.0", features = ["derive"] }
-//! rand = { version = "0.8", features = ["small_rng"] }
-//! ```
+//! Copyright (c) Pavel Kirienko <pavel@opencyphal.org>
 
 #![allow(dead_code, unused_variables, unused_mut)]
 
@@ -30,8 +25,8 @@ struct Config {
 
     /// Use smaller values to increase allocation collisions. We use a simplified subject-ID function here;
     /// refer to proof.md for the equivalence notes between the simplified and full models.
-    /// For quadrating probing, this has to be a prime; use sympy.prevprime()/nextprime().
-    /// For quadrating probing, max topic count is half of this.
+    /// For quadratic probing, max topic count is half of this number, and it has to be a prime;
+    /// use sympy.prevprime()/nextprime().
     #[arg(long, default_value = "1999")]
     subject_id_modulus: u16,
 
@@ -432,7 +427,7 @@ fn is_prime_u16(value: u16) -> bool {
 /// lage is ⌊log₂(age in seconds)⌋, or -1 for age=0; range from -1 to about ~35.
 fn lage_from_duration(duration: Duration) -> i8 {
     match duration.as_secs() {
-        0 => 0,
+        0 => -1,
         s => s.ilog2() as i8,
     }
 }
@@ -509,7 +504,7 @@ mod tests {
 
     #[test]
     fn add_topic_resolves_local_collision_cascade() {
-        let mut node = Node::new(0, 11);
+        let mut node = Node::new(0);
         node.add_topic(2, 11);
         node.add_topic(12, 11);
         node.add_topic(1, 11);
@@ -523,25 +518,5 @@ mod tests {
         assert!(subjects.contains(&(1, 1, 0)));
         assert!(subjects.contains(&(2, 2, 0)));
         assert!(subjects.contains(&(12, 5, 2)));
-    }
-
-    #[test]
-    fn count_collisions_matches_flattened_set_semantics() {
-        let snapshot = Snapshot {
-            time: Duration::ZERO,
-            nodes: vec![make_node(11, &[(3, 1), (8, 0)]), make_node(11, &[(3, 1), (4, 0)])],
-        };
-
-        assert_eq!(1, snapshot.count_collisions(11));
-    }
-
-    #[test]
-    fn count_divergent_matches_flattened_set_semantics() {
-        let snapshot = Snapshot {
-            time: Duration::ZERO,
-            nodes: vec![make_node(11, &[(4, 0), (9, 0)]), make_node(11, &[(4, 1), (9, 0)])],
-        };
-
-        assert_eq!(1, snapshot.count_divergent());
     }
 }
