@@ -282,6 +282,26 @@ struct Network<'a> {
 }
 
 impl<'a> Network<'a> {
+    fn new(
+        node_count: usize,
+        delay_range: RangeInclusive<Duration>,
+        loss_probability: f64,
+        now: &'a Duration,
+        rng: Rc<RefCell<SmallRng>>,
+    ) -> Self {
+        Self {
+            enroute: BTreeMap::new(),
+            node_count,
+            delay_range,
+            loss_probability,
+            count_sent_per_node: BTreeMap::new(),
+            count_received_per_node: BTreeMap::new(),
+            count_lost: 0,
+            now,
+            rng,
+        }
+    }
+
     fn unicast_gossip(&mut self, destination: u16, message: GossipMessage) {
         assert!((destination as usize) < self.node_count);
         self.count_sent_per_node.entry(message.sender_id).and_modify(|c| *c += 1).or_insert(1);
@@ -317,6 +337,11 @@ impl<'a> Network<'a> {
         }
         None
     }
+
+    fn soonest_arrival_at(&self) -> Option<Duration> {
+        // TODO optimize by keeping a separate priority queue of soonest arrivals.
+        self.enroute.values().filter_map(|dest_queue| dest_queue.keys().next().map(|&(time, _)| time)).min()
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -341,13 +366,14 @@ impl Snapshot {
     }
 }
 
-struct Simulation {
+struct Simulation<'a> {
     config: Config,
+    network: Network<'a>,
     nodes: Vec<Node>,
     now: Duration,
     snaps: Vec<Snapshot>,
     converged_at: Option<Duration>,
-    rng: SmallRng,
+    rng: Rc<RefCell<SmallRng>>,
 }
 
 enum SimulationOutcome {
@@ -355,7 +381,7 @@ enum SimulationOutcome {
     TimeLimitReached,
 }
 
-impl Simulation {
+impl<'a> Simulation<'a> {
     fn step(&mut self) -> Option<SimulationOutcome> {
         // Step all nodes.
         for node in &mut self.nodes {
@@ -391,8 +417,12 @@ impl Simulation {
             }
         }
 
-        // Advance the time to the next event by mapping over all nodes.
-        let next_time = self.nodes.iter().map(|node| node.next_update_at()).min().unwrap();
+        // Advance the time to the next event.
+        let next_time = min(
+            self.nodes.iter().map(|node| node.next_update_at()).min().unwrap(),
+            self.network.soonest_arrival_at().unwrap_or(Duration::MAX),
+        );
+        assert!(next_time >= self.now);
         self.now = next_time;
         if self.now >= self.config.time_limit {
             return Some(SimulationOutcome::TimeLimitReached);
@@ -427,13 +457,21 @@ fn main() -> ExitCode {
     }
 
     // Set up the simulation.
+    let mut rng = Rc::new(RefCell::new(SmallRng::seed_from_u64(config.seed.unwrap())));
     let mut sim = Simulation {
         config: config.clone(),
+        network: Network::new(
+            config.node_count,
+            config.network_delay_range.clone(),
+            config.network_loss_probability,
+            &Duration::ZERO,
+            rng.clone(),
+        ),
         nodes: (0..config.node_count as u16).map(Node::new).collect(),
         now: Duration::ZERO,
         snaps: Vec::new(),
         converged_at: None,
-        rng: SmallRng::seed_from_u64(config.seed.unwrap()),
+        rng,
     };
     drop(config);
 
@@ -531,18 +569,14 @@ mod tests {
     use super::*;
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
-    fn make_test_network<'a>(now: &'a Duration, node_count: usize) -> Network<'a> {
-        Network {
-            enroute: BTreeMap::new(),
+    fn make_test_network(now: &Duration, node_count: usize) -> Network<'_> {
+        Network::new(
             node_count,
-            delay_range: Duration::ZERO..=Duration::ZERO,
-            loss_probability: 0.0,
-            count_sent_per_node: BTreeMap::new(),
-            count_received_per_node: BTreeMap::new(),
-            count_lost: 0,
+            Duration::ZERO..=Duration::ZERO,
+            0.0,
             now,
-            rng: Rc::new(RefCell::new(SmallRng::seed_from_u64(0xBAD5_EED))),
-        }
+            Rc::new(RefCell::new(SmallRng::seed_from_u64(0xBAD5_EED))),
+        )
     }
 
     fn make_test_gossip(sender_id: u16) -> GossipMessage {
