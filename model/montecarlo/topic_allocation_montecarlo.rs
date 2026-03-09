@@ -353,7 +353,7 @@ fn main() -> ExitCode {
         Config::command().error(ErrorKind::ValueValidation, "subject-ID modulus must be prime").exit();
     }
     if config.topic_count >= (config.subject_id_modulus as usize) / 2 {
-        Config::command().error(ErrorKind::ValueValidation, format!("too many topics for this modulus")).exit();
+        Config::command().error(ErrorKind::ValueValidation, "too many topics for this modulus").exit();
     }
     if let None = config.seed {
         config.seed = Some(generate_seed());
@@ -369,7 +369,7 @@ fn main() -> ExitCode {
         converged_at: None,
         rng: SmallRng::seed_from_u64(config.seed.unwrap()),
     };
-    std::mem::drop(config);
+    drop(config);
 
     ExitCode::SUCCESS
 }
