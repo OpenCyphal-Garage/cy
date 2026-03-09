@@ -2,11 +2,14 @@ name: CI
 on:
   push:
     paths-ignore:
-      - "model/**"
       - "papers/**"
       - "tools/**"
+      - "model/tlaplus/**"
       - "**/*.md"
+      - "**/*.ipynb"
+      - "**/*.png"
       - "**/*.pdf"
+      - ".gitignore"
 
 jobs:
   test_debug_with_static_analysis:
@@ -113,6 +116,15 @@ jobs:
         with:
           name: coverage-report
           path: build/coverage/
+
+  test_model_montecarlo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked --manifest-path model/montecarlo/Cargo.toml
 
   compile_arm:
     runs-on: ubuntu-latest
