@@ -100,6 +100,10 @@ impl Node {
         self.gossip_at
     }
 
+    fn add_topic(&mut self, topic_hash: u32) {
+        // TODO insert topic using local collision arbitration (like topic_allocate() in cy.c)
+    }
+
     fn step(&mut self, now: Duration) {
         // TODO
     }
@@ -107,27 +111,34 @@ impl Node {
 
 #[derive(Debug, Clone)]
 struct SimulationConfig {
+    /// Topics are generated with random hash values, then randomly assigned to nodes.
+    /// Each topic is used by any number of nodes ranging from 1 to node_count inclusive, chosen randomly.
+    /// The subject-ID modulus defines the subject-ID collision rate.
     node_count: usize,
-
-    /// Limit simulation time.
-    time_max: Duration,
+    topic_count: usize,
 
     /// Use smaller values to increase allocation collisions. We use a simplified subject-ID function here;
     /// refer to proof.md for the equivalence notes between the simplified and full models.
     /// For quadrating probing, this has to be a prime; use sympy.prevprime()/nextprime().
     /// For quadrating probing, max topic count is half of this.
-    subject_id_modulus: u16;
+    subject_id_modulus: u16,
 
+    /// Limit simulation time. Expect convergence before this.
+    time_max: Duration,
+
+    /// Gossip parameters.
     gossip_period: Duration,
     gossip_dither: Duration,    // true interval is in [period-dither, period+dither]
     gossip_broadcast_every: u8, // every Nth gossip is broadcast instead of epidemic
 
+    /// Epidemic peer sampler parameters.
     peer_count: usize,
     peer_age_reachable: Duration,      // ok to send gossips unless older than this
     peer_age_replaceable: Duration,    // replace unconditionally if older than this
-    peer_replace_probability: f64,     // even if not replaceable, replace with this probability
-    peer_replace_moratorium: Duration, // after replacement, no more replacements for a while to manage churn
+    peer_replacement_probability: f64, // even if not replaceable, replace with this probability
+    peer_moratorium_range: RangeInclusive<Duration>, // after replacement, hold for random time from this range
 
+    /// Epidemic duplicate gossip drop cache. Necessary for network load regulation; see the model.
     dedup_capacity: usize,
     dedup_timeout: Duration,
 
@@ -150,11 +161,11 @@ struct Snapshot {
 }
 
 impl Snapshot {
-    fn count_collisions(&self, config: &SimulationConfig) -> usize {
+    fn count_collisions(&self, subject_id_modulus: u16) -> usize {
         // TODO mirror the logic of FindCollisions() from Core.tla
     }
 
-    fn count_divergences(&self, config: &SimulationConfig) -> usize {
+    fn count_divergences(&self, subject_id_modulus: u16) -> usize {
         // TODO mirror the logic of FindDivergent() from Core.tla
     }
 }
@@ -182,7 +193,7 @@ impl Simulation {
         // Snapshot.
         self.snaps.push(Snapshot {
             time: self.now,
-            nodes: self.nodes.clone()
+            nodes: self.nodes.clone(),
         });
 
         // Update the convergence state.
@@ -191,7 +202,7 @@ impl Simulation {
                 if self.count_collisions() > 0 || self.count_divergences() > 0 {
                     self.converged_at = None;
                 }
-            },
+            }
             None => {
                 if self.count_collisions() == 0 && self.count_divergences() == 0 {
                     self.converged_at = Some(self.now);
@@ -216,6 +227,14 @@ impl Simulation {
         }
 
         None
+    }
+
+    fn run(&mut self) -> SimulationOutcome {
+        loop {
+            if let Some(outcome) = self.step() {
+                return outcome;
+            }
+        }
     }
 }
 
