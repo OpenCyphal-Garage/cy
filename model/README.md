@@ -52,3 +52,5 @@ It is obviously not essential that all nodes agree on these parameters. A sensib
 - periodic unicast gossip TTL 1 ($L_\text{unicast}=2$ hops, adjustable);
 - periodic unicast gossip outdegree d=1 (constant, not adjustable);
 - broadcast gossip rate approx. 1/5 Hz, or perhaps automatically adjustable between approx. 1/3 and 1/10 Hz depending on network size, uptime, and other heuristics.
+
+A sensible gossip scheduling approach is to count the total number of gossips published per node, send out a gossip every 1±0.125 s, and make every $n$-th gossip broadcast, with n being somewhere around 5 (may be automatically runtime-adjustable between 3..10 depending on network size and/or gossip arrival load). However, to speed up initial convergence and/or partition repair, $n$ may become 1 if the epidemic peer set has at least one empty or stale entry. The last condition implies that very small networks will only use broadcast gossips, which is fine.
