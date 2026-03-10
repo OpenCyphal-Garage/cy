@@ -132,10 +132,6 @@ impl<'a> Node<'a> {
         self.cfg.subject_id_modulus
     }
 
-    fn now(&self) -> Duration {
-        (self.now)()
-    }
-
     /// If the topic already exists, does nothing.
     pub fn add_topic(&mut self, topic_hash: u64) {
         assert!(self.topics_by_hash.len() < (self.cfg.subject_id_modulus / 2) as usize);
@@ -173,6 +169,57 @@ impl<'a> Node<'a> {
 
     pub fn next_update_at(&self) -> Duration {
         self.gossip_at
+    }
+
+    pub fn step(&mut self, incoming: Vec<GossipMessage>) {
+        let now = self.now();
+        let mut urgent_topics = BTreeSet::<u64>::new();
+        for message in incoming {
+            self.update_peer_sample(now, message.sender_id());
+            let should_forward = self.dedup_should_forward(now, message.dedup_hash(), message.ttl());
+            if self.topics_by_hash.contains_key(&message.topic_hash()) {
+                let outcome = self.on_gossip_known_topic(
+                    now,
+                    message.topic_hash(),
+                    message.topic_evictions(),
+                    message.topic_lage(),
+                    &mut urgent_topics,
+                );
+                if should_forward && matches!(outcome, CrdtMergeOutcome::Consensus) {
+                    let (evictions, lage) = {
+                        let topic = self.topics_by_hash.get(&message.topic_hash()).expect("topic lost after merge");
+                        (topic.evictions(), topic.lage(now))
+                    };
+                    self.forward_received_gossip(now, &message, message.topic_hash(), evictions, lage);
+                }
+            } else {
+                let outcome = self.on_gossip_unknown_topic(
+                    now,
+                    message.topic_hash(),
+                    message.topic_evictions(),
+                    message.topic_lage(),
+                    &mut urgent_topics,
+                );
+                if should_forward && matches!(outcome, CrdtMergeOutcome::Consensus | CrdtMergeOutcome::LocalLoss) {
+                    self.forward_received_gossip(
+                        now,
+                        &message,
+                        message.topic_hash(),
+                        message.topic_evictions(),
+                        message.topic_lage(),
+                    );
+                }
+            }
+        }
+        self.emit_urgent_gossip(now, &urgent_topics);
+        if now >= self.gossip_at {
+            self.emit_periodic_gossip(now);
+            self.schedule_next_periodic(now);
+        }
+    }
+
+    fn now(&self) -> Duration {
+        (self.now)()
     }
 
     fn sample_duration_between(&mut self, low: Duration, high: Duration) -> Duration {
@@ -490,53 +537,6 @@ impl<'a> Node<'a> {
             &[],
         ) {
             self.touch_dedup(now, hash, evictions, lage);
-        }
-    }
-
-    pub fn step(&mut self, incoming: Vec<GossipMessage>) {
-        let now = self.now();
-        let mut urgent_topics = BTreeSet::<u64>::new();
-        for message in incoming {
-            self.update_peer_sample(now, message.sender_id());
-            let should_forward = self.dedup_should_forward(now, message.dedup_hash(), message.ttl());
-            if self.topics_by_hash.contains_key(&message.topic_hash()) {
-                let outcome = self.on_gossip_known_topic(
-                    now,
-                    message.topic_hash(),
-                    message.topic_evictions(),
-                    message.topic_lage(),
-                    &mut urgent_topics,
-                );
-                if should_forward && matches!(outcome, CrdtMergeOutcome::Consensus) {
-                    let (evictions, lage) = {
-                        let topic = self.topics_by_hash.get(&message.topic_hash()).expect("topic lost after merge");
-                        (topic.evictions(), topic.lage(now))
-                    };
-                    self.forward_received_gossip(now, &message, message.topic_hash(), evictions, lage);
-                }
-            } else {
-                let outcome = self.on_gossip_unknown_topic(
-                    now,
-                    message.topic_hash(),
-                    message.topic_evictions(),
-                    message.topic_lage(),
-                    &mut urgent_topics,
-                );
-                if should_forward && matches!(outcome, CrdtMergeOutcome::Consensus | CrdtMergeOutcome::LocalLoss) {
-                    self.forward_received_gossip(
-                        now,
-                        &message,
-                        message.topic_hash(),
-                        message.topic_evictions(),
-                        message.topic_lage(),
-                    );
-                }
-            }
-        }
-        self.emit_urgent_gossip(now, &urgent_topics);
-        if now >= self.gossip_at {
-            self.emit_periodic_gossip(now);
-            self.schedule_next_periodic(now);
         }
     }
 }
