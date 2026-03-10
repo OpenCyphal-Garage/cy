@@ -13,6 +13,7 @@ use node::NodeConfig;
 use simulation::{Simulation, SimulationConfig, SimulationOutcome};
 
 use clap::{CommandFactory, Parser, error::ErrorKind};
+use duration_str::parse_time;
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
 use std::cell::RefCell;
@@ -38,7 +39,7 @@ struct Config {
     /// refer to proof.md for the equivalence notes between the simplified and full models.
     /// For quadratic probing, max topic count is half of this number, and it has to be a prime;
     /// use sympy.prevprime()/nextprime().
-    #[arg(long, default_value = "1999")]
+    #[arg(long, default_value_t = NodeConfig::default().subject_id_modulus)]
     subject_id_modulus: u16,
 
     /// Optional seed for reproducible random initialization. If omitted, current time is used.
@@ -53,46 +54,46 @@ struct Config {
     /// Gossip parameters.
     /// Broadcast always have zero TTL and infinite outdegree (by definition).
     /// Chosen gossip interval is in [period-dither, period+dither].
-    #[arg(long, value_parser = parse_duration, default_value = "1")]
+    #[arg(long, value_parser = parse_duration, default_value_t = NodeConfig::default().gossip_period)]
     gossip_period: Duration,
 
-    #[arg(long, value_parser = parse_duration, default_value = "0.125")]
+    #[arg(long, value_parser = parse_duration, default_value_t = NodeConfig::default().gossip_dither)]
     gossip_dither: Duration,
 
     /// Every nth gossip is broadcast instead of epidemic.
-    #[arg(long, default_value = "10")]
+    #[arg(long, default_value_t = NodeConfig::default().gossip_broadcast_every)]
     gossip_broadcast_every: u8,
 
-    #[arg(long, default_value = "1")]
+    #[arg(long, default_value_t = NodeConfig::default().gossip_ttl_periodic)]
     gossip_ttl_periodic: u8,
 
-    #[arg(long, default_value = "10")]
+    #[arg(long, default_value_t = NodeConfig::default().gossip_ttl_urgent)]
     gossip_ttl_urgent: u8,
 
     /// For unicast gossips, outdegree cannot exceed the peer count.
-    #[arg(long, default_value = "1")]
+    #[arg(long, default_value_t = NodeConfig::default().gossip_outdegree_periodic)]
     gossip_outdegree_periodic: u8,
 
-    #[arg(long, default_value = "2")]
+    #[arg(long, default_value_t = NodeConfig::default().gossip_outdegree_urgent)]
     gossip_outdegree_urgent: u8,
 
     // ----------------------------------------------------------------------------------------------------------------
     /// Epidemic peer sample set size.
-    #[arg(long, default_value = "8")]
+    #[arg(long, default_value_t = NodeConfig::default().peer_count)]
     peer_count: usize,
 
     /// A peer is eligible to receive gossips unless it was last seen longer than this ago.
-    #[arg(long, value_parser = parse_duration, default_value = "30")]
+    #[arg(long, value_parser = parse_duration, default_value_t = NodeConfig::default().peer_age_reachable)]
     peer_age_reachable: Duration,
 
     /// A peer will be replaced unconditionally at next opportunity (bypassing probabilistic sampling)
     /// if it was last seen longer than this ago.
-    #[arg(long, value_parser = parse_duration, default_value = "15")]
+    #[arg(long, value_parser = parse_duration, default_value_t = NodeConfig::default().peer_age_replaceable)]
     peer_age_replaceable: Duration,
 
     /// Peers that are still reachable (which are all peers during normal operation) will be replaced anyway
     /// with this probability at each gossip outside of the moratorium period to ensure mixing.
-    #[arg(long, default_value = "0.125")]
+    #[arg(long, default_value_t = NodeConfig::default().peer_replacement_probability)]
     peer_replacement_probability: f64,
 
     /// After a peer replacement, there is a moratorium period during which the new peer cannot be replaced again to
@@ -103,11 +104,11 @@ struct Config {
 
     // ----------------------------------------------------------------------------------------------------------------
     /// Epidemic duplicate gossip drop cache is necessary for network load regulation; see the model.
-    #[arg(long, default_value = "16")]
+    #[arg(long, default_value_t = NodeConfig::default().dedup_capacity)]
     dedup_capacity: usize,
 
     /// Gossips that have been seen more than this long ago are considered fresh.
-    #[arg(long, value_parser = parse_duration, default_value = "0.5")]
+    #[arg(long, value_parser = parse_duration, default_value_t = NodeConfig::default().dedup_timeout)]
     dedup_timeout: Duration,
 
     // ----------------------------------------------------------------------------------------------------------------
@@ -129,7 +130,6 @@ impl Config {
     }
 
     fn node(&self) -> NodeConfig {
-        // TODO: Use defaults from NodeConfig instead of repeating them here.
         NodeConfig {
             subject_id_modulus: self.subject_id_modulus,
             gossip_period: self.gossip_period,
@@ -211,13 +211,19 @@ fn parse_duration_range(s: &str) -> Result<RangeInclusive<Duration>, String> {
     Ok(start..=end)
 }
 
-/// The duration is given as a real number of seconds.
 fn parse_duration(s: &str) -> Result<Duration, String> {
-    let seconds = s.parse::<f64>().map_err(|e| e.to_string())?;
-    if !seconds.is_finite() || seconds < 0.0 {
+    let trimmed = s.trim();
+    if let Ok(seconds) = trimmed.parse::<f64>() {
+        if !seconds.is_finite() || seconds < 0.0 {
+            return Err("duration must be finite and non-negative".to_string());
+        }
+        return Ok(Duration::seconds_f64(seconds));
+    }
+    let parsed = parse_time(trimmed).map_err(|e| e.to_string())?;
+    if parsed.is_negative() {
         return Err("duration must be finite and non-negative".to_string());
     }
-    Ok(Duration::seconds_f64(seconds))
+    Ok(parsed)
 }
 
 #[cfg(test)]
@@ -232,10 +238,31 @@ mod tests {
     }
 
     #[test]
+    fn parse_duration_accepts_human_units() {
+        assert_eq!(Duration::seconds(123), parse_duration("123s").unwrap());
+        assert_eq!(Duration::seconds(123), parse_duration("123").unwrap());
+        assert_eq!(Duration::milliseconds(125), parse_duration("125ms").unwrap());
+        assert_eq!(Duration::seconds(62), parse_duration("1m2s").unwrap());
+    }
+
+    #[test]
+    fn parse_duration_accepts_time_display_output() {
+        let rendered = Duration::seconds(62).to_string(); // "1m2s"
+        assert_eq!(Duration::seconds(62), parse_duration(&rendered).unwrap());
+    }
+
+    #[test]
     fn parse_duration_range_requires_ordered_bounds() {
         let range = parse_duration_range("0.25..1.5").unwrap();
         assert_eq!(Duration::milliseconds(250), *range.start());
         assert_eq!(Duration::milliseconds(1500), *range.end());
         assert!(parse_duration_range("2..1").is_err());
+    }
+
+    #[test]
+    fn parse_duration_range_accepts_human_units() {
+        let range = parse_duration_range("125ms..1m2s").unwrap();
+        assert_eq!(Duration::milliseconds(125), *range.start());
+        assert_eq!(Duration::seconds(62), *range.end());
     }
 }

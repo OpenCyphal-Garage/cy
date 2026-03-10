@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
+duration-str = { version = "0.21.0", default-features = false, features = ["time"] }
 rand = { version = "0.10.0" }
 smart-default = "0.7.1"
 time = "0.3.47"
