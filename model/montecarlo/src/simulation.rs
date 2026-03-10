@@ -1,4 +1,4 @@
-use crate::network::{Network, Transmit};
+use crate::network::{Network, NetworkConfig, Transmit};
 use crate::node::{Node, NodeConfig, count_colliding_subjects};
 use crate::topic::Topic;
 use rand::Rng;
@@ -29,31 +29,27 @@ pub enum SimulationOutcome {
 }
 
 impl<'a> Simulation<'a> {
-    pub fn new(
-        network: Rc<RefCell<Network>>,
-        nodes: Vec<Node<'a>>,
-        now: Rc<RefCell<Duration>>,
-        cfg: SimulationConfig,
-        rng: Rc<RefCell<dyn Rng>>,
-    ) -> Self {
-        Self { network, nodes, now, snaps: Vec::new(), converged_at: None, rng, cfg }
-    }
-
     pub fn generate(
         node_count: usize,
         topic_count: usize,
-        now: Rc<RefCell<Duration>>,
         rng: Rc<RefCell<dyn Rng>>,
-        network: Rc<RefCell<Network>>,
+        network_config: NetworkConfig,
         node_config: NodeConfig,
         cfg: SimulationConfig,
     ) -> Result<Self, String> {
-        let now_provider: Rc<dyn Fn() -> Duration + 'a> = {
+        let now = Rc::new(RefCell::new(Duration::ZERO));
+        let network_now_provider: Rc<dyn Fn() -> Duration + 'static> = {
             let now = now.clone();
             Rc::new(move || *now.borrow())
         };
-        let nodes = generate_network(node_count, topic_count, now_provider, rng.clone(), network.clone(), node_config)?;
-        Ok(Self::new(network.clone(), nodes, now, cfg, rng))
+        let node_now_provider: Rc<dyn Fn() -> Duration + 'a> = {
+            let now = now.clone();
+            Rc::new(move || *now.borrow())
+        };
+        let network = Rc::new(RefCell::new(Network::new(network_config, network_now_provider, rng.clone())));
+        let nodes =
+            generate_network(node_count, topic_count, node_now_provider, rng.clone(), network.clone(), node_config)?;
+        Ok(Self { network, nodes, now, snaps: Vec::new(), converged_at: None, rng, cfg })
     }
 
     pub fn step(&mut self) -> Option<SimulationOutcome> {
