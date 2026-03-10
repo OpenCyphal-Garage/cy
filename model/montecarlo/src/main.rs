@@ -15,12 +15,12 @@ use simulation::SimulationConfig;
 use clap::{CommandFactory, Parser, error::ErrorKind};
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
-use rand::{Rng, RngExt};
 use std::cell::RefCell;
 use std::ops::RangeInclusive;
 use std::process::ExitCode;
 use std::rc::Rc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
+use time::Duration;
 
 /// All durations are specified in seconds unless explicitly noted otherwise.
 #[derive(Parser, Debug, Clone)]
@@ -182,7 +182,7 @@ fn main() -> ExitCode {
 }
 
 fn generate_seed() -> u64 {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO);
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(std::time::Duration::ZERO);
     now.as_secs() ^ ((now.subsec_nanos() as u64) << 32)
 }
 
@@ -202,7 +202,7 @@ fn parse_duration(s: &str) -> Result<Duration, String> {
     if !seconds.is_finite() || seconds < 0.0 {
         return Err("duration must be finite and non-negative".to_string());
     }
-    Ok(Duration::from_secs_f64(seconds))
+    Ok(Duration::seconds_f64(seconds))
 }
 
 #[cfg(test)]
@@ -211,7 +211,7 @@ mod tests {
 
     #[test]
     fn parse_duration_accepts_fractional_seconds() {
-        assert_eq!(Duration::from_millis(125), parse_duration("0.125").unwrap());
+        assert_eq!(Duration::milliseconds(125), parse_duration("0.125").unwrap());
         assert!(parse_duration("-1").is_err());
         assert!(parse_duration("nan").is_err());
     }
@@ -219,8 +219,8 @@ mod tests {
     #[test]
     fn parse_duration_range_requires_ordered_bounds() {
         let range = parse_duration_range("0.25..1.5").unwrap();
-        assert_eq!(Duration::from_millis(250), *range.start());
-        assert_eq!(Duration::from_millis(1500), *range.end());
+        assert_eq!(Duration::milliseconds(250), *range.start());
+        assert_eq!(Duration::milliseconds(1500), *range.end());
         assert!(parse_duration_range("2..1").is_err());
     }
 }

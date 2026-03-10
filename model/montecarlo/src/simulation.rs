@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::cmp::min;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
-use std::time::Duration;
+use time::Duration;
 
 #[derive(Debug, Clone)]
 pub struct SimulationConfig {
@@ -80,8 +80,8 @@ impl<'a> Simulation<'a> {
         // Check the simulation stop condition -- when stable state is reached.
         // Stable state is when the network stayed convergent for more than (node count times max delay).
         if let Some(t) = self.converged_at {
-            let stability_window = Duration::from_secs_f64(
-                self.nodes.len() as f64 * self.network.borrow().config().delay_range.end().as_secs_f64(),
+            let stability_window = Duration::seconds_f64(
+                self.nodes.len() as f64 * self.network.borrow().config().delay_range.end().as_seconds_f64(),
             );
             if self.now - t > stability_window {
                 return Some(SimulationOutcome::Converged(t));

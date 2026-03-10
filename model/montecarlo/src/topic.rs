@@ -1,5 +1,5 @@
 use std::cmp::min;
-use std::time::Duration;
+use time::Duration;
 
 #[derive(Debug, Clone)]
 pub struct Topic {
@@ -23,7 +23,8 @@ impl Topic {
 
     /// Adjusts the local topic age estimate based on a received gossip. This implements lage propagation.
     pub fn merge_lage(&mut self, lage: i8, now: Duration) {
-        self.origin = min(self.origin, now - lage_to_duration(lage));
+        let merged_origin = if lage >= 63 { Duration::MIN } else { now - lage_to_duration(lage) };
+        self.origin = min(self.origin, merged_origin);
     }
 
     pub fn subject_id(&self, modulus: u16) -> u16 {
@@ -54,9 +55,9 @@ pub fn left_wins_collision(local: &Topic, now: Duration, remote_lage: i8, remote
 
 /// lage is ⌊log₂(age in seconds)⌋, or -1 for age=0; range from -1 to about ~35.
 pub fn lage_from_duration(duration: Duration) -> i8 {
-    match duration.as_secs() {
-        0 => -1,
-        s => s.ilog2() as i8,
+    match duration.whole_seconds() {
+        ..=0 => -1,
+        s => (s as u64).ilog2() as i8,
     }
 }
 
@@ -64,7 +65,7 @@ pub fn lage_to_duration(lage: i8) -> Duration {
     match lage {
         ..0 => Duration::ZERO,
         63.. => Duration::MAX,
-        v => Duration::from_secs(1_u64 << (v as u32)),
+        v => Duration::seconds(1_i64 << (v as u32)),
     }
 }
 
@@ -73,15 +74,73 @@ mod tests {
     use super::*;
 
     #[test]
+    fn topic_new_exposes_basic_properties() {
+        let topic = Topic::new(0xDEAD_BEEF, Duration::seconds(5));
+        assert_eq!(0xDEAD_BEEF, topic.hash());
+        assert_eq!(0, topic.evictions());
+    }
+
+    #[test]
+    fn topic_age_and_lage_follow_origin() {
+        let topic = Topic::new(7, Duration::seconds(10));
+        assert_eq!(Duration::seconds(5), topic.age(Duration::seconds(15)));
+        assert_eq!(2, topic.lage(Duration::seconds(15))); // floor(log2(5))
+    }
+
+    #[test]
+    fn merge_lage_prefers_older_origin() {
+        let mut topic = Topic::new(1, Duration::seconds(10));
+        topic.merge_lage(3, Duration::seconds(20)); // implies origin at 12s, newer than current
+        assert_eq!(Duration::seconds(10), topic.age(Duration::seconds(20)));
+
+        topic.merge_lage(4, Duration::seconds(20)); // implies origin at 4s, older than current
+        assert_eq!(Duration::seconds(16), topic.age(Duration::seconds(20)));
+    }
+
+    #[test]
+    fn merge_lage_handles_old_remote_without_underflow() {
+        let mut topic = Topic::new(1, Duration::ZERO);
+        topic.merge_lage(62, Duration::seconds(1));
+        assert!(topic.age(Duration::seconds(1)) > Duration::ZERO);
+    }
+
+    #[test]
+    fn evict_increments_counter_and_changes_subject() {
+        let mut topic = Topic::new(3, Duration::ZERO);
+        assert_eq!(0, topic.evictions());
+        assert_eq!(3, topic.subject_id(11));
+        topic.evict();
+        assert_eq!(1, topic.evictions());
+        assert_eq!(4, topic.subject_id(11));
+    }
+
+    #[test]
+    fn left_wins_collision_prefers_higher_lage() {
+        let local = Topic::new(10, Duration::seconds(2)); // age at t=10 is 8s => lage=3
+        assert!(left_wins_collision(&local, Duration::seconds(10), 2, 1));
+        assert!(!left_wins_collision(&local, Duration::seconds(10), 4, 1));
+    }
+
+    #[test]
+    fn left_wins_collision_tiebreaks_on_hash() {
+        let local_low = Topic::new(1, Duration::ZERO);
+        let local_high = Topic::new(3, Duration::ZERO);
+        assert!(left_wins_collision(&local_low, Duration::ZERO, -1, 2));
+        assert!(!left_wins_collision(&local_high, Duration::ZERO, -1, 2));
+    }
+
+    #[test]
     fn lage_conversion_matches_model_examples() {
         assert_eq!(-1, lage_from_duration(Duration::ZERO));
-        assert_eq!(0, lage_from_duration(Duration::from_secs(1)));
-        assert_eq!(1, lage_from_duration(Duration::from_secs(2)));
-        assert_eq!(1, lage_from_duration(Duration::from_secs(3)));
+        assert_eq!(-1, lage_from_duration(Duration::seconds(-1)));
+        assert_eq!(0, lage_from_duration(Duration::seconds(1)));
+        assert_eq!(1, lage_from_duration(Duration::seconds(2)));
+        assert_eq!(1, lage_from_duration(Duration::seconds(3)));
         assert_eq!(Duration::ZERO, lage_to_duration(-1));
-        assert_eq!(Duration::from_secs(1), lage_to_duration(0));
-        assert_eq!(Duration::from_secs(2), lage_to_duration(1));
-        assert_eq!(Duration::from_secs(8), lage_to_duration(3));
+        assert_eq!(Duration::seconds(1), lage_to_duration(0));
+        assert_eq!(Duration::seconds(2), lage_to_duration(1));
+        assert_eq!(Duration::seconds(8), lage_to_duration(3));
+        assert_eq!(Duration::MAX, lage_to_duration(63));
     }
 
     #[test]

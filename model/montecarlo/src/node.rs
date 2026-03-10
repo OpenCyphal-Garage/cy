@@ -7,16 +7,16 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::RangeInclusive;
 use std::rc::Rc;
-use std::time::Duration;
+use time::Duration;
 
 #[derive(Debug, Clone, SmartDefault)]
 pub struct NodeConfig {
     #[default(_code = "1999")]
     pub subject_id_modulus: u16,
 
-    #[default(_code = "Duration::from_secs_f64(1.0)")]
+    #[default(_code = "Duration::seconds_f64(1.0)")]
     pub gossip_period: Duration,
-    #[default(_code = "Duration::from_secs_f64(0.125)")]
+    #[default(_code = "Duration::seconds_f64(0.125)")]
     pub gossip_dither: Duration,
     #[default(_code = "10")]
     pub gossip_broadcast_every: u8,
@@ -31,18 +31,18 @@ pub struct NodeConfig {
 
     #[default(_code = "8")]
     pub peer_count: usize,
-    #[default(_code = "Duration::from_secs(30)")]
+    #[default(_code = "Duration::seconds(30)")]
     pub peer_age_reachable: Duration,
-    #[default(_code = "Duration::from_secs(15)")]
+    #[default(_code = "Duration::seconds(15)")]
     pub peer_age_replaceable: Duration,
     #[default(_code = "0.125")]
     pub peer_replacement_probability: f64,
-    #[default(_code = "Duration::ZERO..=Duration::from_secs_f64(0.1)")]
+    #[default(_code = "Duration::ZERO..=Duration::seconds_f64(0.1)")]
     pub peer_moratorium_range: RangeInclusive<Duration>,
 
     #[default(_code = "16")]
     pub dedup_capacity: usize,
-    #[default(_code = "Duration::from_secs_f64(0.5)")]
+    #[default(_code = "Duration::seconds_f64(0.5)")]
     pub dedup_timeout: Duration,
 }
 
@@ -207,6 +207,7 @@ fn is_prime_u16(value: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::RngExt;
     use rand::SeedableRng;
     use rand::rngs::SmallRng;
 
@@ -217,12 +218,60 @@ mod tests {
         fn broadcast_gossip(&mut self, _message: GossipMessage) {}
     }
 
+    fn make_test_node(modulus: u16) -> Node<'static> {
+        let cfg = NodeConfig { subject_id_modulus: modulus, ..NodeConfig::default() };
+        let network = Rc::new(RefCell::new(StubNetwork));
+        let rng = Rc::new(RefCell::new(SmallRng::seed_from_u64(0xD00D_F00D)));
+        Node::new(0, network, rng, cfg).unwrap()
+    }
+
+    fn snapshot(node: &Node<'_>, modulus: u16) -> Vec<(u64, u16, u16)> {
+        node.topics_by_hash.values().map(|topic| (topic.hash(), topic.subject_id(modulus), topic.evictions())).collect()
+    }
+
     #[test]
-    fn add_topic_resolves_local_collision_cascade() {
-        let cfg = NodeConfig { subject_id_modulus: 11, ..NodeConfig::default() };
+    fn new_rejects_non_prime_modulus() {
+        let cfg = NodeConfig { subject_id_modulus: 12, ..NodeConfig::default() };
         let network = Rc::new(RefCell::new(StubNetwork));
         let rng = Rc::new(RefCell::new(SmallRng::seed_from_u64(0)));
-        let mut node = Node::new(0, network, rng, cfg).unwrap();
+        assert!(Node::new(0, network, rng, cfg).is_err());
+    }
+
+    #[test]
+    fn add_topic_inserts_without_collision() {
+        let mut node = make_test_node(11);
+        node.add_topic(2);
+        assert_eq!(vec![(2, 2, 0)], snapshot(&node, 11));
+        assert_eq!(0, node.count_local_collisions());
+    }
+
+    #[test]
+    fn add_topic_collision_moving_topic_loses() {
+        let mut node = make_test_node(11);
+        node.add_topic(1);
+        node.add_topic(12); // Same subject as 1, higher hash loses and is evicted.
+
+        let subjects = snapshot(&node, 11);
+        assert_eq!(0, node.count_local_collisions());
+        assert!(subjects.contains(&(1, 1, 0)));
+        assert!(subjects.contains(&(12, 2, 1)));
+    }
+
+    #[test]
+    fn add_topic_collision_moving_topic_wins_and_displaces_existing() {
+        let mut node = make_test_node(11);
+        node.add_topic(12);
+        node.add_topic(1); // Same subject as 12, lower hash wins.
+
+        let subjects = snapshot(&node, 11);
+        assert_eq!(0, node.count_local_collisions());
+        assert!(subjects.contains(&(1, 1, 0)));
+        assert!(subjects.contains(&(12, 2, 1)));
+    }
+
+    #[test]
+    fn add_topic_resolves_local_collision_cascade() {
+        let mut node = make_test_node(11);
         node.add_topic(2);
         node.add_topic(12);
         node.add_topic(1);
@@ -236,5 +285,50 @@ mod tests {
         assert!(subjects.contains(&(1, 1, 0)));
         assert!(subjects.contains(&(2, 2, 0)));
         assert!(subjects.contains(&(12, 5, 2)));
+    }
+
+    #[test]
+    fn add_topic_existing_hash_is_noop() {
+        let mut node = make_test_node(11);
+        node.add_topic(2);
+        node.add_topic(12);
+        node.add_topic(1);
+        let before = snapshot(&node, 11);
+
+        node.add_topic(2);
+        let after = snapshot(&node, 11);
+
+        assert_eq!(before, after);
+        assert_eq!(0, node.count_local_collisions());
+    }
+
+    #[test]
+    fn add_topic_randomized_stress_preserves_invariants() {
+        const MODULUS: u16 = 101;
+        const TOPIC_SPACE: u64 = 40;
+        const OPS: usize = 1000;
+
+        let mut op_rng = SmallRng::seed_from_u64(0x1BAD_5EED);
+        let mut sequence = Vec::with_capacity(OPS);
+        for _ in 0..OPS {
+            sequence.push(op_rng.random::<u64>() % TOPIC_SPACE);
+        }
+
+        let mut node_a = make_test_node(MODULUS);
+        let mut expected_hashes = BTreeSet::<u64>::new();
+        for &hash in &sequence {
+            node_a.add_topic(hash);
+            expected_hashes.insert(hash);
+
+            let actual_hashes = node_a.topics().into_iter().map(|topic| topic.hash()).collect::<BTreeSet<u64>>();
+            assert_eq!(expected_hashes, actual_hashes);
+            assert_eq!(0, node_a.count_local_collisions());
+        }
+
+        let mut node_b = make_test_node(MODULUS);
+        for &hash in &sequence {
+            node_b.add_topic(hash);
+        }
+        assert_eq!(snapshot(&node_a, MODULUS), snapshot(&node_b, MODULUS));
     }
 }

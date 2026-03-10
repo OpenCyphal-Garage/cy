@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
 use std::rc::Rc;
-use std::time::Duration;
+use time::Duration;
 
 #[derive(Debug, Clone)]
 pub struct NetworkConfig {
@@ -45,7 +45,15 @@ impl Transmit for Network<'_> {
             self.count_lost += 1;
             return;
         }
-        let delay = self.rng.borrow_mut().random_range(self.cfg.delay_range.clone());
+        let delay_start = *self.cfg.delay_range.start();
+        let delay_end = *self.cfg.delay_range.end();
+        let delay = if delay_start == delay_end {
+            delay_start
+        } else {
+            let sampled_seconds =
+                self.rng.borrow_mut().random_range(delay_start.as_seconds_f64()..=delay_end.as_seconds_f64());
+            Duration::seconds_f64(sampled_seconds)
+        };
         let delivery_time = *self.now + delay;
         let tiebreaker = self.rng.borrow_mut().next_u64();
         // This is where we may introduce reordering, which is good.
