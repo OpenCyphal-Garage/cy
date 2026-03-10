@@ -92,7 +92,7 @@ impl<'a> Simulation<'a> {
             let stability_window = Duration::seconds_f64(
                 self.nodes.len() as f64 * self.network.borrow().config().delay_range.end().as_seconds_f64(),
             );
-            if now - t > stability_window {
+            if now - t > min(stability_window, Duration::seconds(10)) {
                 return Some(SimulationOutcome::Converged(t));
             }
         }
@@ -112,7 +112,7 @@ impl<'a> Simulation<'a> {
         None
     }
 
-    pub fn run(&mut self, reporter: Box<dyn Fn(&Snapshot) -> ()>, report_period: Duration) -> SimulationOutcome {
+    pub fn run(&mut self, mut reporter: Box<dyn FnMut(&Snapshot) -> ()>, report_period: Duration) -> SimulationOutcome {
         let mut snap = self.capture();
         loop {
             if *self.now.borrow() - snap.time >= report_period {

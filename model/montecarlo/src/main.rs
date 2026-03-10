@@ -37,6 +37,7 @@ struct Config {
     /// refer to proof.md for the equivalence notes between the simplified and full models.
     /// For quadratic probing, max topic count is half of this number, and it has to be a prime;
     /// use sympy.prevprime()/nextprime().
+    /// The largest 16-bit prime is 65521.
     #[arg(long, default_value_t = NodeConfig::default().subject_id_modulus)]
     subject_id_modulus: u16,
 
@@ -179,9 +180,10 @@ fn main() -> ExitCode {
 
     // Snapshot processor.
     eprintln!(
-        "│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^25}│{:^25}│",
+        "│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^25}│{:^25}│",
         "time [s]",
         "steps",
+        "steps/s",
         "collision",
         "divergent",
         "tx cumul",
@@ -190,15 +192,24 @@ fn main() -> ExitCode {
         "rx/node cumul [msg/node]",
         "arrival load [msg/s/node]"
     );
+    let mut first_snap: Option<Snapshot> = None;
+    let mut prev_snap: Option<Snapshot> = None;
     let process_snapshot = Box::new(move |snap: &Snapshot| {
+        if let None = first_snap {
+            first_snap = Some(snap.clone());
+            prev_snap = Some(snap.clone());
+        }
         let t = snap.time.as_seconds_f64();
+        let dt = t - prev_snap.as_ref().unwrap().time.as_seconds_f64();
+        let step_rate = if dt > 0.0 { ((snap.steps - prev_snap.as_ref().unwrap().steps) as f64) / dt } else { 0.0 };
         let node_count = snap.nodes.len();
         let rx_per_node_cumulative = snap.rx_total as f64 / (node_count as f64);
         let arrival_load_per_node = if t > 0.0 { rx_per_node_cumulative / t } else { 0.0 };
         eprintln!(
-            "│{:10.3}│{:10}│{:10}│{:10}│{:10}│{:10}│{:10}│{:25.1}│{:25.1}│",
+            "│{:10.3}│{:10}│{:10.1}│{:10}│{:10}│{:10}│{:10}│{:10}│{:25.1}│{:25.1}│",
             t,
             snap.steps,
+            step_rate,
             snap.count_collisions(),
             snap.count_divergent(),
             snap.tx_total,
@@ -207,6 +218,7 @@ fn main() -> ExitCode {
             rx_per_node_cumulative,
             arrival_load_per_node
         );
+        prev_snap = Some(snap.clone());
     });
 
     // Run the simulation until convergence or time limit.
