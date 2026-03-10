@@ -65,6 +65,7 @@ pub struct Node<'a> {
     /// Shared components.
     network: Rc<RefCell<dyn Transmit + 'a>>,
     rng: Rc<RefCell<dyn Rng>>,
+    now: Rc<dyn Fn() -> Duration + 'a>,
 
     cfg: NodeConfig,
 }
@@ -94,6 +95,7 @@ impl<'a> Node<'a> {
         id: u16,
         network: Rc<RefCell<dyn Transmit + 'a>>,
         rng: Rc<RefCell<dyn Rng>>,
+        now: Rc<dyn Fn() -> Duration + 'a>,
         cfg: NodeConfig,
     ) -> Result<Self, String> {
         if !is_prime_u16(cfg.subject_id_modulus) {
@@ -109,6 +111,7 @@ impl<'a> Node<'a> {
             gossip_dedup: Vec::new(),
             network,
             rng,
+            now,
             cfg,
         })
     }
@@ -127,6 +130,10 @@ impl<'a> Node<'a> {
 
     pub fn subject_id_modulus(&self) -> u16 {
         self.cfg.subject_id_modulus
+    }
+
+    fn now(&self) -> Duration {
+        (self.now)()
     }
 
     /// If the topic already exists, does nothing.
@@ -485,7 +492,8 @@ impl<'a> Node<'a> {
         }
     }
 
-    pub fn step(&mut self, now: Duration, incoming: Vec<GossipMessage>) {
+    pub fn step(&mut self, incoming: Vec<GossipMessage>) {
+        let now = self.now();
         let mut urgent_topics = BTreeSet::<u64>::new();
         for message in incoming {
             self.update_peer_sample(now, message.sender_id());
@@ -602,18 +610,24 @@ mod tests {
         let cfg = NodeConfig { subject_id_modulus: modulus, ..NodeConfig::default() };
         let network = Rc::new(RefCell::new(StubNetwork));
         let rng = Rc::new(RefCell::new(SmallRng::seed_from_u64(0xD00D_F00D)));
-        Node::new(0, network, rng, cfg).unwrap()
+        let now: Rc<dyn Fn() -> Duration + 'static> = Rc::new(|| Duration::ZERO);
+        Node::new(0, network, rng, now, cfg).unwrap()
     }
 
     fn snapshot(node: &Node<'_>, modulus: u16) -> Vec<(u64, u16, u16)> {
         node.topics_by_hash.values().map(|topic| (topic.hash(), topic.subject_id(modulus), topic.evictions())).collect()
     }
 
-    fn make_recording_node(cfg: NodeConfig) -> (Node<'static>, Rc<RefCell<TxLog>>) {
+    fn make_recording_node(cfg: NodeConfig) -> (Node<'static>, Rc<RefCell<TxLog>>, Rc<RefCell<Duration>>) {
         let log = Rc::new(RefCell::new(TxLog::default()));
         let network: Rc<RefCell<dyn Transmit>> = Rc::new(RefCell::new(RecordingNetwork { log: log.clone() }));
         let rng = Rc::new(RefCell::new(SmallRng::seed_from_u64(0xBAD5_EED0)));
-        (Node::new(0, network, rng, cfg).unwrap(), log)
+        let now = Rc::new(RefCell::new(Duration::ZERO));
+        let now_provider: Rc<dyn Fn() -> Duration + 'static> = {
+            let now = now.clone();
+            Rc::new(move || *now.borrow())
+        };
+        (Node::new(0, network, rng, now_provider, cfg).unwrap(), log, now)
     }
 
     fn make_message(sender: u16, ttl: u8, outdegree: u8, hash: u64, evictions: u16, lage: i8) -> GossipMessage {
@@ -625,7 +639,8 @@ mod tests {
         let cfg = NodeConfig { subject_id_modulus: 12, ..NodeConfig::default() };
         let network = Rc::new(RefCell::new(StubNetwork));
         let rng = Rc::new(RefCell::new(SmallRng::seed_from_u64(0)));
-        assert!(Node::new(0, network, rng, cfg).is_err());
+        let now: Rc<dyn Fn() -> Duration + 'static> = Rc::new(|| Duration::ZERO);
+        assert!(Node::new(0, network, rng, now, cfg).is_err());
     }
 
     #[test]
@@ -731,11 +746,12 @@ mod tests {
             gossip_outdegree_urgent: 1,
             ..NodeConfig::default()
         };
-        let (mut node, log) = make_recording_node(cfg);
+        let (mut node, log, now) = make_recording_node(cfg);
         node.add_topic(1);
         node.gossip_at = Duration::MAX;
 
-        node.step(Duration::seconds(8), vec![make_message(42, 3, 2, 1, 1, 2)]);
+        *now.borrow_mut() = Duration::seconds(8);
+        node.step(vec![make_message(42, 3, 2, 1, 1, 2)]);
 
         let log = log.borrow();
         assert!(log.broadcasts.is_empty());
@@ -756,11 +772,12 @@ mod tests {
             gossip_outdegree_urgent: 1,
             ..NodeConfig::default()
         };
-        let (mut node, log) = make_recording_node(cfg);
+        let (mut node, log, now) = make_recording_node(cfg);
         node.add_topic(1);
         node.gossip_at = Duration::MAX;
 
-        node.step(Duration::seconds(2), vec![make_message(7, 2, 1, 1, 4, 3)]);
+        *now.borrow_mut() = Duration::seconds(2);
+        node.step(vec![make_message(7, 2, 1, 1, 4, 3)]);
 
         let topic = node.topics_by_hash.get(&1).expect("topic must survive divergence merge");
         assert_eq!(4, topic.evictions());
@@ -775,7 +792,7 @@ mod tests {
     #[test]
     fn gossip_unknown_topic_local_loss_forwards_remote_message() {
         let cfg = NodeConfig { subject_id_modulus: 11, gossip_outdegree_urgent: 0, ..NodeConfig::default() };
-        let (mut node, log) = make_recording_node(cfg);
+        let (mut node, log, now) = make_recording_node(cfg);
         node.add_topic(2);
         node.gossip_at = Duration::MAX;
         node.peers = vec![
@@ -783,7 +800,8 @@ mod tests {
             PeerEntry { remote_id: 7, last_seen: Duration::seconds(1) },
         ];
 
-        node.step(Duration::seconds(1), vec![make_message(5, 3, 1, 1, 1, 3)]);
+        *now.borrow_mut() = Duration::seconds(1);
+        node.step(vec![make_message(5, 3, 1, 1, 1, 3)]);
 
         let topic = node.topics_by_hash.get(&2).expect("topic should remain allocated after local loss");
         assert_eq!(1, topic.evictions());
@@ -807,7 +825,7 @@ mod tests {
             gossip_outdegree_urgent: 0,
             ..NodeConfig::default()
         };
-        let (mut node, log) = make_recording_node(cfg);
+        let (mut node, log, now) = make_recording_node(cfg);
         node.gossip_at = Duration::MAX;
         node.peers = vec![
             PeerEntry { remote_id: 5, last_seen: Duration::ZERO },
@@ -815,9 +833,12 @@ mod tests {
         ];
         let message = make_message(5, 3, 1, 42, 0, -1);
 
-        node.step(Duration::seconds(0), vec![message.clone()]);
-        node.step(Duration::seconds(1), vec![message.clone()]);
-        node.step(Duration::seconds(7), vec![message]);
+        *now.borrow_mut() = Duration::seconds(0);
+        node.step(vec![message.clone()]);
+        *now.borrow_mut() = Duration::seconds(1);
+        node.step(vec![message.clone()]);
+        *now.borrow_mut() = Duration::seconds(7);
+        node.step(vec![message]);
 
         let log = log.borrow();
         assert_eq!(2, log.unicasts.len());
@@ -827,7 +848,7 @@ mod tests {
     #[test]
     fn forwarding_respects_message_outdegree_and_excludes_sender() {
         let cfg = NodeConfig { subject_id_modulus: 11, gossip_outdegree_urgent: 0, ..NodeConfig::default() };
-        let (mut node, log) = make_recording_node(cfg);
+        let (mut node, log, now) = make_recording_node(cfg);
         node.gossip_at = Duration::MAX;
         node.peers = vec![
             PeerEntry { remote_id: 1, last_seen: Duration::ZERO },
@@ -835,7 +856,8 @@ mod tests {
             PeerEntry { remote_id: 3, last_seen: Duration::ZERO },
         ];
 
-        node.step(Duration::seconds(1), vec![make_message(1, 4, 2, 99, 0, -1)]);
+        *now.borrow_mut() = Duration::seconds(1);
+        node.step(vec![make_message(1, 4, 2, 99, 0, -1)]);
 
         let log = log.borrow();
         assert_eq!(2, log.unicasts.len());
@@ -857,12 +879,13 @@ mod tests {
             gossip_outdegree_urgent: 0,
             ..NodeConfig::default()
         };
-        let (mut node, _) = make_recording_node(cfg);
+        let (mut node, _, now) = make_recording_node(cfg);
         node.gossip_at = Duration::MAX;
         node.peers = vec![PeerEntry { remote_id: 1, last_seen: Duration::ZERO }];
         node.peer_moratorium_until = Duration::seconds(1000);
 
-        node.step(Duration::seconds(10), vec![make_message(2, 0, 0, 12, 0, -1)]);
+        *now.borrow_mut() = Duration::seconds(10);
+        node.step(vec![make_message(2, 0, 0, 12, 0, -1)]);
         assert_eq!(vec![2], node.peer_ids());
     }
 
@@ -877,14 +900,16 @@ mod tests {
             gossip_outdegree_urgent: 0,
             ..NodeConfig::default()
         };
-        let (mut node, _) = make_recording_node(cfg);
+        let (mut node, _, now) = make_recording_node(cfg);
         node.gossip_at = Duration::MAX;
         node.peers = vec![PeerEntry { remote_id: 1, last_seen: Duration::ZERO }];
         node.peer_moratorium_until = Duration::seconds(5);
 
-        node.step(Duration::seconds(1), vec![make_message(2, 0, 0, 12, 0, -1)]);
+        *now.borrow_mut() = Duration::seconds(1);
+        node.step(vec![make_message(2, 0, 0, 12, 0, -1)]);
         assert_eq!(vec![1], node.peer_ids());
-        node.step(Duration::seconds(6), vec![make_message(2, 0, 0, 13, 0, -1)]);
+        *now.borrow_mut() = Duration::seconds(6);
+        node.step(vec![make_message(2, 0, 0, 13, 0, -1)]);
         assert_eq!(vec![2], node.peer_ids());
         assert_eq!(Duration::seconds(16), node.peer_moratorium_until);
     }
@@ -898,11 +923,12 @@ mod tests {
             gossip_outdegree_urgent: 0,
             ..NodeConfig::default()
         };
-        let (mut node, log) = make_recording_node(cfg);
+        let (mut node, log, now) = make_recording_node(cfg);
         node.add_topic(1);
         node.gossip_at = Duration::ZERO;
 
-        node.step(Duration::ZERO, Vec::new());
+        *now.borrow_mut() = Duration::ZERO;
+        node.step(Vec::new());
 
         let log = log.borrow();
         assert_eq!(1, log.broadcasts.len());
@@ -922,12 +948,13 @@ mod tests {
             gossip_outdegree_urgent: 0,
             ..NodeConfig::default()
         };
-        let (mut node, log) = make_recording_node(cfg);
+        let (mut node, log, now) = make_recording_node(cfg);
         node.add_topic(1);
         node.peers = vec![PeerEntry { remote_id: 9, last_seen: Duration::ZERO }];
         node.gossip_at = Duration::ZERO;
 
-        node.step(Duration::ZERO, Vec::new());
+        *now.borrow_mut() = Duration::ZERO;
+        node.step(Vec::new());
 
         let log = log.borrow();
         assert!(log.broadcasts.is_empty());

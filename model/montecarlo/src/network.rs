@@ -26,7 +26,7 @@ pub struct Network {
     count_lost: u64,
 
     /// Shared states.
-    now: Duration,
+    now: Rc<dyn Fn() -> Duration + 'static>,
     rng: Rc<RefCell<dyn Rng>>,
 
     cfg: NetworkConfig,
@@ -54,7 +54,7 @@ impl Transmit for Network {
                 self.rng.borrow_mut().random_range(delay_start.as_seconds_f64()..=delay_end.as_seconds_f64());
             Duration::seconds_f64(sampled_seconds)
         };
-        let delivery_time = self.now + delay;
+        let delivery_time = (self.now)() + delay;
         let tiebreaker = self.rng.borrow_mut().next_u64();
         // This is where we may introduce reordering, which is good.
         self.enroute.entry(destination).or_default().insert((delivery_time, tiebreaker), message);
@@ -72,7 +72,7 @@ impl Transmit for Network {
 }
 
 impl Network {
-    pub fn new(cfg: NetworkConfig, now: Duration, rng: Rc<RefCell<dyn Rng>>) -> Self {
+    pub fn new(cfg: NetworkConfig, now: Rc<dyn Fn() -> Duration + 'static>, rng: Rc<RefCell<dyn Rng>>) -> Self {
         Self {
             enroute: BTreeMap::new(),
             count_sent_per_node: BTreeMap::new(),
@@ -82,10 +82,6 @@ impl Network {
             rng,
             cfg,
         }
-    }
-
-    pub fn set_now(&mut self, now: Duration) {
-        self.now = now;
     }
 
     pub fn pull(&mut self, now: Duration, destination: u16) -> Vec<GossipMessage> {
@@ -120,9 +116,10 @@ mod tests {
     use rand::rngs::SmallRng;
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
-    fn make_test_network(now: Duration, node_count: usize) -> Network {
+    fn make_test_network(now: Rc<RefCell<Duration>>, node_count: usize) -> Network {
         let config = NetworkConfig { node_count, delay_range: Duration::ZERO..=Duration::ZERO, loss_probability: 0.0 };
-        Network::new(config, now, Rc::new(RefCell::new(SmallRng::seed_from_u64(0xBAD5_EED))))
+        let now_provider: Rc<dyn Fn() -> Duration + 'static> = Rc::new(move || *now.borrow());
+        Network::new(config, now_provider, Rc::new(RefCell::new(SmallRng::seed_from_u64(0xBAD5_EED))))
     }
 
     fn make_test_gossip(sender_id: u16) -> GossipMessage {
@@ -131,7 +128,7 @@ mod tests {
 
     #[test]
     fn network_broadcast_rejects_node_count_above_u16_max() {
-        let now = Duration::ZERO;
+        let now = Rc::new(RefCell::new(Duration::ZERO));
         let mut network = make_test_network(now, (u16::MAX as usize) + 1);
 
         let result = catch_unwind(AssertUnwindSafe(|| {
@@ -143,7 +140,7 @@ mod tests {
 
     #[test]
     fn network_broadcast_rejects_sender_id_out_of_range() {
-        let now = Duration::ZERO;
+        let now = Rc::new(RefCell::new(Duration::ZERO));
         let mut network = make_test_network(now, 3);
 
         let result = catch_unwind(AssertUnwindSafe(|| {
@@ -155,7 +152,8 @@ mod tests {
 
     #[test]
     fn network_pull_drains_all_due_messages() {
-        let mut network = make_test_network(Duration::ZERO, 2);
+        let now = Rc::new(RefCell::new(Duration::ZERO));
+        let mut network = make_test_network(now, 2);
         network.unicast_gossip(1, make_test_gossip(0));
         network.unicast_gossip(1, make_test_gossip(0));
 
@@ -165,9 +163,10 @@ mod tests {
     }
 
     #[test]
-    fn network_set_now_controls_delivery_time_base() {
-        let mut network = make_test_network(Duration::ZERO, 2);
-        network.set_now(Duration::seconds(5));
+    fn network_time_provider_controls_delivery_time_base() {
+        let now = Rc::new(RefCell::new(Duration::ZERO));
+        let mut network = make_test_network(now.clone(), 2);
+        *now.borrow_mut() = Duration::seconds(5);
         network.unicast_gossip(1, make_test_gossip(0));
         assert_eq!(Some(Duration::seconds(5)), network.soonest_arrival_at());
     }

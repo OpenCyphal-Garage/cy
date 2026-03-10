@@ -172,13 +172,25 @@ fn main() -> ExitCode {
     drop(config);
 
     // Set up the simulation.
-    let mut network = Rc::new(RefCell::new(Network::new(network_config, Duration::ZERO, rng.clone())));
-    let mut sim =
-        Simulation::generate(node_count, topic_count, rng.clone(), network.clone(), node_config, simulation_config)
-            .unwrap_or_else(|e| {
-                eprintln!("Error generating simulation: {0}", e);
-                std::process::exit(1);
-            });
+    let now = Rc::new(RefCell::new(Duration::ZERO));
+    let now_provider: Rc<dyn Fn() -> Duration + 'static> = {
+        let now = now.clone();
+        Rc::new(move || *now.borrow())
+    };
+    let mut network = Rc::new(RefCell::new(Network::new(network_config, now_provider, rng.clone())));
+    let mut sim = Simulation::generate(
+        node_count,
+        topic_count,
+        now,
+        rng.clone(),
+        network.clone(),
+        node_config,
+        simulation_config,
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("Error generating simulation: {0}", e);
+        std::process::exit(1);
+    });
 
     // Run the simulation until convergence or time limit.
     // TODO: report the initial network configuration and the final state.

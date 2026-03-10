@@ -16,7 +16,7 @@ pub struct SimulationConfig {
 pub struct Simulation<'a> {
     network: Rc<RefCell<Network>>,
     nodes: Vec<Node<'a>>,
-    now: Duration,
+    now: Rc<RefCell<Duration>>,
     snaps: Vec<Snapshot>,
     converged_at: Option<Duration>,
     rng: Rc<RefCell<dyn Rng>>,
@@ -32,35 +32,40 @@ impl<'a> Simulation<'a> {
     pub fn new(
         network: Rc<RefCell<Network>>,
         nodes: Vec<Node<'a>>,
+        now: Rc<RefCell<Duration>>,
         cfg: SimulationConfig,
         rng: Rc<RefCell<dyn Rng>>,
     ) -> Self {
-        Self { network, nodes, now: Duration::ZERO, snaps: Vec::new(), converged_at: None, rng, cfg }
+        Self { network, nodes, now, snaps: Vec::new(), converged_at: None, rng, cfg }
     }
 
     pub fn generate(
         node_count: usize,
         topic_count: usize,
+        now: Rc<RefCell<Duration>>,
         rng: Rc<RefCell<dyn Rng>>,
         network: Rc<RefCell<Network>>,
         node_config: NodeConfig,
         cfg: SimulationConfig,
     ) -> Result<Self, String> {
-        let nodes = generate_network(node_count, topic_count, rng.clone(), network.clone(), node_config)?;
-        Ok(Self::new(network.clone(), nodes, cfg, rng))
+        let now_provider: Rc<dyn Fn() -> Duration + 'a> = {
+            let now = now.clone();
+            Rc::new(move || *now.borrow())
+        };
+        let nodes = generate_network(node_count, topic_count, now_provider, rng.clone(), network.clone(), node_config)?;
+        Ok(Self::new(network.clone(), nodes, now, cfg, rng))
     }
 
     pub fn step(&mut self) -> Option<SimulationOutcome> {
-        self.network.borrow_mut().set_now(self.now);
+        let now = *self.now.borrow();
         // Step all nodes.
         for node in &mut self.nodes {
-            let incoming = self.network.borrow_mut().pull(self.now, node.id());
-            node.step(self.now, incoming);
+            let incoming = self.network.borrow_mut().pull(now, node.id());
+            node.step(incoming);
         }
 
         // Snapshot.
-        self.snaps
-            .push(Snapshot { time: self.now, nodes: self.nodes.iter().map(|node| NodeSnapshot::new(node)).collect() });
+        self.snaps.push(Snapshot { time: now, nodes: self.nodes.iter().map(|node| NodeSnapshot::new(node)).collect() });
 
         // Update the convergence state.
         let collisions = self.snaps.last().unwrap().count_collisions();
@@ -73,7 +78,7 @@ impl<'a> Simulation<'a> {
             }
             None => {
                 if collisions == 0 && divergences == 0 {
-                    self.converged_at = Some(self.now);
+                    self.converged_at = Some(now);
                 }
             }
         }
@@ -84,7 +89,7 @@ impl<'a> Simulation<'a> {
             let stability_window = Duration::seconds_f64(
                 self.nodes.len() as f64 * self.network.borrow().config().delay_range.end().as_seconds_f64(),
             );
-            if self.now - t > stability_window {
+            if now - t > stability_window {
                 return Some(SimulationOutcome::Converged(t));
             }
         }
@@ -94,9 +99,9 @@ impl<'a> Simulation<'a> {
             self.nodes.iter().map(|node| node.next_update_at()).min().unwrap(),
             self.network.borrow().soonest_arrival_at().unwrap_or(Duration::MAX),
         );
-        assert!(next_time >= self.now);
-        self.now = next_time;
-        if self.now >= self.cfg.time_limit {
+        assert!(next_time >= now);
+        *self.now.borrow_mut() = next_time;
+        if next_time >= self.cfg.time_limit {
             return Some(SimulationOutcome::TimeLimitReached);
         }
 
@@ -159,6 +164,7 @@ impl Snapshot {
 fn generate_network<'a>(
     node_count: usize,
     topic_count: usize,
+    now: Rc<dyn Fn() -> Duration + 'a>,
     rng: Rc<RefCell<dyn Rng>>,
     network: Rc<RefCell<dyn Transmit + 'a>>,
     node_config: NodeConfig,
@@ -173,7 +179,7 @@ fn generate_network<'a>(
     let mut nodes = Vec::new();
     assert!(node_count <= u16::MAX as usize);
     for id in 0..(node_count as u16) {
-        nodes.push(Node::new(id, network.clone(), rng.clone(), node_config.clone())?);
+        nodes.push(Node::new(id, network.clone(), rng.clone(), now.clone(), node_config.clone())?);
         let mut node = nodes.last_mut().unwrap();
         let node_topic_count = (rng.borrow_mut().next_u64() % (topic_count as u64)) + 1;
         assert!(node_topic_count >= 1 && node_topic_count <= topic_count as u64);
