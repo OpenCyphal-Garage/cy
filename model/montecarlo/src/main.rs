@@ -7,6 +7,7 @@ pub mod network;
 pub mod node;
 pub mod simulation;
 pub mod topic;
+mod util;
 
 use network::NetworkConfig;
 use node::NodeConfig;

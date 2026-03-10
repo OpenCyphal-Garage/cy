@@ -14,3 +14,4 @@ duration-str = { version = "0.21.0", default-features = false, features = ["time
 rand = { version = "0.10.0" }
 smart-default = "0.7.1"
 time = "0.3.47"
+num-traits = "0.2.19"
