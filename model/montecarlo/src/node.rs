@@ -1,7 +1,12 @@
+use crate::message::GossipMessage;
+use crate::network::Transmit;
 use crate::topic::{Topic, left_wins_collision};
+use rand::Rng;
 use smart_default::SmartDefault;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::RangeInclusive;
+use std::rc::Rc;
 use std::time::Duration;
 
 #[derive(Debug, Clone, SmartDefault)]
@@ -41,8 +46,7 @@ pub struct NodeConfig {
     pub dedup_timeout: Duration,
 }
 
-#[derive(Debug, Clone)]
-pub struct Node {
+pub struct Node<'a> {
     id: u16,
     topics_by_hash: BTreeMap<u64, Topic>,
 
@@ -57,6 +61,10 @@ pub struct Node {
     gossip_at: Duration,
     gossip_counter: u64,
     gossip_dedup: Vec<GossipDedupEntry>,
+
+    /// Shared components.
+    network: Rc<RefCell<dyn Transmit + 'a>>,
+    rng: Rc<RefCell<dyn Rng>>,
 
     cfg: NodeConfig,
 }
@@ -80,9 +88,14 @@ pub enum CrdtMergeOutcome {
     LocalLoss,
 }
 
-impl Node {
+impl<'a> Node<'a> {
     /// Creates an empty node with no topics.
-    pub fn new(id: u16, cfg: NodeConfig) -> Result<Self, String> {
+    pub fn new(
+        id: u16,
+        network: Rc<RefCell<dyn Transmit + 'a>>,
+        rng: Rc<RefCell<dyn Rng>>,
+        cfg: NodeConfig,
+    ) -> Result<Self, String> {
         if !is_prime_u16(cfg.subject_id_modulus) {
             return Err(format!("subject_id_modulus must be prime, got {}", cfg.subject_id_modulus));
         }
@@ -94,6 +107,8 @@ impl Node {
             gossip_at: Duration::ZERO,
             gossip_counter: 0,
             gossip_dedup: Vec::new(),
+            network,
+            rng,
             cfg,
         })
     }
@@ -114,6 +129,7 @@ impl Node {
         self.cfg.subject_id_modulus
     }
 
+    /// If the topic already exists, does nothing.
     pub fn add_topic(&mut self, topic_hash: u64) {
         let mut moving = self.topics_by_hash.remove(&topic_hash).unwrap_or(Topic::new(topic_hash, Duration::ZERO));
         loop {
@@ -151,7 +167,7 @@ impl Node {
         self.gossip_at
     }
 
-    pub fn step(&mut self, _now: Duration) {
+    pub fn step(&mut self, _now: Duration, _incoming: Vec<GossipMessage>) {
         todo!("simulation step is not implemented yet")
     }
 }
@@ -191,11 +207,22 @@ fn is_prime_u16(value: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::SeedableRng;
+    use rand::rngs::SmallRng;
+
+    struct StubNetwork;
+
+    impl Transmit for StubNetwork {
+        fn unicast_gossip(&mut self, _destination: u16, _message: GossipMessage) {}
+        fn broadcast_gossip(&mut self, _message: GossipMessage) {}
+    }
 
     #[test]
     fn add_topic_resolves_local_collision_cascade() {
         let cfg = NodeConfig { subject_id_modulus: 11, ..NodeConfig::default() };
-        let mut node = Node::new(0, cfg).unwrap();
+        let network = Rc::new(RefCell::new(StubNetwork));
+        let rng = Rc::new(RefCell::new(SmallRng::seed_from_u64(0)));
+        let mut node = Node::new(0, network, rng, cfg).unwrap();
         node.add_topic(2);
         node.add_topic(12);
         node.add_topic(1);

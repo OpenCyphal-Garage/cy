@@ -1,6 +1,5 @@
 use crate::message::GossipMessage;
-use rand::prelude::SmallRng;
-use rand::{Rng, RngExt, SeedableRng};
+use rand::{Rng, RngExt};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
@@ -15,7 +14,6 @@ pub struct NetworkConfig {
     pub loss_probability: f64,
 }
 
-#[derive(Debug, Clone)]
 pub struct Network<'a> {
     /// Messages that are currently in transit, indexed by the destination node, then by delivery time.
     /// A tiebreaker is added in case we roll the same delivery time for distinct messages.
@@ -29,25 +27,18 @@ pub struct Network<'a> {
 
     /// Shared states.
     now: &'a Duration,
-    rng: Rc<RefCell<SmallRng>>,
+    rng: Rc<RefCell<dyn Rng>>,
 
     cfg: NetworkConfig,
 }
 
-impl<'a> Network<'a> {
-    pub fn new(cfg: NetworkConfig, now: &'a Duration, rng: Rc<RefCell<SmallRng>>) -> Self {
-        Self {
-            enroute: BTreeMap::new(),
-            count_sent_per_node: BTreeMap::new(),
-            count_received_per_node: BTreeMap::new(),
-            count_lost: 0,
-            now,
-            rng,
-            cfg,
-        }
-    }
+pub trait Transmit {
+    fn unicast_gossip(&mut self, destination: u16, message: GossipMessage);
+    fn broadcast_gossip(&mut self, message: GossipMessage);
+}
 
-    pub fn unicast_gossip(&mut self, destination: u16, message: GossipMessage) {
+impl Transmit for Network<'_> {
+    fn unicast_gossip(&mut self, destination: u16, message: GossipMessage) {
         assert!((destination as usize) < self.cfg.node_count);
         self.count_sent_per_node.entry(message.sender_id()).and_modify(|c| *c += 1).or_insert(1);
         if self.rng.borrow_mut().random_bool(self.cfg.loss_probability) {
@@ -61,7 +52,7 @@ impl<'a> Network<'a> {
         self.enroute.entry(destination).or_default().insert((delivery_time, tiebreaker), message);
     }
 
-    pub fn broadcast_gossip(&mut self, message: GossipMessage) {
+    fn broadcast_gossip(&mut self, message: GossipMessage) {
         assert!(self.cfg.node_count <= u16::MAX as usize);
         assert!((message.sender_id() as usize) < self.cfg.node_count);
         for destination in 0..(self.cfg.node_count as u16) {
@@ -70,17 +61,33 @@ impl<'a> Network<'a> {
             }
         }
     }
+}
 
-    pub fn pull(&mut self, now: Duration, destination: u16) -> Option<GossipMessage> {
+impl<'a> Network<'a> {
+    pub fn new(cfg: NetworkConfig, now: &'a Duration, rng: Rc<RefCell<dyn Rng>>) -> Self {
+        Self {
+            enroute: BTreeMap::new(),
+            count_sent_per_node: BTreeMap::new(),
+            count_received_per_node: BTreeMap::new(),
+            count_lost: 0,
+            now,
+            rng,
+            cfg,
+        }
+    }
+
+    pub fn pull(&mut self, now: Duration, destination: u16) -> Vec<GossipMessage> {
+        let mut out = Vec::new();
         if let Some(dest_queue) = self.enroute.get_mut(&destination) {
             if let Some((&(delivery_time, tie), message)) = dest_queue.iter().next() {
                 if delivery_time <= now {
                     self.count_received_per_node.entry(destination).and_modify(|c| *c += 1).or_insert(1);
-                    return dest_queue.remove(&(delivery_time, tie));
+                    let msg = dest_queue.remove(&(delivery_time, tie));
+                    out.push(msg.unwrap());
                 }
             }
         }
-        None
+        out
     }
 
     pub fn soonest_arrival_at(&self) -> Option<Duration> {
@@ -96,6 +103,8 @@ impl<'a> Network<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::SeedableRng;
+    use rand::rngs::SmallRng;
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
     fn make_test_network(now: &Duration, node_count: usize) -> Network<'_> {

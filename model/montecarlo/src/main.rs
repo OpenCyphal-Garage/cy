@@ -9,8 +9,8 @@ pub mod simulation;
 pub mod topic;
 
 use network::{Network, NetworkConfig};
-use node::{Node, NodeConfig};
-use simulation::{Simulation, SimulationConfig, SimulationOutcome};
+use node::NodeConfig;
+use simulation::SimulationConfig;
 
 use clap::{CommandFactory, Parser, error::ErrorKind};
 use rand::SeedableRng;
