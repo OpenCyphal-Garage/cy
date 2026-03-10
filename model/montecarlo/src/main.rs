@@ -10,7 +10,7 @@ pub mod topic;
 
 use network::{Network, NetworkConfig};
 use node::NodeConfig;
-use simulation::SimulationConfig;
+use simulation::{Simulation, SimulationConfig, SimulationOutcome};
 
 use clap::{CommandFactory, Parser, error::ErrorKind};
 use rand::SeedableRng;
@@ -155,7 +155,6 @@ impl Config {
 }
 
 fn main() -> ExitCode {
-    // Set up the configuration.
     let mut config = Config::parse();
     if config.topic_count >= (config.subject_id_modulus as usize) / 2 {
         Config::command().error(ErrorKind::ValueValidation, "too many topics for this modulus").exit();
@@ -172,17 +171,33 @@ fn main() -> ExitCode {
     let mut rng = Rc::new(RefCell::new(SmallRng::seed_from_u64(config.seed.unwrap())));
     drop(config);
 
-    // Set up the network.
-    let mut network = Network::new(network_config, &Duration::ZERO, rng.clone());
-
     // Set up the simulation.
-    // TODO
+    let mut network = Rc::new(RefCell::new(Network::new(network_config, &Duration::ZERO, rng.clone())));
+    let mut sim =
+        Simulation::generate(node_count, topic_count, rng.clone(), network.clone(), node_config, simulation_config)
+            .unwrap_or_else(|e| {
+                eprintln!("Error generating simulation: {0}", e);
+                std::process::exit(1);
+            });
 
-    ExitCode::SUCCESS
+    // Run the simulation until convergence or time limit.
+    // TODO: report the initial network configuration and the final state.
+    let outcome = sim.run();
+
+    match outcome {
+        SimulationOutcome::TimeLimitReached => {
+            eprintln!("Simulation did not converge within the time limit.");
+            ExitCode::FAILURE
+        }
+        SimulationOutcome::Converged(time) => {
+            println!("Simulation converged at {0:.3} seconds.", time.as_seconds_f64());
+            ExitCode::SUCCESS
+        }
+    }
 }
 
 fn generate_seed() -> u64 {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(std::time::Duration::ZERO);
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     now.as_secs() ^ ((now.subsec_nanos() as u64) << 32)
 }
 
