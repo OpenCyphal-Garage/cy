@@ -138,6 +138,7 @@ impl<'a> Node<'a> {
 
     /// If the topic already exists, does nothing.
     pub fn add_topic(&mut self, topic_hash: u64) {
+        assert!(self.topics_by_hash.len() < (self.cfg.subject_id_modulus / 2) as usize);
         let mut moving = self.topics_by_hash.remove(&topic_hash).unwrap_or(Topic::new(topic_hash, Duration::ZERO));
         loop {
             let subject_id = moving.subject_id(self.cfg.subject_id_modulus);
