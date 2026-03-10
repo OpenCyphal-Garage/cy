@@ -48,7 +48,7 @@ struct Config {
     #[arg(long, value_parser = parse_duration, default_value = "60")]
     time_limit: Duration,
 
-    /// Interval between network snapshot captures.
+    /// Interval between network snapshot captures. Zero to capture a snapshot at every step (needs a lot of memory).
     #[arg(long, value_parser = parse_duration, default_value = "1")]
     snapshot_period: Duration,
 

@@ -6,7 +6,7 @@ use crate::node::{Node, NodeConfig, count_colliding_subjects};
 use crate::topic::Topic;
 use rand::Rng;
 use std::cell::RefCell;
-use std::cmp::min;
+use std::cmp::{max, min};
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use time::Duration;
@@ -103,7 +103,8 @@ impl<'a> Simulation<'a> {
             self.network.borrow().soonest_arrival_at().unwrap_or(Duration::MAX),
         );
         assert!(next_time >= now);
-        *self.now.borrow_mut() = next_time;
+        let increment = max(next_time - now, Duration::microseconds(10));
+        *self.now.borrow_mut() += increment;
         if next_time >= self.cfg.time_limit {
             return Some(SimulationOutcome::TimeLimitReached);
         }
