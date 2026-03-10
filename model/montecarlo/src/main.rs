@@ -180,50 +180,60 @@ fn main() -> ExitCode {
 
     // Snapshot processor.
     eprintln!(
-        "│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^25}│{:^25}│",
+        "│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^25}│{:^25}│",
         "time [s]",
         "steps",
         "steps/s",
         "collision",
         "divergent",
-        "tx cumul",
-        "rx cumul",
-        "loss cumul",
-        "rx/node cumul [msg/node]",
+        "Σ tx",
+        "Δ tx",
+        "tx/s",
+        "Σ rx",
+        "Σ loss",
+        "Σ rx/node [msg/node]",
         "arrival load [msg/s/node]"
     );
-    let mut first_snap: Option<Snapshot> = None;
-    let mut prev_snap: Option<Snapshot> = None;
-    let process_snapshot = Box::new(move |snap: &Snapshot| {
-        if let None = first_snap {
-            first_snap = Some(snap.clone());
-            prev_snap = Some(snap.clone());
+    let mut snap_first: Option<Snapshot> = None;
+    let mut snap_last: Option<Snapshot> = None;
+    let process_snapshot = Box::new(|snap: &Snapshot| {
+        if let None = snap_first {
+            snap_first = Some(snap.clone());
+            snap_last = Some(snap.clone());
         }
         let t = snap.time.as_seconds_f64();
-        let dt = t - prev_snap.as_ref().unwrap().time.as_seconds_f64();
-        let step_rate = if dt > 0.0 { ((snap.steps - prev_snap.as_ref().unwrap().steps) as f64) / dt } else { 0.0 };
+        let dt = t - snap_last.as_ref().unwrap().time.as_seconds_f64();
+        let step_rate = if dt > 0.0 { ((snap.steps - snap_last.as_ref().unwrap().steps) as f64) / dt } else { 0.0 };
+        let tx_delta = snap.tx_total - snap_last.as_ref().unwrap().tx_total;
+        let tx_rate = if dt > 0.0 { (tx_delta as f64) / dt } else { 0.0 };
         let node_count = snap.nodes.len();
         let rx_per_node_cumulative = snap.rx_total as f64 / (node_count as f64);
         let arrival_load_per_node = if t > 0.0 { rx_per_node_cumulative / t } else { 0.0 };
         eprintln!(
-            "│{:10.3}│{:10}│{:10.1}│{:10}│{:10}│{:10}│{:10}│{:10}│{:25.1}│{:25.1}│",
+            "│{:10.3}│{:10}│{:10.1}│{:10}│{:10}│{:10}│{:10}│{:10.1}│{:10}│{:10}│{:25.1}│{:25.1}│",
             t,
             snap.steps,
             step_rate,
             snap.count_collisions(),
             snap.count_divergent(),
             snap.tx_total,
+            tx_delta,
+            tx_rate,
             snap.rx_total,
             snap.loss_total,
             rx_per_node_cumulative,
             arrival_load_per_node
         );
-        prev_snap = Some(snap.clone());
+        snap_last = Some(snap.clone());
     });
 
     // Run the simulation until convergence or time limit.
-    // TODO: report the initial network configuration and the final state.
     let outcome = sim.run(process_snapshot, snapshot_period);
+
+    // Generate reports.
+    let snap_first = snap_first.unwrap();
+    let snap_last = snap_last.unwrap();
+    // TODO
 
     match outcome {
         SimulationOutcome::TimeLimitReached => {

@@ -112,7 +112,11 @@ impl<'a> Simulation<'a> {
         None
     }
 
-    pub fn run(&mut self, mut reporter: Box<dyn FnMut(&Snapshot) -> ()>, report_period: Duration) -> SimulationOutcome {
+    pub fn run<'z>(
+        &mut self,
+        mut reporter: Box<dyn FnMut(&Snapshot) -> () + 'z>,
+        report_period: Duration,
+    ) -> SimulationOutcome {
         let mut snap = self.capture();
         loop {
             if *self.now.borrow() - snap.time >= report_period {
