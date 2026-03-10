@@ -10,16 +10,15 @@ mod util;
 
 use node::NodeConfig;
 use simulation::{NetworkConfig, Simulation, SimulationConfig, SimulationOutcome};
+use util::{generate_seed, parse_duration, parse_duration_range};
 
 use clap::{CommandFactory, Parser, error::ErrorKind};
-use duration_str::parse_time;
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
 use std::cell::RefCell;
 use std::ops::RangeInclusive;
 use std::process::ExitCode;
 use std::rc::Rc;
-use std::time::{SystemTime, UNIX_EPOCH};
 use time::Duration;
 
 /// All durations are specified in seconds unless explicitly noted otherwise.
@@ -176,6 +175,36 @@ fn main() -> ExitCode {
     // Run the simulation until convergence or time limit.
     // TODO: report the initial network configuration and the final state.
     let outcome = sim.run();
+    let snaps = sim.snapshots();
+    eprintln!("Simulation completed with {0} snapshots.", snaps.len());
+
+    // Report the results in brief human-readable form.
+    let snaps = decimate_snapshots_1Hz(&snaps);
+    eprintln!(
+        "│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^25}│{:^25}│",
+        "time [s]",
+        "collision",
+        "divergent",
+        "tx total",
+        "rx total",
+        "loss total",
+        "rx/node total [msg/node]",
+        "arrival load [msg/s/node]"
+    );
+    for snap in snaps {
+        let t = snap.time.as_seconds_f64();
+        eprintln!(
+            "│{:10.1}│{:10}│{:10}│{:10}│{:10}│{:10}│{:25.1}│{:25.1}│",
+            t,
+            snap.count_collisions(),
+            snap.count_divergent(),
+            snap.network.sent_total(),
+            snap.network.received_total(),
+            snap.network.lost,
+            snap.network.received_avg_per_node(),
+            if t > 0.0 { snap.network.received_avg_per_node() / t } else { 0.0 }
+        );
+    }
 
     match outcome {
         SimulationOutcome::TimeLimitReached => {
@@ -189,73 +218,19 @@ fn main() -> ExitCode {
     }
 }
 
-fn generate_seed() -> u64 {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-    now.as_secs() ^ ((now.subsec_nanos() as u64) << 32)
-}
-
-fn parse_duration_range(s: &str) -> Result<RangeInclusive<Duration>, String> {
-    let (start, end) = s.split_once("..").ok_or_else(|| "expected MIN..MAX".to_string())?;
-    let start = parse_duration(start)?;
-    let end = parse_duration(end)?;
-    if start > end {
-        return Err("range start must be <= range end".to_string());
-    }
-    Ok(start..=end)
-}
-
-fn parse_duration(s: &str) -> Result<Duration, String> {
-    let trimmed = s.trim();
-    if let Ok(seconds) = trimmed.parse::<f64>() {
-        if !seconds.is_finite() || seconds < 0.0 {
-            return Err("duration must be finite and non-negative".to_string());
+#[allow(non_snake_case)]
+fn decimate_snapshots_1Hz(snaps: &[simulation::Snapshot]) -> Vec<simulation::Snapshot> {
+    let mut result = Vec::new();
+    let mut next_time = if let Some(snap) = snaps.first() {
+        snap.time
+    } else {
+        return result;
+    };
+    for snap in snaps {
+        if snap.time >= next_time {
+            result.push(snap.clone());
+            next_time += Duration::seconds(1);
         }
-        return Ok(Duration::seconds_f64(seconds));
     }
-    let parsed = parse_time(trimmed).map_err(|e| e.to_string())?;
-    if parsed.is_negative() {
-        return Err("duration must be finite and non-negative".to_string());
-    }
-    Ok(parsed)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_duration_accepts_fractional_seconds() {
-        assert_eq!(Duration::milliseconds(125), parse_duration("0.125").unwrap());
-        assert!(parse_duration("-1").is_err());
-        assert!(parse_duration("nan").is_err());
-    }
-
-    #[test]
-    fn parse_duration_accepts_human_units() {
-        assert_eq!(Duration::seconds(123), parse_duration("123s").unwrap());
-        assert_eq!(Duration::seconds(123), parse_duration("123").unwrap());
-        assert_eq!(Duration::milliseconds(125), parse_duration("125ms").unwrap());
-        assert_eq!(Duration::seconds(62), parse_duration("1m2s").unwrap());
-    }
-
-    #[test]
-    fn parse_duration_accepts_time_display_output() {
-        let rendered = Duration::seconds(62).to_string(); // "1m2s"
-        assert_eq!(Duration::seconds(62), parse_duration(&rendered).unwrap());
-    }
-
-    #[test]
-    fn parse_duration_range_requires_ordered_bounds() {
-        let range = parse_duration_range("0.25..1.5").unwrap();
-        assert_eq!(Duration::milliseconds(250), *range.start());
-        assert_eq!(Duration::milliseconds(1500), *range.end());
-        assert!(parse_duration_range("2..1").is_err());
-    }
-
-    #[test]
-    fn parse_duration_range_accepts_human_units() {
-        let range = parse_duration_range("125ms..1m2s").unwrap();
-        assert_eq!(Duration::milliseconds(125), *range.start());
-        assert_eq!(Duration::seconds(62), *range.end());
-    }
+    result
 }

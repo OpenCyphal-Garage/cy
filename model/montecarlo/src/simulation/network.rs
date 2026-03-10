@@ -20,24 +20,20 @@ pub struct Network {
     /// Note that messages may be delivered out of order, depending on how the propagation delay is rolled.
     enroute: BTreeMap<u16, BTreeMap<(Duration, u64), GossipMessage>>,
 
-    /// Propagation statistics for debugging and analysis.
-    count_sent_per_node: BTreeMap<u16, u64>,
-    count_received_per_node: BTreeMap<u16, u64>,
-    count_lost: u64,
-
     /// Shared states.
     now: Rc<dyn Fn() -> Duration + 'static>,
     rng: Rc<RefCell<dyn Rng>>,
 
+    stats: NetworkStats,
     cfg: NetworkConfig,
 }
 
 impl Transmit for Network {
     fn unicast_gossip(&mut self, destination: u16, message: GossipMessage) {
         assert!((destination as usize) < self.cfg.node_count);
-        self.count_sent_per_node.entry(message.sender_id()).and_modify(|c| *c += 1).or_insert(1);
+        self.stats.sent_per_node.entry(message.sender_id()).and_modify(|c| *c += 1).or_insert(1);
         if self.rng.borrow_mut().random_bool(self.cfg.loss_probability) {
-            self.count_lost += 1;
+            self.stats.lost += 1;
             return;
         }
         let delay_start = *self.cfg.delay_range.start();
@@ -68,15 +64,7 @@ impl Transmit for Network {
 
 impl Network {
     pub fn new(cfg: &NetworkConfig, now: Rc<dyn Fn() -> Duration + 'static>, rng: Rc<RefCell<dyn Rng>>) -> Self {
-        Self {
-            enroute: BTreeMap::new(),
-            count_sent_per_node: BTreeMap::new(),
-            count_received_per_node: BTreeMap::new(),
-            count_lost: 0,
-            now,
-            rng,
-            cfg: cfg.clone(),
-        }
+        Self { enroute: BTreeMap::new(), now, rng, stats: NetworkStats::default(), cfg: cfg.clone() }
     }
 
     pub fn pull(&mut self, now: Duration, destination: u16) -> Vec<GossipMessage> {
@@ -86,7 +74,7 @@ impl Network {
                 if delivery_time > now {
                     break;
                 }
-                self.count_received_per_node.entry(destination).and_modify(|c| *c += 1).or_insert(1);
+                self.stats.received_per_node.entry(destination).and_modify(|c| *c += 1).or_insert(1);
                 let msg = dest_queue.remove(&(delivery_time, tie));
                 out.push(msg.expect("enroute message disappeared while draining arrivals"));
             }
@@ -101,6 +89,42 @@ impl Network {
 
     pub fn config(&self) -> &NetworkConfig {
         &self.cfg
+    }
+
+    pub fn stats(&self) -> NetworkStats {
+        self.stats.clone()
+    }
+}
+
+/// Propagation statistics for debugging and analysis.
+#[derive(Debug, Clone, Default)]
+pub struct NetworkStats {
+    pub sent_per_node: BTreeMap<u16, u64>,
+    pub received_per_node: BTreeMap<u16, u64>,
+    pub lost: u64,
+}
+
+impl NetworkStats {
+    pub fn sent_total(&self) -> u64 {
+        self.sent_per_node.values().sum()
+    }
+
+    pub fn received_total(&self) -> u64 {
+        self.received_per_node.values().sum()
+    }
+
+    pub fn sent_avg_per_node(&self) -> f64 {
+        if self.sent_per_node.len() == 0 {
+            return 0.0;
+        }
+        self.sent_total() as f64 / (self.sent_per_node.len() as f64)
+    }
+
+    pub fn received_avg_per_node(&self) -> f64 {
+        if self.received_per_node.len() == 0 {
+            return 0.0;
+        }
+        self.received_total() as f64 / (self.received_per_node.len() as f64)
     }
 }
 

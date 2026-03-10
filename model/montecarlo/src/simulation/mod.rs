@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use time::Duration;
 
-pub use self::network::NetworkConfig;
+pub use self::network::{NetworkConfig, NetworkStats};
 
 #[derive(Debug, Clone)]
 pub struct SimulationConfig {
@@ -59,14 +59,15 @@ impl<'a> Simulation<'a> {
 
     pub fn step(&mut self) -> Option<SimulationOutcome> {
         let now = *self.now.borrow();
-        // Step all nodes.
+
+        // Step all nodes. Propagate time and deliver messages in separate steps to make updates ordering-invariant.
+        for node in &mut self.nodes {
+            node.step(Vec::new());
+        }
         for node in &mut self.nodes {
             let incoming = self.network.borrow_mut().pull(now, node.id());
             node.step(incoming);
         }
-
-        // Snapshot.
-        self.snaps.push(Snapshot { time: now, nodes: self.nodes.iter().map(|node| NodeSnapshot::new(node)).collect() });
 
         // Update the convergence state.
         let collisions = self.snaps.last().unwrap().count_collisions();
@@ -110,20 +111,35 @@ impl<'a> Simulation<'a> {
     }
 
     pub fn run(&mut self) -> SimulationOutcome {
+        self.snaps.push(self.capture()); // Save the initial state before any updates.
         loop {
-            if let Some(outcome) = self.step() {
+            let outcome = self.step();
+            self.snaps.push(self.capture()); // Ensure the final state is always captured.
+            if let Some(outcome) = outcome {
                 return outcome;
             }
+        }
+    }
+
+    pub fn snapshots(&self) -> &[Snapshot] {
+        &self.snaps
+    }
+
+    fn capture(&self) -> Snapshot {
+        Snapshot {
+            time: *self.now.borrow(),
+            nodes: self.nodes.iter().map(|node| NodeSnapshot::new(node)).collect(),
+            network: self.network.borrow().stats(),
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct NodeSnapshot {
-    id: u16,
-    subject_id_modulus: u16,
-    topics: Vec<Topic>,
-    peers: Vec<u16>,
+    pub id: u16,
+    pub subject_id_modulus: u16,
+    pub topics: Vec<Topic>,
+    pub peers: Vec<u16>,
 }
 
 impl NodeSnapshot {
@@ -139,8 +155,9 @@ impl NodeSnapshot {
 
 #[derive(Debug, Clone)]
 pub struct Snapshot {
-    time: Duration,
-    nodes: Vec<NodeSnapshot>,
+    pub time: Duration,
+    pub nodes: Vec<NodeSnapshot>,
+    pub network: NetworkStats,
 }
 
 impl Snapshot {
