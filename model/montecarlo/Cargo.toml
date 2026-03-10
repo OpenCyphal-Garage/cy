@@ -1,13 +1,14 @@
 [package]
-name = "cyphal-model-montecarlo"
+name = "cyphal-montecarlo"
 version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-# cargo run --release --bin topic_allocation_montecarlo
-name = "topic_allocation_montecarlo"
-path = "topic_allocation_montecarlo.rs"
+# cargo run --release --bin cyphal_montecarlo
+name = "cyphal_montecarlo"
+path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
-rand = { version = "0.8", features = ["small_rng"] }
+rand = { version = "0.10" }
+smart-default = "0.7.1"
