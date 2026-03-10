@@ -21,7 +21,7 @@ jobs:
     container: ghcr.io/opencyphal/toolshed:ts24.4.3
     strategy:
       matrix:
-        toolchain: ["clang", "gcc"]
+        toolchain: [ "clang", "gcc" ]
         include:
           - toolchain: gcc
             c-compiler: gcc
@@ -53,7 +53,7 @@ jobs:
     container: ghcr.io/opencyphal/toolshed:ts24.4.3
     strategy:
       matrix:
-        toolchain: ["clang", "gcc"]
+        toolchain: [ "clang", "gcc" ]
         include:
           - toolchain: gcc
             c-compiler: gcc
@@ -122,12 +122,16 @@ jobs:
 
   test_model_montecarlo:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: model/montecarlo
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: true
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --manifest-path model/montecarlo/Cargo.toml
+      - run: cargo test
+      - run: cargo run --release
 
   compile_arm:
     runs-on: ubuntu-latest
@@ -135,7 +139,7 @@ jobs:
       flags: -Wall -Wextra -pedantic -Wconversion -Wtype-limits -Wfatal-errors
     strategy:
       matrix:
-        std: ["c11"]
+        std: [ "c11" ]
     steps:
       - uses: actions/checkout@v4
       # language=bash
