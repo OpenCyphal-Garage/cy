@@ -172,7 +172,7 @@ fn main() -> ExitCode {
     drop(config);
 
     // Set up the simulation.
-    let mut network = Rc::new(RefCell::new(Network::new(network_config, &Duration::ZERO, rng.clone())));
+    let mut network = Rc::new(RefCell::new(Network::new(network_config, Duration::ZERO, rng.clone())));
     let mut sim =
         Simulation::generate(node_count, topic_count, rng.clone(), network.clone(), node_config, simulation_config)
             .unwrap_or_else(|e| {

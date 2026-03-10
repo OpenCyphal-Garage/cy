@@ -39,6 +39,10 @@ impl Topic {
         self.hash
     }
 
+    pub fn set_evictions(&mut self, evictions: u16) {
+        self.evictions = evictions;
+    }
+
     pub fn evict(&mut self) {
         self.evictions = self.evictions.checked_add(1).expect("too many evictions");
     }
@@ -112,6 +116,16 @@ mod tests {
         topic.evict();
         assert_eq!(1, topic.evictions());
         assert_eq!(4, topic.subject_id(11));
+    }
+
+    #[test]
+    fn set_evictions_overrides_counter() {
+        let mut topic = Topic::new(3, Duration::ZERO);
+        topic.evict();
+        assert_eq!(1, topic.evictions());
+        topic.set_evictions(7);
+        assert_eq!(7, topic.evictions());
+        assert_eq!(8, topic.subject_id(11));
     }
 
     #[test]

@@ -14,7 +14,7 @@ pub struct NetworkConfig {
     pub loss_probability: f64,
 }
 
-pub struct Network<'a> {
+pub struct Network {
     /// Messages that are currently in transit, indexed by the destination node, then by delivery time.
     /// A tiebreaker is added in case we roll the same delivery time for distinct messages.
     /// Note that messages may be delivered out of order, depending on how the propagation delay is rolled.
@@ -26,7 +26,7 @@ pub struct Network<'a> {
     count_lost: u64,
 
     /// Shared states.
-    now: &'a Duration,
+    now: Duration,
     rng: Rc<RefCell<dyn Rng>>,
 
     cfg: NetworkConfig,
@@ -37,7 +37,7 @@ pub trait Transmit {
     fn broadcast_gossip(&mut self, message: GossipMessage);
 }
 
-impl Transmit for Network<'_> {
+impl Transmit for Network {
     fn unicast_gossip(&mut self, destination: u16, message: GossipMessage) {
         assert!((destination as usize) < self.cfg.node_count);
         self.count_sent_per_node.entry(message.sender_id()).and_modify(|c| *c += 1).or_insert(1);
@@ -54,7 +54,7 @@ impl Transmit for Network<'_> {
                 self.rng.borrow_mut().random_range(delay_start.as_seconds_f64()..=delay_end.as_seconds_f64());
             Duration::seconds_f64(sampled_seconds)
         };
-        let delivery_time = *self.now + delay;
+        let delivery_time = self.now + delay;
         let tiebreaker = self.rng.borrow_mut().next_u64();
         // This is where we may introduce reordering, which is good.
         self.enroute.entry(destination).or_default().insert((delivery_time, tiebreaker), message);
@@ -71,8 +71,8 @@ impl Transmit for Network<'_> {
     }
 }
 
-impl<'a> Network<'a> {
-    pub fn new(cfg: NetworkConfig, now: &'a Duration, rng: Rc<RefCell<dyn Rng>>) -> Self {
+impl Network {
+    pub fn new(cfg: NetworkConfig, now: Duration, rng: Rc<RefCell<dyn Rng>>) -> Self {
         Self {
             enroute: BTreeMap::new(),
             count_sent_per_node: BTreeMap::new(),
@@ -84,15 +84,20 @@ impl<'a> Network<'a> {
         }
     }
 
+    pub fn set_now(&mut self, now: Duration) {
+        self.now = now;
+    }
+
     pub fn pull(&mut self, now: Duration, destination: u16) -> Vec<GossipMessage> {
         let mut out = Vec::new();
         if let Some(dest_queue) = self.enroute.get_mut(&destination) {
-            if let Some((&(delivery_time, tie), message)) = dest_queue.iter().next() {
-                if delivery_time <= now {
-                    self.count_received_per_node.entry(destination).and_modify(|c| *c += 1).or_insert(1);
-                    let msg = dest_queue.remove(&(delivery_time, tie));
-                    out.push(msg.unwrap());
+            while let Some((&(delivery_time, tie), _)) = dest_queue.iter().next() {
+                if delivery_time > now {
+                    break;
                 }
+                self.count_received_per_node.entry(destination).and_modify(|c| *c += 1).or_insert(1);
+                let msg = dest_queue.remove(&(delivery_time, tie));
+                out.push(msg.expect("enroute message disappeared while draining arrivals"));
             }
         }
         out
@@ -115,7 +120,7 @@ mod tests {
     use rand::rngs::SmallRng;
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
-    fn make_test_network(now: &Duration, node_count: usize) -> Network<'_> {
+    fn make_test_network(now: Duration, node_count: usize) -> Network {
         let config = NetworkConfig { node_count, delay_range: Duration::ZERO..=Duration::ZERO, loss_probability: 0.0 };
         Network::new(config, now, Rc::new(RefCell::new(SmallRng::seed_from_u64(0xBAD5_EED))))
     }
@@ -127,7 +132,7 @@ mod tests {
     #[test]
     fn network_broadcast_rejects_node_count_above_u16_max() {
         let now = Duration::ZERO;
-        let mut network = make_test_network(&now, (u16::MAX as usize) + 1);
+        let mut network = make_test_network(now, (u16::MAX as usize) + 1);
 
         let result = catch_unwind(AssertUnwindSafe(|| {
             network.broadcast_gossip(make_test_gossip(0));
@@ -139,12 +144,31 @@ mod tests {
     #[test]
     fn network_broadcast_rejects_sender_id_out_of_range() {
         let now = Duration::ZERO;
-        let mut network = make_test_network(&now, 3);
+        let mut network = make_test_network(now, 3);
 
         let result = catch_unwind(AssertUnwindSafe(|| {
             network.broadcast_gossip(make_test_gossip(3));
         }));
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn network_pull_drains_all_due_messages() {
+        let mut network = make_test_network(Duration::ZERO, 2);
+        network.unicast_gossip(1, make_test_gossip(0));
+        network.unicast_gossip(1, make_test_gossip(0));
+
+        let pulled = network.pull(Duration::ZERO, 1);
+        assert_eq!(2, pulled.len());
+        assert_eq!(None, network.soonest_arrival_at());
+    }
+
+    #[test]
+    fn network_set_now_controls_delivery_time_base() {
+        let mut network = make_test_network(Duration::ZERO, 2);
+        network.set_now(Duration::seconds(5));
+        network.unicast_gossip(1, make_test_gossip(0));
+        assert_eq!(Some(Duration::seconds(5)), network.soonest_arrival_at());
     }
 }

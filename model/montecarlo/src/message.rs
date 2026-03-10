@@ -46,7 +46,7 @@ impl GossipMessage {
     }
 }
 
-fn gossip_dedup_hash(hash: u64, evictions: u16, lage: i8) -> u64 {
+pub fn gossip_dedup_hash(hash: u64, evictions: u16, lage: i8) -> u64 {
     let other = ((evictions as u64) << 16) | (((lage + 1) as u64) << 56);
     hash ^ other
 }

@@ -14,7 +14,7 @@ pub struct SimulationConfig {
 }
 
 pub struct Simulation<'a> {
-    network: Rc<RefCell<Network<'a>>>,
+    network: Rc<RefCell<Network>>,
     nodes: Vec<Node<'a>>,
     now: Duration,
     snaps: Vec<Snapshot>,
@@ -30,7 +30,7 @@ pub enum SimulationOutcome {
 
 impl<'a> Simulation<'a> {
     pub fn new(
-        network: Rc<RefCell<Network<'a>>>,
+        network: Rc<RefCell<Network>>,
         nodes: Vec<Node<'a>>,
         cfg: SimulationConfig,
         rng: Rc<RefCell<dyn Rng>>,
@@ -42,7 +42,7 @@ impl<'a> Simulation<'a> {
         node_count: usize,
         topic_count: usize,
         rng: Rc<RefCell<dyn Rng>>,
-        network: Rc<RefCell<Network<'a>>>,
+        network: Rc<RefCell<Network>>,
         node_config: NodeConfig,
         cfg: SimulationConfig,
     ) -> Result<Self, String> {
@@ -51,6 +51,7 @@ impl<'a> Simulation<'a> {
     }
 
     pub fn step(&mut self) -> Option<SimulationOutcome> {
+        self.network.borrow_mut().set_now(self.now);
         // Step all nodes.
         for node in &mut self.nodes {
             let incoming = self.network.borrow_mut().pull(self.now, node.id());
