@@ -112,20 +112,6 @@ impl NetworkStats {
     pub fn received_total(&self) -> u64 {
         self.received_per_node.values().sum()
     }
-
-    pub fn sent_avg_per_node(&self) -> f64 {
-        if self.sent_per_node.len() == 0 {
-            return 0.0;
-        }
-        self.sent_total() as f64 / (self.sent_per_node.len() as f64)
-    }
-
-    pub fn received_avg_per_node(&self) -> f64 {
-        if self.received_per_node.len() == 0 {
-            return 0.0;
-        }
-        self.received_total() as f64 / (self.received_per_node.len() as f64)
-    }
 }
 
 #[cfg(test)]

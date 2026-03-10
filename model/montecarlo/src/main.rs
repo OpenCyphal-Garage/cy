@@ -174,35 +174,37 @@ fn main() -> ExitCode {
 
     // Run the simulation until convergence or time limit.
     // TODO: report the initial network configuration and the final state.
-    let outcome = sim.run();
-    let snaps = sim.snapshots();
-    eprintln!("Simulation completed with {0} snapshots.", snaps.len());
+    let (outcome, snaps) = sim.run();
 
     // Report the results in brief human-readable form.
-    let snaps = decimate_snapshots_1Hz(&snaps);
     eprintln!(
-        "│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^25}│{:^25}│",
+        "│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^25}│{:^25}│",
         "time [s]",
+        "steps",
         "collision",
         "divergent",
-        "tx total",
-        "rx total",
-        "loss total",
-        "rx/node total [msg/node]",
+        "tx cumul",
+        "rx cumul",
+        "loss cumul",
+        "rx/node cumul [msg/node]",
         "arrival load [msg/s/node]"
     );
     for snap in snaps {
         let t = snap.time.as_seconds_f64();
+        let node_count = snap.nodes.len();
+        let rx_per_node_cumulative = snap.rx_total as f64 / (node_count as f64);
+        let arrival_load_per_node = if t > 0.0 { rx_per_node_cumulative / t } else { 0.0 };
         eprintln!(
-            "│{:10.1}│{:10}│{:10}│{:10}│{:10}│{:10}│{:25.1}│{:25.1}│",
+            "│{:10.1}│{:10}│{:10}│{:10}│{:10}│{:10}│{:10}│{:25.1}│{:25.1}│",
             t,
+            snap.steps,
             snap.count_collisions(),
             snap.count_divergent(),
-            snap.network.sent_total(),
-            snap.network.received_total(),
-            snap.network.lost,
-            snap.network.received_avg_per_node(),
-            if t > 0.0 { snap.network.received_avg_per_node() / t } else { 0.0 }
+            snap.tx_total,
+            snap.rx_total,
+            snap.loss_total,
+            rx_per_node_cumulative,
+            arrival_load_per_node
         );
     }
 
@@ -216,21 +218,4 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
     }
-}
-
-#[allow(non_snake_case)]
-fn decimate_snapshots_1Hz(snaps: &[simulation::Snapshot]) -> Vec<simulation::Snapshot> {
-    let mut result = Vec::new();
-    let mut next_time = if let Some(snap) = snaps.first() {
-        snap.time
-    } else {
-        return result;
-    };
-    for snap in snaps {
-        if snap.time >= next_time {
-            result.push(snap.clone());
-            next_time += Duration::seconds(1);
-        }
-    }
-    result
 }

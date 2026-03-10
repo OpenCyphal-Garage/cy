@@ -23,7 +23,7 @@ pub struct Simulation<'a> {
     network: Rc<RefCell<Network>>,
     nodes: Vec<Node<'a>>,
     now: Rc<RefCell<Duration>>,
-    snaps: Vec<Snapshot>,
+    step_count: u64,
     converged_at: Option<Duration>,
     rng: Rc<RefCell<dyn Rng>>,
     cfg: SimulationConfig,
@@ -54,7 +54,7 @@ impl<'a> Simulation<'a> {
         let network = Rc::new(RefCell::new(Network::new(&cfg.network, network_now_provider, rng.clone())));
         let nodes =
             generate_network(node_count, topic_count, node_now_provider, rng.clone(), network.clone(), node_config)?;
-        Ok(Self { network, nodes, now, snaps: Vec::new(), converged_at: None, rng, cfg: cfg.clone() })
+        Ok(Self { network, nodes, now, step_count: 0, converged_at: None, rng, cfg: cfg.clone() })
     }
 
     pub fn step(&mut self) -> Option<SimulationOutcome> {
@@ -68,10 +68,11 @@ impl<'a> Simulation<'a> {
             let incoming = self.network.borrow_mut().pull(now, node.id());
             node.step(incoming);
         }
+        self.step_count += 1;
 
         // Update the convergence state.
-        let collisions = self.snaps.last().unwrap().count_collisions();
-        let divergences = self.snaps.last().unwrap().count_divergent();
+        let collisions = count_collisions(&self.nodes);
+        let divergences = count_divergent(&self.nodes);
         match self.converged_at {
             Some(_) => {
                 if collisions > 0 || divergences > 0 {
@@ -110,26 +111,30 @@ impl<'a> Simulation<'a> {
         None
     }
 
-    pub fn run(&mut self) -> SimulationOutcome {
-        self.snaps.push(self.capture()); // Save the initial state before any updates.
+    pub fn run(&mut self) -> (SimulationOutcome, Vec<Snapshot>) {
+        let mut snaps: Vec<Snapshot> = Vec::new();
+        let snap_period = Duration::seconds(1);
         loop {
+            if snaps.len() == 0 || *self.now.borrow() - snaps.last().unwrap().time >= snap_period {
+                snaps.push(self.capture());
+            }
             let outcome = self.step();
-            self.snaps.push(self.capture()); // Ensure the final state is always captured.
             if let Some(outcome) = outcome {
-                return outcome;
+                snaps.push(self.capture()); // Always capture the final state.
+                return (outcome, snaps);
             }
         }
     }
 
-    pub fn snapshots(&self) -> &[Snapshot] {
-        &self.snaps
-    }
-
     fn capture(&self) -> Snapshot {
+        let net = self.network.borrow().stats();
         Snapshot {
             time: *self.now.borrow(),
+            steps: self.step_count,
             nodes: self.nodes.iter().map(|node| NodeSnapshot::new(node)).collect(),
-            network: self.network.borrow().stats(),
+            tx_total: net.sent_total(),
+            rx_total: net.received_total(),
+            loss_total: net.lost,
         }
     }
 }
@@ -156,8 +161,11 @@ impl NodeSnapshot {
 #[derive(Debug, Clone)]
 pub struct Snapshot {
     pub time: Duration,
+    pub steps: u64,
     pub nodes: Vec<NodeSnapshot>,
-    pub network: NetworkStats,
+    pub tx_total: u64,
+    pub rx_total: u64,
+    pub loss_total: u64,
 }
 
 impl Snapshot {
@@ -176,6 +184,22 @@ impl Snapshot {
         }
         by_hash.values().filter(|evictions| evictions.len() > 1).count()
     }
+}
+
+fn count_collisions(nodes: &[Node]) -> usize {
+    if nodes.len() == 0 {
+        return 0;
+    }
+    let subject_id_modulus = nodes[0].subject_id_modulus();
+    count_colliding_subjects(nodes.iter().flat_map(|node| node.topics()), subject_id_modulus)
+}
+
+fn count_divergent(nodes: &[Node]) -> usize {
+    let mut by_hash: BTreeMap<u64, BTreeSet<u16>> = BTreeMap::new();
+    for topic in nodes.iter().flat_map(|node| node.topics()) {
+        by_hash.entry(topic.hash()).or_default().insert(topic.evictions());
+    }
+    by_hash.values().filter(|evictions| evictions.len() > 1).count()
 }
 
 /// Generates a random network of nodes and returns them.
