@@ -111,17 +111,18 @@ impl<'a> Simulation<'a> {
         None
     }
 
-    pub fn run(&mut self) -> (SimulationOutcome, Vec<Snapshot>) {
-        let mut snaps: Vec<Snapshot> = Vec::new();
-        let snap_period = Duration::seconds(1);
+    pub fn run(&mut self, reporter: Box<dyn Fn(&Snapshot) -> ()>, report_period: Duration) -> SimulationOutcome {
+        let mut snap = self.capture();
         loop {
-            if snaps.len() == 0 || *self.now.borrow() - snaps.last().unwrap().time >= snap_period {
-                snaps.push(self.capture());
+            if *self.now.borrow() - snap.time >= report_period {
+                snap = self.capture();
+                reporter(&snap);
             }
             let outcome = self.step();
             if let Some(outcome) = outcome {
-                snaps.push(self.capture()); // Always capture the final state.
-                return (outcome, snaps);
+                snap = self.capture();
+                reporter(&snap); // Always capture the final state.
+                return outcome;
             }
         }
     }

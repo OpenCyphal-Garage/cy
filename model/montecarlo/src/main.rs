@@ -9,7 +9,7 @@ pub mod topic;
 mod util;
 
 use node::NodeConfig;
-use simulation::{NetworkConfig, Simulation, SimulationConfig, SimulationOutcome};
+use simulation::{NetworkConfig, Simulation, SimulationConfig, SimulationOutcome, Snapshot};
 use util::{generate_seed, parse_duration, parse_duration_range};
 
 use clap::{CommandFactory, Parser, error::ErrorKind};
@@ -47,6 +47,10 @@ struct Config {
     /// Limit simulation time. Expect convergence before this.
     #[arg(long, value_parser = parse_duration, default_value = "60")]
     time_limit: Duration,
+
+    /// Interval between network snapshot captures.
+    #[arg(long, value_parser = parse_duration, default_value = "1")]
+    snapshot_period: Duration,
 
     // ----------------------------------------------------------------------------------------------------------------
     /// Gossip parameters.
@@ -161,6 +165,7 @@ fn main() -> ExitCode {
     let node_count = config.node_count;
     let topic_count = config.topic_count;
     let node_config = config.node();
+    let snapshot_period = config.snapshot_period;
     let simulation_config = config.simulation();
     let mut rng = Rc::new(RefCell::new(SmallRng::seed_from_u64(config.seed.unwrap())));
     drop(config);
@@ -172,11 +177,7 @@ fn main() -> ExitCode {
             std::process::exit(1);
         });
 
-    // Run the simulation until convergence or time limit.
-    // TODO: report the initial network configuration and the final state.
-    let (outcome, snaps) = sim.run();
-
-    // Report the results in brief human-readable form.
+    // Snapshot processor.
     eprintln!(
         "│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^25}│{:^25}│",
         "time [s]",
@@ -189,13 +190,13 @@ fn main() -> ExitCode {
         "rx/node cumul [msg/node]",
         "arrival load [msg/s/node]"
     );
-    for snap in snaps {
+    let process_snapshot = Box::new(move |snap: &Snapshot| {
         let t = snap.time.as_seconds_f64();
         let node_count = snap.nodes.len();
         let rx_per_node_cumulative = snap.rx_total as f64 / (node_count as f64);
         let arrival_load_per_node = if t > 0.0 { rx_per_node_cumulative / t } else { 0.0 };
         eprintln!(
-            "│{:10.1}│{:10}│{:10}│{:10}│{:10}│{:10}│{:10}│{:25.1}│{:25.1}│",
+            "│{:10.3}│{:10}│{:10}│{:10}│{:10}│{:10}│{:10}│{:25.1}│{:25.1}│",
             t,
             snap.steps,
             snap.count_collisions(),
@@ -206,7 +207,11 @@ fn main() -> ExitCode {
             rx_per_node_cumulative,
             arrival_load_per_node
         );
-    }
+    });
+
+    // Run the simulation until convergence or time limit.
+    // TODO: report the initial network configuration and the final state.
+    let outcome = sim.run(process_snapshot, snapshot_period);
 
     match outcome {
         SimulationOutcome::TimeLimitReached => {
