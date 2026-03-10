@@ -3,8 +3,7 @@ mod peer_sampler;
 
 use self::gossip_dedup::{GossipDedup, GossipDedupConfig};
 use self::peer_sampler::{PeerSampler, PeerSamplerConfig};
-use crate::message::GossipMessage;
-use crate::network::Transmit;
+use crate::message::{GossipMessage, Transmit};
 use crate::topic::{Topic, left_wins_collision, topic_subject_id};
 use crate::util::is_prime;
 use rand::{Rng, RngExt};
@@ -89,32 +88,31 @@ impl<'a> Node<'a> {
         network: Rc<RefCell<dyn Transmit + 'a>>,
         rng: Rc<RefCell<dyn Rng>>,
         now: Rc<dyn Fn() -> Duration + 'a>,
-        cfg: NodeConfig,
+        cfg: &NodeConfig,
     ) -> Result<Self, String> {
         if !is_prime(cfg.subject_id_modulus) {
             return Err(format!("subject_id_modulus must be prime, got {}", cfg.subject_id_modulus));
         }
+        let peer_sampler_cfg = PeerSamplerConfig {
+            self_id: id,
+            peer_count: cfg.peer_count,
+            peer_age_reachable: cfg.peer_age_reachable,
+            peer_age_replaceable: cfg.peer_age_replaceable,
+            peer_replacement_probability: cfg.peer_replacement_probability,
+            peer_moratorium_range: cfg.peer_moratorium_range.clone(),
+        };
+        let gossip_dedup_cfg = GossipDedupConfig { capacity: cfg.dedup_capacity, timeout: cfg.dedup_timeout };
         Ok(Self {
             id,
             topics_by_hash: BTreeMap::new(),
-            peer_sampler: PeerSampler::new(PeerSamplerConfig {
-                self_id: id,
-                peer_count: cfg.peer_count,
-                peer_age_reachable: cfg.peer_age_reachable,
-                peer_age_replaceable: cfg.peer_age_replaceable,
-                peer_replacement_probability: cfg.peer_replacement_probability,
-                peer_moratorium_range: cfg.peer_moratorium_range.clone(),
-            }),
+            peer_sampler: PeerSampler::new(peer_sampler_cfg),
             gossip_at: Duration::ZERO,
             gossip_counter: 0,
-            gossip_dedup: GossipDedup::new(GossipDedupConfig {
-                capacity: cfg.dedup_capacity,
-                timeout: cfg.dedup_timeout,
-            }),
+            gossip_dedup: GossipDedup::new(gossip_dedup_cfg),
             network,
             rng,
             now,
-            cfg,
+            cfg: cfg.clone(),
         })
     }
 

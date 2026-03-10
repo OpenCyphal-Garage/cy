@@ -1,4 +1,7 @@
-use crate::network::{Network, NetworkConfig, Transmit};
+mod network;
+
+use self::network::Network;
+use crate::message::Transmit;
 use crate::node::{Node, NodeConfig, count_colliding_subjects};
 use crate::topic::Topic;
 use rand::Rng;
@@ -8,9 +11,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use time::Duration;
 
+pub use self::network::NetworkConfig;
+
 #[derive(Debug, Clone)]
 pub struct SimulationConfig {
     pub time_limit: Duration,
+    pub network: NetworkConfig,
 }
 
 pub struct Simulation<'a> {
@@ -33,9 +39,8 @@ impl<'a> Simulation<'a> {
         node_count: usize,
         topic_count: usize,
         rng: Rc<RefCell<dyn Rng>>,
-        network_config: NetworkConfig,
-        node_config: NodeConfig,
-        cfg: SimulationConfig,
+        node_config: &NodeConfig,
+        cfg: &SimulationConfig,
     ) -> Result<Self, String> {
         let now = Rc::new(RefCell::new(Duration::ZERO));
         let network_now_provider: Rc<dyn Fn() -> Duration + 'static> = {
@@ -46,10 +51,10 @@ impl<'a> Simulation<'a> {
             let now = now.clone();
             Rc::new(move || *now.borrow())
         };
-        let network = Rc::new(RefCell::new(Network::new(network_config, network_now_provider, rng.clone())));
+        let network = Rc::new(RefCell::new(Network::new(&cfg.network, network_now_provider, rng.clone())));
         let nodes =
             generate_network(node_count, topic_count, node_now_provider, rng.clone(), network.clone(), node_config)?;
-        Ok(Self { network, nodes, now, snaps: Vec::new(), converged_at: None, rng, cfg })
+        Ok(Self { network, nodes, now, snaps: Vec::new(), converged_at: None, rng, cfg: cfg.clone() })
     }
 
     pub fn step(&mut self) -> Option<SimulationOutcome> {
@@ -163,7 +168,7 @@ fn generate_network<'a>(
     now: Rc<dyn Fn() -> Duration + 'a>,
     rng: Rc<RefCell<dyn Rng>>,
     network: Rc<RefCell<dyn Transmit + 'a>>,
-    node_config: NodeConfig,
+    node_config: &NodeConfig,
 ) -> Result<Vec<Node<'a>>, String> {
     // Generate random topics to choose from later.
     let mut topic_hashes = Vec::new();
@@ -175,7 +180,7 @@ fn generate_network<'a>(
     let mut nodes = Vec::new();
     assert!(node_count <= u16::MAX as usize);
     for id in 0..(node_count as u16) {
-        nodes.push(Node::new(id, network.clone(), rng.clone(), now.clone(), node_config.clone())?);
+        nodes.push(Node::new(id, network.clone(), rng.clone(), now.clone(), node_config)?);
         let mut node = nodes.last_mut().unwrap();
         let node_topic_count = (rng.borrow_mut().next_u64() % (topic_count as u64)) + 1;
         assert!(node_topic_count >= 1 && node_topic_count <= topic_count as u64);

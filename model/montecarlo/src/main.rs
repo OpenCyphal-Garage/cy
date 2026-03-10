@@ -3,15 +3,13 @@
 #![allow(dead_code, unused_variables, unused_mut)]
 
 pub mod message;
-pub mod network;
 pub mod node;
 pub mod simulation;
 pub mod topic;
 mod util;
 
-use network::NetworkConfig;
 use node::NodeConfig;
-use simulation::{Simulation, SimulationConfig, SimulationOutcome};
+use simulation::{NetworkConfig, Simulation, SimulationConfig, SimulationOutcome};
 
 use clap::{CommandFactory, Parser, error::ErrorKind};
 use duration_str::parse_time;
@@ -122,14 +120,6 @@ struct Config {
 }
 
 impl Config {
-    fn network(&self) -> NetworkConfig {
-        NetworkConfig {
-            node_count: self.node_count,
-            delay_range: self.network_delay_range.clone(),
-            loss_probability: self.network_loss_probability,
-        }
-    }
-
     fn node(&self) -> NodeConfig {
         NodeConfig {
             subject_id_modulus: self.subject_id_modulus,
@@ -151,7 +141,12 @@ impl Config {
     }
 
     fn simulation(&self) -> SimulationConfig {
-        SimulationConfig { time_limit: self.time_limit }
+        let network = NetworkConfig {
+            node_count: self.node_count,
+            delay_range: self.network_delay_range.clone(),
+            loss_probability: self.network_loss_probability,
+        };
+        SimulationConfig { time_limit: self.time_limit, network }
     }
 }
 
@@ -167,18 +162,16 @@ fn main() -> ExitCode {
     let node_count = config.node_count;
     let topic_count = config.topic_count;
     let node_config = config.node();
-    let network_config = config.network();
     let simulation_config = config.simulation();
     let mut rng = Rc::new(RefCell::new(SmallRng::seed_from_u64(config.seed.unwrap())));
     drop(config);
 
     // Set up the simulation.
-    let mut sim =
-        Simulation::generate(node_count, topic_count, rng.clone(), network_config, node_config, simulation_config)
-            .unwrap_or_else(|e| {
-                eprintln!("Error generating simulation: {0}", e);
-                std::process::exit(1);
-            });
+    let mut sim = Simulation::generate(node_count, topic_count, rng.clone(), &node_config, &simulation_config)
+        .unwrap_or_else(|e| {
+            eprintln!("Error generating simulation: {0}", e);
+            std::process::exit(1);
+        });
 
     // Run the simulation until convergence or time limit.
     // TODO: report the initial network configuration and the final state.

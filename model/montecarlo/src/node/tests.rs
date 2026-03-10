@@ -35,7 +35,7 @@ fn make_test_node(modulus: u16) -> Node<'static> {
     let network = Rc::new(RefCell::new(StubNetwork));
     let rng = Rc::new(RefCell::new(SmallRng::seed_from_u64(0xD00D_F00D)));
     let now: Rc<dyn Fn() -> Duration + 'static> = Rc::new(|| Duration::ZERO);
-    Node::new(0, network, rng, now, cfg).unwrap()
+    Node::new(0, network, rng, now, &cfg).unwrap()
 }
 
 fn snapshot(node: &Node<'_>, modulus: u16) -> Vec<(u64, u16, u16)> {
@@ -51,7 +51,7 @@ fn make_recording_node(cfg: NodeConfig) -> (Node<'static>, Rc<RefCell<TxLog>>, R
         let now = now.clone();
         Rc::new(move || *now.borrow())
     };
-    (Node::new(0, network, rng, now_provider, cfg).unwrap(), log, now)
+    (Node::new(0, network, rng, now_provider, &cfg).unwrap(), log, now)
 }
 
 fn make_message(sender: u16, ttl: u8, outdegree: u8, hash: u64, evictions: u16, lage: i8) -> GossipMessage {
@@ -64,7 +64,7 @@ fn new_rejects_non_prime_modulus() {
     let network = Rc::new(RefCell::new(StubNetwork));
     let rng = Rc::new(RefCell::new(SmallRng::seed_from_u64(0)));
     let now: Rc<dyn Fn() -> Duration + 'static> = Rc::new(|| Duration::ZERO);
-    assert!(Node::new(0, network, rng, now, cfg).is_err());
+    assert!(Node::new(0, network, rng, now, &cfg).is_err());
 }
 
 #[test]

@@ -1,4 +1,4 @@
-use crate::message::GossipMessage;
+use crate::message::{GossipMessage, Transmit};
 use rand::{Rng, RngExt};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -30,11 +30,6 @@ pub struct Network {
     rng: Rc<RefCell<dyn Rng>>,
 
     cfg: NetworkConfig,
-}
-
-pub trait Transmit {
-    fn unicast_gossip(&mut self, destination: u16, message: GossipMessage);
-    fn broadcast_gossip(&mut self, message: GossipMessage);
 }
 
 impl Transmit for Network {
@@ -72,7 +67,7 @@ impl Transmit for Network {
 }
 
 impl Network {
-    pub fn new(cfg: NetworkConfig, now: Rc<dyn Fn() -> Duration + 'static>, rng: Rc<RefCell<dyn Rng>>) -> Self {
+    pub fn new(cfg: &NetworkConfig, now: Rc<dyn Fn() -> Duration + 'static>, rng: Rc<RefCell<dyn Rng>>) -> Self {
         Self {
             enroute: BTreeMap::new(),
             count_sent_per_node: BTreeMap::new(),
@@ -80,7 +75,7 @@ impl Network {
             count_lost: 0,
             now,
             rng,
-            cfg,
+            cfg: cfg.clone(),
         }
     }
 
@@ -119,7 +114,7 @@ mod tests {
     fn make_test_network(now: Rc<RefCell<Duration>>, node_count: usize) -> Network {
         let config = NetworkConfig { node_count, delay_range: Duration::ZERO..=Duration::ZERO, loss_probability: 0.0 };
         let now_provider: Rc<dyn Fn() -> Duration + 'static> = Rc::new(move || *now.borrow());
-        Network::new(config, now_provider, Rc::new(RefCell::new(SmallRng::seed_from_u64(0xBAD5_EED))))
+        Network::new(&config, now_provider, Rc::new(RefCell::new(SmallRng::seed_from_u64(0xBAD5_EED))))
     }
 
     fn make_test_gossip(sender_id: u16) -> GossipMessage {

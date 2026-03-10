@@ -46,6 +46,12 @@ impl GossipMessage {
     }
 }
 
+/// The connectivity fabric of the simulator that implements message delivery with optional latency and loss.
+pub trait Transmit {
+    fn unicast_gossip(&mut self, destination: u16, message: GossipMessage);
+    fn broadcast_gossip(&mut self, message: GossipMessage);
+}
+
 pub fn gossip_dedup_hash(hash: u64, evictions: u16, lage: i8) -> u64 {
     let other = ((evictions as u64) << 16) | (((lage + 1) as u64) << 56);
     hash ^ other
