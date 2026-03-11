@@ -397,7 +397,7 @@ fn run_parallel(config: Config) -> ExitCode {
     if time_limit_failures > 0 {
         eprintln!("Runs that did not converge before time limit: {time_limit_failures}");
     }
-    print_convergence_histogram(&converged_times);
+    print_convergence_histogram(&converged_times, simulation_config.time_limit);
 
     if (failure_count > 0) || (panicked_workers > 0) { ExitCode::FAILURE } else { ExitCode::SUCCESS }
 }
