@@ -3,7 +3,7 @@ use std::ops::RangeInclusive;
 use time::Duration;
 
 #[derive(Debug, Clone)]
-pub struct PeerSamplerConfig {
+pub(super) struct PeerSamplerConfig {
     pub self_id: u16,
     pub peer_count: usize,
     pub peer_age_reachable: Duration,
@@ -18,14 +18,14 @@ struct PeerEntry {
     last_seen: Duration,
 }
 
-pub struct PeerSampler {
+pub(super) struct PeerSampler {
     peers: Vec<PeerEntry>,
     peer_moratorium_until: Duration,
     cfg: PeerSamplerConfig,
 }
 
 impl PeerSampler {
-    pub fn new(cfg: PeerSamplerConfig) -> Self {
+    pub(super) fn new(cfg: PeerSamplerConfig) -> Self {
         Self { peers: Vec::new(), peer_moratorium_until: Duration::ZERO, cfg }
     }
 

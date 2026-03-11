@@ -9,14 +9,14 @@ use time::Duration;
 const DELAY_QUANTIZATION_STEP: Duration = Duration::microseconds(50);
 
 #[derive(Debug, Clone)]
-pub struct NetworkConfig {
+pub(super) struct NetworkConfig {
     /// Assuming that nodes have contiguous IDs from 0 to node_count-1; used for broadcasting.
     pub node_count: usize,
     pub delay_range: RangeInclusive<Duration>,
     pub loss_probability: f64,
 }
 
-pub struct Network {
+pub(super) struct Network {
     /// Messages that are currently in transit, indexed globally by delivery time.
     /// A tiebreaker is added in case we roll the same delivery time for distinct messages.
     /// Note that messages may be delivered out of order, depending on how the propagation delay is rolled.
@@ -66,7 +66,7 @@ impl Transmit for Network {
 }
 
 impl Network {
-    pub fn new(cfg: &NetworkConfig, now: Rc<dyn Fn() -> Duration + 'static>, rng: Rc<RefCell<dyn Rng>>) -> Self {
+    pub(super) fn new(cfg: &NetworkConfig, now: Rc<dyn Fn() -> Duration + 'static>, rng: Rc<RefCell<dyn Rng>>) -> Self {
         Self { enroute: BTreeMap::new(), now, rng, stats: NetworkStats::default(), cfg: cfg.clone() }
     }
 
@@ -102,7 +102,7 @@ impl Network {
 
 /// Propagation statistics for debugging and analysis.
 #[derive(Debug, Clone, Default)]
-pub struct NetworkStats {
+pub(super) struct NetworkStats {
     pub sent_per_node: BTreeMap<u16, u64>,
     pub received_per_node: BTreeMap<u16, u64>,
     pub lost: u64,

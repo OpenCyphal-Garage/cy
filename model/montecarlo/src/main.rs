@@ -9,7 +9,7 @@ pub mod topic;
 mod util;
 
 use node::NodeConfig;
-use simulation::{NetworkConfig, Simulation, SimulationConfig, SimulationOutcome, Snapshot};
+use simulation::{Simulation, SimulationConfig, SimulationOutcome, Snapshot};
 use util::{
     TimeStats, derive_seed, generate_seed, parse_duration, parse_duration_range, print_convergence_histogram,
     worker_count,
@@ -172,12 +172,12 @@ impl Config {
     }
 
     fn simulation(&self) -> SimulationConfig {
-        let network = NetworkConfig {
+        SimulationConfig {
+            time_limit: self.time_limit,
             node_count: self.node_count,
-            delay_range: self.network_delay_range.clone(),
-            loss_probability: self.network_loss_probability,
-        };
-        SimulationConfig { time_limit: self.time_limit, network }
+            network_delay_range: self.network_delay_range.clone(),
+            network_loss_probability: self.network_loss_probability,
+        }
     }
 }
 

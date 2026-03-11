@@ -1,6 +1,6 @@
 mod network;
 
-use self::network::Network;
+use self::network::{Network, NetworkConfig};
 use crate::message::Transmit;
 use crate::node::{Node, NodeConfig, count_colliding_subjects};
 use crate::topic::Topic;
@@ -8,10 +8,9 @@ use rand::Rng;
 use std::cell::RefCell;
 use std::cmp::min;
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::RangeInclusive;
 use std::rc::Rc;
 use time::Duration;
-
-pub use self::network::{NetworkConfig, NetworkStats};
 
 const MIN_STEP: Duration = Duration::microseconds(50);
 const CONVERGENCE_CHECK_PERIOD: Duration = Duration::seconds(1);
@@ -19,7 +18,9 @@ const CONVERGENCE_CHECK_PERIOD: Duration = Duration::seconds(1);
 #[derive(Debug, Clone)]
 pub struct SimulationConfig {
     pub time_limit: Duration,
-    pub network: NetworkConfig,
+    pub node_count: usize,
+    pub network_delay_range: RangeInclusive<Duration>,
+    pub network_loss_probability: f64,
 }
 
 pub struct Simulation<'a> {
@@ -55,7 +56,12 @@ impl<'a> Simulation<'a> {
             let now = now.clone();
             Rc::new(move || *now.borrow())
         };
-        let network = Rc::new(RefCell::new(Network::new(&cfg.network, network_now_provider, rng.clone())));
+        let network_config = NetworkConfig {
+            node_count,
+            delay_range: cfg.network_delay_range.clone(),
+            loss_probability: cfg.network_loss_probability,
+        };
+        let network = Rc::new(RefCell::new(Network::new(&network_config, network_now_provider, rng.clone())));
         let nodes =
             generate_network(node_count, topic_count, node_now_provider, rng.clone(), network.clone(), node_config)?;
         Ok(Self {

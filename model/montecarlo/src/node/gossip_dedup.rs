@@ -2,7 +2,7 @@ use crate::message::gossip_dedup_hash;
 use time::Duration;
 
 #[derive(Debug, Clone)]
-pub struct GossipDedupConfig {
+pub(super) struct GossipDedupConfig {
     pub capacity: usize,
     pub timeout: Duration,
 }
@@ -13,13 +13,13 @@ struct GossipDedupEntry {
     last_seen: Duration,
 }
 
-pub struct GossipDedup {
+pub(super) struct GossipDedup {
     entries: Vec<GossipDedupEntry>,
     cfg: GossipDedupConfig,
 }
 
 impl GossipDedup {
-    pub fn new(cfg: GossipDedupConfig) -> Self {
+    pub(super) fn new(cfg: GossipDedupConfig) -> Self {
         Self { entries: Vec::new(), cfg }
     }
 
