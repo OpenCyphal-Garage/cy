@@ -29,6 +29,7 @@ pub struct Simulation<'a> {
     cfg: SimulationConfig,
 }
 
+#[derive(Debug)]
 pub enum SimulationOutcome {
     Converged(Duration),
     TimeLimitReached,
@@ -237,7 +238,6 @@ fn generate_network<'a>(
             let topic_hash = topic_hashes[rng.borrow_mut().next_u64() as usize % topic_count];
             node.add_topic(topic_hash);
         }
-        eprintln!("Node {} has {} topics", node.id(), node.topics().len());
     }
     Ok(nodes)
 }

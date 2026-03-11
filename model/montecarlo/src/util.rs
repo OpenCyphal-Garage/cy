@@ -30,6 +30,15 @@ pub fn generate_seed() -> u64 {
     now.as_secs() ^ ((now.subsec_nanos() as u64) << 32)
 }
 
+/// Given a base seed and an index, derives a new seed that is deterministic but well-diffused.
+pub fn derive_seed(base_seed: u64, index: usize) -> u64 {
+    // splitmix64: deterministic diffusion from the base seed and run index.
+    let mut x = base_seed.wrapping_add((index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^ (x >> 31)
+}
+
 pub fn parse_duration_range(s: &str) -> Result<RangeInclusive<Duration>, String> {
     let (start, end) = s.split_once("..").ok_or_else(|| "expected MIN..MAX".to_string())?;
     let start = parse_duration(start)?;
@@ -53,6 +62,41 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
         return Err("duration must be finite and non-negative".to_string());
     }
     Ok(parsed)
+}
+
+pub fn worker_count() -> usize {
+    std::thread::available_parallelism().map_or(1, |cpus| compute_worker_count_from_logical(cpus.get()))
+}
+
+fn compute_worker_count_from_logical(logical: usize) -> usize {
+    logical.saturating_sub(1).max(1)
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TimeStats {
+    pub min: f64,
+    pub mean: f64,
+    pub median: f64,
+    pub max: f64,
+}
+
+impl TimeStats {
+    pub fn compute(times: &[Duration]) -> Option<TimeStats> {
+        if times.is_empty() {
+            return None;
+        }
+        let mut values = times.iter().map(|time| time.as_seconds_f64()).collect::<Vec<_>>();
+        values.sort_by(|a, b| a.total_cmp(b));
+
+        let min = values[0];
+        let max = values[values.len() - 1];
+        let sum: f64 = values.iter().sum();
+        let mean = sum / (values.len() as f64);
+        let mid = values.len() / 2;
+        let median = if values.len() % 2 == 0 { (values[mid - 1] + values[mid]) * 0.5 } else { values[mid] };
+
+        Some(TimeStats { min, mean, median, max })
+    }
 }
 
 #[cfg(test)]
@@ -130,5 +174,27 @@ mod tests {
         let range = parse_duration_range("125ms..1m2s").unwrap();
         assert_eq!(Duration::milliseconds(125), *range.start());
         assert_eq!(Duration::seconds(62), *range.end());
+    }
+
+    #[test]
+    fn summarize_times_handles_odd_and_even_lengths() {
+        let odd = vec![Duration::seconds(1), Duration::seconds(3), Duration::seconds(2)];
+        let odd_stats = TimeStats::compute(&odd).expect("stats should be present for odd vector");
+        assert_eq!(1.0, odd_stats.min);
+        assert_eq!(2.0, odd_stats.mean);
+        assert_eq!(2.0, odd_stats.median);
+        assert_eq!(3.0, odd_stats.max);
+
+        let even = vec![Duration::seconds(1), Duration::seconds(4), Duration::seconds(2), Duration::seconds(3)];
+        let even_stats = TimeStats::compute(&even).expect("stats should be present for even vector");
+        assert_eq!(1.0, even_stats.min);
+        assert_eq!(2.5, even_stats.mean);
+        assert_eq!(2.5, even_stats.median);
+        assert_eq!(4.0, even_stats.max);
+    }
+
+    #[test]
+    fn summarize_times_returns_none_for_empty_input() {
+        assert!(TimeStats::compute(&[]).is_none());
     }
 }
