@@ -6,12 +6,15 @@ use crate::node::{Node, NodeConfig, count_colliding_subjects};
 use crate::topic::Topic;
 use rand::Rng;
 use std::cell::RefCell;
-use std::cmp::{max, min};
+use std::cmp::min;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use time::Duration;
 
 pub use self::network::{NetworkConfig, NetworkStats};
+
+const MIN_STEP: Duration = Duration::microseconds(50);
+const CONVERGENCE_CHECK_PERIOD: Duration = Duration::seconds(1);
 
 #[derive(Debug, Clone)]
 pub struct SimulationConfig {
@@ -25,7 +28,7 @@ pub struct Simulation<'a> {
     now: Rc<RefCell<Duration>>,
     step_count: u64,
     converged_at: Option<Duration>,
-    rng: Rc<RefCell<dyn Rng>>,
+    next_convergence_check_at: Duration,
     cfg: SimulationConfig,
 }
 
@@ -55,60 +58,38 @@ impl<'a> Simulation<'a> {
         let network = Rc::new(RefCell::new(Network::new(&cfg.network, network_now_provider, rng.clone())));
         let nodes =
             generate_network(node_count, topic_count, node_now_provider, rng.clone(), network.clone(), node_config)?;
-        Ok(Self { network, nodes, now, step_count: 0, converged_at: None, rng, cfg: cfg.clone() })
+        Ok(Self {
+            network,
+            nodes,
+            now,
+            step_count: 0,
+            converged_at: None,
+            next_convergence_check_at: Duration::ZERO,
+            cfg: cfg.clone(),
+        })
     }
 
     pub fn step(&mut self) -> Option<SimulationOutcome> {
         let now = *self.now.borrow();
+        self.process_due_events(now);
 
-        // Step all nodes. Propagate time and deliver messages in separate steps to make updates ordering-invariant.
-        for node in &mut self.nodes {
-            node.step(Vec::new());
-        }
-        for node in &mut self.nodes {
-            let incoming = self.network.borrow_mut().pull(now, node.id());
-            node.step(incoming);
-        }
-        self.step_count += 1;
-
-        // Update the convergence state.
-        let collisions = count_collisions(&self.nodes);
-        let divergences = count_divergent(&self.nodes);
-        match self.converged_at {
-            Some(_) => {
-                if collisions > 0 || divergences > 0 {
-                    self.converged_at = None;
-                }
-            }
-            None => {
-                if collisions == 0 && divergences == 0 {
-                    self.converged_at = Some(now);
-                }
-            }
-        }
-
-        // Check the simulation stop condition -- when stable state is reached.
-        // Stable state is when the network stayed convergent for more than (node count times max delay).
-        if let Some(t) = self.converged_at {
-            let stability_window = Duration::seconds_f64(
-                self.nodes.len() as f64 * self.network.borrow().config().delay_range.end().as_seconds_f64(),
-            );
-            if now - t > min(stability_window, Duration::seconds(10)) {
-                return Some(SimulationOutcome::Converged(t));
-            }
+        let now = *self.now.borrow();
+        self.maybe_recompute_convergence_state(now);
+        if let Some(outcome) = self.try_convergence_outcome(now) {
+            return Some(outcome);
         }
 
         // Advance the time to the next event.
-        let next_time = min(
-            self.nodes.iter().map(|node| node.next_update_at()).min().unwrap(),
-            self.network.borrow().soonest_arrival_at().unwrap_or(Duration::MAX),
-        );
+        let next_node_update = self.nodes.iter().map(|node| node.next_update_at()).min().unwrap_or(Duration::MAX);
+        let next_arrival = self.network.borrow().soonest_arrival_at().unwrap_or(Duration::MAX);
+        let next_time = min(next_node_update, next_arrival);
         assert!(next_time >= now);
-        let increment = max(next_time - now, Duration::microseconds(10));
-        *self.now.borrow_mut() += increment;
         if next_time >= self.cfg.time_limit {
+            *self.now.borrow_mut() = self.cfg.time_limit;
+            self.recompute_convergence_state(self.cfg.time_limit);
             return Some(SimulationOutcome::TimeLimitReached);
         }
+        *self.now.borrow_mut() = if next_time > now { next_time } else { now + MIN_STEP };
 
         None
     }
@@ -133,6 +114,14 @@ impl<'a> Simulation<'a> {
         }
     }
 
+    pub fn run_quiet(&mut self) -> SimulationOutcome {
+        loop {
+            if let Some(outcome) = self.step() {
+                return outcome;
+            }
+        }
+    }
+
     fn capture(&self) -> Snapshot {
         let net = self.network.borrow().stats();
         Snapshot {
@@ -143,6 +132,81 @@ impl<'a> Simulation<'a> {
             rx_total: net.received_total(),
             loss_total: net.lost,
         }
+    }
+
+    fn process_due_events(&mut self, now: Duration) {
+        // Periodic updates are evaluated exactly once at this timestamp.
+        let mut periodic_due = self.nodes.iter().map(|node| node.next_update_at() <= now).collect::<Vec<bool>>();
+        loop {
+            let arrivals = self.network.borrow_mut().drain_due(now);
+            let mut arrivals_iter = arrivals.into_iter().peekable();
+            let mut processed_any = false;
+
+            for (index, node) in self.nodes.iter_mut().enumerate() {
+                let incoming = if let Some((destination, _)) = arrivals_iter.peek() {
+                    if *destination == node.id() {
+                        arrivals_iter.next().expect("peeked arrival vanished").1
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    Vec::new()
+                };
+                if periodic_due[index] || !incoming.is_empty() {
+                    node.step(incoming);
+                    processed_any = true;
+                }
+            }
+            debug_assert!(arrivals_iter.next().is_none(), "arrival destination does not match any node");
+            if !processed_any {
+                break;
+            }
+            self.step_count = self.step_count.wrapping_add(1);
+            periodic_due.fill(false);
+        }
+    }
+
+    fn maybe_recompute_convergence_state(&mut self, now: Duration) {
+        while now >= self.next_convergence_check_at {
+            self.recompute_convergence_state(now);
+            self.next_convergence_check_at += CONVERGENCE_CHECK_PERIOD;
+        }
+    }
+
+    fn recompute_convergence_state(&mut self, now: Duration) {
+        let collisions = count_collisions(&self.nodes);
+        let divergences = count_divergent(&self.nodes);
+        match self.converged_at {
+            Some(_) => {
+                if collisions > 0 || divergences > 0 {
+                    self.converged_at = None;
+                }
+            }
+            None => {
+                if collisions == 0 && divergences == 0 {
+                    self.converged_at = Some(now);
+                }
+            }
+        }
+    }
+
+    fn try_convergence_outcome(&mut self, now: Duration) -> Option<SimulationOutcome> {
+        let stability_window = Duration::seconds_f64(
+            self.nodes.len() as f64 * self.network.borrow().config().delay_range.end().as_seconds_f64(),
+        );
+        let required_stability = min(stability_window, Duration::seconds(10));
+        if let Some(t) = self.converged_at {
+            if now - t > required_stability {
+                // Ensure final outcome uses freshly recomputed full-state consensus status.
+                self.recompute_convergence_state(now);
+                if let Some(updated) = self.converged_at {
+                    if now - updated > required_stability {
+                        return Some(SimulationOutcome::Converged(updated));
+                    }
+                }
+            }
+        }
+        None
     }
 }
 

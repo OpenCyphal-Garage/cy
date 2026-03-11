@@ -99,6 +99,57 @@ impl TimeStats {
     }
 }
 
+pub fn print_convergence_histogram(time_samples: &[Duration], time_limit: Duration) {
+    if time_samples.is_empty() {
+        return;
+    }
+    let times_f64: Vec<f64> = time_samples.iter().map(|t| t.as_seconds_f64()).collect();
+
+    // Use full range from 0 to time_limit to show how much headroom was available.
+    let max_seconds = time_limit.as_seconds_f64().ceil() as i32;
+    let span = max_seconds as usize;
+    if span == 0 {
+        eprintln!("Histogram: time limit is 0 seconds");
+        return;
+    }
+
+    // Find largest "nice" bin size that gives enough bins.
+    let min_bins = 30;
+    let nice_sizes = [100, 60, 30, 20, 10, 6, 3, 2, 1];
+    let mut bin_size = 1;
+    for size in nice_sizes.iter() {
+        let num_bins = ((span as f64) / (*size as f64)).ceil() as usize;
+        if num_bins >= min_bins {
+            bin_size = *size;
+            break;
+        }
+    }
+    let num_bins = (span as f64 / bin_size as f64).ceil() as usize;
+
+    // Bin the data.
+    let mut counts = vec![0usize; num_bins];
+    for &t in &times_f64 {
+        let bin_idx = (t / bin_size as f64) as usize;
+        if bin_idx < num_bins {
+            counts[bin_idx] += 1;
+        }
+    }
+    let max_count = counts.iter().max().unwrap_or(&0);
+    let bar_width = 40usize;
+
+    // Print the histogram.
+    eprintln!(
+        "\n📊 CONVERGENCE TIME HISTOGRAM [s] ({} bins × {} s each, limit: {} s)",
+        num_bins, bin_size, max_seconds
+    );
+    for (i, &count) in counts.iter().enumerate() {
+        let lo = i as f64 * bin_size as f64;
+        let hi = lo + bin_size as f64;
+        let filled = if *max_count > 0 { count * bar_width / max_count } else { 0 };
+        eprintln!("{:6.1} – {:6.1} |{}{} {}", lo, hi, "█".repeat(filled), " ".repeat(bar_width - filled), count);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,5 +247,16 @@ mod tests {
     #[test]
     fn summarize_times_returns_none_for_empty_input() {
         assert!(TimeStats::compute(&[]).is_none());
+    }
+
+    #[test]
+    fn worker_count_uses_logical_minus_one_heuristic() {
+        assert_eq!(1, compute_worker_count_from_logical(0));
+        assert_eq!(1, compute_worker_count_from_logical(1));
+        assert_eq!(1, compute_worker_count_from_logical(2));
+        assert_eq!(2, compute_worker_count_from_logical(3));
+        assert_eq!(3, compute_worker_count_from_logical(4));
+        assert_eq!(7, compute_worker_count_from_logical(8));
+        assert_eq!(19, compute_worker_count_from_logical(20));
     }
 }
