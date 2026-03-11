@@ -101,12 +101,36 @@ impl TimeStats {
 }
 
 pub fn print_convergence_histogram(time_samples: &[Duration]) {
-    let mut time_samples = time_samples.to_vec();
-    time_samples.sort();
+    if time_samples.is_empty() {
+        return;
+    }
     let times_f64: Vec<f64> = time_samples.iter().map(|t| t.as_seconds_f64()).collect();
-    let options = plot::HistogramOptions { intervals: 20, ..Default::default() };
+
+    // Round min/max to nearest second boundaries
+    let min_seconds = times_f64.iter().cloned().fold(f64::INFINITY, f64::min).floor() as i32;
+    let max_seconds = times_f64.iter().cloned().fold(0.0, f64::max).ceil() as i32;
+    let span = (max_seconds - min_seconds) as usize;
+    if span == 0 {
+        eprintln!("Histogram: all values identical ({:.3} s)", times_f64[0]);
+        return;
+    }
+
+    // Find smallest "nice" bin size [1, 2, 5, 10, 20, 50, ...] that gives >= 10 bins
+    let nice_sizes = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000];
+    let mut bin_size = 1;
+    for size in nice_sizes.iter() {
+        let num_bins = ((span as f64) / (*size as f64)).ceil() as usize;
+        if num_bins >= 10 {
+            bin_size = *size;
+            break;
+        }
+    }
+    let num_bins = ((span as f64) / (bin_size as f64)).ceil() as usize;
+
+    // Display histogram with calculated bin count
+    let options = plot::HistogramOptions { intervals: num_bins, ..Default::default() };
     let histogram = plot::Histogram::new(&times_f64, options);
-    eprintln!("\n📊 CONVERGENCE TIME HISTOGRAM [second]\n{}", histogram);
+    eprintln!("\n📊 CONVERGENCE TIME HISTOGRAM [s] ({} bins × {} s each)\n{}", num_bins, bin_size, histogram);
 }
 
 #[cfg(test)]
