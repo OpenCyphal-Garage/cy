@@ -27,7 +27,8 @@
 *.profraw
 *.luarc*
 .scannerwork
-target/
+target*/
+*.data
 Cargo.lock
 build*/
 cmake*build*/
