@@ -1,4 +1,5 @@
 use duration_str::parse_time;
+use lowcharts::plot;
 use num_traits::{PrimInt, Unsigned};
 use std::ops::RangeInclusive;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -97,6 +98,15 @@ impl TimeStats {
 
         Some(TimeStats { min, mean, median, max })
     }
+}
+
+pub fn print_convergence_histogram(time_samples: &[Duration]) {
+    let mut time_samples = time_samples.to_vec();
+    time_samples.sort();
+    let times_f64: Vec<f64> = time_samples.iter().map(|t| t.as_seconds_f64()).collect();
+    let options = plot::HistogramOptions { intervals: 20, ..Default::default() };
+    let histogram = plot::Histogram::new(&times_f64, options);
+    eprintln!("\n📊 CONVERGENCE TIME HISTOGRAM [second]\n{}", histogram);
 }
 
 #[cfg(test)]

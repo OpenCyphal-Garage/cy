@@ -10,7 +10,10 @@ mod util;
 
 use node::NodeConfig;
 use simulation::{NetworkConfig, Simulation, SimulationConfig, SimulationOutcome, Snapshot};
-use util::{TimeStats, derive_seed, generate_seed, parse_duration, parse_duration_range, worker_count};
+use util::{
+    TimeStats, derive_seed, generate_seed, parse_duration, parse_duration_range, print_convergence_histogram,
+    worker_count,
+};
 
 use clap::{CommandFactory, Parser, error::ErrorKind};
 use rand::SeedableRng;
@@ -382,7 +385,6 @@ fn run_parallel(config: Config) -> ExitCode {
     if panicked_workers > 0 {
         eprintln!("{panicked_workers} worker thread(s) panicked.");
     }
-
     eprintln!("Completed: converged={}, failed={}, remaining=0", converged_times.len(), failure_count);
     if let Some(stats) = TimeStats::compute(&converged_times) {
         eprintln!(
@@ -392,15 +394,10 @@ fn run_parallel(config: Config) -> ExitCode {
     } else {
         eprintln!("Convergence time stats [s]: n/a (no successful runs)");
     }
-    converged_times.sort();
-    eprintln!(
-        "Convergence times [s], sorted (successful runs only): {}",
-        converged_times.iter().map(|t| format!("{:.1}", t.as_seconds_f64())).collect::<Vec<_>>().join(", ")
-    );
-
     if time_limit_failures > 0 {
         eprintln!("Runs that did not converge before time limit: {time_limit_failures}");
     }
+    print_convergence_histogram(&converged_times);
 
     if (failure_count > 0) || (panicked_workers > 0) { ExitCode::FAILURE } else { ExitCode::SUCCESS }
 }
