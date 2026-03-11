@@ -115,8 +115,8 @@ pub fn print_convergence_histogram(time_samples: &[Duration]) {
         return;
     }
 
-    // Find smallest "nice" bin size [1, 2, 5, 10, 20, 50, ...] that gives >= 10 bins
-    let nice_sizes = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000];
+    // Find largest "nice" bin size [1, 2, 5, 10, 20, 50, ...] that gives >= 10 bins
+    let nice_sizes = [5000, 2000, 1000, 500, 200, 100, 50, 20, 10, 5, 2, 1];
     let mut bin_size = 1;
     for size in nice_sizes.iter() {
         let num_bins = ((span as f64) / (*size as f64)).ceil() as usize;
