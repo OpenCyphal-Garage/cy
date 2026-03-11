@@ -13,6 +13,8 @@ use time::Duration;
 
 pub use self::network::{NetworkConfig, NetworkStats};
 
+const MIN_STEP: Duration = Duration::microseconds(50);
+
 #[derive(Debug, Clone)]
 pub struct SimulationConfig {
     pub time_limit: Duration,
@@ -104,7 +106,7 @@ impl<'a> Simulation<'a> {
             self.network.borrow().soonest_arrival_at().unwrap_or(Duration::MAX),
         );
         assert!(next_time >= now);
-        let increment = max(next_time - now, Duration::microseconds(10));
+        let increment = max(next_time - now, MIN_STEP);
         *self.now.borrow_mut() += increment;
         if next_time >= self.cfg.time_limit {
             return Some(SimulationOutcome::TimeLimitReached);
