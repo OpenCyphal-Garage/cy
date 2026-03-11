@@ -114,6 +114,14 @@ impl<'a> Simulation<'a> {
         }
     }
 
+    pub fn run_quiet(&mut self) -> SimulationOutcome {
+        loop {
+            if let Some(outcome) = self.step() {
+                return outcome;
+            }
+        }
+    }
+
     fn capture(&self) -> Snapshot {
         let net = self.network.borrow().stats();
         Snapshot {
