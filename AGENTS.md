@@ -16,7 +16,7 @@ Update docs/examples when public API behavior changes.
 - `tests/`: the test suite; refer to its own README.
 - `examples/`: runnable demos.
 - `lib/`: all external dependencies for the library itself, for the test suite, and for the demos.
-- `model/`: formal protocol specification and verification models. Read it to understand the protocol.
+- `model/`: formal protocol models. Read it to understand the protocol, esp. READMEs & notebooks.
 - `tools/`: various utilities useful for development, validation, and verification.
 - `papers/`: relevant publications and prior art.
 
