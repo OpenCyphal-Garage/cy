@@ -104,21 +104,9 @@ struct Config {
     #[arg(long, value_parser = parse_duration, default_value_t = NodeConfig::default().peer_age_reachable)]
     peer_age_reachable: Duration,
 
-    /// A peer will be replaced unconditionally at next opportunity (bypassing probabilistic sampling)
-    /// if it was last seen longer than this ago.
+    /// A peer is considered expired and may be replaced by new peers if it was last seen longer than this ago.
     #[arg(long, value_parser = parse_duration, default_value_t = NodeConfig::default().peer_age_replaceable)]
     peer_age_replaceable: Duration,
-
-    /// Peers that are still reachable (which are all peers during normal operation) will be replaced anyway
-    /// with this probability at each gossip outside of the moratorium period to ensure mixing.
-    #[arg(long, default_value_t = NodeConfig::default().peer_replacement_probability)]
-    peer_replacement_probability: f64,
-
-    /// After a peer replacement, there is a moratorium period during which the new peer cannot be replaced again to
-    /// make the peer churn rate less dependent on the network size, ensuring more consistent parameters across
-    /// networks of various sizes.
-    #[arg(long, value_parser = parse_duration_range, default_value = "0..1")]
-    peer_moratorium_range: RangeInclusive<Duration>,
 
     // ----------------------------------------------------------------------------------------------------------------
     /// Epidemic duplicate gossip drop cache is necessary for network load regulation; see the model.
@@ -164,8 +152,6 @@ impl Config {
             peer_count: self.peer_count,
             peer_age_reachable: self.peer_age_reachable,
             peer_age_replaceable: self.peer_age_replaceable,
-            peer_replacement_probability: self.peer_replacement_probability,
-            peer_moratorium_range: self.peer_moratorium_range.clone(),
             dedup_capacity: self.dedup_capacity,
             dedup_timeout: self.dedup_timeout,
         }
@@ -231,12 +217,13 @@ fn run_single(config: Config) -> ExitCode {
                 topics_by_node_tail.map(|n| n.to_string()).collect::<Vec<_>>().join(", ")
             );
             eprintln!(
-                "│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^25}│{:^25}│",
+                "│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^25}│{:^25}│",
                 "time [s]",
                 "steps",
                 "steps/s",
                 "collision",
                 "divergent",
+                "unlisted",
                 "Σ tx",
                 "Δ tx",
                 "tx/s",
@@ -259,12 +246,13 @@ fn run_single(config: Config) -> ExitCode {
         let rx_per_node_cumulative = snap.rx_total as f64 / (node_count as f64);
         let arrival_load_per_node = if t > 0.0 { rx_per_node_cumulative / t } else { 0.0 };
         eprintln!(
-            "│{:10.3}│{:10}│{:10.1}│{:10}│{:10}│{:10}│{:10}│{:10.1}│{:10}│{:10}│{:25.1}│{:25.1}│",
+            "│{:10.3}│{:10}│{:10.1}│{:10}│{:10}│{:10}│{:10}│{:10}│{:10.1}│{:10}│{:10}│{:25.1}│{:25.1}│",
             t,
             snap.steps,
             step_rate,
             snap.count_collisions(),
             snap.count_divergent(),
+            snap.count_unlisted_nodes(),
             snap.tx_total,
             tx_delta,
             tx_rate,

@@ -10,7 +10,6 @@ use rand::{Rng, RngExt};
 use smart_default::SmartDefault;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::ops::RangeInclusive;
 use std::rc::Rc;
 use time::Duration;
 
@@ -34,16 +33,12 @@ pub struct NodeConfig {
     #[default(_code = "2")]
     pub gossip_outdegree_urgent: u8,
 
-    #[default(_code = "8")]
+    #[default(_code = "20")]
     pub peer_count: usize,
     #[default(_code = "Duration::seconds(30)")]
     pub peer_age_reachable: Duration,
     #[default(_code = "Duration::seconds(15)")]
     pub peer_age_replaceable: Duration,
-    #[default(_code = "0.125")]
-    pub peer_replacement_probability: f64,
-    #[default(_code = "Duration::ZERO..=Duration::seconds_f64(0.1)")]
-    pub peer_moratorium_range: RangeInclusive<Duration>,
 
     #[default(_code = "16")]
     pub dedup_capacity: usize,
@@ -98,8 +93,6 @@ impl<'a> Node<'a> {
             peer_count: cfg.peer_count,
             peer_age_reachable: cfg.peer_age_reachable,
             peer_age_replaceable: cfg.peer_age_replaceable,
-            peer_replacement_probability: cfg.peer_replacement_probability,
-            peer_moratorium_range: cfg.peer_moratorium_range.clone(),
         };
         let gossip_dedup_cfg = GossipDedupConfig { capacity: cfg.dedup_capacity, timeout: cfg.dedup_timeout };
         Ok(Self {
@@ -241,8 +234,7 @@ impl<'a> Node<'a> {
     }
 
     fn observe_peer(&mut self, now: Duration, remote_id: u16) {
-        let mut rng = self.rng.borrow_mut();
-        self.peer_sampler.observe(now, remote_id, &mut *rng);
+        self.peer_sampler.observe(now, remote_id);
     }
 
     fn sample_peer_targets(&mut self, now: Duration, outdegree: u8, blacklist: &[u16]) -> Vec<u16> {
@@ -451,16 +443,6 @@ impl<'a> Node<'a> {
     #[cfg(test)]
     fn set_peers_for_test(&mut self, peers: Vec<(u16, Duration)>) {
         self.peer_sampler.set_peers_for_test(peers);
-    }
-
-    #[cfg(test)]
-    fn set_peer_moratorium_until_for_test(&mut self, until: Duration) {
-        self.peer_sampler.set_moratorium_until_for_test(until);
-    }
-
-    #[cfg(test)]
-    fn peer_moratorium_until_for_test(&self) -> Duration {
-        self.peer_sampler.moratorium_until_for_test()
     }
 }
 

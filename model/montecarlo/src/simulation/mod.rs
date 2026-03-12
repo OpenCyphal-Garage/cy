@@ -261,6 +261,19 @@ impl Snapshot {
         }
         by_hash.values().filter(|evictions| evictions.len() > 1).count()
     }
+
+    pub fn count_unlisted_nodes(&self) -> usize {
+        let mut inbound_references = vec![0usize; self.nodes.len()];
+        for node in &self.nodes {
+            for &peer in &node.peers {
+                let peer_index = peer as usize;
+                if peer_index < inbound_references.len() {
+                    inbound_references[peer_index] += 1;
+                }
+            }
+        }
+        inbound_references.into_iter().filter(|count| *count == 0).count()
+    }
 }
 
 fn count_collisions(nodes: &[Node]) -> usize {
@@ -310,4 +323,41 @@ fn generate_network<'a>(
         }
     }
     Ok(nodes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_snapshot(peers_by_node: &[Vec<u16>]) -> Snapshot {
+        Snapshot {
+            time: Duration::ZERO,
+            steps: 0,
+            nodes: peers_by_node
+                .iter()
+                .enumerate()
+                .map(|(id, peers)| NodeSnapshot {
+                    id: id as u16,
+                    subject_id_modulus: 1999,
+                    topics: Vec::new(),
+                    peers: peers.clone(),
+                })
+                .collect(),
+            tx_total: 0,
+            rx_total: 0,
+            loss_total: 0,
+        }
+    }
+
+    #[test]
+    fn count_unlisted_nodes_counts_zero_inbound_references() {
+        let snapshot = make_snapshot(&[vec![1], vec![0], vec![1], vec![]]);
+        assert_eq!(2, snapshot.count_unlisted_nodes());
+    }
+
+    #[test]
+    fn count_unlisted_nodes_ignores_out_of_range_peer_ids() {
+        let snapshot = make_snapshot(&[vec![7], vec![0]]);
+        assert_eq!(1, snapshot.count_unlisted_nodes());
+    }
 }

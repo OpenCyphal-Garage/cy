@@ -1,4 +1,5 @@
 use super::*;
+use peer_sampler::ticket;
 use rand::RngExt;
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
@@ -284,48 +285,115 @@ fn forwarding_respects_message_outdegree_and_excludes_sender() {
 }
 
 #[test]
-fn stale_peer_is_replaced_even_during_moratorium() {
+fn deterministic_sampler_keeps_smallest_tickets_in_integration_path() {
     let cfg = NodeConfig {
         subject_id_modulus: 11,
-        peer_count: 1,
-        peer_age_replaceable: Duration::seconds(5),
-        peer_replacement_probability: 0.0,
+        peer_count: 3,
+        peer_age_replaceable: Duration::seconds(100),
         gossip_outdegree_urgent: 0,
         ..NodeConfig::default()
     };
     let (mut node, _, now) = make_recording_node(cfg);
     node.gossip_at = Duration::MAX;
-    node.set_peers_for_test(vec![(1, Duration::ZERO)]);
-    node.set_peer_moratorium_until_for_test(Duration::seconds(1000));
-
-    *now.borrow_mut() = Duration::seconds(10);
-    node.step(vec![make_message(2, 0, 0, 12, 0, -1)]);
-    assert_eq!(vec![2], node.peer_ids());
+    *now.borrow_mut() = Duration::seconds(1);
+    for sender in [1_u16, 2, 3, 4, 5, 6] {
+        node.step(vec![make_message(sender, 0, 0, 99, 0, -1)]);
+    }
+    let actual = node.peer_ids().into_iter().collect::<BTreeSet<_>>();
+    let expected = (1_u16..=6).map(|sender| (sender, ticket(0, sender))).collect::<Vec<_>>();
+    let expected = expected
+        .iter()
+        .cloned()
+        .fold(Vec::<(u16, u64)>::new(), |mut smallest, entry| {
+            smallest.push(entry);
+            smallest.sort_by_key(|(_, t)| *t);
+            smallest.truncate(3);
+            smallest
+        })
+        .into_iter()
+        .map(|(sender, _)| sender)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(expected, actual);
 }
 
 #[test]
-fn probabilistic_peer_replacement_is_gated_by_moratorium() {
+fn expired_peer_is_replaced_even_if_new_ticket_is_worse() {
+    let cfg = NodeConfig {
+        subject_id_modulus: 11,
+        peer_count: 2,
+        peer_age_replaceable: Duration::seconds(5),
+        gossip_outdegree_urgent: 0,
+        ..NodeConfig::default()
+    };
+    let (mut node, _, now) = make_recording_node(cfg);
+    node.gossip_at = Duration::MAX;
+    node.set_peers_for_test(vec![(1, Duration::ZERO), (2, Duration::seconds(9))]);
+    let replacement = (3_u16..=64)
+        .find(|sender| ticket(0, *sender) > ticket(0, 1))
+        .expect("test setup requires a worse-ticket replacement candidate");
+    assert!(ticket(0, replacement) > ticket(0, 1));
+
+    *now.borrow_mut() = Duration::seconds(10);
+    node.step(vec![make_message(replacement, 0, 0, 99, 0, -1)]);
+
+    let ids = node.peer_ids().into_iter().collect::<BTreeSet<_>>();
+    assert!(ids.contains(&2));
+    assert!(ids.contains(&replacement));
+    assert!(!ids.contains(&1));
+}
+
+#[test]
+fn consecutive_better_tickets_replace_immediately_without_moratorium() {
     let cfg = NodeConfig {
         subject_id_modulus: 11,
         peer_count: 1,
         peer_age_replaceable: Duration::seconds(100),
-        peer_replacement_probability: 1.0,
-        peer_moratorium_range: Duration::seconds(10)..=Duration::seconds(10),
         gossip_outdegree_urgent: 0,
         ..NodeConfig::default()
     };
     let (mut node, _, now) = make_recording_node(cfg);
     node.gossip_at = Duration::MAX;
-    node.set_peers_for_test(vec![(1, Duration::ZERO)]);
-    node.set_peer_moratorium_until_for_test(Duration::seconds(5));
+    let all = (1_u16..=32).map(|sender| (sender, ticket(0, sender))).collect::<Vec<_>>();
+    let worst = all.iter().max_by_key(|(_, t)| *t).map(|(sender, _)| *sender).expect("non-empty setup");
+    let mut best_two = all.clone();
+    best_two.sort_by_key(|(_, t)| *t);
+    let first = best_two[1].0;
+    let second = best_two[0].0;
+    node.set_peers_for_test(vec![(worst, Duration::ZERO)]);
+
+    *now.borrow_mut() = Duration::seconds(10);
+    node.step(vec![make_message(first, 0, 0, 99, 0, -1)]);
+    node.step(vec![make_message(second, 0, 0, 99, 0, -1)]);
+    assert_eq!(vec![second], node.peer_ids());
+}
+
+#[test]
+fn live_peer_is_not_replaced_by_worse_tickets() {
+    let cfg = NodeConfig {
+        subject_id_modulus: 11,
+        peer_count: 1,
+        peer_age_replaceable: Duration::seconds(100),
+        gossip_outdegree_urgent: 0,
+        ..NodeConfig::default()
+    };
+    let (mut node, _, now) = make_recording_node(cfg);
+    node.gossip_at = Duration::MAX;
+    let all = (1_u16..=64).map(|sender| (sender, ticket(0, sender))).collect::<Vec<_>>();
+    let best = all.iter().min_by_key(|(_, t)| *t).map(|(sender, _)| *sender).expect("non-empty setup");
+    let worse = all
+        .iter()
+        .find(|(sender, t)| (*sender != best) && (*t > ticket(0, best)))
+        .map(|(sender, _)| *sender)
+        .expect("test setup requires a worse-ticket candidate");
+    node.set_peers_for_test(vec![(best, Duration::ZERO)]);
 
     *now.borrow_mut() = Duration::seconds(1);
-    node.step(vec![make_message(2, 0, 0, 12, 0, -1)]);
-    assert_eq!(vec![1], node.peer_ids());
-    *now.borrow_mut() = Duration::seconds(6);
-    node.step(vec![make_message(2, 0, 0, 13, 0, -1)]);
-    assert_eq!(vec![2], node.peer_ids());
-    assert_eq!(Duration::seconds(16), node.peer_moratorium_until_for_test());
+    node.step(vec![make_message(worse, 0, 0, 99, 0, -1)]);
+    *now.borrow_mut() = Duration::seconds(2);
+    node.step(vec![make_message(worse, 0, 0, 99, 0, -1)]);
+    *now.borrow_mut() = Duration::seconds(3);
+    node.step(vec![make_message(worse, 0, 0, 99, 0, -1)]);
+    assert_eq!(vec![best], node.peer_ids());
 }
 
 #[test]
