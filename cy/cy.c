@@ -2088,7 +2088,7 @@ static void on_gossip(cy_t* const        cy,
     // Find the topic, create one if there's a matching pattern subscriber.
     cy_topic_t* mine = cy_topic_find_by_hash(cy, hash);
     if ((mine == NULL) && (name.len > 0)) { // a name is required but maybe the publisher is non-compliant
-        mine = topic_subscribe_if_matching(cy, name, hash, evictions, lage);
+        mine = topic_subscribe_if_matching(cy, name, hash, evictions, lage); // TODO only if broadcast or unicast
     }
     if (out_topic != NULL) {
         *out_topic = mine;
