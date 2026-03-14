@@ -277,6 +277,44 @@ fn shard_selection_is_invariant_across_evictions_for_same_hash() {
 }
 
 #[test]
+fn allocate_topic_schedules_broadcast_for_all_changed_evictions() {
+    let cfg = NodeConfig { subject_id_modulus: 11, gossip_urgent_delay: Duration::ZERO, ..NodeConfig::default() };
+    let (mut node, _log, now) = make_recording_node(cfg, 16);
+    node.add_topic(0);
+    node.add_topic(1);
+
+    let now_value = Duration::seconds(10);
+    *now.borrow_mut() = now_value;
+    let final_evictions = node.allocate_topic(0, 1, now_value);
+
+    assert_eq!(1, final_evictions);
+    assert_eq!(1, node.topics_by_hash.get(&0).expect("topic 0 missing").evictions());
+    assert_eq!(1, node.topics_by_hash.get(&1).expect("topic 1 missing").evictions());
+
+    let pending_a = node.pending_urgent_by_hash.get(&0).copied().expect("topic 0 urgent missing");
+    let pending_b = node.pending_urgent_by_hash.get(&1).copied().expect("topic 1 urgent missing");
+    assert_eq!(UrgentScope::Broadcast, pending_a.scope);
+    assert_eq!(UrgentScope::Broadcast, pending_b.scope);
+    assert_eq!(now_value, pending_a.deadline);
+    assert_eq!(now_value, pending_b.deadline);
+}
+
+#[test]
+fn allocate_topic_without_eviction_change_schedules_no_broadcast() {
+    let cfg = NodeConfig { gossip_urgent_delay: Duration::ZERO, ..NodeConfig::default() };
+    let (mut node, _log, now) = make_recording_node(cfg, 16);
+    node.add_topic(77);
+
+    let now_value = Duration::seconds(3);
+    *now.borrow_mut() = now_value;
+    let final_evictions = node.allocate_topic(77, 0, now_value);
+
+    assert_eq!(0, final_evictions);
+    assert_eq!(0, node.topics_by_hash.get(&77).expect("topic missing after allocation").evictions());
+    assert!(node.pending_urgent_by_hash.is_empty());
+}
+
+#[test]
 fn urgent_requests_coalesce_and_upgrade_to_broadcast() {
     let cfg = NodeConfig { gossip_urgent_delay: Duration::milliseconds(50), ..NodeConfig::default() };
     let (mut node, _log, now) = make_recording_node(cfg, 100);

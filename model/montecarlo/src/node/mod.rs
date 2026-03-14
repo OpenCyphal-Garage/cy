@@ -474,7 +474,12 @@ impl<'a> Node<'a> {
     }
 
     fn allocate_topic(&mut self, topic_hash: u64, new_evictions: u16, now: Duration) -> u16 {
+        let mut original_evictions_by_hash = BTreeMap::new();
         let mut moving = self.remove_topic_by_hash(topic_hash);
+        let initial_evictions = moving.evictions();
+        if initial_evictions != new_evictions {
+            original_evictions_by_hash.insert(topic_hash, initial_evictions);
+        }
         moving.set_evictions(new_evictions);
         loop {
             let subject_id = moving.subject_id(self.cfg.subject_id_modulus);
@@ -485,8 +490,10 @@ impl<'a> Node<'a> {
                     if left_wins_collision(&moving, now, displaced.lage(now), displaced.hash()) {
                         self.insert_topic(moving);
                         moving = displaced;
+                        original_evictions_by_hash.entry(moving.hash()).or_insert(moving.evictions());
                         moving.evict();
                     } else {
+                        original_evictions_by_hash.entry(moving.hash()).or_insert(moving.evictions());
                         moving.evict();
                         self.insert_topic(displaced);
                     }
@@ -494,6 +501,14 @@ impl<'a> Node<'a> {
                 None => {
                     let final_evictions = moving.evictions();
                     self.insert_topic(moving);
+                    for (changed_hash, original_evictions) in original_evictions_by_hash {
+                        let updated_evictions = self.topics_by_hash.get(&changed_hash).expect("missing").evictions();
+                        if updated_evictions != original_evictions {
+                            // Subject-ID occupancy changed for this topic; reveal it network-wide.
+                            // This will reveal collisions if any other topic is occupying the same subject-ID.
+                            self.schedule_urgent(now, changed_hash, UrgentScope::Broadcast);
+                        }
+                    }
                     debug_assert_eq!(0, self.count_local_collisions(), "local allocation incorrect");
                     return final_evictions;
                 }
@@ -515,14 +530,10 @@ impl<'a> Node<'a> {
             } else {
                 // The local replica is obsolete. If we can move exactly to the specified subject-ID (evictions),
                 // then nothing needs to be gossiped because that state is already known to be occupied by this topic.
-                // If that subject-ID is occupied locally and we can't displace that topic, then we need to bump
-                // evictions further and broadcast because the subject-ID occupancy is changing and we need to reveal
-                // potential conflicts with other topics we might not be aware of.
+                // If that subject-ID is occupied locally and we can't displace that topic, allocation may bump one or
+                // more eviction counters; allocate_topic() schedules urgent broadcast for all such changes.
                 self.topics_by_hash.get_mut(&hash).expect("known topic disappeared").merge_lage(lage, now);
-                let final_evictions = self.allocate_topic(hash, evictions, now);
-                if final_evictions != evictions {
-                    self.schedule_urgent(now, hash, UrgentScope::Broadcast);
-                }
+                self.allocate_topic(hash, evictions, now);
                 CrdtMergeOutcome::LocalLoss
             }
         } else {
@@ -552,10 +563,8 @@ impl<'a> Node<'a> {
             CrdtMergeOutcome::LocalWin
         } else {
             let bumped = local_evictions.checked_add(1).expect("too many evictions");
+            // We lost, so we need to move; allocate_topic() broadcasts occupancy changes.
             self.allocate_topic(local_hash, bumped, now);
-            // We lost, so we need to move; the subject-ID occupancy is changing therefore we MUST announce it to the
-            // entire network to reveal potential conflicts with other topics we might not be aware of.
-            self.schedule_urgent(now, local_hash, UrgentScope::Broadcast);
             CrdtMergeOutcome::LocalLoss
         }
     }
