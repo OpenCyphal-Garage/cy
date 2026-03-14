@@ -29,6 +29,7 @@ pub(super) struct Network {
     /// Shared states.
     now: Rc<dyn Fn() -> Duration + 'static>,
     rng: Rc<RefCell<dyn Rng>>,
+    delivery_destinations: Vec<u16>,
 
     stats: NetworkStats,
     cfg: NetworkConfig,
@@ -48,12 +49,19 @@ impl Transmit for Network {
                 }
             }
             GossipScope::Shard(shard_id) => {
-                let subscribers = self.shard_subscribers.get(&shard_id).cloned().unwrap_or_default();
-                for destination in subscribers {
+                self.delivery_destinations.clear();
+                if let Some(subscribers) = self.shard_subscribers.get(&shard_id) {
+                    self.delivery_destinations
+                        .extend(subscribers.iter().copied().filter(|destination| *destination != message.sender_id()));
+                }
+                let mut destinations = std::mem::take(&mut self.delivery_destinations);
+                for destination in destinations.iter().copied() {
                     if destination != message.sender_id() {
                         self.enqueue_delivery(destination, message.clone());
                     }
                 }
+                destinations.clear();
+                self.delivery_destinations = destinations;
             }
         }
     }
@@ -88,6 +96,7 @@ impl Network {
             shard_subscribers: BTreeMap::new(),
             now,
             rng,
+            delivery_destinations: Vec::new(),
             stats: NetworkStats::default(),
             cfg: cfg.clone(),
         }

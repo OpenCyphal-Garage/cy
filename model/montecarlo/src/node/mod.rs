@@ -4,7 +4,7 @@ use crate::util::is_prime;
 use rand::{Rng, RngExt};
 use smart_default::SmartDefault;
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 use time::Duration;
 
@@ -65,6 +65,7 @@ pub struct Node<'a> {
     id: u16,
     shard_count: u32,
     topics_by_hash: BTreeMap<u64, Topic>,
+    topic_hash_by_subject_id: HashMap<u32, u64>,
 
     /// Local topics are scheduled independently by per-topic next-gossip timestamps.
     topic_schedule_by_hash: BTreeMap<u64, TopicScheduleState>,
@@ -102,6 +103,7 @@ impl<'a> Node<'a> {
             id,
             shard_count,
             topics_by_hash: BTreeMap::new(),
+            topic_hash_by_subject_id: HashMap::new(),
             topic_schedule_by_hash: BTreeMap::new(),
             pending_urgent_by_hash: BTreeMap::new(),
             next_topic_update_at: Cell::new(Duration::MAX),
@@ -149,19 +151,18 @@ impl<'a> Node<'a> {
             let collided_hash = self.find_topic_by_subject_id(subject_id);
             match collided_hash {
                 Some(hash) => {
-                    let displaced =
-                        self.topics_by_hash.remove(&hash).expect("collision peer disappeared during local allocation");
+                    let displaced = self.remove_topic_by_hash(hash);
                     if left_wins_collision(&moving, Duration::ZERO, displaced.lage(Duration::ZERO), displaced.hash()) {
-                        self.topics_by_hash.insert(moving.hash(), moving);
+                        self.insert_topic(moving);
                         moving = displaced;
                         moving.evict();
                     } else {
                         moving.evict();
-                        self.topics_by_hash.insert(displaced.hash(), displaced);
+                        self.insert_topic(displaced);
                     }
                 }
                 None => {
-                    self.topics_by_hash.insert(moving.hash(), moving);
+                    self.insert_topic(moving);
                     break;
                 }
             }
@@ -178,11 +179,7 @@ impl<'a> Node<'a> {
         let next_topic = self.cached_next_topic_update_at();
         let next_urgent = self.cached_next_urgent_update_at();
         let next = std::cmp::min(next_topic, next_urgent);
-        debug_assert_eq!(
-            next,
-            self.next_update_at_full_scan(),
-            "cached next-update deadline diverged from full scan"
-        );
+        debug_assert_eq!(next, self.next_update_at_full_scan(), "cached next-update deadline diverged from full scan");
         next
     }
 
@@ -259,8 +256,10 @@ impl<'a> Node<'a> {
     }
 
     fn next_update_at_full_scan(&self) -> Duration {
-        let next_topic = self.topic_schedule_by_hash.values().map(|state| state.next_gossip_at).min().unwrap_or(Duration::MAX);
-        let next_urgent = self.pending_urgent_by_hash.values().map(|entry| entry.deadline).min().unwrap_or(Duration::MAX);
+        let next_topic =
+            self.topic_schedule_by_hash.values().map(|state| state.next_gossip_at).min().unwrap_or(Duration::MAX);
+        let next_urgent =
+            self.pending_urgent_by_hash.values().map(|entry| entry.deadline).min().unwrap_or(Duration::MAX);
         std::cmp::min(next_topic, next_urgent)
     }
 
@@ -353,9 +352,7 @@ impl<'a> Node<'a> {
     }
 
     fn find_topic_by_subject_id(&self, subject_id: u32) -> Option<u64> {
-        self.topics_by_hash.iter().find_map(|(hash, topic)| {
-            if topic.subject_id(self.cfg.subject_id_modulus) == subject_id { Some(*hash) } else { None }
-        })
+        self.topic_hash_by_subject_id.get(&subject_id).copied()
     }
 
     fn shard_for_topic(&self, hash: u64) -> u32 {
@@ -473,27 +470,26 @@ impl<'a> Node<'a> {
     }
 
     fn allocate_topic(&mut self, topic_hash: u64, new_evictions: u16, now: Duration) -> u16 {
-        let mut moving = self.topics_by_hash.remove(&topic_hash).expect("missing topic for local reallocation");
+        let mut moving = self.remove_topic_by_hash(topic_hash);
         moving.set_evictions(new_evictions);
         loop {
             let subject_id = moving.subject_id(self.cfg.subject_id_modulus);
             let collided_hash = self.find_topic_by_subject_id(subject_id);
             match collided_hash {
                 Some(hash) => {
-                    let displaced =
-                        self.topics_by_hash.remove(&hash).expect("collision peer disappeared during local allocation");
+                    let displaced = self.remove_topic_by_hash(hash);
                     if left_wins_collision(&moving, now, displaced.lage(now), displaced.hash()) {
-                        self.topics_by_hash.insert(moving.hash(), moving);
+                        self.insert_topic(moving);
                         moving = displaced;
                         moving.evict();
                     } else {
                         moving.evict();
-                        self.topics_by_hash.insert(displaced.hash(), displaced);
+                        self.insert_topic(displaced);
                     }
                 }
                 None => {
                     let final_evictions = moving.evictions();
-                    self.topics_by_hash.insert(moving.hash(), moving);
+                    self.insert_topic(moving);
                     debug_assert_eq!(0, self.count_local_collisions(), "local allocation incorrect");
                     return final_evictions;
                 }
@@ -552,6 +548,23 @@ impl<'a> Node<'a> {
             }
             CrdtMergeOutcome::LocalLoss
         }
+    }
+
+    fn insert_topic(&mut self, topic: Topic) {
+        let hash = topic.hash();
+        let subject_id = topic.subject_id(self.cfg.subject_id_modulus);
+        let previous_topic = self.topics_by_hash.insert(hash, topic);
+        debug_assert!(previous_topic.is_none(), "insert_topic unexpectedly replaced an existing topic");
+        let previous_hash = self.topic_hash_by_subject_id.insert(subject_id, hash);
+        debug_assert!(previous_hash.is_none(), "insert_topic created a local subject-ID collision");
+    }
+
+    fn remove_topic_by_hash(&mut self, hash: u64) -> Topic {
+        let topic = self.topics_by_hash.remove(&hash).expect("topic missing from hash index");
+        let subject_id = topic.subject_id(self.cfg.subject_id_modulus);
+        let removed = self.topic_hash_by_subject_id.remove(&subject_id);
+        debug_assert_eq!(Some(hash), removed, "subject-ID index diverged from hash index");
+        topic
     }
 }
 
