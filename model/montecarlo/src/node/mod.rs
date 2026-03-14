@@ -508,16 +508,20 @@ impl<'a> Node<'a> {
         };
         let outcome = if local_evictions != evictions {
             if (local_lage > lage) || ((local_lage == lage) && (local_evictions > evictions)) {
+                // The remote is obsolete, so we need to tell it to move. The subject-ID occupancy is not changing,
+                // so there is no need to use broadcast scope, since no new collisions are expected.
                 self.schedule_urgent(now, hash, UrgentScope::Shard);
                 CrdtMergeOutcome::LocalWin
             } else {
-                self.topics_by_hash
-                    .get_mut(&hash)
-                    .expect("known topic disappeared while merging gossip")
-                    .merge_lage(lage, now);
+                // The local replica is obsolete. If we can move exactly to the specified subject-ID (evictions),
+                // then nothing needs to be gossiped because that state is already known to be occupied by this topic.
+                // If that subject-ID is occupied locally and we can't displace that topic, then we need to bump
+                // evictions further and broadcast because the subject-ID occupancy is changing and we need to reveal
+                // potential conflicts with other topics we might not be aware of.
+                self.topics_by_hash.get_mut(&hash).expect("known topic disappeared").merge_lage(lage, now);
                 let final_evictions = self.allocate_topic(hash, evictions, now);
                 if final_evictions != evictions {
-                    self.schedule_urgent(now, hash, UrgentScope::Shard);
+                    self.schedule_urgent(now, hash, UrgentScope::Broadcast);
                 }
                 CrdtMergeOutcome::LocalLoss
             }
@@ -537,19 +541,21 @@ impl<'a> Node<'a> {
             return CrdtMergeOutcome::Consensus;
         };
         let (local_win, local_evictions) = {
-            let local =
-                self.topics_by_hash.get(&local_hash).expect("colliding local topic disappeared while merging gossip");
+            let local = self.topics_by_hash.get(&local_hash).expect("colliding local topic disappeared");
             (left_wins_collision(local, now, lage, hash), local.evictions())
         };
         if local_win {
+            // The remote is occupying our subject-ID; we are not expected to be on its shard (we might be due to
+            // a collision but it is unlikely), so we need to broadcast urgently to reach it and everyone else on
+            // the infringing topic.
             self.schedule_urgent(now, local_hash, UrgentScope::Broadcast);
             CrdtMergeOutcome::LocalWin
         } else {
             let bumped = local_evictions.checked_add(1).expect("too many evictions");
-            let final_evictions = self.allocate_topic(local_hash, bumped, now);
-            if final_evictions != evictions {
-                self.schedule_urgent(now, local_hash, UrgentScope::Shard);
-            }
+            self.allocate_topic(local_hash, bumped, now);
+            // We lost, so we need to move; the subject-ID occupancy is changing therefore we MUST announce it to the
+            // entire network to reveal potential conflicts with other topics we might not be aware of.
+            self.schedule_urgent(now, local_hash, UrgentScope::Broadcast);
             CrdtMergeOutcome::LocalLoss
         }
     }
