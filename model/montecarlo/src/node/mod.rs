@@ -1,5 +1,5 @@
 use crate::message::{GossipMessage, GossipScope, Transmit};
-use crate::topic::{Topic, left_wins_collision, topic_subject_id};
+use crate::topic::{Topic, left_wins_collision, left_wins_divergence, topic_subject_id};
 use crate::util::is_prime;
 use rand::{Rng, RngExt};
 use smart_default::SmartDefault;
@@ -200,7 +200,12 @@ impl<'a> Node<'a> {
         if self.topics_by_hash.contains_key(&message.topic_hash()) {
             self.on_gossip_known_topic(now, message.topic_hash(), message.topic_evictions(), message.topic_lage());
             self.schedule_after_heard(now, message.topic_hash());
-            self.cancel_pending_urgent_if_up_to_date(now, message.topic_hash(), message.topic_evictions());
+            self.cancel_pending_urgent_if_up_to_date(
+                now,
+                message.topic_hash(),
+                message.topic_evictions(),
+                message.topic_lage(),
+            );
         } else {
             self.on_gossip_unknown_topic(now, message.topic_hash(), message.topic_evictions(), message.topic_lage());
         }
@@ -235,7 +240,27 @@ impl<'a> Node<'a> {
     }
 
     fn startup_interval_bounds(&self) -> (Duration, Duration) {
-        // Counterintuitively, shortening this window can degrade the convergence time.
+        // Counterintuitively, shortening this window can degrade the convergence time in highly contested networks
+        // (many topics, small subject modulus).
+        //
+        // The reason is that when the new topic is allocated on multiple nodes simultaneously, the eviction counts
+        // may be different depending on the local topic sets; nodes with higher eviction counts will win against
+        // other allocations of the same topic, since they all have the same lage (initially -1). When startup interval
+        // is tight, multiple nodes with different eviction counts will end up gossiping concurrently. Suppose that
+        // eviction counts x and y are gossiped this way, with 0<x<y. Nodes that receive x for this topic will attempt
+        // to catch up, potentially displacing local topics, causing cascading collisions and evictions; by itself
+        // this is normal, but some time later gossips for the same topic will arrive with evictions=y, which will
+        // cause all listeners to rehash their local allocation tables, causing further cascading reallocations,
+        // which in highly contested networks may create a lot of churn.
+        //
+        // With a wider window, we reduce the probability of concurrent gossip emission, spreading the probability
+        // of simultaneous gossip of (evictions=x and evictions=y) between three cases (see Monty Hall problem):
+        //  a. x and y as before, but less likely;
+        //  b. x, then y;
+        //  c. y, then x.
+        // Cases a and b cause the same churn behavior as before, while case c causes nodes with pending gossip of
+        // evictions=x to receive evictions=y before they gossip and update their state locally, allowing other
+        // copies to skip evictions=x and converge on evictions=y without the intermediate churn.
         (Duration::ZERO, self.cfg.gossip_period)
     }
 
@@ -424,11 +449,22 @@ impl<'a> Node<'a> {
         }
     }
 
-    fn cancel_pending_urgent_if_up_to_date(&mut self, now: Duration, hash: u64, received_evictions: u16) {
+    fn cancel_pending_urgent_if_up_to_date(
+        &mut self,
+        now: Duration,
+        hash: u64,
+        received_evictions: u16,
+        received_lage: i8,
+    ) {
         let Some(topic) = self.topics_by_hash.get(&hash) else {
             return;
         };
-        if topic.evictions() != received_evictions {
+        // Cancel only if the received gossip is at least as informative as the local state being tracked.
+        // This MUST match divergence arbitration semantics to avoid suppressing a newer local CRDT state.
+        let local_evictions = topic.evictions();
+        let local_lage = topic.lage(now);
+        assert!(local_lage >= received_lage, "lage must be merged before pending urgent gossip cancellation");
+        if left_wins_divergence(local_lage, local_evictions, received_lage, received_evictions) {
             return;
         }
         let Some(pending) = self.pending_urgent_by_hash.get(&hash).copied() else {
@@ -521,7 +557,7 @@ impl<'a> Node<'a> {
             (topic.evictions(), topic.lage(now))
         };
         let outcome = if local_evictions != evictions {
-            if (local_lage > lage) || ((local_lage == lage) && (local_evictions > evictions)) {
+            if left_wins_divergence(local_lage, local_evictions, lage, evictions) {
                 // The remote is obsolete, so we need to tell it to move. The subject-ID occupancy is not changing,
                 // so there is no need to use broadcast scope, since no new collisions are expected.
                 self.schedule_urgent(now, hash, UrgentScope::Shard);

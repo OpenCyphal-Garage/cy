@@ -255,12 +255,54 @@ fn delayed_urgent_is_canceled_by_up_to_date_gossip_before_deadline() {
     insert_pending_urgent(&mut node, 1, Duration::seconds(1) + Duration::milliseconds(10), UrgentScope::Shard);
 
     *now.borrow_mut() = Duration::seconds(1) + Duration::milliseconds(5);
-    node.step(vec![make_message(9, GossipScope::Shard(2000), 1, 0, -1)]);
+    node.step(vec![make_message(9, GossipScope::Shard(2000), 1, 0, 0)]);
     assert!(!node.pending_urgent_by_hash.contains_key(&1));
 
     *now.borrow_mut() = Duration::seconds(1) + Duration::milliseconds(20);
     node.step(Vec::new());
     assert!(take_messages(&log).is_empty());
+}
+
+#[test]
+fn delayed_urgent_is_not_canceled_by_stale_lage_gossip() {
+    let cfg = NodeConfig::default();
+    let (mut node, log, now) = make_recording_node(cfg, 100);
+    node.add_topic(1);
+    defer_periodic(&mut node);
+
+    *now.borrow_mut() = Duration::seconds(8);
+    insert_pending_urgent(&mut node, 1, Duration::seconds(8) + Duration::milliseconds(10), UrgentScope::Shard);
+
+    // Same eviction counter but stale age estimate; this must not cancel a pending urgent repair.
+    *now.borrow_mut() = Duration::seconds(8) + Duration::milliseconds(5);
+    node.step(vec![make_message(9, GossipScope::Shard(2000), 1, 0, 1)]);
+    assert!(node.pending_urgent_by_hash.contains_key(&1));
+
+    *now.borrow_mut() = Duration::seconds(8) + Duration::milliseconds(20);
+    node.step(Vec::new());
+    assert_eq!(1, take_messages(&log).len());
+}
+
+#[test]
+fn delayed_urgent_cancellation_uses_divergence_arbitration_on_evictions() {
+    let cfg = NodeConfig::default();
+    let (mut node, _log, now) = make_recording_node(cfg, 100);
+    node.add_topic(1);
+    defer_periodic(&mut node);
+
+    *now.borrow_mut() = Duration::seconds(8);
+    insert_pending_urgent(&mut node, 1, Duration::seconds(8) + Duration::milliseconds(10), UrgentScope::Shard);
+
+    // Same lage, higher remote eviction => local loses divergence arbitration, pending urgent is canceled.
+    node.cancel_pending_urgent_if_up_to_date(Duration::seconds(8), 1, 1, 3);
+    assert!(!node.pending_urgent_by_hash.contains_key(&1));
+
+    insert_pending_urgent(&mut node, 1, Duration::seconds(8) + Duration::milliseconds(10), UrgentScope::Shard);
+
+    // Same lage, lower remote eviction => local wins divergence arbitration, pending urgent is kept.
+    node.allocate_topic(1, 1, Duration::seconds(8));
+    node.cancel_pending_urgent_if_up_to_date(Duration::seconds(8), 1, 0, 3);
+    assert!(node.pending_urgent_by_hash.contains_key(&1));
 }
 
 #[test]

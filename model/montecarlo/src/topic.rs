@@ -57,6 +57,10 @@ pub fn left_wins_collision(local: &Topic, now: Duration, remote_lage: i8, remote
     if local_lage != remote_lage { local_lage > remote_lage } else { local.hash < remote_hash }
 }
 
+pub fn left_wins_divergence(local_lage: i8, local_evictions: u16, remote_lage: i8, remote_evictions: u16) -> bool {
+    (local_lage > remote_lage) || ((local_lage == remote_lage) && (local_evictions > remote_evictions))
+}
+
 /// lage is ⌊log₂(age in seconds)⌋, or -1 for age=0; range from -1 to about ~35.
 pub fn lage_from_duration(duration: Duration) -> i8 {
     match duration.whole_seconds() {
@@ -141,6 +145,13 @@ mod tests {
         let local_high = Topic::new(3, Duration::ZERO);
         assert!(left_wins_collision(&local_low, Duration::ZERO, -1, 2));
         assert!(!left_wins_collision(&local_high, Duration::ZERO, -1, 2));
+    }
+
+    #[test]
+    fn left_wins_divergence_prefers_lage_then_evictions() {
+        assert!(left_wins_divergence(3, 1, 2, 100));
+        assert!(left_wins_divergence(3, 5, 3, 4));
+        assert!(!left_wins_divergence(3, 4, 3, 5));
     }
 
     #[test]
