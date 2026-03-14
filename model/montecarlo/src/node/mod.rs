@@ -236,8 +236,7 @@ impl<'a> Node<'a> {
     }
 
     fn startup_interval_bounds(&self) -> (Duration, Duration) {
-        let (_, high) = self.heard_interval_bounds();
-        (Duration::ZERO, high)
+        (Duration::ZERO, self.cfg.gossip_period)
     }
 
     fn cached_next_topic_update_at(&self) -> Duration {
