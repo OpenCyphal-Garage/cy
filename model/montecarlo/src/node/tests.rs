@@ -46,6 +46,17 @@ fn defer_periodic(node: &mut Node<'_>) {
     for state in node.topic_schedule_by_hash.values_mut() {
         state.next_gossip_at = Duration::MAX;
     }
+    node.next_topic_update_at_stale.set(true);
+}
+
+fn set_topic_next_gossip_at(node: &mut Node<'_>, hash: u64, at: Duration) {
+    node.topic_schedule_by_hash.get_mut(&hash).expect("missing schedule state").next_gossip_at = at;
+    node.next_topic_update_at_stale.set(true);
+}
+
+fn insert_pending_urgent(node: &mut Node<'_>, hash: u64, deadline: Duration, scope: UrgentScope) {
+    node.pending_urgent_by_hash.insert(hash, PendingUrgentGossip { deadline, scope });
+    node.next_urgent_update_at_stale.set(true);
 }
 
 #[test]
@@ -78,7 +89,7 @@ fn first_periodic_gossip_is_forced_broadcast_and_rescheduled_by_send_window() {
     };
     let (mut node, log, now) = make_recording_node(cfg, 100);
     node.add_topic(42);
-    node.topic_schedule_by_hash.get_mut(&42).expect("missing schedule state").next_gossip_at = Duration::ZERO;
+    set_topic_next_gossip_at(&mut node, 42, Duration::ZERO);
 
     *now.borrow_mut() = Duration::ZERO;
     node.step(Vec::new());
@@ -118,10 +129,8 @@ fn periodic_scheduler_emits_one_oldest_due_topic() {
     node.add_topic(1);
     node.add_topic(2);
 
-    node.topic_schedule_by_hash.get_mut(&1).expect("schedule for topic 1 missing").next_gossip_at =
-        Duration::seconds(5);
-    node.topic_schedule_by_hash.get_mut(&2).expect("schedule for topic 2 missing").next_gossip_at =
-        Duration::seconds(3);
+    set_topic_next_gossip_at(&mut node, 1, Duration::seconds(5));
+    set_topic_next_gossip_at(&mut node, 2, Duration::seconds(3));
 
     *now.borrow_mut() = Duration::seconds(5);
     node.step(Vec::new());
@@ -167,8 +176,7 @@ fn periodic_scope_uses_per_topic_ratio_after_first_broadcast() {
 
     for emission in 1_i64..=20 {
         *now.borrow_mut() = Duration::seconds(emission);
-        node.topic_schedule_by_hash.get_mut(&42).expect("missing schedule state").next_gossip_at =
-            Duration::seconds(emission);
+        set_topic_next_gossip_at(&mut node, 42, Duration::seconds(emission));
         node.step(Vec::new());
 
         let messages = take_messages(&log);
@@ -188,19 +196,19 @@ fn next_update_at_uses_earliest_periodic_or_urgent_deadline() {
     let (mut node, _log, now) = make_recording_node(cfg, 100);
     node.add_topic(1);
     node.add_topic(2);
-    node.topic_schedule_by_hash.get_mut(&1).unwrap().next_gossip_at = Duration::seconds(10);
-    node.topic_schedule_by_hash.get_mut(&2).unwrap().next_gossip_at = Duration::seconds(7);
+    set_topic_next_gossip_at(&mut node, 1, Duration::seconds(10));
+    set_topic_next_gossip_at(&mut node, 2, Duration::seconds(7));
     assert_eq!(Duration::seconds(7), node.next_update_at());
 
-    node.pending_urgent_by_hash
-        .insert(1, PendingUrgentGossip { deadline: Duration::seconds(3), scope: UrgentScope::Shard });
+    insert_pending_urgent(&mut node, 1, Duration::seconds(3), UrgentScope::Shard);
     assert_eq!(Duration::seconds(3), node.next_update_at());
 
     *now.borrow_mut() = Duration::seconds(9);
     node.pending_urgent_by_hash.clear();
-    node.topic_schedule_by_hash.get_mut(&1).unwrap().next_gossip_at = Duration::seconds(4);
-    node.topic_schedule_by_hash.get_mut(&2).unwrap().next_gossip_at = Duration::seconds(6);
-    assert_eq!(Duration::seconds(9), node.next_update_at());
+    node.next_urgent_update_at_stale.set(true);
+    set_topic_next_gossip_at(&mut node, 1, Duration::seconds(4));
+    set_topic_next_gossip_at(&mut node, 2, Duration::seconds(6));
+    assert_eq!(Duration::seconds(4), node.next_update_at());
 }
 
 #[test]
@@ -244,10 +252,7 @@ fn delayed_urgent_is_canceled_by_up_to_date_gossip_before_deadline() {
     defer_periodic(&mut node);
 
     *now.borrow_mut() = Duration::seconds(1);
-    node.pending_urgent_by_hash.insert(
-        1,
-        PendingUrgentGossip { deadline: Duration::seconds(1) + Duration::milliseconds(10), scope: UrgentScope::Shard },
-    );
+    insert_pending_urgent(&mut node, 1, Duration::seconds(1) + Duration::milliseconds(10), UrgentScope::Shard);
 
     *now.borrow_mut() = Duration::seconds(1) + Duration::milliseconds(5);
     node.step(vec![make_message(9, GossipScope::Shard(2000), 1, 0, -1)]);
@@ -277,8 +282,7 @@ fn urgent_requests_coalesce_and_upgrade_to_broadcast() {
     let (mut node, _log, now) = make_recording_node(cfg, 100);
     node.add_topic(1);
 
-    node.pending_urgent_by_hash
-        .insert(1, PendingUrgentGossip { deadline: Duration::seconds(1), scope: UrgentScope::Shard });
+    insert_pending_urgent(&mut node, 1, Duration::seconds(1), UrgentScope::Shard);
 
     *now.borrow_mut() = Duration::seconds(2);
     node.schedule_urgent(Duration::seconds(2), 1, UrgentScope::Broadcast);
@@ -295,8 +299,7 @@ fn urgent_send_uses_current_local_topic_state_and_send_reschedule_window() {
     node.add_topic(1);
     defer_periodic(&mut node);
 
-    node.pending_urgent_by_hash
-        .insert(1, PendingUrgentGossip { deadline: Duration::seconds(2), scope: UrgentScope::Shard });
+    insert_pending_urgent(&mut node, 1, Duration::seconds(2), UrgentScope::Shard);
     node.topics_by_hash.get_mut(&1).unwrap().set_evictions(7);
 
     *now.borrow_mut() = Duration::seconds(2);

@@ -3,7 +3,7 @@ use crate::topic::{Topic, left_wins_collision, topic_subject_id};
 use crate::util::is_prime;
 use rand::{Rng, RngExt};
 use smart_default::SmartDefault;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use time::Duration;
@@ -69,6 +69,10 @@ pub struct Node<'a> {
     /// Local topics are scheduled independently by per-topic next-gossip timestamps.
     topic_schedule_by_hash: BTreeMap<u64, TopicScheduleState>,
     pending_urgent_by_hash: BTreeMap<u64, PendingUrgentGossip>,
+    next_topic_update_at: Cell<Duration>,
+    next_topic_update_at_stale: Cell<bool>,
+    next_urgent_update_at: Cell<Duration>,
+    next_urgent_update_at_stale: Cell<bool>,
 
     /// Shared components.
     network: Rc<RefCell<dyn Transmit + 'a>>,
@@ -100,6 +104,10 @@ impl<'a> Node<'a> {
             topics_by_hash: BTreeMap::new(),
             topic_schedule_by_hash: BTreeMap::new(),
             pending_urgent_by_hash: BTreeMap::new(),
+            next_topic_update_at: Cell::new(Duration::MAX),
+            next_topic_update_at_stale: Cell::new(false),
+            next_urgent_update_at: Cell::new(Duration::MAX),
+            next_urgent_update_at_stale: Cell::new(false),
             network,
             rng,
             now,
@@ -159,7 +167,7 @@ impl<'a> Node<'a> {
             }
         }
         self.ensure_topic_schedule_entry(topic_hash);
-        assert_eq!(0, self.count_local_collisions(), "local allocation incorrect");
+        debug_assert_eq!(0, self.count_local_collisions(), "local allocation incorrect");
     }
 
     pub fn count_local_collisions(&self) -> usize {
@@ -167,11 +175,15 @@ impl<'a> Node<'a> {
     }
 
     pub fn next_update_at(&self) -> Duration {
-        let next_topic = self.topic_schedule_by_hash.values().map(|state| state.next_gossip_at).min();
-        let next_urgent = self.pending_urgent_by_hash.values().map(|entry| entry.deadline).min();
-        let next = next_topic.into_iter().chain(next_urgent).min().unwrap_or(Duration::MAX);
-        let now = self.now();
-        if next < now { now } else { next }
+        let next_topic = self.cached_next_topic_update_at();
+        let next_urgent = self.cached_next_urgent_update_at();
+        let next = std::cmp::min(next_topic, next_urgent);
+        debug_assert_eq!(
+            next,
+            self.next_update_at_full_scan(),
+            "cached next-update deadline diverged from full scan"
+        );
+        next
     }
 
     pub fn step(&mut self, incoming: Vec<GossipMessage>) {
@@ -222,11 +234,98 @@ impl<'a> Node<'a> {
         (low, high)
     }
 
+    fn startup_interval_bounds(&self) -> (Duration, Duration) {
+        let (_, high) = self.heard_interval_bounds();
+        (Duration::ZERO, high)
+    }
+
+    fn cached_next_topic_update_at(&self) -> Duration {
+        if self.next_topic_update_at_stale.get() {
+            let next =
+                self.topic_schedule_by_hash.values().map(|state| state.next_gossip_at).min().unwrap_or(Duration::MAX);
+            self.next_topic_update_at.set(next);
+            self.next_topic_update_at_stale.set(false);
+        }
+        self.next_topic_update_at.get()
+    }
+
+    fn cached_next_urgent_update_at(&self) -> Duration {
+        if self.next_urgent_update_at_stale.get() {
+            let next = self.pending_urgent_by_hash.values().map(|entry| entry.deadline).min().unwrap_or(Duration::MAX);
+            self.next_urgent_update_at.set(next);
+            self.next_urgent_update_at_stale.set(false);
+        }
+        self.next_urgent_update_at.get()
+    }
+
+    fn next_update_at_full_scan(&self) -> Duration {
+        let next_topic = self.topic_schedule_by_hash.values().map(|state| state.next_gossip_at).min().unwrap_or(Duration::MAX);
+        let next_urgent = self.pending_urgent_by_hash.values().map(|entry| entry.deadline).min().unwrap_or(Duration::MAX);
+        std::cmp::min(next_topic, next_urgent)
+    }
+
+    fn reconcile_topic_deadline_change(&self, previous: Duration, updated: Duration) {
+        if self.next_topic_update_at_stale.get() {
+            return;
+        }
+        let cached = self.next_topic_update_at.get();
+        if updated < cached {
+            self.next_topic_update_at.set(updated);
+            return;
+        }
+        if (previous == cached) && (updated > cached) {
+            self.next_topic_update_at_stale.set(true);
+        }
+    }
+
+    fn reconcile_topic_deadline_insert(&self, inserted: Duration) {
+        if self.next_topic_update_at_stale.get() {
+            return;
+        }
+        if inserted < self.next_topic_update_at.get() {
+            self.next_topic_update_at.set(inserted);
+        }
+    }
+
+    fn reconcile_urgent_deadline_change(&self, previous: Duration, updated: Duration) {
+        if self.next_urgent_update_at_stale.get() {
+            return;
+        }
+        let cached = self.next_urgent_update_at.get();
+        if updated < cached {
+            self.next_urgent_update_at.set(updated);
+            return;
+        }
+        if (previous == cached) && (updated > cached) {
+            self.next_urgent_update_at_stale.set(true);
+        }
+    }
+
+    fn reconcile_urgent_deadline_insert(&self, inserted: Duration) {
+        if self.next_urgent_update_at_stale.get() {
+            return;
+        }
+        if inserted < self.next_urgent_update_at.get() {
+            self.next_urgent_update_at.set(inserted);
+        }
+    }
+
+    fn reconcile_urgent_deadline_removed(&self, removed: Duration) {
+        if self.next_urgent_update_at_stale.get() {
+            return;
+        }
+        if removed == self.next_urgent_update_at.get() {
+            self.next_urgent_update_at_stale.set(true);
+        }
+    }
+
     fn schedule_after_send(&mut self, now: Duration, hash: u64) {
         let (low, high) = self.periodic_interval_bounds();
         let deadline = now + self.sample_duration_between(low, high);
         if let Some(state) = self.topic_schedule_by_hash.get_mut(&hash) {
+            let previous = state.next_gossip_at;
             state.next_gossip_at = deadline;
+            self.reconcile_topic_deadline_change(previous, deadline);
         }
     }
 
@@ -234,7 +333,9 @@ impl<'a> Node<'a> {
         let (low, high) = self.heard_interval_bounds();
         let deadline = now + self.sample_duration_between(low, high);
         if let Some(state) = self.topic_schedule_by_hash.get_mut(&hash) {
+            let previous = state.next_gossip_at;
             state.next_gossip_at = deadline;
+            self.reconcile_topic_deadline_change(previous, deadline);
         }
     }
 
@@ -242,10 +343,13 @@ impl<'a> Node<'a> {
         if self.topic_schedule_by_hash.contains_key(&hash) {
             return;
         }
+        let now = self.now();
+        let (low, high) = self.startup_interval_bounds();
         // On topic creation, spread first-gossip opportunities over a wider window so duplicate suppression
         // can kick in before the entire network emits simultaneously.
-        let next = self.now() + self.sample_duration_between(Duration::ZERO, self.cfg.gossip_period);
+        let next = now + self.sample_duration_between(low, high);
         self.topic_schedule_by_hash.insert(hash, TopicScheduleState::new(next));
+        self.reconcile_topic_deadline_insert(next);
     }
 
     fn find_topic_by_subject_id(&self, subject_id: u32) -> Option<u64> {
@@ -303,15 +407,19 @@ impl<'a> Node<'a> {
         let deadline = now + self.sample_duration_between(Duration::ZERO, self.cfg.gossip_urgent_delay);
         match self.pending_urgent_by_hash.get_mut(&hash) {
             Some(existing) => {
+                let previous = existing.deadline;
                 if deadline < existing.deadline {
                     existing.deadline = deadline;
                 }
                 if scope == UrgentScope::Broadcast {
                     existing.scope = UrgentScope::Broadcast;
                 }
+                let updated = existing.deadline;
+                self.reconcile_urgent_deadline_change(previous, updated);
             }
             None => {
                 self.pending_urgent_by_hash.insert(hash, PendingUrgentGossip { deadline, scope });
+                self.reconcile_urgent_deadline_insert(deadline);
             }
         }
     }
@@ -328,6 +436,7 @@ impl<'a> Node<'a> {
         };
         if pending.deadline > now {
             self.pending_urgent_by_hash.remove(&hash);
+            self.reconcile_urgent_deadline_removed(pending.deadline);
         }
     }
 
@@ -340,6 +449,7 @@ impl<'a> Node<'a> {
             .collect::<Vec<_>>();
         for (hash, entry) in due {
             self.pending_urgent_by_hash.remove(&hash);
+            self.reconcile_urgent_deadline_removed(entry.deadline);
             let scope = match entry.scope {
                 UrgentScope::Shard => GossipScope::Shard(self.shard_for_topic(hash)),
                 UrgentScope::Broadcast => GossipScope::Broadcast,
@@ -384,7 +494,7 @@ impl<'a> Node<'a> {
                 None => {
                     let final_evictions = moving.evictions();
                     self.topics_by_hash.insert(moving.hash(), moving);
-                    assert_eq!(0, self.count_local_collisions(), "local allocation incorrect");
+                    debug_assert_eq!(0, self.count_local_collisions(), "local allocation incorrect");
                     return final_evictions;
                 }
             }

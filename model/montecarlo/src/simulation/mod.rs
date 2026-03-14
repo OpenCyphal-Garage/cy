@@ -6,8 +6,8 @@ use crate::node::{Node, NodeConfig, count_colliding_subjects};
 use crate::topic::Topic;
 use rand::Rng;
 use std::cell::RefCell;
-use std::cmp::min;
-use std::collections::{BTreeMap, BTreeSet};
+use std::cmp::{Reverse, min};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::ops::RangeInclusive;
 use std::rc::Rc;
 use time::Duration;
@@ -26,6 +26,8 @@ pub struct SimulationConfig {
 pub struct Simulation<'a> {
     network: Rc<RefCell<Network>>,
     nodes: Vec<Node<'a>>,
+    node_update_queue: BinaryHeap<Reverse<(Duration, usize, u64)>>,
+    node_update_versions: Vec<u64>,
     now: Rc<RefCell<Duration>>,
     step_count: u64,
     converged_at: Option<Duration>,
@@ -64,9 +66,16 @@ impl<'a> Simulation<'a> {
         let network = Rc::new(RefCell::new(Network::new(&network_config, network_now_provider, rng.clone())));
         let nodes =
             generate_network(node_count, topic_count, node_now_provider, rng.clone(), network.clone(), node_config)?;
+        let mut node_update_queue = BinaryHeap::new();
+        let node_update_versions = vec![0_u64; nodes.len()];
+        for (index, node) in nodes.iter().enumerate() {
+            node_update_queue.push(Reverse((node.next_update_at(), index, 0)));
+        }
         Ok(Self {
             network,
             nodes,
+            node_update_queue,
+            node_update_versions,
             now,
             step_count: 0,
             converged_at: None,
@@ -86,10 +95,12 @@ impl<'a> Simulation<'a> {
         }
 
         // Advance the time to the next event.
-        let next_node_update = self.nodes.iter().map(|node| node.next_update_at()).min().unwrap_or(Duration::MAX);
+        let next_node_update = self.next_node_update_at();
         let next_arrival = self.network.borrow().soonest_arrival_at().unwrap_or(Duration::MAX);
-        let next_time = min(next_node_update, next_arrival);
-        assert!(next_time >= now);
+        let mut next_time = min(next_node_update, next_arrival);
+        if next_time < now {
+            next_time = now;
+        }
         if next_time >= self.cfg.time_limit {
             *self.now.borrow_mut() = self.cfg.time_limit;
             self.recompute_convergence_state(self.cfg.time_limit);
@@ -147,34 +158,84 @@ impl<'a> Simulation<'a> {
 
     fn process_due_events(&mut self, now: Duration) {
         // Periodic updates are evaluated exactly once at this timestamp.
-        let mut periodic_due = self.nodes.iter().map(|node| node.next_update_at() <= now).collect::<Vec<bool>>();
+        let mut ready_nodes = self.take_periodic_due_nodes(now);
         loop {
-            let arrivals = self.network.borrow_mut().drain_due(now);
-            let mut arrivals_iter = arrivals.into_iter().peekable();
-            let mut processed_any = false;
+            let mut arrivals = self
+                .network
+                .borrow_mut()
+                .drain_due(now)
+                .into_iter()
+                .map(|(destination, messages)| {
+                    let index = destination as usize;
+                    debug_assert!(index < self.nodes.len(), "arrival destination does not match any node");
+                    (index, messages)
+                })
+                .collect::<Vec<_>>();
+            for (index, _) in &arrivals {
+                ready_nodes.push(*index);
+            }
+            if ready_nodes.is_empty() {
+                break;
+            }
+            ready_nodes.sort_unstable();
+            ready_nodes.dedup();
 
-            for (index, node) in self.nodes.iter_mut().enumerate() {
-                let incoming = if let Some((destination, _)) = arrivals_iter.peek() {
-                    if *destination == node.id() {
-                        arrivals_iter.next().expect("peeked arrival vanished").1
-                    } else {
-                        Vec::new()
-                    }
+            let mut arrival_index = 0;
+            for index in ready_nodes.drain(..) {
+                while (arrival_index < arrivals.len()) && (arrivals[arrival_index].0 < index) {
+                    arrival_index += 1;
+                }
+                let incoming = if (arrival_index < arrivals.len()) && (arrivals[arrival_index].0 == index) {
+                    std::mem::take(&mut arrivals[arrival_index].1)
                 } else {
                     Vec::new()
                 };
-                if periodic_due[index] || !incoming.is_empty() {
-                    node.step(incoming);
-                    processed_any = true;
-                }
+                self.nodes[index].step(incoming);
+                self.refresh_node_update(index);
             }
-            debug_assert!(arrivals_iter.next().is_none(), "arrival destination does not match any node");
-            if !processed_any {
+
+            self.step_count = self.step_count.wrapping_add(1);
+            // Periodic updates are checked only on entry at this timestamp.
+            ready_nodes.clear();
+        }
+    }
+
+    fn prune_stale_node_updates(&mut self) {
+        while let Some(Reverse((_, index, version))) = self.node_update_queue.peek().copied() {
+            if self.node_update_versions[index] == version {
                 break;
             }
-            self.step_count = self.step_count.wrapping_add(1);
-            periodic_due.fill(false);
+            self.node_update_queue.pop();
         }
+    }
+
+    fn next_node_update_at(&mut self) -> Duration {
+        self.prune_stale_node_updates();
+        self.node_update_queue.peek().map(|Reverse((time, _, _))| *time).unwrap_or(Duration::MAX)
+    }
+
+    fn take_periodic_due_nodes(&mut self, now: Duration) -> Vec<usize> {
+        let mut due = Vec::new();
+        loop {
+            self.prune_stale_node_updates();
+            let Some(Reverse((time, index, version))) = self.node_update_queue.peek().copied() else {
+                break;
+            };
+            if time > now {
+                break;
+            }
+            self.node_update_queue.pop();
+            if self.node_update_versions[index] == version {
+                due.push(index);
+            }
+        }
+        due
+    }
+
+    fn refresh_node_update(&mut self, index: usize) {
+        self.node_update_versions[index] = self.node_update_versions[index].wrapping_add(1);
+        let version = self.node_update_versions[index];
+        self.node_update_queue.push(Reverse((self.nodes[index].next_update_at(), index, version)));
     }
 
     fn maybe_recompute_convergence_state(&mut self, now: Duration) {
