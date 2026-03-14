@@ -6,8 +6,8 @@ use crate::node::{Node, NodeConfig, count_colliding_subjects};
 use crate::topic::Topic;
 use rand::Rng;
 use std::cell::RefCell;
-use std::cmp::{Reverse, min};
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+use std::cmp::min;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::RangeInclusive;
 use std::rc::Rc;
 use time::Duration;
@@ -26,8 +26,8 @@ pub struct SimulationConfig {
 pub struct Simulation<'a> {
     network: Rc<RefCell<Network>>,
     nodes: Vec<Node<'a>>,
-    node_update_queue: BinaryHeap<Reverse<(Duration, usize, u64)>>,
-    node_update_versions: Vec<u64>,
+    node_update_queue: BTreeSet<(Duration, usize)>,
+    node_update_deadlines: Vec<Duration>,
     now: Rc<RefCell<Duration>>,
     step_count: u64,
     converged_at: Option<Duration>,
@@ -66,16 +66,18 @@ impl<'a> Simulation<'a> {
         let network = Rc::new(RefCell::new(Network::new(&network_config, network_now_provider, rng.clone())));
         let nodes =
             generate_network(node_count, topic_count, node_now_provider, rng.clone(), network.clone(), node_config)?;
-        let mut node_update_queue = BinaryHeap::new();
-        let node_update_versions = vec![0_u64; nodes.len()];
+        let mut node_update_queue = BTreeSet::new();
+        let mut node_update_deadlines = vec![Duration::MAX; nodes.len()];
         for (index, node) in nodes.iter().enumerate() {
-            node_update_queue.push(Reverse((node.next_update_at(), index, 0)));
+            let deadline = node.next_update_at();
+            node_update_deadlines[index] = deadline;
+            node_update_queue.insert((deadline, index));
         }
         Ok(Self {
             network,
             nodes,
             node_update_queue,
-            node_update_versions,
+            node_update_deadlines,
             now,
             step_count: 0,
             converged_at: None,
@@ -158,7 +160,9 @@ impl<'a> Simulation<'a> {
 
     fn process_due_events(&mut self, now: Duration) {
         // Periodic updates are evaluated exactly once at this timestamp.
-        let mut ready_nodes = self.take_periodic_due_nodes(now);
+        let mut periodic_due_nodes = self.take_periodic_due_nodes(now);
+        periodic_due_nodes.sort_unstable();
+        let mut include_periodic_due = true;
         loop {
             let mut arrivals = self
                 .network
@@ -171,24 +175,39 @@ impl<'a> Simulation<'a> {
                     (index, messages)
                 })
                 .collect::<Vec<_>>();
-            for (index, _) in &arrivals {
-                ready_nodes.push(*index);
-            }
-            if ready_nodes.is_empty() {
+            let periodic = if include_periodic_due { &periodic_due_nodes[..] } else { &[] };
+            if periodic.is_empty() && arrivals.is_empty() {
                 break;
             }
-            ready_nodes.sort_unstable();
-            ready_nodes.dedup();
 
-            let mut arrival_index = 0;
-            for index in ready_nodes.drain(..) {
-                while (arrival_index < arrivals.len()) && (arrivals[arrival_index].0 < index) {
+            let mut periodic_index = 0_usize;
+            let mut arrival_index = 0_usize;
+            while (periodic_index < periodic.len()) || (arrival_index < arrivals.len()) {
+                let (index, incoming) = if arrival_index >= arrivals.len() {
+                    let index = periodic[periodic_index];
+                    periodic_index += 1;
+                    (index, Vec::new())
+                } else if periodic_index >= periodic.len() {
+                    let index = arrivals[arrival_index].0;
+                    let incoming = std::mem::take(&mut arrivals[arrival_index].1);
                     arrival_index += 1;
-                }
-                let incoming = if (arrival_index < arrivals.len()) && (arrivals[arrival_index].0 == index) {
-                    std::mem::take(&mut arrivals[arrival_index].1)
+                    (index, incoming)
                 } else {
-                    Vec::new()
+                    let periodic_index_value = periodic[periodic_index];
+                    let arrival_index_value = arrivals[arrival_index].0;
+                    if periodic_index_value < arrival_index_value {
+                        periodic_index += 1;
+                        (periodic_index_value, Vec::new())
+                    } else if arrival_index_value < periodic_index_value {
+                        let incoming = std::mem::take(&mut arrivals[arrival_index].1);
+                        arrival_index += 1;
+                        (arrival_index_value, incoming)
+                    } else {
+                        periodic_index += 1;
+                        let incoming = std::mem::take(&mut arrivals[arrival_index].1);
+                        arrival_index += 1;
+                        (arrival_index_value, incoming)
+                    }
                 };
                 self.nodes[index].step(incoming);
                 self.refresh_node_update(index);
@@ -196,46 +215,33 @@ impl<'a> Simulation<'a> {
 
             self.step_count = self.step_count.wrapping_add(1);
             // Periodic updates are checked only on entry at this timestamp.
-            ready_nodes.clear();
-        }
-    }
-
-    fn prune_stale_node_updates(&mut self) {
-        while let Some(Reverse((_, index, version))) = self.node_update_queue.peek().copied() {
-            if self.node_update_versions[index] == version {
-                break;
-            }
-            self.node_update_queue.pop();
+            include_periodic_due = false;
+            periodic_due_nodes.clear();
         }
     }
 
     fn next_node_update_at(&mut self) -> Duration {
-        self.prune_stale_node_updates();
-        self.node_update_queue.peek().map(|Reverse((time, _, _))| *time).unwrap_or(Duration::MAX)
+        self.node_update_queue.first().map(|(time, _)| *time).unwrap_or(Duration::MAX)
     }
 
     fn take_periodic_due_nodes(&mut self, now: Duration) -> Vec<usize> {
         let mut due = Vec::new();
-        loop {
-            self.prune_stale_node_updates();
-            let Some(Reverse((time, index, version))) = self.node_update_queue.peek().copied() else {
-                break;
-            };
+        while let Some((time, index)) = self.node_update_queue.first().copied() {
             if time > now {
                 break;
             }
-            self.node_update_queue.pop();
-            if self.node_update_versions[index] == version {
-                due.push(index);
-            }
+            self.node_update_queue.pop_first();
+            due.push(index);
         }
         due
     }
 
     fn refresh_node_update(&mut self, index: usize) {
-        self.node_update_versions[index] = self.node_update_versions[index].wrapping_add(1);
-        let version = self.node_update_versions[index];
-        self.node_update_queue.push(Reverse((self.nodes[index].next_update_at(), index, version)));
+        let previous = self.node_update_deadlines[index];
+        self.node_update_queue.remove(&(previous, index));
+        let updated = self.nodes[index].next_update_at();
+        self.node_update_deadlines[index] = updated;
+        self.node_update_queue.insert((updated, index));
     }
 
     fn maybe_recompute_convergence_state(&mut self, now: Duration) {
@@ -294,7 +300,7 @@ impl NodeSnapshot {
         Self {
             id: node.id(),
             subject_id_modulus: node.subject_id_modulus(),
-            topics: node.topics().into_iter().cloned().collect(),
+            topics: node.topics_iter().cloned().collect(),
         }
     }
 }
@@ -319,7 +325,7 @@ impl Snapshot {
             return 0;
         }
         let subject_id_modulus = self.nodes[0].subject_id_modulus;
-        count_colliding_subjects(self.nodes.iter().flat_map(|node| node.topics.iter().map(|x| x)), subject_id_modulus)
+        count_colliding_subjects(self.nodes.iter().flat_map(|node| node.topics.iter()), subject_id_modulus)
     }
 
     pub fn count_divergent(&self) -> usize {
@@ -336,12 +342,12 @@ fn count_collisions(nodes: &[Node<'_>]) -> usize {
         return 0;
     }
     let subject_id_modulus = nodes[0].subject_id_modulus();
-    count_colliding_subjects(nodes.iter().flat_map(|node| node.topics()), subject_id_modulus)
+    count_colliding_subjects(nodes.iter().flat_map(|node| node.topics_iter()), subject_id_modulus)
 }
 
 fn count_divergent(nodes: &[Node<'_>]) -> usize {
     let mut by_hash: BTreeMap<u64, BTreeSet<u16>> = BTreeMap::new();
-    for topic in nodes.iter().flat_map(|node| node.topics()) {
+    for topic in nodes.iter().flat_map(|node| node.topics_iter()) {
         by_hash.entry(topic.hash()).or_default().insert(topic.evictions());
     }
     by_hash.values().filter(|evictions| evictions.len() > 1).count()

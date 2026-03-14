@@ -122,7 +122,11 @@ impl<'a> Node<'a> {
     }
 
     pub fn topics(&self) -> Vec<&Topic> {
-        self.topics_by_hash.values().collect()
+        self.topics_iter().collect()
+    }
+
+    pub fn topics_iter(&self) -> impl Iterator<Item = &Topic> {
+        self.topics_by_hash.values()
     }
 
     pub fn subject_id_modulus(&self) -> u32 {
