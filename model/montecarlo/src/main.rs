@@ -83,6 +83,9 @@ struct Config {
     #[arg(long, value_parser = parse_duration, default_value_t = NodeConfig::default().gossip_urgent_delay)]
     gossip_urgent_delay: Duration,
 
+    #[arg(long, value_parser = parse_duration, default_value_t = NodeConfig::default().gossip_startup_delay)]
+    gossip_startup_delay: Duration,
+
     // ----------------------------------------------------------------------------------------------------------------
     /// Imperfect network simulation. Packets take a random time in this range to be delivered.
     #[arg(long, value_parser = parse_duration_range, default_value = "0..0.1")]
@@ -112,6 +115,7 @@ impl Config {
             gossip_dither: self.gossip_dither,
             gossip_broadcast_fraction: self.gossip_broadcast_fraction,
             gossip_urgent_delay: self.gossip_urgent_delay,
+            gossip_startup_delay: self.gossip_startup_delay,
         }
     }
 

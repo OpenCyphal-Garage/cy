@@ -25,8 +25,27 @@ pub struct NodeConfig {
     #[default(_code = "0.1")]
     pub gossip_broadcast_fraction: f64,
 
+    /// Greater values tend to speed up convergence and reduce reallocation churn in highly contested networks;
+    /// see the explanation for gossip_startup_delay_max. In sparsely contested networks (which describes all
+    /// real-world networks due to necessarily large subject ID modulus) the effect is the opposite.
     #[default(_code = "Duration::seconds_f64(0.05)")]
     pub gossip_urgent_delay: Duration,
+
+    /// Counterintuitively, widening the startup gossip window can improve convergence in highly contested networks
+    /// (many topics, low subject modulus). If multiple nodes create the same topic simultaneously, they may start
+    /// with different eviction counts because of distinct local collisions. A narrow window causes many such replicas
+    /// to gossip before hearing one another, so the network processes several intermediate states in succession,
+    /// triggering unnecessary reallocations and churn.
+    ///
+    /// A wider window increases the chance that a newer replica is heard before older pending
+    /// gossips are emitted. Nodes that were about to gossip an older state can then update locally
+    /// and skip advertising it, allowing the network to converge directly toward the newest known
+    /// state instead of walking through obsolete intermediate states.
+    ///
+    /// Same considerations apply to the urgent delay: greater variance improves convergence in highly contested
+    /// networks, but may degrade performance in sparser networks where conflicts are rare.
+    #[default(_code = "Duration::seconds_f64(1.0)")]
+    pub gossip_startup_delay: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -240,28 +259,7 @@ impl<'a> Node<'a> {
     }
 
     fn startup_interval_bounds(&self) -> (Duration, Duration) {
-        // Counterintuitively, shortening this window can degrade the convergence time in highly contested networks
-        // (many topics, small subject modulus).
-        //
-        // The reason is that when the new topic is allocated on multiple nodes simultaneously, the eviction counts
-        // may be different depending on the local topic sets; nodes with higher eviction counts will win against
-        // other allocations of the same topic, since they all have the same lage (initially -1). When startup interval
-        // is tight, multiple nodes with different eviction counts will end up gossiping concurrently. Suppose that
-        // eviction counts x and y are gossiped this way, with 0<x<y. Nodes that receive x for this topic will attempt
-        // to catch up, potentially displacing local topics, causing cascading collisions and evictions; by itself
-        // this is normal, but some time later gossips for the same topic will arrive with evictions=y, which will
-        // cause all listeners to rehash their local allocation tables, causing further cascading reallocations,
-        // which in highly contested networks may create a lot of churn.
-        //
-        // With a wider window, we reduce the probability of concurrent gossip emission, spreading the probability
-        // of simultaneous gossip of (evictions=x and evictions=y) between three cases (see Monty Hall problem):
-        //  a. x and y as before, but less likely;
-        //  b. x, then y;
-        //  c. y, then x.
-        // Cases a and b cause the same churn behavior as before, while case c causes nodes with pending gossip of
-        // evictions=x to receive evictions=y before they gossip and update their state locally, allowing other
-        // copies to skip evictions=x and converge on evictions=y without the intermediate churn.
-        (Duration::ZERO, self.cfg.gossip_period)
+        (Duration::ZERO, self.cfg.gossip_startup_delay)
     }
 
     fn cached_next_topic_update_at(&self) -> Duration {
