@@ -40,7 +40,7 @@ struct Config {
     node_count: usize,
 
     /// Topics are generated with random hash values, then randomly assigned to nodes.
-    /// The subject-ID modulus defines the subject-ID collision rate.
+    /// The topic count also defines the shard count in the multicast gossip model.
     #[arg(long, default_value = "20")]
     topic_count: usize,
 
@@ -48,9 +48,8 @@ struct Config {
     /// refer to proof.md for the equivalence notes between the simplified and full models.
     /// For quadratic probing, max topic count is half of this number, and it has to be a prime;
     /// use sympy.prevprime()/nextprime().
-    /// The largest 16-bit prime is 65521.
     #[arg(long, default_value_t = NodeConfig::default().subject_id_modulus)]
-    subject_id_modulus: u16,
+    subject_id_modulus: u32,
 
     /// Optional seed for reproducible random initialization. If omitted, current time is used.
     #[arg(long)]
@@ -69,53 +68,20 @@ struct Config {
     snapshot_period: Duration,
 
     // ----------------------------------------------------------------------------------------------------------------
-    /// Gossip parameters.
-    /// Broadcast always have zero TTL and infinite outdegree (by definition).
-    /// Chosen gossip interval is in [period-dither, period+dither].
+    /// Topic-wise gossip parameters.
+    /// A locally sent topic is rescheduled in [period-dither, period+dither].
+    /// A received topic is rescheduled in [2*(period-dither), 2*(period+dither)].
     #[arg(long, value_parser = parse_duration, default_value_t = NodeConfig::default().gossip_period)]
     gossip_period: Duration,
 
     #[arg(long, value_parser = parse_duration, default_value_t = NodeConfig::default().gossip_dither)]
     gossip_dither: Duration,
 
-    /// Every nth gossip is broadcast instead of epidemic.
-    #[arg(long, default_value_t = NodeConfig::default().gossip_broadcast_every)]
-    gossip_broadcast_every: u8,
+    #[arg(long, default_value_t = NodeConfig::default().gossip_broadcast_fraction)]
+    gossip_broadcast_fraction: f64,
 
-    #[arg(long, default_value_t = NodeConfig::default().gossip_ttl_periodic)]
-    gossip_ttl_periodic: u8,
-
-    #[arg(long, default_value_t = NodeConfig::default().gossip_ttl_urgent)]
-    gossip_ttl_urgent: u8,
-
-    /// For unicast gossips, outdegree cannot exceed the peer count.
-    #[arg(long, default_value_t = NodeConfig::default().gossip_outdegree_periodic)]
-    gossip_outdegree_periodic: u8,
-
-    #[arg(long, default_value_t = NodeConfig::default().gossip_outdegree_urgent)]
-    gossip_outdegree_urgent: u8,
-
-    // ----------------------------------------------------------------------------------------------------------------
-    /// Epidemic peer sample set size.
-    #[arg(long, default_value_t = NodeConfig::default().peer_count)]
-    peer_count: usize,
-
-    /// A peer is eligible to receive gossips unless it was last seen longer than this ago.
-    #[arg(long, value_parser = parse_duration, default_value_t = NodeConfig::default().peer_age_reachable)]
-    peer_age_reachable: Duration,
-
-    /// A peer is considered expired and may be replaced by new peers if it was last seen longer than this ago.
-    #[arg(long, value_parser = parse_duration, default_value_t = NodeConfig::default().peer_age_replaceable)]
-    peer_age_replaceable: Duration,
-
-    // ----------------------------------------------------------------------------------------------------------------
-    /// Epidemic duplicate gossip drop cache is necessary for network load regulation; see the model.
-    #[arg(long, default_value_t = NodeConfig::default().dedup_capacity)]
-    dedup_capacity: usize,
-
-    /// Gossips that have been seen more than this long ago are considered fresh.
-    #[arg(long, value_parser = parse_duration, default_value_t = NodeConfig::default().dedup_timeout)]
-    dedup_timeout: Duration,
+    #[arg(long, value_parser = parse_duration, default_value_t = NodeConfig::default().gossip_urgent_delay)]
+    gossip_urgent_delay: Duration,
 
     // ----------------------------------------------------------------------------------------------------------------
     /// Imperfect network simulation. Packets take a random time in this range to be delivered.
@@ -144,16 +110,8 @@ impl Config {
             subject_id_modulus: self.subject_id_modulus,
             gossip_period: self.gossip_period,
             gossip_dither: self.gossip_dither,
-            gossip_broadcast_every: self.gossip_broadcast_every,
-            gossip_ttl_periodic: self.gossip_ttl_periodic,
-            gossip_ttl_urgent: self.gossip_ttl_urgent,
-            gossip_outdegree_periodic: self.gossip_outdegree_periodic,
-            gossip_outdegree_urgent: self.gossip_outdegree_urgent,
-            peer_count: self.peer_count,
-            peer_age_reachable: self.peer_age_reachable,
-            peer_age_replaceable: self.peer_age_replaceable,
-            dedup_capacity: self.dedup_capacity,
-            dedup_timeout: self.dedup_timeout,
+            gossip_broadcast_fraction: self.gossip_broadcast_fraction,
+            gossip_urgent_delay: self.gossip_urgent_delay,
         }
     }
 
@@ -169,12 +127,29 @@ impl Config {
 
 fn main() -> ExitCode {
     let mut config = Config::parse();
+    if config.topic_count == 0 {
+        Config::command().error(ErrorKind::ValueValidation, "topic_count must be positive").exit();
+    }
     if config.topic_count >= (config.subject_id_modulus as usize) / 2 {
         Config::command().error(ErrorKind::ValueValidation, "too many topics for this modulus").exit();
     }
+    if !(0.0..=1.0).contains(&config.gossip_broadcast_fraction) {
+        Config::command().error(ErrorKind::ValueValidation, "gossip_broadcast_fraction must be in [0, 1]").exit();
+    }
+    let topic_count_u32 = match u32::try_from(config.topic_count) {
+        Ok(value) => value,
+        Err(_) => {
+            Config::command().error(ErrorKind::ValueValidation, "topic_count does not fit into u32").exit();
+        }
+    };
+    if config.subject_id_modulus > u32::MAX - topic_count_u32 {
+        Config::command().error(ErrorKind::ValueValidation, "subject_id_modulus + topic_count overflows u32").exit();
+    }
     if let None = config.seed {
         config.seed = Some(generate_seed());
-        eprintln!("Using automatic --seed={0}", config.seed.unwrap());
+        eprintln!("Using automatic random seed; use --seed={0} to reproduce this run", config.seed.unwrap());
+    } else {
+        eprintln!("Deterministic run with --seed={0}", config.seed.unwrap());
     }
 
     if config.runs > 1 { run_parallel(config) } else { run_single(config) }
@@ -217,20 +192,22 @@ fn run_single(config: Config) -> ExitCode {
                 topics_by_node_tail.map(|n| n.to_string()).collect::<Vec<_>>().join(", ")
             );
             eprintln!(
-                "│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^25}│{:^25}│",
+                "│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^10}│{:^15}│{:^15}│",
                 "time [s]",
                 "steps",
                 "steps/s",
                 "collision",
                 "divergent",
-                "unlisted",
-                "Σ tx",
-                "Δ tx",
-                "tx/s",
-                "Σ rx",
-                "Σ loss",
-                "Σ rx/node [msg/node]",
-                "arrival load [msg/s/node]"
+                "Σ tx emit",
+                "Δ tx emit",
+                "tx emit/s",
+                "Σ tx brd",
+                "Σ tx shd",
+                "Σ rx total",
+                "Σ rx brd",
+                "Σ rx shd",
+                "Σ rx [msg/node]",
+                "R [msg/s/node]"
             );
         }
         let t = snap.time.as_seconds_f64();
@@ -242,22 +219,25 @@ fn run_single(config: Config) -> ExitCode {
         };
         let tx_delta = snap.tx_total - snap_last.as_ref().expect("last snapshot must be available").tx_total;
         let tx_rate = if dt > 0.0 { (tx_delta as f64) / dt } else { 0.0 };
+        let rx_delta = snap.rx_total - snap_last.as_ref().expect("last snapshot must be available").rx_total;
         let node_count = snap.nodes.len();
         let rx_per_node_cumulative = snap.rx_total as f64 / (node_count as f64);
-        let arrival_load_per_node = if t > 0.0 { rx_per_node_cumulative / t } else { 0.0 };
+        let arrival_load_per_node = if dt > 0.0 { (rx_delta as f64) / ((node_count as f64) * dt) } else { 0.0 };
         eprintln!(
-            "│{:10.3}│{:10}│{:10.1}│{:10}│{:10}│{:10}│{:10}│{:10}│{:10.1}│{:10}│{:10}│{:25.1}│{:25.1}│",
+            "│ {:8.3} │ {:8} │ {:8.1} │ {:8} │ {:8} │ {:8} │ {:8} │ {:8.1} │ {:8} │ {:8} │ {:8} │ {:8} │ {:8} │ {:13.1} │ {:13.1} │",
             t,
             snap.steps,
             step_rate,
             snap.count_collisions(),
             snap.count_divergent(),
-            snap.count_unlisted_nodes(),
             snap.tx_total,
             tx_delta,
             tx_rate,
+            snap.broadcast_tx_total,
+            snap.shard_tx_total,
             snap.rx_total,
-            snap.loss_total,
+            snap.broadcast_rx_total,
+            snap.shard_rx_total,
             rx_per_node_cumulative,
             arrival_load_per_node
         );

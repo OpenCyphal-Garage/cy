@@ -106,6 +106,7 @@ impl<'a> Simulation<'a> {
         report_period: Duration,
     ) -> SimulationOutcome {
         let mut snap = self.capture();
+        reporter(&snap);
         loop {
             if *self.now.borrow() - snap.time >= report_period {
                 snap = self.capture();
@@ -133,9 +134,13 @@ impl<'a> Simulation<'a> {
         Snapshot {
             time: *self.now.borrow(),
             steps: self.step_count,
-            nodes: self.nodes.iter().map(|node| NodeSnapshot::new(node)).collect(),
+            nodes: self.nodes.iter().map(NodeSnapshot::new).collect(),
             tx_total: net.sent_total(),
+            broadcast_tx_total: net.broadcast_sent_total(),
+            shard_tx_total: net.shard_sent_total(),
             rx_total: net.received_total(),
+            broadcast_rx_total: net.broadcast_received_total(),
+            shard_rx_total: net.shard_received_total(),
             loss_total: net.lost,
         }
     }
@@ -219,9 +224,8 @@ impl<'a> Simulation<'a> {
 #[derive(Debug, Clone)]
 pub struct NodeSnapshot {
     pub id: u16,
-    pub subject_id_modulus: u16,
+    pub subject_id_modulus: u32,
     pub topics: Vec<Topic>,
-    pub peers: Vec<u16>,
 }
 
 impl NodeSnapshot {
@@ -230,7 +234,6 @@ impl NodeSnapshot {
             id: node.id(),
             subject_id_modulus: node.subject_id_modulus(),
             topics: node.topics().into_iter().cloned().collect(),
-            peers: node.peer_ids(),
         }
     }
 }
@@ -241,13 +244,17 @@ pub struct Snapshot {
     pub steps: u64,
     pub nodes: Vec<NodeSnapshot>,
     pub tx_total: u64,
+    pub broadcast_tx_total: u64,
+    pub shard_tx_total: u64,
     pub rx_total: u64,
+    pub broadcast_rx_total: u64,
+    pub shard_rx_total: u64,
     pub loss_total: u64,
 }
 
 impl Snapshot {
     pub fn count_collisions(&self) -> usize {
-        if self.nodes.len() == 0 {
+        if self.nodes.is_empty() {
             return 0;
         }
         let subject_id_modulus = self.nodes[0].subject_id_modulus;
@@ -261,30 +268,17 @@ impl Snapshot {
         }
         by_hash.values().filter(|evictions| evictions.len() > 1).count()
     }
-
-    pub fn count_unlisted_nodes(&self) -> usize {
-        let mut inbound_references = vec![0usize; self.nodes.len()];
-        for node in &self.nodes {
-            for &peer in &node.peers {
-                let peer_index = peer as usize;
-                if peer_index < inbound_references.len() {
-                    inbound_references[peer_index] += 1;
-                }
-            }
-        }
-        inbound_references.into_iter().filter(|count| *count == 0).count()
-    }
 }
 
-fn count_collisions(nodes: &[Node]) -> usize {
-    if nodes.len() == 0 {
+fn count_collisions(nodes: &[Node<'_>]) -> usize {
+    if nodes.is_empty() {
         return 0;
     }
     let subject_id_modulus = nodes[0].subject_id_modulus();
     count_colliding_subjects(nodes.iter().flat_map(|node| node.topics()), subject_id_modulus)
 }
 
-fn count_divergent(nodes: &[Node]) -> usize {
+fn count_divergent(nodes: &[Node<'_>]) -> usize {
     let mut by_hash: BTreeMap<u64, BTreeSet<u16>> = BTreeMap::new();
     for topic in nodes.iter().flat_map(|node| node.topics()) {
         by_hash.entry(topic.hash()).or_default().insert(topic.evictions());
@@ -301,6 +295,11 @@ fn generate_network<'a>(
     network: Rc<RefCell<dyn Transmit + 'a>>,
     node_config: &NodeConfig,
 ) -> Result<Vec<Node<'a>>, String> {
+    if topic_count == 0 {
+        return Err("topic_count must be positive".to_string());
+    }
+    let shard_count = u32::try_from(topic_count).map_err(|_| "topic_count is too large for u32 shard IDs")?;
+
     // Generate random topics to choose from later.
     let mut topic_hashes = Vec::new();
     for _ in 0..topic_count {
@@ -311,8 +310,8 @@ fn generate_network<'a>(
     let mut nodes = Vec::new();
     assert!(node_count <= u16::MAX as usize);
     for id in 0..(node_count as u16) {
-        nodes.push(Node::new(id, network.clone(), rng.clone(), now.clone(), node_config)?);
-        let mut node = nodes.last_mut().unwrap();
+        nodes.push(Node::new(id, shard_count, network.clone(), rng.clone(), now.clone(), node_config)?);
+        let node = nodes.last_mut().expect("node was just pushed");
         let node_topic_count = (rng.borrow_mut().next_u64() % (topic_count as u64)) + 1;
         assert!(node_topic_count >= 1 && node_topic_count <= topic_count as u64);
         for _ in 0..node_topic_count {
@@ -321,6 +320,7 @@ fn generate_network<'a>(
             let topic_hash = topic_hashes[rng.borrow_mut().next_u64() as usize % topic_count];
             node.add_topic(topic_hash);
         }
+        network.borrow_mut().set_node_shards(id, node.shard_ids());
     }
     Ok(nodes)
 }
@@ -329,35 +329,39 @@ fn generate_network<'a>(
 mod tests {
     use super::*;
 
-    fn make_snapshot(peers_by_node: &[Vec<u16>]) -> Snapshot {
+    fn make_snapshot(evictions_by_node: &[Vec<(u64, u16)>]) -> Snapshot {
         Snapshot {
             time: Duration::ZERO,
             steps: 0,
-            nodes: peers_by_node
+            nodes: evictions_by_node
                 .iter()
                 .enumerate()
-                .map(|(id, peers)| NodeSnapshot {
+                .map(|(id, topics)| NodeSnapshot {
                     id: id as u16,
                     subject_id_modulus: 1999,
-                    topics: Vec::new(),
-                    peers: peers.clone(),
+                    topics: topics
+                        .iter()
+                        .map(|(hash, evictions)| {
+                            let mut topic = Topic::new(*hash, Duration::ZERO);
+                            topic.set_evictions(*evictions);
+                            topic
+                        })
+                        .collect(),
                 })
                 .collect(),
             tx_total: 0,
+            broadcast_tx_total: 0,
+            shard_tx_total: 0,
             rx_total: 0,
+            broadcast_rx_total: 0,
+            shard_rx_total: 0,
             loss_total: 0,
         }
     }
 
     #[test]
-    fn count_unlisted_nodes_counts_zero_inbound_references() {
-        let snapshot = make_snapshot(&[vec![1], vec![0], vec![1], vec![]]);
-        assert_eq!(2, snapshot.count_unlisted_nodes());
-    }
-
-    #[test]
-    fn count_unlisted_nodes_ignores_out_of_range_peer_ids() {
-        let snapshot = make_snapshot(&[vec![7], vec![0]]);
-        assert_eq!(1, snapshot.count_unlisted_nodes());
+    fn count_divergent_counts_hashes_with_distinct_eviction_values() {
+        let snapshot = make_snapshot(&[vec![(1, 0), (2, 0)], vec![(1, 1), (2, 0)], vec![(1, 1), (2, 0)]]);
+        assert_eq!(1, snapshot.count_divergent());
     }
 }

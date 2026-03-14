@@ -1,7 +1,7 @@
-use crate::message::{GossipMessage, Transmit};
+use crate::message::{GossipMessage, GossipScope, Transmit};
 use rand::{Rng, RngExt};
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::RangeInclusive;
 use std::rc::Rc;
 use time::Duration;
@@ -10,7 +10,7 @@ const DELAY_QUANTIZATION_STEP: Duration = Duration::microseconds(50);
 
 #[derive(Debug, Clone)]
 pub(super) struct NetworkConfig {
-    /// Assuming that nodes have contiguous IDs from 0 to node_count-1; used for broadcasting.
+    /// Assuming that nodes have contiguous IDs from 0 to node_count-1.
     pub node_count: usize,
     pub delay_range: RangeInclusive<Duration>,
     pub loss_probability: f64,
@@ -22,6 +22,10 @@ pub(super) struct Network {
     /// Note that messages may be delivered out of order, depending on how the propagation delay is rolled.
     enroute: BTreeMap<(Duration, u64, u16), GossipMessage>,
 
+    /// Current multicast shard subscriptions.
+    node_shards: BTreeMap<u16, BTreeSet<u32>>,
+    shard_subscribers: BTreeMap<u32, BTreeSet<u16>>,
+
     /// Shared states.
     now: Rc<dyn Fn() -> Duration + 'static>,
     rng: Rc<RefCell<dyn Rng>>,
@@ -31,9 +35,65 @@ pub(super) struct Network {
 }
 
 impl Transmit for Network {
-    fn unicast_gossip(&mut self, destination: u16, message: GossipMessage) {
-        assert!((destination as usize) < self.cfg.node_count);
-        self.stats.sent_per_node.entry(message.sender_id()).and_modify(|c| *c += 1).or_insert(1);
+    fn transmit_gossip(&mut self, message: GossipMessage) {
+        assert!((message.sender_id() as usize) < self.cfg.node_count);
+        self.increment_sent_counter(message.sender_id(), message.scope());
+        match message.scope() {
+            GossipScope::Broadcast => {
+                assert!(self.cfg.node_count <= u16::MAX as usize);
+                for destination in 0..(self.cfg.node_count as u16) {
+                    if destination != message.sender_id() {
+                        self.enqueue_delivery(destination, message.clone());
+                    }
+                }
+            }
+            GossipScope::Shard(shard_id) => {
+                let subscribers = self.shard_subscribers.get(&shard_id).cloned().unwrap_or_default();
+                for destination in subscribers {
+                    if destination != message.sender_id() {
+                        self.enqueue_delivery(destination, message.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    fn set_node_shards(&mut self, node_id: u16, shards: Vec<u32>) {
+        assert!((node_id as usize) < self.cfg.node_count);
+
+        if let Some(old) = self.node_shards.remove(&node_id) {
+            for shard in old {
+                if let Some(subscribers) = self.shard_subscribers.get_mut(&shard) {
+                    subscribers.remove(&node_id);
+                    if subscribers.is_empty() {
+                        self.shard_subscribers.remove(&shard);
+                    }
+                }
+            }
+        }
+
+        let set = shards.into_iter().collect::<BTreeSet<_>>();
+        for shard in &set {
+            self.shard_subscribers.entry(*shard).or_default().insert(node_id);
+        }
+        self.node_shards.insert(node_id, set);
+    }
+}
+
+impl Network {
+    pub(super) fn new(cfg: &NetworkConfig, now: Rc<dyn Fn() -> Duration + 'static>, rng: Rc<RefCell<dyn Rng>>) -> Self {
+        Self {
+            enroute: BTreeMap::new(),
+            node_shards: BTreeMap::new(),
+            shard_subscribers: BTreeMap::new(),
+            now,
+            rng,
+            stats: NetworkStats::default(),
+            cfg: cfg.clone(),
+        }
+    }
+
+    fn enqueue_delivery(&mut self, destination: u16, message: GossipMessage) {
         if self.rng.borrow_mut().random_bool(self.cfg.loss_probability) {
             self.stats.lost += 1;
             return;
@@ -50,24 +110,29 @@ impl Transmit for Network {
         };
         let delivery_time = (self.now)() + delay;
         let tiebreaker = self.rng.borrow_mut().next_u64();
-        // This is where we may introduce reordering, which is good.
         self.enroute.insert((delivery_time, tiebreaker, destination), message);
     }
 
-    fn broadcast_gossip(&mut self, message: GossipMessage) {
-        assert!(self.cfg.node_count <= u16::MAX as usize);
-        assert!((message.sender_id() as usize) < self.cfg.node_count);
-        for destination in 0..(self.cfg.node_count as u16) {
-            if destination != message.sender_id() {
-                self.unicast_gossip(destination, message.clone());
+    fn increment_sent_counter(&mut self, sender_id: u16, scope: GossipScope) {
+        match scope {
+            GossipScope::Broadcast => {
+                self.stats.broadcast_sent_per_node.entry(sender_id).and_modify(|c| *c += 1).or_insert(1);
+            }
+            GossipScope::Shard(_) => {
+                self.stats.shard_sent_per_node.entry(sender_id).and_modify(|c| *c += 1).or_insert(1);
             }
         }
     }
-}
 
-impl Network {
-    pub(super) fn new(cfg: &NetworkConfig, now: Rc<dyn Fn() -> Duration + 'static>, rng: Rc<RefCell<dyn Rng>>) -> Self {
-        Self { enroute: BTreeMap::new(), now, rng, stats: NetworkStats::default(), cfg: cfg.clone() }
+    fn increment_received_counter(&mut self, destination: u16, scope: GossipScope) {
+        match scope {
+            GossipScope::Broadcast => {
+                self.stats.broadcast_received_per_node.entry(destination).and_modify(|c| *c += 1).or_insert(1);
+            }
+            GossipScope::Shard(_) => {
+                self.stats.shard_received_per_node.entry(destination).and_modify(|c| *c += 1).or_insert(1);
+            }
+        }
     }
 
     /// Drains all messages that are due by the specified time, grouped by destination.
@@ -77,11 +142,11 @@ impl Network {
             if delivery_time > now {
                 break;
             }
-            self.stats.received_per_node.entry(destination).and_modify(|c| *c += 1).or_insert(1);
             let message = self
                 .enroute
                 .remove(&(delivery_time, tie, destination))
                 .expect("enroute message disappeared while draining arrivals");
+            self.increment_received_counter(destination, message.scope());
             by_destination.entry(destination).or_default().push(message);
         }
         by_destination.into_iter().collect()
@@ -103,18 +168,38 @@ impl Network {
 /// Propagation statistics for debugging and analysis.
 #[derive(Debug, Clone, Default)]
 pub(super) struct NetworkStats {
-    pub sent_per_node: BTreeMap<u16, u64>,
-    pub received_per_node: BTreeMap<u16, u64>,
+    // Transmit counters are per gossip emission (one multicast send), not per destination.
+    pub broadcast_sent_per_node: BTreeMap<u16, u64>,
+    pub shard_sent_per_node: BTreeMap<u16, u64>,
+    // Receive and loss counters are per destination delivery copy.
+    pub broadcast_received_per_node: BTreeMap<u16, u64>,
+    pub shard_received_per_node: BTreeMap<u16, u64>,
     pub lost: u64,
 }
 
 impl NetworkStats {
+    pub fn broadcast_sent_total(&self) -> u64 {
+        self.broadcast_sent_per_node.values().sum()
+    }
+
+    pub fn shard_sent_total(&self) -> u64 {
+        self.shard_sent_per_node.values().sum()
+    }
+
     pub fn sent_total(&self) -> u64 {
-        self.sent_per_node.values().sum()
+        self.broadcast_sent_total() + self.shard_sent_total()
+    }
+
+    pub fn broadcast_received_total(&self) -> u64 {
+        self.broadcast_received_per_node.values().sum()
+    }
+
+    pub fn shard_received_total(&self) -> u64 {
+        self.shard_received_per_node.values().sum()
     }
 
     pub fn received_total(&self) -> u64 {
-        self.received_per_node.values().sum()
+        self.broadcast_received_total() + self.shard_received_total()
     }
 }
 
@@ -141,8 +226,8 @@ mod tests {
         Network::new(&config, now_provider, Rc::new(RefCell::new(SmallRng::seed_from_u64(0xBAD5_EED))))
     }
 
-    fn make_test_gossip(sender_id: u16) -> GossipMessage {
-        GossipMessage::new(sender_id, 0, 0, 0x1234_5678_9ABC_DEF0, 0, -1)
+    fn make_test_gossip(sender_id: u16, scope: GossipScope) -> GossipMessage {
+        GossipMessage::new(sender_id, scope, 0x1234_5678_9ABC_DEF0, 0, -1)
     }
 
     #[test]
@@ -151,19 +236,19 @@ mod tests {
         let mut network = make_test_network(now, (u16::MAX as usize) + 1);
 
         let result = catch_unwind(AssertUnwindSafe(|| {
-            network.broadcast_gossip(make_test_gossip(0));
+            network.transmit_gossip(make_test_gossip(0, GossipScope::Broadcast));
         }));
 
         assert!(result.is_err());
     }
 
     #[test]
-    fn network_broadcast_rejects_sender_id_out_of_range() {
+    fn network_transmit_rejects_sender_id_out_of_range() {
         let now = Rc::new(RefCell::new(Duration::ZERO));
         let mut network = make_test_network(now, 3);
 
         let result = catch_unwind(AssertUnwindSafe(|| {
-            network.broadcast_gossip(make_test_gossip(3));
+            network.transmit_gossip(make_test_gossip(3, GossipScope::Broadcast));
         }));
 
         assert!(result.is_err());
@@ -172,14 +257,13 @@ mod tests {
     #[test]
     fn network_drain_due_drains_all_due_messages() {
         let now = Rc::new(RefCell::new(Duration::ZERO));
-        let mut network = make_test_network(now, 2);
-        network.unicast_gossip(1, make_test_gossip(0));
-        network.unicast_gossip(1, make_test_gossip(0));
+        let mut network = make_test_network(now, 3);
+        network.transmit_gossip(make_test_gossip(0, GossipScope::Broadcast));
 
         let drained = network.drain_due(Duration::ZERO);
-        assert_eq!(1, drained.len());
-        assert_eq!(1, drained[0].0);
-        assert_eq!(2, drained[0].1.len());
+        assert_eq!(2, drained.len());
+        assert_eq!(1, drained[0].1.len());
+        assert_eq!(1, drained[1].1.len());
         assert_eq!(None, network.soonest_arrival_at());
     }
 
@@ -188,7 +272,8 @@ mod tests {
         let now = Rc::new(RefCell::new(Duration::ZERO));
         let mut network = make_test_network(now.clone(), 2);
         *now.borrow_mut() = Duration::seconds(5);
-        network.unicast_gossip(1, make_test_gossip(0));
+        network.set_node_shards(1, vec![42]);
+        network.transmit_gossip(make_test_gossip(0, GossipScope::Shard(42)));
         assert_eq!(Some(Duration::seconds(5)), network.soonest_arrival_at());
     }
 
@@ -203,8 +288,9 @@ mod tests {
         let now_provider: Rc<dyn Fn() -> Duration + 'static> = Rc::new(move || *now.borrow());
         let mut network = Network::new(&config, now_provider, Rc::new(RefCell::new(SmallRng::seed_from_u64(1234))));
 
+        network.set_node_shards(1, vec![42]);
         for _ in 0..64 {
-            network.unicast_gossip(1, make_test_gossip(0));
+            network.transmit_gossip(make_test_gossip(0, GossipScope::Shard(42)));
         }
         assert!(!network.enroute.is_empty());
         for &(delivery_time, _, _) in network.enroute.keys() {
@@ -223,13 +309,66 @@ mod tests {
         let now_provider: Rc<dyn Fn() -> Duration + 'static> = Rc::new(move || *now.borrow());
         let mut network = Network::new(&config, now_provider, Rc::new(RefCell::new(SmallRng::seed_from_u64(5678))));
 
+        network.set_node_shards(1, vec![42]);
         for _ in 0..64 {
-            network.unicast_gossip(1, make_test_gossip(0));
+            network.transmit_gossip(make_test_gossip(0, GossipScope::Shard(42)));
         }
         assert!(!network.enroute.is_empty());
         for &(delivery_time, _, _) in network.enroute.keys() {
             assert!(delivery_time >= Duration::microseconds(1));
             assert!(delivery_time <= Duration::microseconds(49));
         }
+    }
+
+    #[test]
+    fn shard_delivery_reaches_only_subscribers() {
+        let now = Rc::new(RefCell::new(Duration::ZERO));
+        let mut network = make_test_network(now, 4);
+        network.set_node_shards(1, vec![500]);
+        network.set_node_shards(2, vec![500]);
+        network.set_node_shards(3, vec![700]);
+
+        network.transmit_gossip(make_test_gossip(0, GossipScope::Shard(500)));
+        let drained = network.drain_due(Duration::ZERO);
+        let destinations = drained.into_iter().map(|(destination, _)| destination).collect::<BTreeSet<_>>();
+        assert_eq!(BTreeSet::from([1_u16, 2_u16]), destinations);
+    }
+
+    #[test]
+    fn stats_count_transmit_once_per_emission_but_receive_per_delivery_copy() {
+        let now = Rc::new(RefCell::new(Duration::ZERO));
+        let mut network = make_test_network(now, 4);
+        network.set_node_shards(1, vec![500]);
+        network.set_node_shards(2, vec![500]);
+        network.set_node_shards(3, vec![700]);
+
+        network.transmit_gossip(make_test_gossip(0, GossipScope::Broadcast)); // 1 emit, 3 deliveries
+        network.transmit_gossip(make_test_gossip(0, GossipScope::Shard(500))); // 1 emit, 2 deliveries
+        let _ = network.drain_due(Duration::ZERO);
+
+        let stats = network.stats();
+        assert_eq!(1, stats.broadcast_sent_total());
+        assert_eq!(1, stats.shard_sent_total());
+        assert_eq!(2, stats.sent_total());
+        assert_eq!(3, stats.broadcast_received_total());
+        assert_eq!(2, stats.shard_received_total());
+        assert_eq!(5, stats.received_total());
+    }
+
+    #[test]
+    fn stats_lost_counts_dropped_delivery_copies() {
+        let now = Rc::new(RefCell::new(Duration::ZERO));
+        let config =
+            NetworkConfig { node_count: 4, delay_range: Duration::ZERO..=Duration::ZERO, loss_probability: 1.0 };
+        let now_provider: Rc<dyn Fn() -> Duration + 'static> = Rc::new(move || *now.borrow());
+        let mut network = Network::new(&config, now_provider, Rc::new(RefCell::new(SmallRng::seed_from_u64(42))));
+
+        network.transmit_gossip(make_test_gossip(0, GossipScope::Broadcast)); // 3 destination copies dropped
+        let _ = network.drain_due(Duration::ZERO);
+
+        let stats = network.stats();
+        assert_eq!(1, stats.broadcast_sent_total());
+        assert_eq!(0, stats.received_total());
+        assert_eq!(3, stats.lost);
     }
 }

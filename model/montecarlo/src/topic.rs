@@ -27,7 +27,7 @@ impl Topic {
         self.origin = min(self.origin, merged_origin);
     }
 
-    pub fn subject_id(&self, modulus: u16) -> u16 {
+    pub fn subject_id(&self, modulus: u32) -> u32 {
         topic_subject_id(self.hash, self.evictions, modulus)
     }
 
@@ -48,8 +48,8 @@ impl Topic {
     }
 }
 
-pub fn topic_subject_id(hash: u64, evictions: u16, modulus: u16) -> u16 {
-    ((hash + (evictions as u64).pow(2)) % (modulus as u64)) as u16
+pub fn topic_subject_id(hash: u64, evictions: u16, modulus: u32) -> u32 {
+    ((hash + (evictions as u64).pow(2)) % (modulus as u64)) as u32
 }
 
 pub fn left_wins_collision(local: &Topic, now: Duration, remote_lage: i8, remote_hash: u64) -> bool {

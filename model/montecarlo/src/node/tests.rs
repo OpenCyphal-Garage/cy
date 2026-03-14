@@ -1,20 +1,10 @@
 use super::*;
-use peer_sampler::ticket;
-use rand::RngExt;
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
 
-struct StubNetwork;
-
-impl Transmit for StubNetwork {
-    fn unicast_gossip(&mut self, _destination: u16, _message: GossipMessage) {}
-    fn broadcast_gossip(&mut self, _message: GossipMessage) {}
-}
-
 #[derive(Default)]
 struct TxLog {
-    unicasts: Vec<(u16, GossipMessage)>,
-    broadcasts: Vec<GossipMessage>,
+    messages: Vec<GossipMessage>,
 }
 
 struct RecordingNetwork {
@@ -22,28 +12,17 @@ struct RecordingNetwork {
 }
 
 impl Transmit for RecordingNetwork {
-    fn unicast_gossip(&mut self, destination: u16, message: GossipMessage) {
-        self.log.borrow_mut().unicasts.push((destination, message));
+    fn transmit_gossip(&mut self, message: GossipMessage) {
+        self.log.borrow_mut().messages.push(message);
     }
 
-    fn broadcast_gossip(&mut self, message: GossipMessage) {
-        self.log.borrow_mut().broadcasts.push(message);
-    }
+    fn set_node_shards(&mut self, _node_id: u16, _shards: Vec<u32>) {}
 }
 
-fn make_test_node(modulus: u16) -> Node<'static> {
-    let cfg = NodeConfig { subject_id_modulus: modulus, ..NodeConfig::default() };
-    let network = Rc::new(RefCell::new(StubNetwork));
-    let rng = Rc::new(RefCell::new(SmallRng::seed_from_u64(0xD00D_F00D)));
-    let now: Rc<dyn Fn() -> Duration + 'static> = Rc::new(|| Duration::ZERO);
-    Node::new(0, network, rng, now, &cfg).unwrap()
-}
-
-fn snapshot(node: &Node<'_>, modulus: u16) -> Vec<(u64, u16, u16)> {
-    node.topics_by_hash.values().map(|topic| (topic.hash(), topic.subject_id(modulus), topic.evictions())).collect()
-}
-
-fn make_recording_node(cfg: NodeConfig) -> (Node<'static>, Rc<RefCell<TxLog>>, Rc<RefCell<Duration>>) {
+fn make_recording_node(
+    cfg: NodeConfig,
+    shard_count: u32,
+) -> (Node<'static>, Rc<RefCell<TxLog>>, Rc<RefCell<Duration>>) {
     let log = Rc::new(RefCell::new(TxLog::default()));
     let network: Rc<RefCell<dyn Transmit>> = Rc::new(RefCell::new(RecordingNetwork { log: log.clone() }));
     let rng = Rc::new(RefCell::new(SmallRng::seed_from_u64(0xBAD5_EED0)));
@@ -52,396 +31,281 @@ fn make_recording_node(cfg: NodeConfig) -> (Node<'static>, Rc<RefCell<TxLog>>, R
         let now = now.clone();
         Rc::new(move || *now.borrow())
     };
-    (Node::new(0, network, rng, now_provider, &cfg).unwrap(), log, now)
+    (Node::new(0, shard_count, network, rng, now_provider, &cfg).unwrap(), log, now)
 }
 
-fn make_message(sender: u16, ttl: u8, outdegree: u8, hash: u64, evictions: u16, lage: i8) -> GossipMessage {
-    GossipMessage::new(sender, ttl, outdegree, hash, evictions, lage)
+fn make_message(sender: u16, scope: GossipScope, hash: u64, evictions: u16, lage: i8) -> GossipMessage {
+    GossipMessage::new(sender, scope, hash, evictions, lage)
+}
+
+fn take_messages(log: &Rc<RefCell<TxLog>>) -> Vec<GossipMessage> {
+    std::mem::take(&mut log.borrow_mut().messages)
+}
+
+fn defer_periodic(node: &mut Node<'_>) {
+    for state in node.topic_schedule_by_hash.values_mut() {
+        state.next_gossip_at = Duration::MAX;
+    }
 }
 
 #[test]
 fn new_rejects_non_prime_modulus() {
     let cfg = NodeConfig { subject_id_modulus: 12, ..NodeConfig::default() };
-    let network = Rc::new(RefCell::new(StubNetwork));
+    let log = Rc::new(RefCell::new(TxLog::default()));
+    let network: Rc<RefCell<dyn Transmit>> = Rc::new(RefCell::new(RecordingNetwork { log }));
     let rng = Rc::new(RefCell::new(SmallRng::seed_from_u64(0)));
     let now: Rc<dyn Fn() -> Duration + 'static> = Rc::new(|| Duration::ZERO);
-    assert!(Node::new(0, network, rng, now, &cfg).is_err());
+    assert!(Node::new(0, 1, network, rng, now, &cfg).is_err());
 }
 
 #[test]
-fn add_topic_inserts_without_collision() {
-    let mut node = make_test_node(11);
-    node.add_topic(2);
-    assert_eq!(vec![(2, 2, 0)], snapshot(&node, 11));
-    assert_eq!(0, node.count_local_collisions());
+fn new_rejects_zero_shard_count() {
+    let cfg = NodeConfig::default();
+    let log = Rc::new(RefCell::new(TxLog::default()));
+    let network: Rc<RefCell<dyn Transmit>> = Rc::new(RefCell::new(RecordingNetwork { log }));
+    let rng = Rc::new(RefCell::new(SmallRng::seed_from_u64(0)));
+    let now: Rc<dyn Fn() -> Duration + 'static> = Rc::new(|| Duration::ZERO);
+    assert!(Node::new(0, 0, network, rng, now, &cfg).is_err());
 }
 
 #[test]
-fn add_topic_collision_moving_topic_loses() {
-    let mut node = make_test_node(11);
-    node.add_topic(1);
-    node.add_topic(12); // Same subject as 1, higher hash loses and is evicted.
-
-    let subjects = snapshot(&node, 11);
-    assert_eq!(0, node.count_local_collisions());
-    assert!(subjects.contains(&(1, 1, 0)));
-    assert!(subjects.contains(&(12, 2, 1)));
-}
-
-#[test]
-fn add_topic_collision_moving_topic_wins_and_displaces_existing() {
-    let mut node = make_test_node(11);
-    node.add_topic(12);
-    node.add_topic(1); // Same subject as 12, lower hash wins.
-
-    let subjects = snapshot(&node, 11);
-    assert_eq!(0, node.count_local_collisions());
-    assert!(subjects.contains(&(1, 1, 0)));
-    assert!(subjects.contains(&(12, 2, 1)));
-}
-
-#[test]
-fn add_topic_resolves_local_collision_cascade() {
-    let mut node = make_test_node(11);
-    node.add_topic(2);
-    node.add_topic(12);
-    node.add_topic(1);
-
-    let subjects = node
-        .topics_by_hash
-        .values()
-        .map(|topic| (topic.hash(), topic.subject_id(11), topic.evictions()))
-        .collect::<Vec<_>>();
-    assert_eq!(0, node.count_local_collisions());
-    assert!(subjects.contains(&(1, 1, 0)));
-    assert!(subjects.contains(&(2, 2, 0)));
-    assert!(subjects.contains(&(12, 5, 2)));
-}
-
-#[test]
-fn add_topic_existing_hash_is_noop() {
-    let mut node = make_test_node(11);
-    node.add_topic(2);
-    node.add_topic(12);
-    node.add_topic(1);
-    let before = snapshot(&node, 11);
-
-    node.add_topic(2);
-    let after = snapshot(&node, 11);
-
-    assert_eq!(before, after);
-    assert_eq!(0, node.count_local_collisions());
-}
-
-#[test]
-fn add_topic_randomized_stress_preserves_invariants() {
-    const MODULUS: u16 = 101;
-    const TOPIC_SPACE: u64 = 40;
-    const OPS: usize = 1000;
-
-    let mut op_rng = SmallRng::seed_from_u64(0x1BAD_5EED);
-    let mut sequence = Vec::with_capacity(OPS);
-    for _ in 0..OPS {
-        sequence.push(op_rng.random::<u64>() % TOPIC_SPACE);
-    }
-
-    let mut node_a = make_test_node(MODULUS);
-    let mut expected_hashes = BTreeSet::<u64>::new();
-    for &hash in &sequence {
-        node_a.add_topic(hash);
-        expected_hashes.insert(hash);
-
-        let actual_hashes = node_a.topics().into_iter().map(|topic| topic.hash()).collect::<BTreeSet<u64>>();
-        assert_eq!(expected_hashes, actual_hashes);
-        assert_eq!(0, node_a.count_local_collisions());
-    }
-
-    let mut node_b = make_test_node(MODULUS);
-    for &hash in &sequence {
-        node_b.add_topic(hash);
-    }
-    assert_eq!(snapshot(&node_a, MODULUS), snapshot(&node_b, MODULUS));
-}
-
-#[test]
-fn gossip_known_topic_local_win_sends_urgent_without_forwarding() {
+fn first_periodic_gossip_is_forced_broadcast_and_rescheduled_by_send_window() {
     let cfg = NodeConfig {
-        subject_id_modulus: 11,
-        gossip_ttl_urgent: 9,
-        gossip_outdegree_urgent: 1,
+        gossip_period: Duration::seconds(5),
+        gossip_dither: Duration::seconds(1),
+        gossip_broadcast_fraction: 0.1,
         ..NodeConfig::default()
     };
-    let (mut node, log, now) = make_recording_node(cfg);
+    let (mut node, log, now) = make_recording_node(cfg, 100);
+    node.add_topic(42);
+    node.topic_schedule_by_hash.get_mut(&42).expect("missing schedule state").next_gossip_at = Duration::ZERO;
+
+    *now.borrow_mut() = Duration::ZERO;
+    node.step(Vec::new());
+
+    let messages = take_messages(&log);
+    assert_eq!(1, messages.len());
+    assert_eq!(GossipScope::Broadcast, messages[0].scope());
+
+    let state = node.topic_schedule_by_hash.get(&42).expect("missing schedule state");
+    assert_eq!(1, state.periodic_emissions);
+    assert!(!state.first_periodic_broadcast_pending);
+    assert!(state.next_gossip_at >= Duration::seconds(4));
+    assert!(state.next_gossip_at <= Duration::seconds(6));
+}
+
+#[test]
+fn topic_creation_applies_startup_jitter_before_first_periodic_gossip() {
+    let cfg = NodeConfig {
+        gossip_period: Duration::seconds(5),
+        gossip_dither: Duration::seconds(1),
+        ..NodeConfig::default()
+    };
+    let (mut node, _log, now) = make_recording_node(cfg, 100);
+    *now.borrow_mut() = Duration::seconds(10);
+    node.add_topic(123);
+
+    let state = node.topic_schedule_by_hash.get(&123).expect("missing schedule state");
+    assert!(state.next_gossip_at >= Duration::seconds(10));
+    assert!(state.next_gossip_at <= Duration::seconds(22)); // startup window: [0, 2*(5+1)] seconds from now
+}
+
+#[test]
+fn periodic_scheduler_emits_one_oldest_due_topic() {
+    let cfg =
+        NodeConfig { gossip_period: Duration::seconds(5), gossip_dither: Duration::ZERO, ..NodeConfig::default() };
+    let (mut node, log, now) = make_recording_node(cfg, 100);
     node.add_topic(1);
-    node.gossip_at = Duration::MAX;
+    node.add_topic(2);
+
+    node.topic_schedule_by_hash.get_mut(&1).expect("schedule for topic 1 missing").next_gossip_at =
+        Duration::seconds(5);
+    node.topic_schedule_by_hash.get_mut(&2).expect("schedule for topic 2 missing").next_gossip_at =
+        Duration::seconds(3);
+
+    *now.borrow_mut() = Duration::seconds(5);
+    node.step(Vec::new());
+
+    let messages = take_messages(&log);
+    assert_eq!(1, messages.len());
+    assert_eq!(2, messages[0].topic_hash());
+    assert_eq!(Duration::seconds(5), node.topic_schedule_by_hash.get(&1).unwrap().next_gossip_at);
+    assert_eq!(Duration::seconds(10), node.topic_schedule_by_hash.get(&2).unwrap().next_gossip_at);
+}
+
+#[test]
+fn known_gossip_reschedules_topic_to_duplicate_suppression_window() {
+    let cfg = NodeConfig {
+        gossip_period: Duration::seconds(5),
+        gossip_dither: Duration::seconds(1),
+        ..NodeConfig::default()
+    };
+    let (mut node, log, now) = make_recording_node(cfg, 100);
+    node.add_topic(1);
+    defer_periodic(&mut node);
+
+    *now.borrow_mut() = Duration::seconds(10);
+    node.step(vec![make_message(7, GossipScope::Shard(2000), 1, 0, -1)]);
+
+    assert!(take_messages(&log).is_empty());
+    let state = node.topic_schedule_by_hash.get(&1).expect("missing schedule state");
+    assert!(state.next_gossip_at >= Duration::seconds(18));
+    assert!(state.next_gossip_at <= Duration::seconds(22));
+}
+
+#[test]
+fn periodic_scope_uses_per_topic_ratio_after_first_broadcast() {
+    let cfg = NodeConfig {
+        gossip_period: Duration::seconds(5),
+        gossip_dither: Duration::ZERO,
+        gossip_broadcast_fraction: 0.1,
+        ..NodeConfig::default()
+    };
+    let (mut node, log, now) = make_recording_node(cfg, 100);
+    node.add_topic(42);
+    let shard = node.subject_id_modulus() + ((42 % 100) as u32);
+
+    for emission in 1_i64..=20 {
+        *now.borrow_mut() = Duration::seconds(emission);
+        node.topic_schedule_by_hash.get_mut(&42).expect("missing schedule state").next_gossip_at =
+            Duration::seconds(emission);
+        node.step(Vec::new());
+
+        let messages = take_messages(&log);
+        assert_eq!(1, messages.len());
+        let expected_scope = if (emission == 1) || (emission == 10) || (emission == 20) {
+            GossipScope::Broadcast
+        } else {
+            GossipScope::Shard(shard)
+        };
+        assert_eq!(expected_scope, messages[0].scope(), "unexpected scope at emission {emission}");
+    }
+}
+
+#[test]
+fn next_update_at_uses_earliest_periodic_or_urgent_deadline() {
+    let cfg = NodeConfig::default();
+    let (mut node, _log, now) = make_recording_node(cfg, 100);
+    node.add_topic(1);
+    node.add_topic(2);
+    node.topic_schedule_by_hash.get_mut(&1).unwrap().next_gossip_at = Duration::seconds(10);
+    node.topic_schedule_by_hash.get_mut(&2).unwrap().next_gossip_at = Duration::seconds(7);
+    assert_eq!(Duration::seconds(7), node.next_update_at());
+
+    node.pending_urgent_by_hash
+        .insert(1, PendingUrgentGossip { deadline: Duration::seconds(3), scope: UrgentScope::Shard });
+    assert_eq!(Duration::seconds(3), node.next_update_at());
+
+    *now.borrow_mut() = Duration::seconds(9);
+    node.pending_urgent_by_hash.clear();
+    node.topic_schedule_by_hash.get_mut(&1).unwrap().next_gossip_at = Duration::seconds(4);
+    node.topic_schedule_by_hash.get_mut(&2).unwrap().next_gossip_at = Duration::seconds(6);
+    assert_eq!(Duration::seconds(9), node.next_update_at());
+}
+
+#[test]
+fn known_topic_local_win_divergence_schedules_delayed_urgent_shard() {
+    let cfg = NodeConfig { gossip_urgent_delay: Duration::milliseconds(50), ..NodeConfig::default() };
+    let (mut node, log, now) = make_recording_node(cfg, 100);
+    node.add_topic(1);
+    defer_periodic(&mut node);
 
     *now.borrow_mut() = Duration::seconds(8);
-    node.step(vec![make_message(42, 3, 2, 1, 1, 2)]);
+    node.step(vec![make_message(7, GossipScope::Shard(2000), 1, 1, 2)]);
 
-    let log = log.borrow();
-    assert!(log.broadcasts.is_empty());
-    assert_eq!(1, log.unicasts.len());
-    assert_eq!(42, log.unicasts[0].0);
-    let message = &log.unicasts[0].1;
-    assert_eq!(9, message.ttl());
-    assert_eq!(1, message.outdegree());
-    assert_eq!(1, message.topic_hash());
-    assert_eq!(0, message.topic_evictions());
+    assert!(log.borrow().messages.is_empty());
+    let pending = node.pending_urgent_by_hash.get(&1).copied().expect("urgent gossip must be pending");
+    assert_eq!(UrgentScope::Shard, pending.scope);
+    assert!(pending.deadline >= Duration::seconds(8));
+    assert!(pending.deadline <= Duration::seconds(8) + Duration::milliseconds(50));
 }
 
 #[test]
-fn gossip_known_topic_local_loss_updates_local_and_sends_urgent() {
-    let cfg = NodeConfig {
-        subject_id_modulus: 11,
-        gossip_ttl_urgent: 9,
-        gossip_outdegree_urgent: 1,
-        ..NodeConfig::default()
-    };
-    let (mut node, log, now) = make_recording_node(cfg);
-    node.add_topic(1);
-    node.gossip_at = Duration::MAX;
-
-    *now.borrow_mut() = Duration::seconds(2);
-    node.step(vec![make_message(7, 2, 1, 1, 4, 3)]);
-
-    let topic = node.topics_by_hash.get(&1).expect("topic must survive divergence merge");
-    assert_eq!(4, topic.evictions());
-    let log = log.borrow();
-    assert_eq!(1, log.unicasts.len());
-    assert!(log.broadcasts.is_empty());
-    let message = &log.unicasts[0].1;
-    assert_eq!(9, message.ttl());
-    assert_eq!(4, message.topic_evictions());
-}
-
-#[test]
-fn gossip_unknown_topic_local_loss_forwards_remote_message() {
-    let cfg = NodeConfig { subject_id_modulus: 11, gossip_outdegree_urgent: 0, ..NodeConfig::default() };
-    let (mut node, log, now) = make_recording_node(cfg);
+fn unknown_topic_local_win_collision_schedules_delayed_urgent_broadcast() {
+    let cfg =
+        NodeConfig { subject_id_modulus: 11, gossip_urgent_delay: Duration::milliseconds(50), ..NodeConfig::default() };
+    let (mut node, log, now) = make_recording_node(cfg, 16);
     node.add_topic(2);
-    node.gossip_at = Duration::MAX;
-    node.set_peers_for_test(vec![(5, Duration::seconds(1)), (7, Duration::seconds(1))]);
+    defer_periodic(&mut node);
+
+    *now.borrow_mut() = Duration::seconds(8);
+    node.step(vec![make_message(7, GossipScope::Shard(11), 1, 1, 2)]); // subject_id=2 collides with topic 2
+
+    assert!(log.borrow().messages.is_empty());
+    let pending = node.pending_urgent_by_hash.get(&2).copied().expect("urgent gossip must be pending");
+    assert_eq!(UrgentScope::Broadcast, pending.scope);
+}
+
+#[test]
+fn delayed_urgent_is_canceled_by_up_to_date_gossip_before_deadline() {
+    let cfg = NodeConfig::default();
+    let (mut node, log, now) = make_recording_node(cfg, 100);
+    node.add_topic(1);
+    defer_periodic(&mut node);
 
     *now.borrow_mut() = Duration::seconds(1);
-    node.step(vec![make_message(5, 3, 1, 1, 1, 3)]);
+    node.pending_urgent_by_hash.insert(
+        1,
+        PendingUrgentGossip { deadline: Duration::seconds(1) + Duration::milliseconds(10), scope: UrgentScope::Shard },
+    );
 
-    let topic = node.topics_by_hash.get(&2).expect("topic should remain allocated after local loss");
-    assert_eq!(1, topic.evictions());
-    let log = log.borrow();
-    assert!(log.broadcasts.is_empty());
-    assert_eq!(1, log.unicasts.len());
-    assert_eq!(7, log.unicasts[0].0);
-    let message = &log.unicasts[0].1;
-    assert_eq!(2, message.ttl());
-    assert_eq!(1, message.outdegree());
-    assert_eq!(1, message.topic_hash());
-    assert_eq!(1, message.topic_evictions());
-    assert_eq!(3, message.topic_lage());
+    *now.borrow_mut() = Duration::seconds(1) + Duration::milliseconds(5);
+    node.step(vec![make_message(9, GossipScope::Shard(2000), 1, 0, -1)]);
+    assert!(!node.pending_urgent_by_hash.contains_key(&1));
+
+    *now.borrow_mut() = Duration::seconds(1) + Duration::milliseconds(20);
+    node.step(Vec::new());
+    assert!(take_messages(&log).is_empty());
 }
 
 #[test]
-fn gossip_dedup_suppresses_reforward_until_timeout() {
-    let cfg = NodeConfig {
-        subject_id_modulus: 11,
-        dedup_timeout: Duration::seconds(5),
-        gossip_outdegree_urgent: 0,
-        ..NodeConfig::default()
-    };
-    let (mut node, log, now) = make_recording_node(cfg);
-    node.gossip_at = Duration::MAX;
-    node.set_peers_for_test(vec![(5, Duration::ZERO), (7, Duration::ZERO)]);
-    let message = make_message(5, 3, 1, 42, 0, -1);
+fn shard_selection_is_invariant_across_evictions_for_same_hash() {
+    let cfg = NodeConfig::default();
+    let (mut node, _log, _now) = make_recording_node(cfg, 100);
+    node.add_topic(0xDEAD_BEEF);
+    let shard_before = node.shard_for_topic(0xDEAD_BEEF);
 
-    *now.borrow_mut() = Duration::seconds(0);
-    node.step(vec![message.clone()]);
-    *now.borrow_mut() = Duration::seconds(1);
-    node.step(vec![message.clone()]);
-    *now.borrow_mut() = Duration::seconds(7);
-    node.step(vec![message]);
+    node.topics_by_hash.get_mut(&0xDEAD_BEEF).unwrap().set_evictions(123);
+    let shard_after = node.shard_for_topic(0xDEAD_BEEF);
 
-    let log = log.borrow();
-    assert_eq!(2, log.unicasts.len());
-    assert!(log.unicasts.iter().all(|(destination, _)| *destination == 7));
+    assert_eq!(shard_before, shard_after);
 }
 
 #[test]
-fn forwarding_respects_message_outdegree_and_excludes_sender() {
-    let cfg = NodeConfig { subject_id_modulus: 11, gossip_outdegree_urgent: 0, ..NodeConfig::default() };
-    let (mut node, log, now) = make_recording_node(cfg);
-    node.gossip_at = Duration::MAX;
-    node.set_peers_for_test(vec![(1, Duration::ZERO), (2, Duration::ZERO), (3, Duration::ZERO)]);
+fn urgent_requests_coalesce_and_upgrade_to_broadcast() {
+    let cfg = NodeConfig { gossip_urgent_delay: Duration::milliseconds(50), ..NodeConfig::default() };
+    let (mut node, _log, now) = make_recording_node(cfg, 100);
+    node.add_topic(1);
 
-    *now.borrow_mut() = Duration::seconds(1);
-    node.step(vec![make_message(1, 4, 2, 99, 0, -1)]);
+    node.pending_urgent_by_hash
+        .insert(1, PendingUrgentGossip { deadline: Duration::seconds(1), scope: UrgentScope::Shard });
 
-    let log = log.borrow();
-    assert_eq!(2, log.unicasts.len());
-    let destinations = log.unicasts.iter().map(|(destination, _)| *destination).collect::<BTreeSet<u16>>();
-    assert_eq!(BTreeSet::from([2, 3]), destinations);
-    for (_, message) in &log.unicasts {
-        assert_eq!(3, message.ttl());
-        assert_eq!(2, message.outdegree());
-    }
-}
-
-#[test]
-fn deterministic_sampler_keeps_smallest_tickets_in_integration_path() {
-    let cfg = NodeConfig {
-        subject_id_modulus: 11,
-        peer_count: 3,
-        peer_age_replaceable: Duration::seconds(100),
-        gossip_outdegree_urgent: 0,
-        ..NodeConfig::default()
-    };
-    let (mut node, _, now) = make_recording_node(cfg);
-    node.gossip_at = Duration::MAX;
-    *now.borrow_mut() = Duration::seconds(1);
-    for sender in [1_u16, 2, 3, 4, 5, 6] {
-        node.step(vec![make_message(sender, 0, 0, 99, 0, -1)]);
-    }
-    let actual = node.peer_ids().into_iter().collect::<BTreeSet<_>>();
-    let expected = (1_u16..=6).map(|sender| (sender, ticket(0, sender))).collect::<Vec<_>>();
-    let expected = expected
-        .iter()
-        .cloned()
-        .fold(Vec::<(u16, u64)>::new(), |mut smallest, entry| {
-            smallest.push(entry);
-            smallest.sort_by_key(|(_, t)| *t);
-            smallest.truncate(3);
-            smallest
-        })
-        .into_iter()
-        .map(|(sender, _)| sender)
-        .collect::<BTreeSet<_>>();
-    assert_eq!(expected, actual);
-}
-
-#[test]
-fn expired_peer_is_replaced_even_if_new_ticket_is_worse() {
-    let cfg = NodeConfig {
-        subject_id_modulus: 11,
-        peer_count: 2,
-        peer_age_replaceable: Duration::seconds(5),
-        gossip_outdegree_urgent: 0,
-        ..NodeConfig::default()
-    };
-    let (mut node, _, now) = make_recording_node(cfg);
-    node.gossip_at = Duration::MAX;
-    node.set_peers_for_test(vec![(1, Duration::ZERO), (2, Duration::seconds(9))]);
-    let replacement = (3_u16..=64)
-        .find(|sender| ticket(0, *sender) > ticket(0, 1))
-        .expect("test setup requires a worse-ticket replacement candidate");
-    assert!(ticket(0, replacement) > ticket(0, 1));
-
-    *now.borrow_mut() = Duration::seconds(10);
-    node.step(vec![make_message(replacement, 0, 0, 99, 0, -1)]);
-
-    let ids = node.peer_ids().into_iter().collect::<BTreeSet<_>>();
-    assert!(ids.contains(&2));
-    assert!(ids.contains(&replacement));
-    assert!(!ids.contains(&1));
-}
-
-#[test]
-fn consecutive_better_tickets_replace_immediately_without_moratorium() {
-    let cfg = NodeConfig {
-        subject_id_modulus: 11,
-        peer_count: 1,
-        peer_age_replaceable: Duration::seconds(100),
-        gossip_outdegree_urgent: 0,
-        ..NodeConfig::default()
-    };
-    let (mut node, _, now) = make_recording_node(cfg);
-    node.gossip_at = Duration::MAX;
-    let all = (1_u16..=32).map(|sender| (sender, ticket(0, sender))).collect::<Vec<_>>();
-    let worst = all.iter().max_by_key(|(_, t)| *t).map(|(sender, _)| *sender).expect("non-empty setup");
-    let mut best_two = all.clone();
-    best_two.sort_by_key(|(_, t)| *t);
-    let first = best_two[1].0;
-    let second = best_two[0].0;
-    node.set_peers_for_test(vec![(worst, Duration::ZERO)]);
-
-    *now.borrow_mut() = Duration::seconds(10);
-    node.step(vec![make_message(first, 0, 0, 99, 0, -1)]);
-    node.step(vec![make_message(second, 0, 0, 99, 0, -1)]);
-    assert_eq!(vec![second], node.peer_ids());
-}
-
-#[test]
-fn live_peer_is_not_replaced_by_worse_tickets() {
-    let cfg = NodeConfig {
-        subject_id_modulus: 11,
-        peer_count: 1,
-        peer_age_replaceable: Duration::seconds(100),
-        gossip_outdegree_urgent: 0,
-        ..NodeConfig::default()
-    };
-    let (mut node, _, now) = make_recording_node(cfg);
-    node.gossip_at = Duration::MAX;
-    let all = (1_u16..=64).map(|sender| (sender, ticket(0, sender))).collect::<Vec<_>>();
-    let best = all.iter().min_by_key(|(_, t)| *t).map(|(sender, _)| *sender).expect("non-empty setup");
-    let worse = all
-        .iter()
-        .find(|(sender, t)| (*sender != best) && (*t > ticket(0, best)))
-        .map(|(sender, _)| *sender)
-        .expect("test setup requires a worse-ticket candidate");
-    node.set_peers_for_test(vec![(best, Duration::ZERO)]);
-
-    *now.borrow_mut() = Duration::seconds(1);
-    node.step(vec![make_message(worse, 0, 0, 99, 0, -1)]);
     *now.borrow_mut() = Duration::seconds(2);
-    node.step(vec![make_message(worse, 0, 0, 99, 0, -1)]);
-    *now.borrow_mut() = Duration::seconds(3);
-    node.step(vec![make_message(worse, 0, 0, 99, 0, -1)]);
-    assert_eq!(vec![best], node.peer_ids());
+    node.schedule_urgent(Duration::seconds(2), 1, UrgentScope::Broadcast);
+    let second = node.pending_urgent_by_hash.get(&1).copied().unwrap();
+
+    assert_eq!(UrgentScope::Broadcast, second.scope);
+    assert_eq!(Duration::seconds(1), second.deadline);
 }
 
 #[test]
-fn periodic_gossip_broadcasts_when_peer_set_is_incomplete() {
-    let cfg = NodeConfig {
-        subject_id_modulus: 11,
-        peer_count: 2,
-        gossip_broadcast_every: 100,
-        gossip_outdegree_urgent: 0,
-        ..NodeConfig::default()
-    };
-    let (mut node, log, now) = make_recording_node(cfg);
+fn urgent_send_uses_current_local_topic_state_and_send_reschedule_window() {
+    let cfg = NodeConfig::default();
+    let (mut node, log, now) = make_recording_node(cfg, 100);
     node.add_topic(1);
-    node.gossip_at = Duration::ZERO;
+    defer_periodic(&mut node);
 
-    *now.borrow_mut() = Duration::ZERO;
+    node.pending_urgent_by_hash
+        .insert(1, PendingUrgentGossip { deadline: Duration::seconds(2), scope: UrgentScope::Shard });
+    node.topics_by_hash.get_mut(&1).unwrap().set_evictions(7);
+
+    *now.borrow_mut() = Duration::seconds(2);
     node.step(Vec::new());
 
-    let log = log.borrow();
-    assert_eq!(1, log.broadcasts.len());
-    assert!(log.unicasts.is_empty());
-    assert_eq!(0, log.broadcasts[0].ttl());
-    assert!(node.next_update_at() > Duration::ZERO);
-}
-
-#[test]
-fn periodic_gossip_uses_epidemic_when_peer_set_is_healthy() {
-    let cfg = NodeConfig {
-        subject_id_modulus: 11,
-        peer_count: 1,
-        gossip_broadcast_every: 10,
-        gossip_ttl_periodic: 2,
-        gossip_outdegree_periodic: 1,
-        gossip_outdegree_urgent: 0,
-        ..NodeConfig::default()
-    };
-    let (mut node, log, now) = make_recording_node(cfg);
-    node.add_topic(1);
-    node.set_peers_for_test(vec![(9, Duration::ZERO)]);
-    node.gossip_at = Duration::ZERO;
-
-    *now.borrow_mut() = Duration::ZERO;
-    node.step(Vec::new());
-
-    let log = log.borrow();
-    assert!(log.broadcasts.is_empty());
-    assert_eq!(1, log.unicasts.len());
-    assert_eq!(9, log.unicasts[0].0);
-    assert_eq!(2, log.unicasts[0].1.ttl());
-    assert_eq!(1, log.unicasts[0].1.outdegree());
+    let messages = take_messages(&log);
+    assert_eq!(1, messages.len());
+    assert_eq!(7, messages[0].topic_evictions());
+    let state = node.topic_schedule_by_hash.get(&1).expect("missing schedule state");
+    assert!(state.next_gossip_at >= Duration::seconds(6));
+    assert!(state.next_gossip_at <= Duration::seconds(8));
 }
