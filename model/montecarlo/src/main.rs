@@ -387,5 +387,5 @@ fn run_one_simulation(
 
 fn report_parallel_progress(completed: usize, total: usize, failures: usize) {
     let remaining = total - completed;
-    eprintln!("Progress: completed={completed}/{total}, remaining={remaining}, failed={failures}");
+    eprintln!("Progress: completed={completed:05}/{total}, remaining={remaining}, failed={failures}");
 }

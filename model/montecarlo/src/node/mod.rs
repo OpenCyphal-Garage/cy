@@ -229,13 +229,13 @@ impl<'a> Node<'a> {
     }
 
     fn heard_interval_bounds(&self) -> (Duration, Duration) {
-        let (send_low, send_high) = self.periodic_interval_bounds();
-        let low = Duration::seconds_f64(send_low.as_seconds_f64() * 2.0);
-        let high = Duration::seconds_f64(send_high.as_seconds_f64() * 2.0);
+        let low = self.cfg.gossip_period + self.cfg.gossip_dither;
+        let high = self.cfg.gossip_period * 3;
         (low, high)
     }
 
     fn startup_interval_bounds(&self) -> (Duration, Duration) {
+        // Counterintuitively, shortening this window can degrade the convergence time.
         (Duration::ZERO, self.cfg.gossip_period)
     }
 
