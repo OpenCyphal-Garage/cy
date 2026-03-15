@@ -13,6 +13,9 @@ use std::rc::Rc;
 use time::Duration;
 
 const MIN_STEP: Duration = Duration::microseconds(10);
+
+/// This has to be not larger than the smallest bin in the output convergence time histogram,
+/// otherwise the histogram will show gaps, which can be highly misleading!
 const CONVERGENCE_CHECK_PERIOD: Duration = Duration::seconds(1);
 
 #[derive(Debug, Clone)]
@@ -96,10 +99,10 @@ impl<'a> Simulation<'a> {
             return Some(outcome);
         }
 
-        // Advance the time to the next event.
+        // Advance the time to the next node/network/convergence-check event.
         let next_node_update = self.next_node_update_at();
         let next_arrival = self.network.borrow().soonest_arrival_at().unwrap_or(Duration::MAX);
-        let mut next_time = min(next_node_update, next_arrival);
+        let mut next_time = min(min(next_node_update, next_arrival), self.next_convergence_check_at);
         if next_time < now {
             next_time = now;
         }
@@ -435,6 +438,32 @@ mod tests {
     }
 
     #[test]
+    fn step_advances_to_convergence_check_without_other_events() {
+        let node_cfg = NodeConfig::default();
+        let sim_cfg = SimulationConfig {
+            time_limit: Duration::seconds(20),
+            node_count: 1,
+            network_delay_range: Duration::ZERO..=Duration::milliseconds(10),
+            network_loss_probability: 0.0,
+        };
+        let rng = Rc::new(RefCell::new(SmallRng::seed_from_u64(1)));
+        let mut sim = Simulation::generate(1, 1, rng, &node_cfg, &sim_cfg).expect("simulation generation failed");
+
+        sim.converged_at = None;
+        sim.next_convergence_check_at = Duration::seconds(1);
+        sim.node_update_queue.clear();
+        sim.node_update_queue.insert((Duration::seconds(10), 0));
+        sim.node_update_deadlines[0] = Duration::seconds(10);
+
+        assert!(sim.step().is_none());
+        assert_eq!(Duration::seconds(1), *sim.now.borrow());
+
+        assert_eq!(None, sim.converged_at);
+        assert!(sim.step().is_none());
+        assert_eq!(Some(Duration::seconds(1)), sim.converged_at);
+    }
+
+    #[test]
     fn contested_network_does_not_linger_unresolved_without_active_repairs() {
         let node_cfg = NodeConfig { subject_id_modulus: 127, ..NodeConfig::default() };
         let sim_cfg = SimulationConfig {
@@ -474,11 +503,6 @@ mod tests {
             }
         }
 
-        assert_eq!(
-            None,
-            found,
-            "entered a quiescent unresolved state after startup: {:?}",
-            found
-        );
+        assert_eq!(None, found, "entered a quiescent unresolved state after startup: {:?}", found);
     }
 }
