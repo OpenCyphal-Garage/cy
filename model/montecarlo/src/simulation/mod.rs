@@ -12,7 +12,7 @@ use std::ops::RangeInclusive;
 use std::rc::Rc;
 use time::Duration;
 
-const MIN_STEP: Duration = Duration::microseconds(50);
+const MIN_STEP: Duration = Duration::microseconds(10);
 const CONVERGENCE_CHECK_PERIOD: Duration = Duration::seconds(1);
 
 #[derive(Debug, Clone)]

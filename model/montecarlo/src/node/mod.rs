@@ -4,6 +4,7 @@ use crate::util::is_prime;
 use rand::{Rng, RngExt};
 use smart_default::SmartDefault;
 use std::cell::{Cell, RefCell};
+use std::cmp::max;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 use time::Duration;
@@ -46,6 +47,13 @@ pub struct NodeConfig {
     /// networks, but may degrade performance in sparser networks where conflicts are rare.
     #[default(_code = "Duration::seconds_f64(1.0)")]
     pub gossip_startup_delay: Duration,
+
+    /// Conjecture: topics that have seen more evictions (have been defeated more times against local contenders)
+    /// can be gossiped sooner to reduce churn, because if they transmit after less-defeated replicas,
+    /// remotes may need to reallocate multiple times. This flag shortens the urgent and startup delay proportional
+    /// to the eviction count.
+    #[default(_code = "false")]
+    pub gossip_conditional_urgency: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -372,6 +380,11 @@ impl<'a> Node<'a> {
         let (low, high) = self.startup_interval_bounds();
         // On topic creation, spread first-gossip opportunities over a wider window so duplicate suppression
         // can kick in before the entire network emits simultaneously.
+        let high = if self.cfg.gossip_conditional_urgency {
+            high / (1 + self.topics_by_hash[&hash].evictions())
+        } else {
+            high
+        };
         let next = now + self.sample_duration_between(low, high);
         self.topic_schedule_by_hash.insert(hash, TopicScheduleState::new(next));
         self.reconcile_topic_deadline_insert(next);
@@ -423,11 +436,14 @@ impl<'a> Node<'a> {
         self.schedule_after_send(now, hash);
     }
 
-    fn schedule_urgent(&mut self, now: Duration, hash: u64, scope: UrgentScope) {
+    /// The urgency factor shortens the delay range by the specified value. Zero or one for nominal urgency.
+    fn schedule_urgent(&mut self, now: Duration, hash: u64, scope: UrgentScope, urgency: u16) {
         if !self.topics_by_hash.contains_key(&hash) {
             return;
         }
-        let deadline = now + self.sample_duration_between(Duration::ZERO, self.cfg.gossip_urgent_delay);
+        let urgency = if self.cfg.gossip_conditional_urgency { urgency } else { 0 };
+        let urgency = max(urgency, 1);
+        let deadline = now + self.sample_duration_between(Duration::ZERO, self.cfg.gossip_urgent_delay / urgency);
         match self.pending_urgent_by_hash.get_mut(&hash) {
             Some(existing) => {
                 let previous = existing.deadline;
@@ -539,7 +555,10 @@ impl<'a> Node<'a> {
                         if updated_evictions != original_evictions {
                             // Subject-ID occupancy changed for this topic; reveal it network-wide.
                             // This will reveal collisions if any other topic is occupying the same subject-ID.
-                            self.schedule_urgent(now, changed_hash, UrgentScope::Broadcast);
+                            let urgency = (updated_evictions > original_evictions)
+                                .then(|| updated_evictions - original_evictions)
+                                .unwrap_or(0);
+                            self.schedule_urgent(now, changed_hash, UrgentScope::Broadcast, urgency);
                         }
                     }
                     debug_assert_eq!(0, self.count_local_collisions(), "local allocation incorrect");
@@ -558,7 +577,7 @@ impl<'a> Node<'a> {
             if left_wins_divergence(local_lage, local_evictions, lage, evictions) {
                 // The remote is obsolete, so we need to tell it to move. The subject-ID occupancy is not changing,
                 // so there is no need to use broadcast scope, since no new collisions are expected.
-                self.schedule_urgent(now, hash, UrgentScope::Shard);
+                self.schedule_urgent(now, hash, UrgentScope::Shard, 0);
                 CrdtMergeOutcome::LocalWin
             } else {
                 // The local replica is obsolete. If we can move exactly to the specified subject-ID (evictions),
@@ -592,7 +611,7 @@ impl<'a> Node<'a> {
             // The remote is occupying our subject-ID; we are not expected to be on its shard (we might be due to
             // a collision but it is unlikely), so we need to broadcast urgently to reach it and everyone else on
             // the infringing topic.
-            self.schedule_urgent(now, local_hash, UrgentScope::Broadcast);
+            self.schedule_urgent(now, local_hash, UrgentScope::Broadcast, 0);
             CrdtMergeOutcome::LocalWin
         } else {
             let bumped = local_evictions.checked_add(1).expect("too many evictions");

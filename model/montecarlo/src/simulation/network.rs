@@ -6,7 +6,7 @@ use std::ops::RangeInclusive;
 use std::rc::Rc;
 use time::Duration;
 
-const DELAY_QUANTIZATION_STEP: Duration = Duration::microseconds(50);
+const DELAY_QUANTIZATION_STEP: Duration = Duration::microseconds(10);
 
 #[derive(Debug, Clone)]
 pub(super) struct NetworkConfig {
