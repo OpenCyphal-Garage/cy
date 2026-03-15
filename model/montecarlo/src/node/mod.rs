@@ -29,6 +29,8 @@ pub struct NodeConfig {
     /// Greater values tend to speed up convergence and reduce reallocation churn in highly contested networks;
     /// see the explanation for gossip_startup_delay_max. In sparsely contested networks (which describes all
     /// real-world networks due to necessarily large subject ID modulus) the effect is the opposite.
+    ///
+    /// See the analytical models for details. The optimum is likely to be around the expected message delivery delay.
     #[default(_code = "Duration::seconds_f64(0.05)")]
     pub gossip_urgent_delay: Duration,
 
@@ -44,7 +46,9 @@ pub struct NodeConfig {
     /// state instead of walking through obsolete intermediate states.
     ///
     /// Same considerations apply to the urgent delay: greater variance improves convergence in highly contested
-    /// networks, but may degrade performance in sparser networks where conflicts are rare.
+    /// networks, but may degrade performance in sparser networks where conflicts are rare. See the analytical models
+    /// for details. The optimum is likely to lie in delta_max < gossip_startup_delay < delta_max*10, where delta_max
+    /// is the maximum expected message delivery delay.
     #[default(_code = "Duration::seconds_f64(1.0)")]
     pub gossip_startup_delay: Duration,
 
@@ -52,6 +56,9 @@ pub struct NodeConfig {
     /// can be gossiped sooner to reduce churn, because if they transmit after less-defeated replicas,
     /// remotes may need to reallocate multiple times. This flag shortens the urgent and startup delay proportional
     /// to the eviction count.
+    ///
+    /// However, as the randomized gossip delay models predict, this factor has negligible effect if the network delays
+    /// are large compared to the randomization interval.
     #[default(_code = "false")]
     pub gossip_conditional_urgency: bool,
 }

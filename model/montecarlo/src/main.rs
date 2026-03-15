@@ -68,9 +68,7 @@ struct Config {
     snapshot_period: Duration,
 
     // ----------------------------------------------------------------------------------------------------------------
-    /// Topic-wise gossip parameters.
-    /// A locally sent topic is rescheduled in [period-dither, period+dither].
-    /// A received topic is rescheduled in [2*(period-dither), 2*(period+dither)].
+    /// Refer to NodeConfig struct for commentary.
     #[arg(long, value_parser = parse_duration, default_value_t = NodeConfig::default().gossip_period)]
     gossip_period: Duration,
 
@@ -91,7 +89,7 @@ struct Config {
 
     // ----------------------------------------------------------------------------------------------------------------
     /// Imperfect network simulation. Packets take a random time in this range to be delivered.
-    #[arg(long, value_parser = parse_duration_range, default_value = "0..0.1")]
+    #[arg(long, value_parser = parse_duration_range, default_value = "0..0.01")]
     network_delay_range: RangeInclusive<Duration>,
 
     #[arg(long, default_value = "0.0001")]
