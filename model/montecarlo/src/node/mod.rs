@@ -30,8 +30,9 @@ pub struct NodeConfig {
     /// see the explanation for gossip_startup_delay_max. In sparsely contested networks (which describes all
     /// real-world networks due to necessarily large subject ID modulus) the effect is the opposite.
     ///
-    /// See the analytical models for details. The optimum is likely to be around the expected message delivery delay.
-    #[default(_code = "Duration::seconds_f64(0.05)")]
+    /// See the analytical models for details.
+    /// The optimum is likely to be around the expected maximum message delivery delay (propagation+processing).
+    #[default(_code = "Duration::seconds_f64(0.01)")]
     pub gossip_urgent_delay: Duration,
 
     /// Counterintuitively, widening the startup gossip window can improve convergence in highly contested networks
