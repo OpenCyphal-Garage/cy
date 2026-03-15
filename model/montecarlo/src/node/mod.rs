@@ -222,6 +222,11 @@ impl<'a> Node<'a> {
         next
     }
 
+    #[cfg(test)]
+    pub(crate) fn pending_urgent_count(&self) -> usize {
+        self.pending_urgent_by_hash.len()
+    }
+
     pub fn step(&mut self, incoming: Vec<GossipMessage>) {
         let now = self.now();
         for message in incoming {

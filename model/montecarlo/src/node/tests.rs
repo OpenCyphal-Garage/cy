@@ -365,7 +365,7 @@ fn urgent_requests_coalesce_and_upgrade_to_broadcast() {
     insert_pending_urgent(&mut node, 1, Duration::seconds(1), UrgentScope::Shard);
 
     *now.borrow_mut() = Duration::seconds(2);
-    node.schedule_urgent(Duration::seconds(2), 1, UrgentScope::Broadcast);
+    node.schedule_urgent(Duration::seconds(2), 1, UrgentScope::Broadcast, 0);
     let second = node.pending_urgent_by_hash.get(&1).copied().unwrap();
 
     assert_eq!(UrgentScope::Broadcast, second.scope);

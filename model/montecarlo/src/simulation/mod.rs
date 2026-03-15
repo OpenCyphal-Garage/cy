@@ -395,6 +395,8 @@ fn generate_network<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::SeedableRng;
+    use rand::rngs::SmallRng;
 
     fn make_snapshot(evictions_by_node: &[Vec<(u64, u16)>]) -> Snapshot {
         Snapshot {
@@ -430,5 +432,53 @@ mod tests {
     fn count_divergent_counts_hashes_with_distinct_eviction_values() {
         let snapshot = make_snapshot(&[vec![(1, 0), (2, 0)], vec![(1, 1), (2, 0)], vec![(1, 1), (2, 0)]]);
         assert_eq!(1, snapshot.count_divergent());
+    }
+
+    #[test]
+    fn contested_network_does_not_linger_unresolved_without_active_repairs() {
+        let node_cfg = NodeConfig { subject_id_modulus: 127, ..NodeConfig::default() };
+        let sim_cfg = SimulationConfig {
+            time_limit: Duration::seconds(10),
+            node_count: 60,
+            network_delay_range: Duration::ZERO..=Duration::milliseconds(10),
+            network_loss_probability: 0.0,
+        };
+        let rng = Rc::new(RefCell::new(SmallRng::seed_from_u64(4009897536515330144)));
+        let mut sim = Simulation::generate(60, 60, rng, &node_cfg, &sim_cfg).expect("simulation generation failed");
+        let startup_cutoff = node_cfg.gossip_startup_delay + Duration::seconds(1);
+        let max_quiet_gap = Duration::seconds(1);
+        let mut found = None;
+
+        loop {
+            let now = *sim.now.borrow();
+            let collisions = count_collisions(&sim.nodes);
+            let divergences = count_divergent(&sim.nodes);
+            let pending_urgent = sim.nodes.iter().map(Node::pending_urgent_count).sum::<usize>();
+            let next_arrival = sim.network.borrow().soonest_arrival_at().unwrap_or(Duration::MAX);
+            let next_node = sim.next_node_update_at();
+            let next_event_at = min(next_node, next_arrival);
+            let quiet_gap = if next_event_at == Duration::MAX { Duration::MAX } else { next_event_at - now };
+
+            if now >= startup_cutoff
+                && (collisions > 0 || divergences > 0)
+                && pending_urgent == 0
+                && next_arrival == Duration::MAX
+                && quiet_gap >= max_quiet_gap
+            {
+                found = Some((now, collisions, divergences, quiet_gap));
+                break;
+            }
+
+            if sim.step().is_some() {
+                break;
+            }
+        }
+
+        assert_eq!(
+            None,
+            found,
+            "entered a quiescent unresolved state after startup: {:?}",
+            found
+        );
     }
 }
