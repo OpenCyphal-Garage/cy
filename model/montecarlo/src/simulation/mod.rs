@@ -16,7 +16,7 @@ const MIN_STEP: Duration = Duration::microseconds(10);
 
 /// This has to be not larger than the smallest bin in the output convergence time histogram,
 /// otherwise the histogram will show gaps, which can be highly misleading!
-const CONVERGENCE_CHECK_PERIOD: Duration = Duration::seconds(1);
+const CONVERGENCE_CHECK_PERIOD: Duration = Duration::milliseconds(300);
 
 #[derive(Debug, Clone)]
 pub struct SimulationConfig {

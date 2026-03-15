@@ -60,7 +60,7 @@ struct Config {
     runs: usize,
 
     /// Limit simulation time. Expect convergence before this.
-    #[arg(long, value_parser = parse_duration, default_value = "60")]
+    #[arg(long, value_parser = parse_duration, default_value = "10")]
     time_limit: Duration,
 
     /// Interval between network snapshot captures. Zero to capture a snapshot at every step (needs a lot of memory).
