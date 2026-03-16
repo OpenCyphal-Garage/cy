@@ -907,7 +907,7 @@ struct cy_topic_t
 
     olga_event_t gossip_event;
     uint64_t     gossip_counter; // Reset on init and when CRDT needs repair.
-    shard_t*     gossip_shard;   // Refcounted, sometimes shared with other topics.
+    shard_t*     gossip_shard;   // Refcounted, sometimes shared with other topics; NULL for pinned topics.
 
     cy_t* cy;
 
@@ -1572,19 +1572,23 @@ static cy_err_t topic_new(cy_t* const        cy,
     }
 
     // Allocate the gossip shard.
-    topic->gossip_event                   = OLGA_EVENT_INIT;
-    const uint32_t          shard_subject = topic_gossip_shard_subject_id(cy, topic->hash);
-    shard_factory_context_t shard_fac     = { .cy = cy, .subject_id = shard_subject };
-    topic->gossip_shard                   = (shard_t*)cavl2_find_or_insert(
-      &cy->gossip_shards, &shard_subject, shard_cavl_compare, &shard_fac, &shard_cavl_factory);
-    if (topic->gossip_shard == NULL) {
-        err = CY_ERR_MEMORY;
-        cavl2_remove(&cy->topics_by_hash, &topic->index_hash);
-        goto fail;
+    topic->gossip_event = OLGA_EVENT_INIT;
+    if (!is_pinned(topic->hash)) {
+        const uint32_t          shard_subject = topic_gossip_shard_subject_id(cy, topic->hash);
+        shard_factory_context_t shard_fac     = { .cy = cy, .subject_id = shard_subject };
+        topic->gossip_shard                   = (shard_t*)cavl2_find_or_insert(
+          &cy->gossip_shards, &shard_subject, shard_cavl_compare, &shard_fac, &shard_cavl_factory);
+        if (topic->gossip_shard == NULL) {
+            err = CY_ERR_MEMORY;
+            cavl2_remove(&cy->topics_by_hash, &topic->index_hash);
+            goto fail;
+        }
+        topic->gossip_shard->refcount++;
+        assert(topic->gossip_shard->writer->subject_id == shard_subject);
+        assert(topic->gossip_shard->reader->subject_id == shard_subject);
+    } else {
+        topic->gossip_shard = NULL;
     }
-    topic->gossip_shard->refcount++;
-    assert(topic->gossip_shard->writer->subject_id == shard_subject);
-    assert(topic->gossip_shard->reader->subject_id == shard_subject);
 
     // Initially, all topics are considered implicit until proven otherwise. See topic_sync_implicit().
     enlist_head(&cy->list_implicit, &topic->list_implicit);
@@ -1824,7 +1828,7 @@ static void schedule_gossip_periodic(cy_topic_t* const topic, const cy_us_t now,
             // optional extension (may not be modeled): temporarily increase rate after creation or repair events;
             // this also helps decluster events after simultaneous startup.
             if (topic->gossip_counter < cy->gossip_broadcast_ratio) {
-                delay_min = 0;
+                delay_min /= 16U;
             }
         }
         olga_defer(&topic->cy->olga,
@@ -1909,7 +1913,8 @@ static void on_gossip_known_topic(cy_t* const          cy,
             // that is currently used by another topic that we have, which could even lose arbitration, we ignore it
             // because the remote will have to move to catch up with us anyway, thus resolving the collision.
             // See https://github.com/OpenCyphal-Garage/cy/issues/28 and AcceptGossip() in Core.tla.
-            // Per the model, we gossip on the shard instead of broadcast, because subject-ID occupancy is not changed.
+            // Per the model, we should gossip on the shard instead of broadcast, because subject-ID occupancy is not
+            // changed, but it is also valid to use a simplification and always broadcast.
             schedule_gossip_urgent(mine, ts);
         } else {
             topic_allocate(mine, evictions, ts);
@@ -4111,7 +4116,7 @@ static void topic_destroy(cy_topic_t* const topic)
         request_future_destroy(future);
     }
 
-    // Detach the gossip shards.
+    // Detach the gossip shards. This is NULL for pinned topics.
     if (topic->gossip_shard != NULL) {
         shard_deref(cy, topic->gossip_shard);
         topic->gossip_shard = NULL;
