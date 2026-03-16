@@ -130,7 +130,6 @@ static void fixture_init(fixture_t* const self)
     self->cy.async_error_handler      = fixture_on_async_error;
     olga_init(&self->cy.olga, &self->cy, olga_now);
     self->cy.ack_baseline_timeout = ACK_BASELINE_DEFAULT_TIMEOUT_us;
-    self->cy.gossip_next          = HEAT_DEATH;
     self->fail_after              = SIZE_MAX;
     self->new_alloc_count         = 0U;
     self->now                     = 10000;

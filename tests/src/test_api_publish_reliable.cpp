@@ -672,7 +672,7 @@ void test_initial_send_failure_returns_null()
     test_end(platform);
 }
 
-void test_single_remaining_not_last_attempt_stays_multicast()
+void test_single_remaining_retry_switches_to_unicast()
 {
     test_platform_t platform{};
     test_begin(platform);
@@ -692,8 +692,8 @@ void test_single_remaining_not_last_attempt_stays_multicast()
     const std::size_t multicast_before = platform.reliable_multicast_count;
     const cy_us_t     t0               = platform.now;
     spin_to(platform, t0 + ACK_TIMEOUT + 1);
-    TEST_ASSERT_EQUAL_size_t(unicast_before, platform.unicast_count);
-    TEST_ASSERT_TRUE(platform.reliable_multicast_count > multicast_before);
+    TEST_ASSERT_TRUE(platform.unicast_count > unicast_before);
+    TEST_ASSERT_EQUAL_size_t(multicast_before, platform.reliable_multicast_count);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0xA123), platform.now);
     assert_publish_state(fut, true, CY_OK);
@@ -1805,7 +1805,7 @@ int main()
     RUN_TEST(test_two_subscribers_none_ack_timeout);
     RUN_TEST(test_retransmission_on_timeout);
     RUN_TEST(test_initial_send_failure_returns_null);
-    RUN_TEST(test_single_remaining_not_last_attempt_stays_multicast);
+    RUN_TEST(test_single_remaining_retry_switches_to_unicast);
     RUN_TEST(test_retransmission_send_error_does_not_abort_future);
     RUN_TEST(test_retransmission_send_error_partial_known_acks_fails);
     RUN_TEST(test_retransmission_send_error_all_known_acks_succeeds);

@@ -716,12 +716,10 @@ static void test_topic_new_pinned_starts_implicit_and_not_gossiped(void)
     TEST_ASSERT_TRUE(is_implicit(topic));
     TEST_ASSERT_TRUE(fix.cy->list_implicit.head == &topic->list_implicit);
     TEST_ASSERT_NULL(topic_find_by_subject_id(fix.cy, (uint32_t)pinned_hash));
-    TEST_ASSERT_FALSE(is_listed(&fix.cy->list_gossip, &topic->list_gossip));
-    TEST_ASSERT_FALSE(is_listed(&fix.cy->list_gossip_urgent, &topic->list_gossip_urgent));
+    TEST_ASSERT_FALSE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
 
-    schedule_gossip_urgent(topic);
-    TEST_ASSERT_FALSE(is_listed(&fix.cy->list_gossip, &topic->list_gossip));
-    TEST_ASSERT_FALSE(is_listed(&fix.cy->list_gossip_urgent, &topic->list_gossip_urgent));
+    schedule_gossip_urgent(topic, 1000);
+    TEST_ASSERT_FALSE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
     fixture_deinit(&fix);
 }
 
@@ -738,19 +736,15 @@ static void test_pinned_topic_sync_implicit_transitions_without_gossip(void)
     topic_sync_implicit(topic);
     TEST_ASSERT_FALSE(topic_validate_is_implicit(topic));
     TEST_ASSERT_FALSE(is_implicit(topic));
-    TEST_ASSERT_FALSE(is_listed(&fix.cy->list_gossip, &topic->list_gossip));
-    TEST_ASSERT_FALSE(is_listed(&fix.cy->list_gossip_urgent, &topic->list_gossip_urgent));
-    schedule_gossip(topic);
-    schedule_gossip_urgent(topic);
-    TEST_ASSERT_FALSE(is_listed(&fix.cy->list_gossip, &topic->list_gossip));
-    TEST_ASSERT_FALSE(is_listed(&fix.cy->list_gossip_urgent, &topic->list_gossip_urgent));
+    TEST_ASSERT_FALSE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
+    schedule_gossip_urgent(topic, 1000);
+    TEST_ASSERT_FALSE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
 
     topic->pub_count = 0U;
     topic_sync_implicit(topic);
     TEST_ASSERT_TRUE(topic_validate_is_implicit(topic));
     TEST_ASSERT_TRUE(is_implicit(topic));
-    TEST_ASSERT_FALSE(is_listed(&fix.cy->list_gossip, &topic->list_gossip));
-    TEST_ASSERT_FALSE(is_listed(&fix.cy->list_gossip_urgent, &topic->list_gossip_urgent));
+    TEST_ASSERT_FALSE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
     fixture_deinit(&fix);
 }
 
@@ -854,18 +848,19 @@ static void test_on_gossip_known_topic_equal_lage_prefers_higher_evictions(void)
     topic_merge_lage(topic_win, now, 5);
     topic_allocate(topic_win, 6U, now);
     TEST_ASSERT_EQUAL_UINT32(6U, topic_win->evictions);
-    TEST_ASSERT_EQUAL_INT(crdt_local_win,
-                          on_gossip_known_topic(fix.cy, now, topic_win, 5U, topic_lage(topic_win, now)));
+    on_gossip_known_topic(fix.cy, now, topic_win, 5U, topic_lage(topic_win, now), gossip_broadcast);
     TEST_ASSERT_EQUAL_UINT32(6U, topic_win->evictions);
-    TEST_ASSERT_TRUE(is_listed(&fix.cy->list_gossip_urgent, &topic_win->list_gossip_urgent));
+    TEST_ASSERT_TRUE(olga_is_pending(&fix.cy->olga, &topic_win->gossip_event));
+    TEST_ASSERT_TRUE(topic_win->gossip_event.handler == gossip_event_urgent);
 
     cy_topic_t* const topic_lose =
       fixture_make_explicit_topic(&fix, "alloc/divergence/eviction-lose", UINT64_C(0x1000000000001170));
     topic_merge_lage(topic_lose, now, 5);
     topic_allocate(topic_lose, 6U, now);
-    TEST_ASSERT_EQUAL_INT(crdt_local_loss,
-                          on_gossip_known_topic(fix.cy, now, topic_lose, 9U, topic_lage(topic_lose, now)));
+    on_gossip_known_topic(fix.cy, now, topic_lose, 9U, topic_lage(topic_lose, now), gossip_broadcast);
     TEST_ASSERT_EQUAL_UINT32(9U, topic_lose->evictions);
+    TEST_ASSERT_TRUE(olga_is_pending(&fix.cy->olga, &topic_lose->gossip_event));
+    TEST_ASSERT_TRUE(topic_lose->gossip_event.handler == gossip_event_periodic);
 
     topic_win->pub_count  = 0U;
     topic_lose->pub_count = 0U;
@@ -942,20 +937,23 @@ static void test_on_gossip_known_topic_divergence_paths(void)
 
     topic_merge_lage(t1, 50 * MEGA, 5);
     const uint32_t ev_before = t1->evictions;
-    TEST_ASSERT_EQUAL_INT(crdt_local_win, on_gossip_known_topic(fix.cy, 50 * MEGA, t1, ev_before + 1U, 1));
+    on_gossip_known_topic(fix.cy, 50 * MEGA, t1, ev_before + 1U, 1, gossip_broadcast);
     TEST_ASSERT_EQUAL_UINT32(ev_before, t1->evictions);
-    TEST_ASSERT_TRUE(is_listed(&fix.cy->list_gossip_urgent, &t1->list_gossip_urgent));
+    TEST_ASSERT_TRUE(olga_is_pending(&fix.cy->olga, &t1->gossip_event));
+    TEST_ASSERT_TRUE(t1->gossip_event.handler == gossip_event_urgent);
 
     topic_merge_lage(t2, 60 * MEGA, 1);
-    TEST_ASSERT_EQUAL_INT(crdt_local_loss, on_gossip_known_topic(fix.cy, 60 * MEGA, t2, t2->evictions + 3U, 8));
+    on_gossip_known_topic(fix.cy, 60 * MEGA, t2, t2->evictions + 3U, 8, gossip_broadcast);
     TEST_ASSERT_EQUAL_UINT32(3U, t2->evictions);
     TEST_ASSERT_TRUE(topic_lage(t2, 60 * MEGA) >= 4);
+    TEST_ASSERT_TRUE(olga_is_pending(&fix.cy->olga, &t2->gossip_event));
+    TEST_ASSERT_TRUE(t2->gossip_event.handler == gossip_event_periodic);
 
-    schedule_gossip(t1);
-    schedule_gossip(t2);
-    TEST_ASSERT_EQUAL_INT(crdt_consensus,
-                          on_gossip_known_topic(fix.cy, 70 * MEGA, t1, t1->evictions, topic_lage(t1, 70 * MEGA)));
-    TEST_ASSERT_TRUE(fix.cy->list_gossip.head == &t1->list_gossip);
+    schedule_gossip_periodic(t1, 70 * MEGA, false);
+    const cy_us_t deadline_before = t1->gossip_event.deadline;
+    on_gossip_known_topic(fix.cy, 70 * MEGA, t1, t1->evictions, topic_lage(t1, 70 * MEGA), gossip_broadcast);
+    TEST_ASSERT_TRUE(t1->gossip_event.handler == gossip_event_periodic);
+    TEST_ASSERT_TRUE(t1->gossip_event.deadline > deadline_before);
     t1->pub_count = 0U;
     t2->pub_count = 0U;
     topic_sync_implicit(t1);
@@ -973,11 +971,12 @@ static void test_on_gossip_unknown_topic_collision_paths(void)
     const uint32_t    remote_evictions = 0U;
     topic_merge_lage(mine, 100 * MEGA, 4);
 
-    TEST_ASSERT_EQUAL_INT(crdt_local_win, on_gossip_unknown_topic(fix.cy, 100 * MEGA, remote, remote_evictions, 1));
-    TEST_ASSERT_TRUE(is_listed(&fix.cy->list_gossip_urgent, &mine->list_gossip_urgent));
+    on_gossip_unknown_topic(fix.cy, 100 * MEGA, remote, remote_evictions, 1);
+    TEST_ASSERT_TRUE(olga_is_pending(&fix.cy->olga, &mine->gossip_event));
+    TEST_ASSERT_TRUE(mine->gossip_event.handler == gossip_event_urgent);
 
     const uint32_t before = mine->evictions;
-    TEST_ASSERT_EQUAL_INT(crdt_local_loss, on_gossip_unknown_topic(fix.cy, 110 * MEGA, remote, remote_evictions, 8));
+    on_gossip_unknown_topic(fix.cy, 110 * MEGA, remote, remote_evictions, 8);
     TEST_ASSERT_TRUE(mine->evictions > before);
     fixture_deinit(&fix);
 }
@@ -1020,7 +1019,7 @@ static void test_topic_destroy_removes_indexes_and_lists_and_handles(void)
     char              name[CY_TOPIC_NAME_MAX + 1U] = { 0 };
     memcpy(name, topic->name, cy_topic_name(topic).len);
 
-    schedule_gossip_urgent(topic);
+    schedule_gossip_urgent(topic, 230 * MEGA);
     topic->pub_writer = fixture_subject_writer_new(&fix.platform, sid);
     topic->sub_reader = fixture_subject_reader_new(&fix.platform, sid, 123U);
     TEST_ASSERT_NOT_NULL(topic->pub_writer);
@@ -1031,8 +1030,8 @@ static void test_topic_destroy_removes_indexes_and_lists_and_handles(void)
     TEST_ASSERT_NULL(cy_topic_find_by_hash(fix.cy, hash));
     TEST_ASSERT_NULL(cy_topic_find_by_name(fix.cy, cy_str(name)));
     TEST_ASSERT_NULL(topic_find_by_subject_id(fix.cy, sid));
-    TEST_ASSERT_EQUAL_size_t(1U, fix.subject_writer_destroy_count);
-    TEST_ASSERT_EQUAL_size_t(1U, fix.subject_reader_destroy_count);
+    TEST_ASSERT_EQUAL_size_t(2U, fix.subject_writer_destroy_count);
+    TEST_ASSERT_EQUAL_size_t(2U, fix.subject_reader_destroy_count);
     fixture_deinit(&fix);
 }
 

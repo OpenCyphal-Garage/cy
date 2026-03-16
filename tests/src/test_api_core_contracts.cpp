@@ -283,11 +283,11 @@ void test_api_core_time_and_spin_contracts()
     platform.spin_result     = CY_OK;
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_until(platform.cy, 900)); // deadline in the past
     TEST_ASSERT_EQUAL_size_t(1U, platform.spin_call_count);
-    TEST_ASSERT_EQUAL_INT64(900, platform.spin_last_deadline);
+    TEST_ASSERT_EQUAL_INT64(0, platform.spin_last_deadline);
 
     platform.spin_call_count = 0U;
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_until(platform.cy, 1450));
-    TEST_ASSERT_EQUAL_size_t(1U, platform.spin_call_count);
+    TEST_ASSERT_EQUAL_size_t(2U, platform.spin_call_count);
     TEST_ASSERT_EQUAL_INT64(1450, platform.spin_last_deadline);
     TEST_ASSERT_EQUAL_INT64(1450, platform.now);
 

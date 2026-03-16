@@ -1274,7 +1274,7 @@ static uint32_t topic_subject_id(const cy_topic_t* const topic)
 static uint32_t topic_gossip_shard_subject_id(const cy_t* const cy, const uint64_t topic_hash)
 {
     // Gossip shard subjects are located between the max valid subject-ID and the broadcast subject-ID.
-    const uint32_t shard_index = topic_hash % cy->gossip_shard_count;
+    const uint32_t shard_index = (uint32_t)(topic_hash % (uint64_t)cy->gossip_shard_count);
     const uint32_t subject_id  = CY_SUBJECT_ID_MAX(cy->platform->subject_id_modulus) + 1U + shard_index;
     assert(subject_id > CY_SUBJECT_ID_MAX(cy->platform->subject_id_modulus));
     assert(subject_id < cy_broadcast_subject_id(cy->platform));
