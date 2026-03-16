@@ -201,16 +201,6 @@ static int64_t min_i64(const int64_t a, const int64_t b) { return (a < b) ? a : 
 static cy_us_t later(const cy_us_t a, const cy_us_t b) { return max_i64(a, b); }
 static cy_us_t sooner(const cy_us_t a, const cy_us_t b) { return min_i64(a, b); }
 
-// Number of non-zero bits in [0,64].
-static byte_t popcount(const uint64_t x)
-{
-#if defined(__GNUC__) || defined(__clang__) || defined(__CC_ARM)
-    return (byte_t)__builtin_popcountll(x);
-#else
-#error "No known intrinsics available; please provide fallback emulation"
-#endif
-}
-
 // Number of leading zeros in [0,64]. No special casing for zero argument -- returns 64.
 static byte_t clz64(const uint64_t x)
 {
@@ -243,10 +233,6 @@ static int64_t random_int(const cy_t* const cy, const int64_t min, const int64_t
         return (int64_t)(cy->platform->vtable->random(cy->platform) % (uint64_t)(max - min)) + min;
     }
     return min;
-}
-static int64_t dither_int(const cy_t* const cy, const int64_t mean, const int64_t deviation)
-{
-    return mean + random_int(cy, -deviation, +deviation);
 }
 
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
@@ -592,23 +578,6 @@ static void enlist_head(cy_list_t* const list, cy_list_member_t* const member)
     list->head = member;
     if (list->tail == NULL) {
         list->tail = member;
-    }
-    assert((list->head != NULL) && (list->tail != NULL));
-}
-
-// The counterpart of enlist_head().
-static void enlist_tail(cy_list_t* const list, cy_list_member_t* const member)
-{
-    delist(list, member);
-    assert((member->next == NULL) && (member->prev == NULL));
-    assert((list->head != NULL) == (list->tail != NULL));
-    member->prev = list->tail;
-    if (list->tail != NULL) {
-        list->tail->next = member;
-    }
-    list->tail = member;
-    if (list->head == NULL) {
-        list->head = member;
     }
     assert((list->head != NULL) && (list->tail != NULL));
 }
