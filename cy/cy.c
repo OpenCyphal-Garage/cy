@@ -1315,8 +1315,9 @@ static void schedule_gossip_urgent(cy_topic_t* const topic, const cy_us_t now, c
 {
     const cy_t* const cy = topic->cy;
     if (!is_pinned(topic->hash)) {
-        const cy_us_t at = now + random_int(topic->cy, 0, cy->gossip_urgent_delay_max);
-        if ((at < topic->gossip_at) || (topic->gossip_at <= 0)) {
+        const bool    first = !cavl2_is_inserted(topic->cy->topics_by_next_gossip, &topic->index_next_gossip);
+        const cy_us_t at    = now + random_int(topic->cy, 0, cy->gossip_urgent_delay_max);
+        if ((at < topic->gossip_at) || first) {
             schedule_gossip_at(topic, at);
         }
         topic->gossip_urgent_scheduled = true;
@@ -1896,6 +1897,7 @@ static void on_gossip_known_topic(cy_t* const          cy,
     const int_fast8_t mine_lage = topic_lage(mine, ts);
     if (mine->evictions != evictions) {
         const bool win = (mine_lage > lage) || ((mine_lage == lage) && (mine->evictions > evictions));
+        topic_merge_lage(mine, ts, lage); // merge lage AFTER the CRDT causality check
         CY_TRACE(cy,
                  "🔀 Divergence on '%.*s':\n"
                  "\t local  %s T%016jx@S%08jx evict=%ju lage=%+jd\n"
@@ -1919,25 +1921,23 @@ static void on_gossip_known_topic(cy_t* const          cy,
             // Per the model, we gossip on the shard instead of broadcast, because subject-ID occupancy is not changed.
             schedule_gossip_urgent(mine, ts, false);
         } else {
-            assert((mine_lage <= lage) && ((mine_lage < lage) || (mine->evictions < evictions)));
-            assert(mine_lage <= lage);
-            topic_merge_lage(mine, ts, lage);
             topic_allocate(mine, evictions, ts);
-            // If we managed to catch up exactly, there is no need to urgent-gossip because the global subject-ID
-            // occupancy has not been altered.
-            if (mine->evictions == evictions) {
+            if (mine->evictions == evictions) { // no need to urgent-gossip: subject occupancy has not been altered
                 schedule_gossip_ordinary(mine, ts, true);
             }
         }
     } else {
-        const bool sched = (!mine->gossip_urgent_scheduled || (scope == gossip_broadcast)) &&
-                           (scope != gossip_inline) && (topic_lage(mine, ts) == lage);
-        if (sched) {
+        topic_merge_lage(mine, ts, lage);
+        // Suppress gossip (incl. urgent) if we cannot contribute newer states to the consensus process.
+        // Inline and unicast gossips are only seen by a small subsets of nodes so they do not suppress others.
+        const bool suppress = (!mine->gossip_urgent_scheduled || (scope == gossip_broadcast)) &&
+                              ((scope == gossip_broadcast) || (scope == gossip_sharded)) &&
+                              (topic_lage(mine, ts) == lage);
+        if (suppress) {
             schedule_gossip_ordinary(mine, ts, true);
         }
         topic_sync_subject_reader(mine); // use this opportunity to repair the subscription if broken
     }
-    topic_merge_lage(mine, ts, lage);
 }
 
 // We received a gossip message for a topic that is unknown to us. Check for subject-ID collisions.
