@@ -907,8 +907,8 @@ struct cy_topic_t
     cy_list_member_t list_implicit; // Last animated topic is at the end of the list.
 
     olga_event_t gossip_event;
-    byte_t       gossip_broadcast_counter; // When reaches zero, a broadcast gossip is sent.
-    shard_t*     gossip_shard;             // Refcounted, sometimes shared with other topics.
+    uint64_t     gossip_counter; // Reset on init and when CRDT needs repair.
+    shard_t*     gossip_shard;   // Refcounted, sometimes shared with other topics.
 
     cy_t* cy;
 
@@ -1790,12 +1790,11 @@ static void gossip_event_periodic(olga_t* const olga, olga_event_t* const event,
     assert(!is_pinned(topic->hash));
     topic_sync_subject_reader(topic);            // use this opportunity to repair the subscription if broken
     schedule_gossip_periodic(topic, now, false); // reschedule even if failed -- anther node might pick up
-    cy_subject_writer_t* writer = topic->gossip_shard->writer;
-    if (topic->gossip_broadcast_counter == 0) {
-        topic->gossip_broadcast_counter = cy->gossip_broadcast_ratio;
-        writer                          = cy->broad_writer;
-    }
-    topic->gossip_broadcast_counter--;
+    // optional extension (may not be modeled): prefer broadcast initially.
+    const bool broadcast = (topic->gossip_counter < cy->gossip_broadcast_ratio) || //
+                           ((topic->gossip_counter % cy->gossip_broadcast_ratio) == 0);
+    topic->gossip_counter++;
+    cy_subject_writer_t* const writer = broadcast ? cy->broad_writer : topic->gossip_shard->writer;
     ON_ASYNC_ERROR_IF(cy, topic, send_gossip_multicast(topic, now, writer));
 }
 
@@ -1804,10 +1803,9 @@ static void gossip_event_urgent(olga_t* const olga, olga_event_t* const event, c
     (void)olga;
     cy_topic_t* const topic = (cy_topic_t*)event->user;
     schedule_gossip_periodic(topic, now, false);
-    const cy_err_t err = send_gossip_multicast(topic, now, topic->cy->broad_writer);
     assert(topic->cy->gossip_broadcast_ratio > 0);
-    topic->gossip_broadcast_counter = (err == CY_OK) ? (topic->cy->gossip_broadcast_ratio - 1U) : 0;
-    ON_ASYNC_ERROR_IF(topic->cy, topic, err);
+    topic->gossip_counter = 0;
+    ON_ASYNC_ERROR_IF(topic->cy, topic, send_gossip_multicast(topic, now, topic->cy->broad_writer));
 }
 
 static void schedule_gossip_periodic(cy_topic_t* const topic, const cy_us_t now, const bool suppressed)
@@ -1816,12 +1814,19 @@ static void schedule_gossip_periodic(cy_topic_t* const topic, const cy_us_t now,
     const bool        eligible = !is_pinned(topic->hash) && !is_implicit(topic);
     if (eligible) {
         const cy_us_t dither    = cy->gossip_period / GOSSIP_PERIOD_DITHER_RATIO;
-        cy_us_t       delay_min = cy->gossip_period - dither;
-        cy_us_t       delay_max = cy->gossip_period + dither;
-        if (suppressed) {
-            delay_min                       = delay_max;
-            delay_max                       = cy->gossip_period * 3;
-            topic->gossip_broadcast_counter = 0; // reset sequence when unsuppressed later (optional)
+        cy_us_t       delay_min = 0;
+        cy_us_t       delay_max = 0;
+        if (suppressed) { // increase interval because another node is the dedicated gossiper for this topic
+            delay_min = cy->gossip_period + dither;
+            delay_max = cy->gossip_period * 3;
+        } else {
+            delay_min = cy->gossip_period - dither;
+            delay_max = cy->gossip_period + dither;
+            // optional extension (may not be modeled): temporarily increase rate after creation or repair events;
+            // this also helps decluster events after simultaneous startup.
+            if (topic->gossip_counter < cy->gossip_broadcast_ratio) {
+                delay_min = 0;
+            }
         }
         olga_defer(&topic->cy->olga,
                    now + random_int(topic->cy, delay_min, delay_max),
