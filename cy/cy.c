@@ -251,20 +251,6 @@ static int64_t dither_int(const cy_t* const cy, const int64_t mean, const int64_
     return mean + random_int(cy, -deviation, +deviation);
 }
 
-// Returns true with a given 1/probability.
-static bool chance(const cy_t* const cy, const uint32_t probability_reciprocal)
-{
-    const uint64_t rnd = cy->platform->vtable->random(cy->platform);
-    return (probability_reciprocal > 0U) && ((rnd % probability_reciprocal) == 0U); // modulo bias negligible
-}
-
-// Returns a random value in [0, bound).
-static size_t choice(const cy_t* const cy, const size_t bound)
-{
-    const uint64_t rnd = cy->platform->vtable->random(cy->platform);
-    return (bound > 0U) ? (size_t)(rnd % bound) : 0U; // modulo bias negligible
-}
-
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
 static void* wkv_realloc(wkv_t* const self, void* ptr, const size_t new_size)
 {
@@ -1930,9 +1916,11 @@ static void on_gossip_known_topic(cy_t* const          cy,
         topic_merge_lage(mine, ts, lage);
         // Suppress gossip (incl. urgent) if we cannot contribute newer states to the consensus process.
         // Inline and unicast gossips are only seen by a small subsets of nodes so they do not suppress others.
-        const bool suppress = (!mine->gossip_urgent_scheduled || (scope == gossip_broadcast)) &&
-                              ((scope == gossip_broadcast) || (scope == gossip_sharded)) &&
-                              (topic_lage(mine, ts) == lage);
+        // See the model for the rationale.
+        const bool suppress =
+          ((scope == gossip_broadcast) || (scope == gossip_sharded)) && //
+          (topic_lage(mine, ts) == lage) &&                             //
+          (!mine->gossip_urgent_scheduled || (mine->gossip_broadcast_counter != 0) || (scope == gossip_broadcast));
         if (suppress) {
             schedule_gossip_ordinary(mine, ts, true);
         }
@@ -4348,7 +4336,7 @@ static void gossip_poll(cy_t* const cy, const cy_us_t now)
     if ((topic == NULL) || (topic->gossip_at > now)) {
         return;
     }
-    assert(!is_implicit(topic));
+    assert(!is_pinned(topic->hash));
     topic_sync_subject_reader(topic);            // use this opportunity to repair the subscription if broken
     schedule_gossip_ordinary(topic, now, false); // reschedule even if failed -- anther node might pick up
     bool use_broadcast = topic->gossip_broadcast_counter == 0;
