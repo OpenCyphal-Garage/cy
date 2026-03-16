@@ -62,7 +62,6 @@ struct cy_tree_t
 // For reference, 2**35 seconds is a little over one millennium.
 #define LAGE_MAX 35
 
-// Mean-field models are invariant over this so we can pick a value that is easy to divide by.
 #define GOSSIP_PERIOD_DITHER_RATIO 8
 
 // A topic created based on a pattern subscription will be deleted after it's been idle for this long.
@@ -2293,8 +2292,8 @@ static void publish_future_timeout(cy_future_t* const base, const cy_us_t schedu
     // Potential improvement to consider: the unicast context is updated on received acks only; if stale,
     // it may cause repeated unicast delivery failures; we could possibly consider this in the heuristic?
     // We already have the last_seen in the association, we could also use that.
-    const bool       unicast = (self->assoc_remaining == 1) && last_attempt; // heuristic subject to review
-    cy_lane_t        lane    = { 0 };                                        // cppcheck-suppress unreadVariable
+    const bool       unicast = (self->assoc_remaining == 1); // heuristic subject to review
+    cy_lane_t        lane    = { 0 };                        // cppcheck-suppress unreadVariable
     const cy_lane_t* lane_p  = NULL;
     if (unicast) {
         const size_t assoc_idx = bitmap_clz(self->assoc_knockout, self->assoc_capacity);
