@@ -17,9 +17,9 @@
 #include <stdint.h>
 
 /// See the subject_id_modulus for details.
-#define CY_SUBJECT_ID_MODULUS_17bit 122867UL     ///< Suitable for all Cyphal transports.
-#define CY_SUBJECT_ID_MODULUS_23bit 8380403UL    ///< Incompatible with Cyphal/CAN.
-#define CY_SUBJECT_ID_MODULUS_32bit 4294959083UL ///< Incompatible with Cyphal/CAN and Cyphal/UDPv4.
+#define CY_SUBJECT_ID_MODULUS_17bit 122743UL     ///< Suitable for all Cyphal transports.
+#define CY_SUBJECT_ID_MODULUS_23bit 8378431UL    ///< Incompatible with Cyphal/CAN.
+#define CY_SUBJECT_ID_MODULUS_32bit 4294954663UL ///< Incompatible with Cyphal/CAN and Cyphal/UDPv4.
 
 #ifdef __cplusplus
 extern "C"
@@ -90,6 +90,13 @@ struct cy_platform_t
     /// Further, to enable fast reconstruction of the eviction count from the subject-ID, we impose an additional
     /// constraint that subject_id_modulus mod 4 == 3.
     ///
+    /// The range of subject-IDs between (CY_SUBJECT_ID_PINNED_MAX+modulus) and
+    /// 2^ceil(log2(CY_SUBJECT_ID_PINNED_MAX+modulus))-1 is not used for topic allocation;
+    /// these are used for the protocol itself: the maximum subject-ID is used for the broadcast subject,
+    /// which in turn is used for broadcast gossips, scout messages, and potentially other protocol needs;
+    /// the remaining subject-IDs in (CY_SUBJECT_ID_PINNED_MAX+modulus, broadcast_subject_id) are used
+    /// for sharded per-topic gossips for background gossip load distribution.
+    ///
     /// See https://en.wikipedia.org/wiki/Quadratic_probing
     /// See https://github.com/OpenCyphal-Garage/cy/issues/12#issuecomment-3577831960
     uint32_t subject_id_modulus;
@@ -114,6 +121,7 @@ typedef struct cy_platform_vtable_t
     /// The factory returns NULL on OOM.
     /// The write method non-blockingly publishes a new message on the subject; the message lifetime ends upon return
     /// from this function.
+    /// Valid subject-ID values are in the range [ 0, 2^ceil(log2(subject_id_modulus+CY_SUBJECT_ID_PINNED_MAX)) ).
     cy_subject_writer_t* (*subject_writer_new)(cy_platform_t*, uint32_t subject_id);
     void (*subject_writer_destroy)(cy_platform_t*, cy_subject_writer_t*);
     cy_err_t (*subject_writer_send)(cy_platform_t*, cy_subject_writer_t*, cy_us_t deadline, cy_prio_t, cy_bytes_t);
@@ -176,9 +184,6 @@ typedef struct cy_platform_vtable_t
 } cy_platform_vtable_t;
 
 /// A special subject-ID is dedicated to broadcast subject. All nodes subscribe to this subject.
-/// This is where topic allocation CRDT gossips are published. Other uses are also possible that involve all nodes.
-/// This works because the primality of the subject-ID modulus implies that a few of the subject-IDs above the
-/// CY_SUBJECT_ID_MAX(modulus) will be unused.
 /// Cy does not require deduplication on the broadcast subject for transport implementation simplicity.
 uint32_t cy_broadcast_subject_id(const cy_platform_t* const platform);
 

@@ -195,16 +195,11 @@ uint64 message_tag      # The tag of the published message this response pertain
 
 #### Type 7 (topic allocation CRDT gossip)
 
-This is broadcast at a constant rate and may also be epidemic unicast ad-hoc when consensus needs repair to speed up the repair process. Broadcast is the ultimate last-resort baseline for eventual convergence where all nodes MUST participate, while epidemic unicasting is an option.
-
-The TTL field is decremented every time the gossip is forwarded to gossip peers to prevent cycles. Broadcast gossips MUST have zero TTL.
-
-The TTL is only the last line of defence against cycles; each forwarding node must keep a short list of recently seen gossips to prevent redundant transmissions early.
+See the `model/` directory for the design rationale.
 
 ```bash
 uint8  type
-void8
-uint8  ttl              # Must be zero for broadcast gossips.
+void16
 int8   topic_log_age    # floor(log2(topic_age)) if topic_age>0 else -1
 uint32 incompatibility
 uint64 topic_hash
@@ -232,11 +227,7 @@ Currently, the name has to be non-empty. Empty-name scouts are reserved for futu
 
 ### CRDT gossips
 
-The topic to subject-ID mapping is done via a CRDT described in the formal specification/verification model. For the CRDT to function, nodes must periodically exchange their states with each other. A simple and robust approach is to regularly broadcast all CRDT state of each node or a part of it, the limit case of the latter being a single topic per message with a scheduler choosing which topic to gossip next. The next topic to gossip is that which has recently seen conflicts/divergences, then the one whose gossips haven't been observed the longest.
-
-The broadcast gossip rate is constant on a large time interval, but short-term it is variable due to intentional dithering, which is introduced to enable duplicate gossip suppression, similar to GAAP/ZMAAP. Removal of duplicates speeds up topic discovery and consensus repair.
-
-For the related models and theory, refer to the `model/` directory.
+The topic to subject-ID mapping is done via a CRDT described in the formal specification/verification model. For the CRDT to function, nodes must periodically exchange their states with each other. For the related models and theory, refer to the `model/` directory.
 
 #### Prior art
 
