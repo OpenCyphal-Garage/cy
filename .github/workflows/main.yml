@@ -3,12 +3,12 @@ on:
   push:
     paths-ignore:
       - "papers/**"
-      - "tools/**"
       - "model/tlaplus/**"
       - "**/*.md"
       - "**/*.ipynb"
       - "**/*.png"
       - "**/*.pdf"
+      - ".claude/**"
       - ".gitignore"
       - ".idea/**"
       - ".zed/**"
