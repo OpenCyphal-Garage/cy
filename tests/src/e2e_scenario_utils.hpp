@@ -22,8 +22,8 @@ inline void set_now_all(sim_net_t& net, const cy_us_t now)
     }
 }
 
-inline void drive_for(sim_net_t& net,
-                      cy_us_t&   now,
+inline void drive_for(sim_net_t&    net,
+                      cy_us_t&      now,
                       const cy_us_t duration,
                       const cy_us_t step_us,
                       const bool    allow_spin_media_failures = false)
@@ -40,10 +40,7 @@ inline void drive_for(sim_net_t& net,
     }
 }
 
-inline void drain_queue(sim_net_t&       net,
-                        cy_us_t&          now,
-                        const cy_us_t     step_us,
-                        const std::size_t guard_limit)
+inline void drain_queue(sim_net_t& net, cy_us_t& now, const cy_us_t step_us, const std::size_t guard_limit)
 {
     std::size_t guard = 0U;
     while (sim_net_pending_frames(net) > 0U) {
@@ -54,8 +51,8 @@ inline void drain_queue(sim_net_t&       net,
     }
 }
 
-inline void drive_for_all(sim_net_t& net,
-                          cy_us_t&   now,
+inline void drive_for_all(sim_net_t&    net,
+                          cy_us_t&      now,
                           const cy_us_t duration,
                           const cy_us_t step_us,
                           const bool    allow_spin_media_failures = false)
@@ -72,10 +69,7 @@ inline void drive_for_all(sim_net_t& net,
     }
 }
 
-inline void drain_queue_all(sim_net_t&       net,
-                            cy_us_t&          now,
-                            const cy_us_t     step_us,
-                            const std::size_t guard_limit)
+inline void drain_queue_all(sim_net_t& net, cy_us_t& now, const cy_us_t step_us, const std::size_t guard_limit)
 {
     std::size_t guard = 0U;
     while (sim_net_pending_frames(net) > 0U) {
@@ -87,7 +81,7 @@ inline void drain_queue_all(sim_net_t&       net,
 }
 
 inline bool wait_all_futures(sim_net_t&                       net,
-                             cy_us_t&                          now,
+                             cy_us_t&                         now,
                              const std::vector<cy_future_t*>& futures,
                              const cy_us_t                    timeout,
                              const cy_us_t                    step_us,
@@ -136,10 +130,7 @@ inline void destroy_futures(const std::vector<cy_future_t*>& futures)
     }
 }
 
-inline void destroy_subscribers(const std::vector<cy_future_t*>& subscribers)
-{
-    destroy_futures(subscribers);
-}
+inline void destroy_subscribers(const std::vector<cy_future_t*>& subscribers) { destroy_futures(subscribers); }
 
 inline void unadvertise_publishers(const std::vector<cy_publisher_t*>& publishers)
 {
@@ -150,7 +141,7 @@ inline void unadvertise_publishers(const std::vector<cy_publisher_t*>& publisher
     }
 }
 
-inline void cleanup_case(sim_net_t&                         net,
+inline void cleanup_case(sim_net_t&                          net,
                          cy_us_t&                            now,
                          const std::vector<cy_future_t*>&    futures,
                          const std::vector<cy_future_t*>&    subscribers,
