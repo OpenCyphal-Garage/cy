@@ -23,6 +23,7 @@
 *.log
 *.tsv
 *.csv
+*.*-swp
 *.db
 *.profraw
 *.luarc*
