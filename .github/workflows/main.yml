@@ -30,7 +30,7 @@ jobs:
             c-compiler: clang
             cxx-compiler: clang++
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: true
       - run: |
@@ -62,7 +62,7 @@ jobs:
             c-compiler: clang
             cxx-compiler: clang++
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: true
       # language=bash
@@ -81,7 +81,7 @@ jobs:
     runs-on: ubuntu-latest
     container: ghcr.io/opencyphal/toolshed:ts24.4.3
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: true
       - run: pip install --break-system-packages gcovr
@@ -115,7 +115,7 @@ jobs:
       - if: ${{ steps.coveralls_upload.outcome == 'failure' }}
         run: |
           echo "::warning::Coveralls upload failed (likely Coveralls API issue). Continuing without failing CI."
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: coverage-report
           path: build/coverage/
@@ -126,7 +126,7 @@ jobs:
       run:
         working-directory: model/montecarlo
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: true
       - uses: dtolnay/rust-toolchain@stable
@@ -141,7 +141,7 @@ jobs:
       matrix:
         std: [ "c11" ]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # language=bash
       - run: |
           sudo apt update -y
