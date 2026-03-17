@@ -4049,6 +4049,9 @@ static void topic_destroy(cy_topic_t* const topic)
     cy_t* const cy = topic->cy;
     CY_TRACE(cy, "🗑️ %s", topic_repr(topic).str);
 
+    // Ensure no gossip callback can run while we are tearing down storage it may touch.
+    unschedule_gossip(topic);
+
     // Remove subject reader/writer.
     if (topic->sub_reader != NULL) {
         cy->platform->vtable->subject_reader_destroy(cy->platform, topic->sub_reader);
@@ -4090,12 +4093,12 @@ static void topic_destroy(cy_topic_t* const topic)
 
     // Detach the gossip shards. This is NULL for pinned topics.
     if (topic->gossip_shard != NULL) {
-        shard_deref(cy, topic->gossip_shard);
+        shard_t* const shard = topic->gossip_shard;
         topic->gossip_shard = NULL;
+        shard_deref(cy, shard);
     }
 
     // Delist and deindex.
-    unschedule_gossip(topic);
     if (cy->topic_iter == topic) {
         cy->topic_iter = cy_topic_iter_next(topic);
     }
