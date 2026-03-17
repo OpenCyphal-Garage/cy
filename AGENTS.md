@@ -10,6 +10,8 @@ You must read all source and documentation files in their entirety instead of us
 
 Update docs/examples when public API behavior changes.
 
+When working with the CI, be aware that commits that contain `#yolo` run only the faster subset of CI jobs, which can be used to speed up the work.
+
 ## Project structure
 
 - `cy/`: the library itself, which is transport-agnostic and platform-agnostic.

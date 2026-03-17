@@ -66,7 +66,7 @@ struct cy_tree_t
 
 // A topic created based on a pattern subscription will be deleted after it's been idle for this long.
 // Here, "idle" means no messages received from this topic and no gossips seen on the network.
-#define IMPLICIT_TOPIC_DEFAULT_TIMEOUT_us (3600 * MEGA)
+#define IMPLICIT_TOPIC_DEFAULT_TIMEOUT_us (600 * MEGA)
 
 // Used to derive the actual ack timeout; see the publisher.
 #define ACK_BASELINE_DEFAULT_TIMEOUT_us (16 * KILO)
