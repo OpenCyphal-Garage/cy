@@ -120,6 +120,17 @@ jobs:
           name: coverage-report
           path: build/coverage/
 
+  test_examples_smoke:
+    runs-on: ubuntu-latest
+    container: ghcr.io/opencyphal/toolshed:ts24.4.3
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+      - run: cmake -S . -B $GITHUB_WORKSPACE/build -DCMAKE_BUILD_TYPE=Debug -DNO_STATIC_ANALYSIS=ON
+      - run: cd $GITHUB_WORKSPACE/build && make -j"$(nproc)" udp_echo udp_time_pub
+      - run: python3 tools/ci_example_smoke.py --build-dir $GITHUB_WORKSPACE/build
+
   test_model_montecarlo:
     runs-on: ubuntu-latest
     defaults:
