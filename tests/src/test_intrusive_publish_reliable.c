@@ -20,6 +20,8 @@ typedef struct
 
     cy_err_t unicast_send_result;
     size_t   unicast_send_count;
+    size_t   last_unicast_size;
+    byte_t   last_unicast[HEADER_BYTES];
 } fixture_t;
 
 static void* fixture_realloc(cy_platform_t* const platform, void* const ptr, const size_t size)
@@ -41,9 +43,20 @@ static cy_err_t fixture_unicast_send(cy_platform_t* const   platform,
 {
     (void)lane;
     (void)deadline;
-    (void)message;
     fixture_t* const self = (fixture_t*)platform;
     self->unicast_send_count++;
+    self->last_unicast_size = 0U;
+    memset(self->last_unicast, 0, sizeof(self->last_unicast));
+    const cy_bytes_t* frag = &message;
+    while ((frag != NULL) && (self->last_unicast_size < sizeof(self->last_unicast))) {
+        if ((frag->size > 0U) && (frag->data != NULL)) {
+            const size_t remaining = sizeof(self->last_unicast) - self->last_unicast_size;
+            const size_t n         = (remaining < frag->size) ? remaining : frag->size;
+            memcpy(&self->last_unicast[self->last_unicast_size], frag->data, n);
+            self->last_unicast_size += n;
+        }
+        frag = frag->next;
+    }
     return self->unicast_send_result;
 }
 
@@ -259,6 +272,12 @@ static publish_future_t* make_publish_future_with_one_assoc(fixture_t* const    
     publish_future_t* const fut =
       (publish_future_t*)mem_alloc_zero(&fixture->cy, sizeof(publish_future_t) + sizeof(association_t*));
     TEST_ASSERT_NOT_NULL(fut);
+    fut->base.index      = TREE_NULL;
+    fut->base.timeout    = OLGA_EVENT_INIT;
+    fut->base.cy         = &fixture->cy;
+    fut->base.callback   = NULL;
+    fut->base.context    = CY_USER_CONTEXT_EMPTY;
+    fut->base.vtable     = &publish_future_vtable;
     fut->owner           = pub;
     fut->assoc_capacity  = 1U;
     fut->assoc_remaining = 1U;
@@ -427,17 +446,64 @@ static void test_publish_future_on_ack_unknown_then_duplicate(void)
     bitmap_set(fut->assoc_knockout, 0U);
     bitmap_set(fut->assoc_knockout, 1U);
 
-    publish_future_on_ack(fut, 20U);
+    publish_future_on_ack(fut, 20U, true);
     TEST_ASSERT_TRUE(fut->acknowledged);
     TEST_ASSERT_EQUAL_size_t(2U, fut->assoc_remaining);
 
-    publish_future_on_ack(fut, 10U);
+    publish_future_on_ack(fut, 10U, true);
     TEST_ASSERT_EQUAL_size_t(1U, fut->assoc_remaining);
 
-    publish_future_on_ack(fut, 10U);
+    publish_future_on_ack(fut, 10U, true);
     TEST_ASSERT_EQUAL_size_t(1U, fut->assoc_remaining);
 
     mem_free(&fixture.cy, fut->assoc_knockout);
+    mem_free(&fixture.cy, fut);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&fixture.heap));
+}
+
+static void test_publish_future_on_nack_does_not_mark_success(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+
+    cy_topic_t              topic;
+    cy_publisher_t          pub;
+    association_t           ass;
+    publish_future_t* const fut = make_publish_future_with_one_assoc(&fixture, &topic, &pub, &ass, 12U);
+    ass.remote_id               = 77U;
+    bitmap_set(fut->assoc_knockout, 0U);
+
+    publish_future_on_ack(fut, ass.remote_id, false);
+    TEST_ASSERT_FALSE(fut->acknowledged);
+    TEST_ASSERT_FALSE(fut->done);
+    TEST_ASSERT_EQUAL_size_t(0U, fut->assoc_remaining);
+
+    mem_free(&fixture.cy, fut->assoc_knockout);
+    mem_free(&fixture.cy, fut);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&fixture.heap));
+}
+
+static void test_publish_future_on_ack_marks_success_when_last_association_resolved(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+
+    cy_topic_t              topic;
+    cy_publisher_t          pub;
+    association_t           ass;
+    publish_future_t* const fut = make_publish_future_with_one_assoc(&fixture, &topic, &pub, &ass, 13U);
+    ass.remote_id               = 78U;
+    bitmap_set(fut->assoc_knockout, 0U);
+    TEST_ASSERT_TRUE(future_index_insert(&fut->base, &topic.pub_futures_by_tag, fut->base.key));
+
+    publish_future_on_ack(fut, ass.remote_id, true);
+    TEST_ASSERT_TRUE(fut->acknowledged);
+    TEST_ASSERT_TRUE(fut->done);
+    TEST_ASSERT_EQUAL_size_t(0U, fut->assoc_capacity);
+    TEST_ASSERT_NULL(fut->assoc_knockout);
+
     mem_free(&fixture.cy, fut);
     TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&fixture.heap));
     TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&fixture.heap));
@@ -455,7 +521,7 @@ static void test_on_message_ack_stale_seqno_lag_ignored(void)
     topic.pub_seqno        = UINT64_C(100005);
 
     const cy_lane_t lane = { .id = 42U, .ctx = { { 0 } }, .prio = cy_prio_nominal };
-    on_message_ack(&fixture.cy, &topic, UINT64_C(1001), 0, lane);
+    on_message_ack(&fixture.cy, &topic, UINT64_C(1001), 0, true, lane);
 
     TEST_ASSERT_EQUAL_size_t(0U, topic.assoc_count);
     TEST_ASSERT_NULL(topic.assoc_by_remote_id);
@@ -477,7 +543,7 @@ static void test_on_message_ack_allocation_failure_reports_async_error(void)
 
     fixture_set_fail_after(&fixture, 0U);
     const cy_lane_t lane = { .id = 43U, .ctx = { { 0 } }, .prio = cy_prio_nominal };
-    on_message_ack(&fixture.cy, &topic, UINT64_C(501), 0, lane);
+    on_message_ack(&fixture.cy, &topic, UINT64_C(501), 0, true, lane);
 
     TEST_ASSERT_EQUAL_size_t(1U, fixture.async_error_count);
     TEST_ASSERT_EQUAL_INT(CY_ERR_MEMORY, fixture.last_async_error);
@@ -499,16 +565,106 @@ static void test_on_message_ack_older_than_witness_keeps_witness(void)
     topic.pub_seqno        = UINT64_C(3);
 
     const cy_lane_t lane = { .id = 44U, .ctx = { { 0 } }, .prio = cy_prio_nominal };
-    on_message_ack(&fixture.cy, &topic, UINT64_C(1002), 10, lane);
+    on_message_ack(&fixture.cy, &topic, UINT64_C(1002), 10, true, lane);
     TEST_ASSERT_EQUAL_size_t(1U, topic.assoc_count);
 
     association_t* const ass = CAVL2_TO_OWNER(cavl2_min(topic.assoc_by_remote_id), association_t, index_remote_id);
     TEST_ASSERT_NOT_NULL(ass);
     TEST_ASSERT_EQUAL_UINT64(UINT64_C(2), ass->seqno_witness);
 
-    on_message_ack(&fixture.cy, &topic, UINT64_C(1001), 11, lane);
+    on_message_ack(&fixture.cy, &topic, UINT64_C(1001), 11, true, lane);
     TEST_ASSERT_EQUAL_size_t(1U, topic.assoc_count);
     TEST_ASSERT_EQUAL_UINT64(UINT64_C(2), ass->seqno_witness);
+    TEST_ASSERT_EQUAL_size_t(0U, fixture.async_error_count);
+
+    forget_associations(&topic);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&fixture.heap));
+}
+
+static void test_on_message_nack_unassociated_does_not_create_association(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+
+    cy_topic_t topic;
+    memset(&topic, 0, sizeof(topic));
+    topic.cy               = &fixture.cy;
+    topic.pub_tag_baseline = UINT64_C(700);
+    topic.pub_seqno        = UINT64_C(3);
+
+    const cy_lane_t lane = { .id = 55U, .ctx = { { 0 } }, .prio = cy_prio_nominal };
+    on_message_ack(&fixture.cy, &topic, UINT64_C(701), 0, false, lane);
+
+    TEST_ASSERT_EQUAL_size_t(0U, topic.assoc_count);
+    TEST_ASSERT_NULL(topic.assoc_by_remote_id);
+    TEST_ASSERT_EQUAL_size_t(0U, fixture.async_error_count);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&fixture.heap));
+}
+
+static void test_on_message_nack_idle_association_is_removed(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+
+    cy_topic_t topic;
+    memset(&topic, 0, sizeof(topic));
+    topic.cy                = &fixture.cy;
+    topic.pub_tag_baseline  = UINT64_C(900);
+    topic.pub_seqno         = UINT64_C(5);
+    topic.assoc_slack_limit = 3U;
+
+    const cy_lane_t               lane = { .id = 56U, .ctx = { { 0 } }, .prio = cy_prio_nominal };
+    association_factory_context_t fac  = { .topic = &topic, .remote_id = lane.id };
+    association_t* const          ass  = CAVL2_TO_OWNER(
+      cavl2_find_or_insert(
+        &topic.assoc_by_remote_id, &fac.remote_id, association_cavl_compare, &fac, association_cavl_factory),
+      association_t,
+      index_remote_id);
+    TEST_ASSERT_NOT_NULL(ass);
+    TEST_ASSERT_EQUAL_size_t(1U, topic.assoc_count);
+    ass->pending_count = 0U;
+    ass->seqno_witness = 0U;
+
+    on_message_ack(&fixture.cy, &topic, UINT64_C(901), 1, false, lane);
+
+    TEST_ASSERT_EQUAL_size_t(0U, topic.assoc_count);
+    TEST_ASSERT_NULL(topic.assoc_by_remote_id);
+    TEST_ASSERT_EQUAL_size_t(0U, fixture.async_error_count);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&fixture.heap));
+}
+
+static void test_on_message_nack_pending_association_is_kept(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+
+    cy_topic_t topic;
+    memset(&topic, 0, sizeof(topic));
+    topic.cy                = &fixture.cy;
+    topic.pub_tag_baseline  = UINT64_C(1000);
+    topic.pub_seqno         = UINT64_C(5);
+    topic.assoc_slack_limit = 2U;
+
+    const cy_lane_t               lane = { .id = 57U, .ctx = { { 0 } }, .prio = cy_prio_nominal };
+    association_factory_context_t fac  = { .topic = &topic, .remote_id = lane.id };
+    association_t* const          ass  = CAVL2_TO_OWNER(
+      cavl2_find_or_insert(
+        &topic.assoc_by_remote_id, &fac.remote_id, association_cavl_compare, &fac, association_cavl_factory),
+      association_t,
+      index_remote_id);
+    TEST_ASSERT_NOT_NULL(ass);
+    ass->pending_count = 1U;
+    ass->seqno_witness = 0U;
+    ass->slack         = 0U;
+
+    on_message_ack(&fixture.cy, &topic, UINT64_C(1001), 2, false, lane);
+
+    TEST_ASSERT_EQUAL_size_t(1U, topic.assoc_count);
+    TEST_ASSERT_EQUAL_size_t(topic.assoc_slack_limit, ass->slack);
+    TEST_ASSERT_EQUAL_UINT64(UINT64_C(1), ass->seqno_witness);
     TEST_ASSERT_EQUAL_size_t(0U, fixture.async_error_count);
 
     forget_associations(&topic);
@@ -523,7 +679,7 @@ static void test_send_message_ack_error_path(void)
     fixture.unicast_send_result = CY_ERR_MEDIA;
 
     const cy_lane_t lane = { .id = 45U, .ctx = { { 0 } }, .prio = cy_prio_nominal };
-    send_message_ack(&fixture.cy, lane, UINT64_C(1), UINT64_C(2), 100);
+    send_message_ack(&fixture.cy, lane, UINT64_C(1), UINT64_C(2), 100, true);
 
     TEST_ASSERT_EQUAL_size_t(1U, fixture.unicast_send_count);
     TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&fixture.heap));
@@ -536,9 +692,31 @@ static void test_send_message_ack_success_path(void)
     fixture_init(&fixture);
 
     const cy_lane_t lane = { .id = 46U, .ctx = { { 0 } }, .prio = cy_prio_nominal };
-    send_message_ack(&fixture.cy, lane, UINT64_C(3), UINT64_C(4), 100);
+    send_message_ack(&fixture.cy, lane, UINT64_C(3), UINT64_C(4), 100, true);
 
     TEST_ASSERT_EQUAL_size_t(1U, fixture.unicast_send_count);
+    TEST_ASSERT_EQUAL_size_t(HEADER_BYTES, fixture.last_unicast_size);
+    TEST_ASSERT_EQUAL_UINT8(header_msg_ack, fixture.last_unicast[0]);
+    TEST_ASSERT_EQUAL_UINT64(UINT64_C(4), deserialize_u64(&fixture.last_unicast[8]));
+    TEST_ASSERT_EQUAL_UINT64(UINT64_C(3), deserialize_u64(&fixture.last_unicast[16]));
+    TEST_ASSERT_EQUAL_size_t(0U, fixture.async_error_count);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&fixture.heap));
+}
+
+static void test_send_message_nack_success_path(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+
+    const cy_lane_t lane = { .id = 47U, .ctx = { { 0 } }, .prio = cy_prio_nominal };
+    send_message_ack(&fixture.cy, lane, UINT64_C(5), UINT64_C(6), 100, false);
+
+    TEST_ASSERT_EQUAL_size_t(1U, fixture.unicast_send_count);
+    TEST_ASSERT_EQUAL_size_t(HEADER_BYTES, fixture.last_unicast_size);
+    TEST_ASSERT_EQUAL_UINT8(header_msg_nack, fixture.last_unicast[0]);
+    TEST_ASSERT_EQUAL_UINT64(UINT64_C(6), deserialize_u64(&fixture.last_unicast[8]));
+    TEST_ASSERT_EQUAL_UINT64(UINT64_C(5), deserialize_u64(&fixture.last_unicast[16]));
     TEST_ASSERT_EQUAL_size_t(0U, fixture.async_error_count);
     TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&fixture.heap));
     TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&fixture.heap));
@@ -577,10 +755,16 @@ int main(void)
     RUN_TEST(test_release_no_slack_when_seqno_behind_witness);
     RUN_TEST(test_release_no_forget_when_pending_remains);
     RUN_TEST(test_publish_future_on_ack_unknown_then_duplicate);
+    RUN_TEST(test_publish_future_on_nack_does_not_mark_success);
+    RUN_TEST(test_publish_future_on_ack_marks_success_when_last_association_resolved);
     RUN_TEST(test_on_message_ack_stale_seqno_lag_ignored);
     RUN_TEST(test_on_message_ack_allocation_failure_reports_async_error);
     RUN_TEST(test_on_message_ack_older_than_witness_keeps_witness);
+    RUN_TEST(test_on_message_nack_unassociated_does_not_create_association);
+    RUN_TEST(test_on_message_nack_idle_association_is_removed);
+    RUN_TEST(test_on_message_nack_pending_association_is_kept);
     RUN_TEST(test_send_message_ack_error_path);
     RUN_TEST(test_send_message_ack_success_path);
+    RUN_TEST(test_send_message_nack_success_path);
     return UNITY_END();
 }

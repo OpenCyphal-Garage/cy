@@ -217,7 +217,7 @@ std::vector<std::vector<unsigned char>> build_corpus(const std::uint64_t known_t
     std::vector<std::vector<unsigned char>> out{};
 
     // Baseline frames for all currently used header types.
-    for (std::uint8_t type = 0U; type <= 6U; type++) {
+    for (std::uint8_t type = 0U; type <= 7U; type++) {
         std::vector<unsigned char> wire(header_bytes + 2U, 0U);
         make_message_header(wire.data(), type, UINT64_C(0x1122334455667788), known_topic_hash);
         wire[header_bytes + 0U] = 0xA5U;

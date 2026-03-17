@@ -11,11 +11,12 @@
 
 namespace {
 
-constexpr cy_us_t step_us          = 5'000;
-constexpr cy_us_t ack_timeout_us   = 20'000;
-constexpr cy_us_t future_wait_us   = 400'000;
-constexpr cy_us_t ordered_window   = 30'000;
-constexpr cy_us_t publish_deadline = 200'000;
+constexpr cy_us_t      step_us          = 5'000;
+constexpr cy_us_t      ack_timeout_us   = 20'000;
+constexpr cy_us_t      future_wait_us   = 400'000;
+constexpr cy_us_t      ordered_window   = 30'000;
+constexpr cy_us_t      publish_deadline = 200'000;
+constexpr std::uint8_t header_rsp_be    = 4U;
 
 struct arrival_sample_t final
 {
@@ -564,7 +565,7 @@ void test_api_pubsub_e2e_a09_response_frame_metadata_is_parsed_per_response_head
     bool        found    = false;
     for (const e2e::frame_capture_t& cap : captures) {
         if ((cap.frame.source != e2e::sim_node_b) || (cap.frame.destination != e2e::sim_node_a) || !cap.frame.unicast ||
-            (cap.frame.header_type != 3U)) {
+            (cap.frame.header_type != header_rsp_be)) {
             continue;
         }
         found = true;

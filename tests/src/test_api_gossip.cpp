@@ -10,7 +10,7 @@
 
 namespace {
 constexpr std::uint8_t header_msg_be = 0U;
-constexpr std::uint8_t header_gossip = 7U;
+constexpr std::uint8_t header_gossip = 8U;
 constexpr std::size_t  header_bytes  = 24U;
 
 struct test_subject_writer_t

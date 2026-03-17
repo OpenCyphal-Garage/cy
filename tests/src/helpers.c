@@ -55,7 +55,7 @@ size_t make_gossip_header(unsigned char* const out,
     }
     // Test helper gossip header layout:
     // [0] type, [2] ttl, [3] log-age, [8..15] topic hash, [16..19] evictions, [23] name length.
-    out[0] = 7U;
+    out[0] = 8U;
     out[1] = 0U;
     out[2] = ttl;
     out[3] = (unsigned char)topic_log_age;
@@ -83,7 +83,7 @@ size_t make_scout_header(unsigned char* const out,
     }
     // Test helper scout header layout:
     // [0] type, [23] pattern length.
-    out[0] = 8U;
+    out[0] = 9U;
     memset(&out[1], 0, TEST_HEADER_BYTES - 1U);
     serialize_u64(&out[8], incompatibility);
     out[TEST_HEADER_BYTES - 1U] = (unsigned char)pattern.len;

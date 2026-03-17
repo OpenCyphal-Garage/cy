@@ -17,10 +17,10 @@ namespace {
 
 constexpr std::uint8_t header_msg_rel  = 1U;
 constexpr std::uint8_t header_msg_ack  = 2U;
-constexpr std::uint8_t header_rsp_be   = 3U;
-constexpr std::uint8_t header_rsp_rel  = 4U;
-constexpr std::uint8_t header_rsp_ack  = 5U;
-constexpr std::uint8_t header_rsp_nack = 6U;
+constexpr std::uint8_t header_rsp_be   = 4U;
+constexpr std::uint8_t header_rsp_rel  = 5U;
+constexpr std::uint8_t header_rsp_ack  = 6U;
+constexpr std::uint8_t header_rsp_nack = 7U;
 
 constexpr std::size_t header_size      = 24U;
 constexpr cy_us_t     step_us          = 5'000;

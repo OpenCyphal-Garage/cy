@@ -3372,7 +3372,7 @@ static bool on_message(cy_t* const           cy,
     // we didn't subscribe to like from a collided subject, or if the sender attempts to unicast etc.
     if (topic->couplings == NULL) { // Subscribers do not exist. Do not accept the message.
         if (reliable) {
-            dedup_t* const dedup =
+            const dedup_t* const dedup =
               CAVL2_TO_OWNER(cavl2_find(topic->sub_index_dedup_by_remote_id, &lane.id, dedup_cavl_compare),
                              dedup_t, //
                              index_remote_id);
