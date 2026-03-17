@@ -223,67 +223,6 @@ static void assert_subject_index_unique(const cy_t* const cy)
     }
 }
 
-typedef struct
-{
-    cy_future_t base;
-    bool        done;
-    cy_tree_t** index_owner;
-    size_t*     dispose_count;
-} fake_future_t;
-
-static bool fake_future_done(const cy_future_t* const base)
-{
-    const fake_future_t* const self = (const fake_future_t*)base;
-    return self->done;
-}
-
-static cy_err_t fake_future_error(const cy_future_t* const base)
-{
-    (void)base;
-    return CY_OK;
-}
-
-static void fake_future_timeout(cy_future_t* const base, const cy_us_t scheduled, const cy_us_t now)
-{
-    (void)base;
-    (void)scheduled;
-    (void)now;
-}
-
-static void fake_future_dispose(cy_future_t* const base)
-{
-    fake_future_t* const self = (fake_future_t*)base;
-    self->done                = true;
-    if ((self->index_owner != NULL) && cavl2_is_inserted(*self->index_owner, &self->base.index)) {
-        cavl2_remove(self->index_owner, &self->base.index);
-    }
-    if (self->dispose_count != NULL) {
-        (*self->dispose_count)++;
-    }
-    mem_free(base->cy, base);
-}
-
-static const cy_future_vtable_t fake_future_vtable = { .done    = fake_future_done,
-                                                       .error   = fake_future_error,
-                                                       .timeout = fake_future_timeout,
-                                                       .dispose = fake_future_dispose };
-
-static fake_future_t* make_fake_future(cy_t* const       cy,
-                                       size_t* const     dispose_count,
-                                       const bool        done,
-                                       const uint64_t    key,
-                                       cy_tree_t** const index)
-{
-    fake_future_t* const out = (fake_future_t*)future_new(cy, &fake_future_vtable, sizeof(fake_future_t));
-    if (out != NULL) {
-        out->done          = done;
-        out->index_owner   = index;
-        out->dispose_count = dispose_count;
-        TEST_ASSERT_TRUE(future_index_insert(&out->base, index, key));
-    }
-    return out;
-}
-
 static void test_cy_destroy_null_is_noop(void) { cy_destroy(NULL); }
 
 static void test_cy_destroy_empty_instance_cleans_all_resources(void)

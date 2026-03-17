@@ -503,14 +503,6 @@ bool wait_until(e2e::sim_net_t& net, cy_us_t& now, const cy_us_t timeout, Predic
     return false;
 }
 
-bool wait_all_done(e2e::sim_net_t& net, cy_us_t& now, const std::vector<cy_future_t*>& futures, const cy_us_t timeout)
-{
-    return wait_until(net, now, timeout, [&futures]() {
-        return std::ranges::all_of(
-          futures, [](const cy_future_t* const fut) { return (fut != nullptr) && cy_future_done(fut); });
-    });
-}
-
 void cleanup_case(e2e::sim_net_t&                     net,
                   cy_us_t&                            now,
                   const std::vector<cy_future_t*>&    futures,

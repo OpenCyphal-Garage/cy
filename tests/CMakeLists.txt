@@ -50,7 +50,7 @@ function(cy_gen_test name compile_flags link_flags c_standard definitions)
             ${CMAKE_CURRENT_SOURCE_DIR}/platform_stubs
     )
     target_link_libraries(${name} PRIVATE "${name}_unity")
-    target_compile_options(${name} PRIVATE ${compile_flags} -Wno-unused-function)
+    target_compile_options(${name} PRIVATE ${compile_flags})
     target_link_options(${name} PRIVATE ${link_flags})
     if (definitions)
         target_compile_definitions(${name} PRIVATE ${definitions})

@@ -58,11 +58,6 @@ typedef struct
     cy_err_t last_error;
 } destroy_capture_t;
 
-static uint32_t deserialize_u32_local(const byte_t in[4])
-{
-    return (uint32_t)in[0] | ((uint32_t)in[1] << 8U) | ((uint32_t)in[2] << 16U) | ((uint32_t)in[3] << 24U);
-}
-
 static uint64_t deserialize_u48_local(const byte_t in[6])
 {
     uint64_t out = 0;
@@ -293,15 +288,6 @@ static void fixture_spin_to(fixture_t* const self, const cy_us_t now)
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(self->cy));
 }
 
-static void fixture_spin_for(fixture_t* const self, const cy_us_t duration, const cy_us_t step)
-{
-    const cy_us_t end = self->now + duration;
-    while (self->now < end) {
-        self->now += step;
-        TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(self->cy));
-    }
-}
-
 static void fixture_fail_multicast_header(fixture_t* const self,
                                           const uint8_t    header_type,
                                           const size_t     count,
@@ -432,14 +418,6 @@ static void dispatch_response_ack(fixture_t* const self,
     serialize_u64_local(&wire[16], message_tag);
     const cy_message_ts_t mts = make_wire_message(self, wire, sizeof(wire), ts);
     cy_on_message(&self->platform, make_lane(remote_id, cy_prio_nominal), NULL, mts);
-}
-
-static void bind_destroy_callback(cy_future_t* const future, destroy_capture_t* const capture)
-{
-    cy_user_context_t ctx = CY_USER_CONTEXT_EMPTY;
-    ctx.ptr[0]            = capture;
-    cy_future_context_set(future, ctx);
-    cy_future_callback_set(future, NULL);
 }
 
 static void destroy_on_notify(cy_future_t* const fut)

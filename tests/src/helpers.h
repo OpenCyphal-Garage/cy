@@ -21,10 +21,6 @@ size_t make_gossip_header(unsigned char* out,
 
 size_t make_scout_header(unsigned char* out, size_t out_size, uint64_t incompatibility, cy_str_t pattern);
 
-/// The PRNG is seeded from the current time by default. If PRNG_SEED environment variable is set,
-/// it is used as the seed instead of the current time to make the sequence deterministic.
-uint64_t prng(void);
-
 #ifdef __cplusplus
 }
 #endif

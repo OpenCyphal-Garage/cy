@@ -59,11 +59,6 @@ test_platform_t* platform_from(cy_platform_t* const platform)
     return reinterpret_cast<test_platform_t*>(platform); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
 }
 
-const test_platform_t* platform_from_const(const cy_platform_t* const platform)
-{
-    return reinterpret_cast<const test_platform_t*>(platform); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
-}
-
 extern "C" cy_subject_writer_t* platform_subject_writer_new(cy_platform_t* const platform,
                                                             const std::uint32_t  subject_id)
 {

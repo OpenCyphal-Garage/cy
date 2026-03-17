@@ -21,7 +21,6 @@ typedef struct
 } guarded_heap_t;
 
 void guarded_heap_init(guarded_heap_t* self, uint64_t seed);
-void guarded_heap_reset(guarded_heap_t* self);
 
 size_t guarded_heap_allocated_fragments(const guarded_heap_t* self);
 size_t guarded_heap_allocated_bytes(const guarded_heap_t* self);
