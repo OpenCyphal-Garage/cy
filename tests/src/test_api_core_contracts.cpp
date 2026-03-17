@@ -63,7 +63,7 @@ const test_platform_t* platform_from_const(const cy_platform_t* const platform)
 extern "C" cy_subject_writer_t* platform_subject_writer_new(cy_platform_t* const platform,
                                                             const std::uint32_t  subject_id)
 {
-    test_platform_t* const self = platform_from(platform);
+    const test_platform_t* const self = platform_from_const(platform);
     if (self->fail_subject_writer_new) {
         return nullptr;
     }
@@ -93,7 +93,7 @@ extern "C" cy_subject_reader_t* platform_subject_reader_new(cy_platform_t* const
                                                             const std::uint32_t  subject_id,
                                                             const std::size_t    extent)
 {
-    test_platform_t* const self = platform_from(platform);
+    const test_platform_t* const self = platform_from_const(platform);
     if (self->fail_subject_reader_new) {
         return nullptr;
     }
