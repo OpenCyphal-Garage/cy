@@ -349,6 +349,24 @@ static void test_send_gossip_raw_writer_lane_and_noop_paths(void)
     fixture_deinit(&fix);
 }
 
+static void test_send_gossip_raw_writer_failure_skips_unicast(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    const cy_lane_t lane = make_lane(UINT64_C(0x101));
+    const cy_str_t  name = cy_str("intrusive/gossip/raw/fail");
+
+    fix.fail_subject_send = true;
+    TEST_ASSERT_EQUAL_INT(
+      CY_ERR_MEDIA,
+      send_gossip_raw(fix.cy, 1000, UINT64_C(0x1000000000001235), 0U, -1, name, fix.cy->broad_writer, &lane));
+    TEST_ASSERT_EQUAL_size_t(1U, fix.subject_send_count);
+    TEST_ASSERT_EQUAL_size_t(0U, fix.unicast_send_count);
+
+    fixture_deinit(&fix);
+}
+
 static void test_schedule_gossip_periodic_requires_nonimplicit_nonpinned_topic(void)
 {
     fixture_t fix;
@@ -471,6 +489,16 @@ static void test_on_gossip_known_topic_consensus_scope_suppression_rules(void)
     on_gossip_known_topic(fix.cy, now + 1, topic, topic->evictions, topic_lage(topic, now + 1), gossip_unicast);
     TEST_ASSERT_EQUAL_UINT64(unicast_before, topic->gossip_event.deadline);
 
+    const uint64_t seq_urgent[] = { 0U };
+    fixture_set_random_sequence(&fix, seq_urgent, 1U);
+    schedule_gossip_urgent(topic, now);
+    TEST_ASSERT_TRUE(topic->gossip_event.handler == gossip_event_urgent);
+    const cy_us_t sharded_before = topic->gossip_event.deadline;
+
+    on_gossip_known_topic(fix.cy, now, topic, topic->evictions, topic_lage(topic, now), gossip_sharded);
+    TEST_ASSERT_TRUE(topic->gossip_event.handler == gossip_event_urgent);
+    TEST_ASSERT_EQUAL_UINT64(sharded_before, topic->gossip_event.deadline);
+
     fixture_deinit(&fix);
 }
 
@@ -518,15 +546,49 @@ static void test_gossip_event_periodic_uses_broadcast_then_shard_writer(void)
     TEST_ASSERT_TRUE(fix.subject_send_count > 0U);
     TEST_ASSERT_EQUAL_UINT32(cy_broadcast_subject_id(fix.cy->platform), fix.capture[0].subject_id);
 
-    fix.capture_count           = 0U;
-    fix.subject_send_count      = 0U;
-    topic->gossip_counter       = (byte_t)(fix.cy->gossip_broadcast_ratio + 1U);
+    fix.capture_count      = 0U;
+    fix.subject_send_count = 0U;
+    topic->gossip_counter  = fix.cy->gossip_broadcast_ratio;
+    topic->gossip_counter++;
     topic->gossip_event.user    = topic;
     topic->gossip_event.handler = gossip_event_periodic;
     gossip_event_periodic(&fix.cy->olga, &topic->gossip_event, 25 * MEGA);
 
     TEST_ASSERT_TRUE(fix.subject_send_count > 0U);
     TEST_ASSERT_EQUAL_UINT32(topic_gossip_shard_subject_id(fix.cy, topic->hash), fix.capture[0].subject_id);
+
+    fix.capture_count           = 0U;
+    fix.subject_send_count      = 0U;
+    topic->gossip_counter       = fix.cy->gossip_broadcast_ratio;
+    topic->gossip_event.user    = topic;
+    topic->gossip_event.handler = gossip_event_periodic;
+    gossip_event_periodic(&fix.cy->olga, &topic->gossip_event, 26 * MEGA);
+
+    TEST_ASSERT_TRUE(fix.subject_send_count > 0U);
+    TEST_ASSERT_EQUAL_UINT32(cy_broadcast_subject_id(fix.cy->platform), fix.capture[0].subject_id);
+
+    fixture_deinit(&fix);
+}
+
+static void test_gossip_event_periodic_reports_async_error_on_send_failure(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    cy_topic_t* const topic = fixture_make_explicit_topic(
+      &fix, "intrusive/gossip/periodic/fail#1000000000001208", UINT64_C(0x1000000000001208), 0U);
+
+    fix.fail_subject_send       = true;
+    fix.async_error_count       = 0U;
+    fix.subject_send_count      = 0U;
+    topic->gossip_counter       = 0;
+    topic->gossip_event.user    = topic;
+    topic->gossip_event.handler = gossip_event_periodic;
+    gossip_event_periodic(&fix.cy->olga, &topic->gossip_event, 27 * MEGA);
+
+    TEST_ASSERT_TRUE(fix.subject_send_count > 0U);
+    TEST_ASSERT_EQUAL_size_t(1U, fix.async_error_count);
+    TEST_ASSERT_EQUAL_INT(CY_ERR_MEDIA, fix.last_async_error);
 
     fixture_deinit(&fix);
 }
@@ -582,6 +644,29 @@ static void test_on_scout_responds_via_unicast_only(void)
     fixture_deinit(&fix);
 }
 
+static void test_on_scout_reports_async_error_on_unicast_failure(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    (void)fixture_make_explicit_topic(
+      &fix, "intrusive/gossip/scout/fail/one#1000000000001212", UINT64_C(0x1000000000001212), 0U);
+    (void)fixture_make_explicit_topic(
+      &fix, "intrusive/gossip/scout/fail/two#1000000000001213", UINT64_C(0x1000000000001213), 0U);
+
+    fix.fail_unicast_send  = true;
+    fix.async_error_count  = 0U;
+    fix.unicast_send_count = 0U;
+
+    on_scout(fix.cy, 28 * MEGA, cy_str("intrusive/gossip/scout/fail/>"), make_lane(UINT64_C(0xABD)));
+
+    TEST_ASSERT_EQUAL_size_t(2U, fix.unicast_send_count);
+    TEST_ASSERT_EQUAL_size_t(2U, fix.async_error_count);
+    TEST_ASSERT_EQUAL_INT(CY_ERR_MEDIA, fix.last_async_error);
+
+    fixture_deinit(&fix);
+}
+
 void setUp(void) {}
 
 void tearDown(void) {}
@@ -591,6 +676,7 @@ int main(void)
     UNITY_BEGIN();
     RUN_TEST(test_topic_gossip_shard_subject_id_deterministic_and_bounded);
     RUN_TEST(test_send_gossip_raw_writer_lane_and_noop_paths);
+    RUN_TEST(test_send_gossip_raw_writer_failure_skips_unicast);
     RUN_TEST(test_schedule_gossip_periodic_requires_nonimplicit_nonpinned_topic);
     RUN_TEST(test_schedule_gossip_urgent_preempts_periodic_deadline);
     RUN_TEST(test_on_gossip_known_topic_local_win_schedules_urgent);
@@ -598,7 +684,9 @@ int main(void)
     RUN_TEST(test_on_gossip_known_topic_consensus_scope_suppression_rules);
     RUN_TEST(test_on_gossip_unknown_topic_collision_win_and_loss);
     RUN_TEST(test_gossip_event_periodic_uses_broadcast_then_shard_writer);
+    RUN_TEST(test_gossip_event_periodic_reports_async_error_on_send_failure);
     RUN_TEST(test_gossip_event_urgent_broadcasts_and_resets_counter);
     RUN_TEST(test_on_scout_responds_via_unicast_only);
+    RUN_TEST(test_on_scout_reports_async_error_on_unicast_failure);
     return UNITY_END();
 }

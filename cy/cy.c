@@ -1390,8 +1390,8 @@ static void topic_allocate(cy_topic_t* const topic, const uint32_t new_evictions
                  (uintmax_t)topic->hash,
                  (uintmax_t)new_sid,
                  victory ? "wins 👑 over" : "loses 💀 to",
-                 (that != NULL) ? (uintmax_t)that->hash : UINTMAX_MAX,
-                 (that != NULL) ? (uintmax_t)topic_subject_id(that) : (uintmax_t)UINT32_MAX);
+                 (uintmax_t)that->hash,
+                 (uintmax_t)topic_subject_id(that));
     }
 #endif
 

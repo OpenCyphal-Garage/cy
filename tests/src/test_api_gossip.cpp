@@ -9,6 +9,7 @@
 #include <cstring>
 
 namespace {
+constexpr std::uint8_t header_msg_be = 0U;
 constexpr std::uint8_t header_gossip = 7U;
 constexpr std::size_t  header_bytes  = 24U;
 
@@ -619,6 +620,32 @@ void test_api_gossip_invalid_frame_has_no_side_effects()
     platform_deinit(p);
 }
 
+void test_api_message_with_reader_above_sid_max_treated_as_nonmulticast()
+{
+    test_platform_t p{};
+    platform_init(p);
+    cy_test_message_reset_counters();
+
+    const std::uint64_t            hash = UINT64_C(0x1000000000000046);
+    std::array<unsigned char, 256> wire{};
+    make_message_header(wire.data(), header_msg_be, UINT64_C(0xA5A5), hash);
+
+    const cy_subject_reader_t out_of_range_reader = {
+        .subject_id = CY_SUBJECT_ID_MAX(p.platform.subject_id_modulus) + 1U,
+    };
+    dispatch_raw(p,
+                 wire,
+                 header_bytes,
+                 cy_lane_t{ .id = 33U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
+                 &out_of_range_reader,
+                 112);
+
+    TEST_ASSERT_EQUAL_size_t(0U, p.subject_send_count);
+    TEST_ASSERT_EQUAL_size_t(0U, p.unicast_send_count);
+    TEST_ASSERT_NULL(cy_topic_find_by_hash(p.cy, hash));
+    platform_deinit(p);
+}
+
 void test_api_scout_match_triggers_gossip_response_and_fields_are_correct()
 {
     test_platform_t p{};
@@ -713,6 +740,7 @@ int main()
     RUN_TEST(test_api_gossip_parser_rejects_pinned_hash_with_nonzero_evictions);
     RUN_TEST(test_api_scout_parser_rejects_empty_and_truncated_pattern);
     RUN_TEST(test_api_gossip_invalid_frame_has_no_side_effects);
+    RUN_TEST(test_api_message_with_reader_above_sid_max_treated_as_nonmulticast);
     RUN_TEST(test_api_scout_match_triggers_gossip_response_and_fields_are_correct);
     RUN_TEST(test_api_scout_match_always_uses_unicast);
     RUN_TEST(test_api_unknown_topic_no_pattern_does_not_autocreate);
