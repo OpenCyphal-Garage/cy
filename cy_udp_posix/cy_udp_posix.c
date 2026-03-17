@@ -343,7 +343,7 @@ static void v_on_msg_stateless(udpard_rx_t* const rx, udpard_rx_port_t* const po
     cy_udp_posix_t* const   owner = rx->user;
     subject_reader_t* const self  = port->user;
     static_assert(sizeof(self->history) / sizeof(self->history[0]) == 2, "");
-    // In the stateless mode, libudpard does not bother deduplicating messages. The broadcast subject is dup-tolerant,
+    // In the stateless mode, libudpard does not bother deduplicating messages. Gossips/scouts are dup-tolerant,
     // so we could just pass all messages as-is and it will work fine, but it would waste CPU cycles because each
     // message requires some log-time index lookups.
     // We can mitigate this by applying a very simple filter that is cheap and computationally negligible.
@@ -375,11 +375,12 @@ static cy_subject_reader_t* v_subject_reader_new(cy_platform_t* const base,
     if (self != NULL) {
         self->base.subject_id = subject_id;
 
-        // We special-case the broadcast subject to have STATELESS reassembly strategy to conserve CPU and RAM.
-        // It is useful for the network stack because the broadcast subject is a bottleneck to be aware of -- every
-        // node publishes on it and every node is subscribed, so there is a lot of traffic, while the protocol stack
-        // itself is invariant to broadcast message reordering/duplicates.
-        const bool stateless = subject_id == cy_broadcast_subject_id(base);
+        // We special-case the broadcast and gossip shard subjects to have STATELESS reassembly strategy to conserve
+        // CPU and RAM. It is useful for the network stack because these subjects are a bottleneck to be aware of --
+        // every node publishes/subscribes to the broadcast subject, and the gossip shards are likewise shared by many
+        // nodes, so there is a lot of traffic, while the protocol stack itself is robust against reordering/duplicates
+        // on these subjects.
+        const bool stateless = subject_id > CY_SUBJECT_ID_MAX(base->subject_id_modulus);
         bool       ok        = false;
         if (!stateless) {
             static const udpard_rx_port_vtable_t port_vtbl = { .on_message = v_on_msg };

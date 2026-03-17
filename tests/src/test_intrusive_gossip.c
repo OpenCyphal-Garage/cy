@@ -288,9 +288,9 @@ static void test_topic_gossip_shard_subject_id_deterministic_and_bounded(void)
 
     TEST_ASSERT_EQUAL_UINT32(sid1, topic_gossip_shard_subject_id(fix.cy, h1));
     TEST_ASSERT_TRUE(sid1 > CY_SUBJECT_ID_MAX(fix.cy->platform->subject_id_modulus));
-    TEST_ASSERT_TRUE(sid1 < cy_broadcast_subject_id(fix.cy->platform));
+    TEST_ASSERT_TRUE(sid1 < fix.cy->broad_reader->subject_id);
     TEST_ASSERT_TRUE(sid2 > CY_SUBJECT_ID_MAX(fix.cy->platform->subject_id_modulus));
-    TEST_ASSERT_TRUE(sid2 < cy_broadcast_subject_id(fix.cy->platform));
+    TEST_ASSERT_TRUE(sid2 < fix.cy->broad_reader->subject_id);
 
     fixture_deinit(&fix);
 }
@@ -523,7 +523,7 @@ static void test_gossip_event_periodic_uses_broadcast_then_shard_writer(void)
     gossip_event_periodic(&fix.cy->olga, &topic->gossip_event, 24 * MEGA);
 
     TEST_ASSERT_TRUE(fix.subject_send_count > 0U);
-    TEST_ASSERT_EQUAL_UINT32(cy_broadcast_subject_id(fix.cy->platform), fix.capture[0].subject_id);
+    TEST_ASSERT_EQUAL_UINT32(fix.cy->broad_reader->subject_id, fix.capture[0].subject_id);
 
     fix.capture_count      = 0U;
     fix.subject_send_count = 0U;
@@ -544,7 +544,7 @@ static void test_gossip_event_periodic_uses_broadcast_then_shard_writer(void)
     gossip_event_periodic(&fix.cy->olga, &topic->gossip_event, 26 * MEGA);
 
     TEST_ASSERT_TRUE(fix.subject_send_count > 0U);
-    TEST_ASSERT_EQUAL_UINT32(cy_broadcast_subject_id(fix.cy->platform), fix.capture[0].subject_id);
+    TEST_ASSERT_EQUAL_UINT32(fix.cy->broad_reader->subject_id, fix.capture[0].subject_id);
 
     fixture_deinit(&fix);
 }
@@ -592,7 +592,7 @@ static void test_gossip_event_urgent_broadcasts_and_resets_counter(void)
     TEST_ASSERT_TRUE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
     TEST_ASSERT_TRUE(topic->gossip_event.handler == gossip_event_periodic);
     TEST_ASSERT_TRUE(fix.subject_send_count > 0U);
-    TEST_ASSERT_EQUAL_UINT32(cy_broadcast_subject_id(fix.cy->platform), fix.capture[0].subject_id);
+    TEST_ASSERT_EQUAL_UINT32(fix.cy->broad_reader->subject_id, fix.capture[0].subject_id);
 
     fixture_deinit(&fix);
 }

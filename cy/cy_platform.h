@@ -21,6 +21,11 @@
 #define CY_SUBJECT_ID_MODULUS_23bit 8378431UL    ///< Incompatible with Cyphal/CAN.
 #define CY_SUBJECT_ID_MODULUS_32bit 4294954663UL ///< Incompatible with Cyphal/CAN and Cyphal/UDPv4.
 
+/// The maximum size of messages exchanged by the session layer itself, unrelated to the application data.
+/// Currently this includes only gossip and scout messages. In the future, additional messages may be introduced,
+/// but normally they should not exceed this limit to maximize wire interoperability.
+#define CY_AUX_SUBJECT_EXTENT 476U
+
 #ifdef __cplusplus
 extern "C"
 {
@@ -96,6 +101,15 @@ struct cy_platform_t
     /// which in turn is used for broadcast gossips, scout messages, and potentially other protocol needs;
     /// the remaining subject-IDs in (CY_SUBJECT_ID_PINNED_MAX+modulus, broadcast_subject_id) are used
     /// for sharded per-topic gossips for background gossip load distribution.
+    ///
+    /// Cy requires the strict transport layer contracts to be upheld only on the normal subjects in the range
+    /// [0, CY_SUBJECT_ID_PINNED_MAX+modulus].
+    /// The gossip shard and broadcast subjects relax the following requirements:
+    ///     - Message deduplication is not mandatory, which often allows elision of per-remote states.
+    ///     - Support for messages longer than CY_AUX_SUBJECT_EXTENT is not mandatory,
+    ///       which means that most transports can omit multi-frame support.
+    /// Together this enables much better scalability which is important for the broadcast subject in particular,
+    /// especially on resource-limited nodes.
     ///
     /// See https://en.wikipedia.org/wiki/Quadratic_probing
     /// See https://github.com/OpenCyphal-Garage/cy/issues/12#issuecomment-3577831960
@@ -182,10 +196,6 @@ typedef struct cy_platform_vtable_t
     ///     return rapidhash_withSeed(seed, sizeof(seed), local_uid);
     uint64_t (*random)(cy_platform_t*);
 } cy_platform_vtable_t;
-
-/// A special subject-ID is dedicated to broadcast subject. All nodes subscribe to this subject.
-/// Cy does not require deduplication on the broadcast subject for transport implementation simplicity.
-uint32_t cy_broadcast_subject_id(const cy_platform_t* const platform);
 
 /// New message received, multicast or unicast. The data ownership is taken by this function.
 /// The subject reader is NULL for unicast messages.

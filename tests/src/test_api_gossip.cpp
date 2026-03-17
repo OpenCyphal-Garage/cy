@@ -564,7 +564,7 @@ void test_api_gossip_invalid_frame_has_no_side_effects()
     platform_init(p);
     cy_test_message_reset_counters();
 
-    const cy_subject_reader_t broad_reader = { .subject_id = cy_broadcast_subject_id(&p.platform) };
+    const cy_subject_reader_t broad_reader = { .subject_id = 0x1FFFFUL };
     dispatch_gossip(p,
                     cy_lane_t{ .id = 31U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
                     &broad_reader,

@@ -41,8 +41,7 @@ extern "C"
 /// range is ~4.44e-16, or about one in two quadrillion, which is not practically possible.
 #define CY_SUBJECT_ID_PINNED_MAX 0x1FFFU
 
-/// This notably excludes the broadcast subject, which is always at the top, above this maximum.
-/// See cy_broadcast_subject_id().
+/// This notably excludes the broadcast subject and gossip shards, which are always at the top, above this maximum.
 #define CY_SUBJECT_ID_MAX(modulus) (CY_SUBJECT_ID_PINNED_MAX + (modulus))
 
 typedef uint_fast8_t cy_err_t;

@@ -322,7 +322,7 @@ cy_err_t enqueue_subject(sim_node_t&                       src,
                          const std::vector<unsigned char>& wire)
 {
     const sim_net_t& net          = *src.network;
-    const bool       is_broadcast = subject_id == cy_broadcast_subject_id(&src.platform);
+    const bool       is_broadcast = subject_id == 0x1FFFFUL;
 
     cy_err_t result = CY_OK;
     for (std::size_t i = 0U; i < net.nodes.size(); i++) {

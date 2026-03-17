@@ -170,7 +170,7 @@ void enqueue_subject(sim_node_t&                                     src,
                      const std::size_t                               size)
 {
     sim_network_t& net          = *src.network;
-    const bool     is_broadcast = subject_id == cy_broadcast_subject_id(&src.platform);
+    const bool     is_broadcast = subject_id == 0x1FFFFUL;
     for (std::size_t i = 0U; i < net.node_count; i++) {
         if (i == src.index) {
             continue;

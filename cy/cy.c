@@ -137,7 +137,7 @@ struct cy_t
     cy_us_t implicit_topic_timeout;
     cy_us_t ack_baseline_timeout;
 
-    // See cy_broadcast_subject_id().
+    // Access to the broadcast subject.
     cy_subject_reader_t* broad_reader;
     cy_subject_writer_t* broad_writer;
 
@@ -168,10 +168,6 @@ struct cy_t
 // The header size is added to the user-supplied extent value.
 // We use a fixed-size header to simplify parsing and also to provide enough space to ensure natural alignment.
 #define HEADER_BYTES 24U
-
-// Chosen rather arbitrarily ensuring that the gossip certainly fits.
-// Does not affect normal messages since they are not broadcast.
-#define BROADCAST_EXTENT 500U
 
 typedef enum
 {
@@ -832,7 +828,7 @@ static cy_tree_t* shard_cavl_factory(void* const user)
             return NULL;
         }
         shard->writer->subject_id = ctx->subject_id;
-        shard->reader = cy->platform->vtable->subject_reader_new(cy->platform, ctx->subject_id, BROADCAST_EXTENT);
+        shard->reader = cy->platform->vtable->subject_reader_new(cy->platform, ctx->subject_id, CY_AUX_SUBJECT_EXTENT);
         if (shard->reader == NULL) {
             cy->platform->vtable->subject_writer_destroy(cy->platform, shard->writer);
             mem_free(cy, shard);
@@ -1276,7 +1272,8 @@ static uint32_t topic_gossip_shard_subject_id(const cy_t* const cy, const uint64
     const uint32_t shard_index = (uint32_t)(topic_hash % (uint64_t)cy->gossip_shard_count);
     const uint32_t subject_id  = CY_SUBJECT_ID_MAX(cy->platform->subject_id_modulus) + 1U + shard_index;
     assert(subject_id > CY_SUBJECT_ID_MAX(cy->platform->subject_id_modulus));
-    assert(subject_id < cy_broadcast_subject_id(cy->platform));
+    assert(subject_id < cy->broad_reader->subject_id);
+    assert(cy->broad_reader->subject_id == cy->broad_writer->subject_id);
     return subject_id;
 }
 
@@ -4230,12 +4227,14 @@ cy_t* cy_new(cy_platform_t* const platform)
     cy->gossip_urgent_delay_max = 10 * KILO;
     cy->gossip_broadcast_ratio  = 10;
 
-    const uint32_t broad_id = cy_broadcast_subject_id(platform);
-    cy->gossip_shard_count  = broad_id - (CY_SUBJECT_ID_MAX(platform->subject_id_modulus) + 1U);
+    const uint32_t broadcast_subject_id =
+      (uint32_t)((1ULL << (byte_t)(log2_floor(CY_SUBJECT_ID_MAX(platform->subject_id_modulus)) + 1)) - 1U);
+    cy->gossip_shard_count = broadcast_subject_id - (CY_SUBJECT_ID_MAX(platform->subject_id_modulus) + 1U);
     assert((cy->gossip_shard_count > 0) && (cy->gossip_shard_count < platform->subject_id_modulus)); // sanity
 
     // Set up the broadcast subject readers/writers.
-    cy->broad_reader = cy->platform->vtable->subject_reader_new(cy->platform, broad_id, BROADCAST_EXTENT);
+    cy->broad_reader =
+      cy->platform->vtable->subject_reader_new(cy->platform, broadcast_subject_id, CY_AUX_SUBJECT_EXTENT);
     if (cy->broad_reader == NULL) {
         mem_free(cy, (void*)cy->home.str);
         mem_free(cy, (void*)cy->ns.str);
@@ -4243,7 +4242,7 @@ cy_t* cy_new(cy_platform_t* const platform)
         platform->cy = NULL;
         return NULL;
     }
-    cy->broad_writer = cy->platform->vtable->subject_writer_new(cy->platform, broad_id);
+    cy->broad_writer = cy->platform->vtable->subject_writer_new(cy->platform, broadcast_subject_id);
     if (cy->broad_writer == NULL) {
         cy->platform->vtable->subject_reader_destroy(cy->platform, cy->broad_reader);
         mem_free(cy, (void*)cy->home.str);
@@ -4252,8 +4251,8 @@ cy_t* cy_new(cy_platform_t* const platform)
         platform->cy = NULL;
         return NULL;
     }
-    cy->broad_reader->subject_id = broad_id;
-    cy->broad_writer->subject_id = broad_id;
+    cy->broad_reader->subject_id = broadcast_subject_id;
+    cy->broad_writer->subject_id = broadcast_subject_id;
 
     cy->async_error_handler = default_async_error_handler;
     cy->topic_iter          = NULL;
@@ -4550,16 +4549,6 @@ static void send_response_ack(cy_t* const     cy,
                  (uintmax_t)seqno,
                  (intmax_t)err);
     }
-}
-
-uint32_t cy_broadcast_subject_id(const cy_platform_t* const platform)
-{
-    // Round up to the nearest power of two minus one. This is guaranteed to be outside of the normal subject-ID range.
-    const uint32_t max = CY_SUBJECT_ID_MAX(platform->subject_id_modulus);
-    // The broadcast subject is the maximum valid subject-ID.
-    const uint32_t id = (uint32_t)((1ULL << (byte_t)(log2_floor(max) + 1)) - 1U);
-    assert(id > max);
-    return id;
 }
 
 void cy_on_message(cy_platform_t* const             platform,
