@@ -1,0 +1,21 @@
+[package]
+name = "cyphal-montecarlo"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+# cargo run --release --bin cyphal_montecarlo
+name = "cyphal_montecarlo"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+duration-str = { version = "0.21.0", default-features = false, features = ["time"] }
+rand = { version = "0.10.0" }
+smart-default = "0.7.1"
+time = "0.3.47"
+num-traits = "0.2.19"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

@@ -6,9 +6,11 @@ The library sources are under the `cy/` directory; everything else is ancillary.
 
 The library code must be fully portable between different architectures and compilers, from baremetal to POSIX, from 8-bit to 64-bit.
 
-You must read all files in their entirety instead of using search tools for best context awareness.
+You must read all source and documentation files in their entirety instead of using search tools for best context awareness.
 
 Update docs/examples when public API behavior changes.
+
+When working with the CI, be aware that commits that contain `#yolo` run only the faster subset of CI jobs, which can be used to speed up the work.
 
 ## Project structure
 
@@ -16,7 +18,7 @@ Update docs/examples when public API behavior changes.
 - `tests/`: the test suite; refer to its own README.
 - `examples/`: runnable demos.
 - `lib/`: all external dependencies for the library itself, for the test suite, and for the demos.
-- `formal/`: formal protocol specification and verification models. Read it to understand the protocol.
+- `model/`: formal protocol models. Read it to understand the protocol, esp. READMEs & notebooks.
 - `tools/`: various utilities useful for development, validation, and verification.
 - `papers/`: relevant publications and prior art.
 

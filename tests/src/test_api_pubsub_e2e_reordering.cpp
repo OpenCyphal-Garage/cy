@@ -2,6 +2,7 @@
 #include <unity.h>
 #include "e2e_faults.hpp"
 #include "e2e_sim_net.hpp"
+#include "e2e_scenario_utils.hpp"
 #include "e2e_test_utils.hpp"
 #include "message.h"
 #include <algorithm>
@@ -78,32 +79,6 @@ bool frame_payload_parse(const e2e::frame_info_t& frame, e2e::app_payload_t& out
         return false;
     }
     return e2e::app_payload_unpack(frame.payload, out);
-}
-
-void drive_for(e2e::sim_net_t& net, cy_us_t& now, const cy_us_t duration)
-{
-    const cy_us_t end = now + duration;
-    while (now < end) {
-        TEST_ASSERT_EQUAL_INT(CY_OK, e2e::drive_round(net, now, now));
-        now += step_us;
-    }
-}
-
-void drain_queue(e2e::sim_net_t& net, cy_us_t& now)
-{
-    std::size_t guard = 0U;
-    while (e2e::sim_net_pending_frames(net) > 0U) {
-        TEST_ASSERT_EQUAL_INT(CY_OK, e2e::drive_round(net, now, now));
-        now += step_us;
-        guard++;
-        TEST_ASSERT_TRUE(guard < 50'000U);
-    }
-}
-
-void set_now(e2e::sim_net_t& net, const cy_us_t now)
-{
-    e2e::sim_net_node_now_set(net, e2e::sim_node_a, now);
-    e2e::sim_net_node_now_set(net, e2e::sim_node_b, now);
 }
 
 cy_publisher_t* make_publisher(e2e::sim_net_t& net, const char* const topic_name)
@@ -207,70 +182,6 @@ void assert_ordered_strictly_increasing(const arrival_capture_t& capture, const 
     }
 }
 
-bool wait_all_futures(e2e::sim_net_t& net, cy_us_t& now, const std::vector<cy_future_t*>& futures)
-{
-    const cy_us_t end = now + future_wait_us;
-    while (now <= end) {
-        bool all_done = true;
-        for (cy_future_t* const fut : futures) {
-            TEST_ASSERT_NOT_NULL(fut);
-            if (!cy_future_done(fut)) {
-                all_done = false;
-                break;
-            }
-        }
-        if (all_done) {
-            return true;
-        }
-        TEST_ASSERT_EQUAL_INT(CY_OK, e2e::drive_round(net, now, now));
-        now += step_us;
-    }
-    return false;
-}
-
-void assert_publish_futures(const std::vector<cy_future_t*>& futures, const cy_err_t expected_error)
-{
-    for (cy_future_t* const fut : futures) {
-        TEST_ASSERT_NOT_NULL(fut);
-        TEST_ASSERT_TRUE(cy_future_done(fut));
-        TEST_ASSERT_EQUAL_INT(expected_error, cy_future_error(fut));
-    }
-}
-
-void cleanup_case(e2e::sim_net_t&                     net,
-                  cy_us_t&                            now,
-                  const std::vector<cy_future_t*>&    futures,
-                  const std::vector<cy_future_t*>&    subscribers,
-                  const std::vector<cy_publisher_t*>& publishers)
-{
-    for (cy_future_t* const fut : futures) {
-        if (fut != nullptr) {
-            cy_future_destroy(fut);
-        }
-    }
-
-    for (cy_future_t* const sub : subscribers) {
-        if (sub != nullptr) {
-            cy_future_destroy(sub);
-        }
-    }
-    drive_for(net, now, 50'000);
-
-    for (cy_publisher_t* const pub : publishers) {
-        if (pub != nullptr) {
-            cy_unadvertise(pub);
-        }
-    }
-    drive_for(net, now, 50'000);
-
-    drain_queue(net, now);
-    e2e::assert_quiescent(net);
-
-    e2e::sim_net_deinit(net);
-    e2e::assert_all_heaps_clean(net);
-    e2e::assert_no_live_messages();
-}
-
 void test_api_pubsub_e2e_c01_ack_loss_retransmit_duplicate_rejected_unordered()
 {
     constexpr std::uint32_t hot_pub_id  = 301U;
@@ -303,7 +214,7 @@ void test_api_pubsub_e2e_c01_ack_loss_retransmit_duplicate_rejected_unordered()
     std::vector<cy_future_t*> hot_futures{};
     std::vector<cy_future_t*> cold_futures{};
     for (std::uint64_t seq = 1U; seq <= 8U; seq++) {
-        set_now(net, now);
+        e2e::set_now(net, now);
         cy_future_t* const hot_fut  = publish_reliable(hot_pub, hot_pub_id, seq, now, 420'000);
         cy_future_t* const cold_fut = publish_reliable(cold_pub, cold_pub_id, seq, now, 420'000);
         TEST_ASSERT_NOT_NULL(hot_fut);
@@ -312,9 +223,9 @@ void test_api_pubsub_e2e_c01_ack_loss_retransmit_duplicate_rejected_unordered()
         cold_futures.push_back(cold_fut);
     }
 
-    TEST_ASSERT_TRUE(wait_all_futures(net, now, hot_futures));
-    TEST_ASSERT_TRUE(wait_all_futures(net, now, cold_futures));
-    drive_for(net, now, 140'000);
+    TEST_ASSERT_TRUE(e2e::wait_all_futures(net, now, hot_futures, future_wait_us, step_us));
+    TEST_ASSERT_TRUE(e2e::wait_all_futures(net, now, cold_futures, future_wait_us, step_us));
+    e2e::drive_for(net, now, 140'000, step_us);
 
     TEST_ASSERT_EQUAL_size_t(0U, hot_capture.malformed);
     TEST_ASSERT_EQUAL_size_t(0U, cold_capture.malformed);
@@ -322,12 +233,12 @@ void test_api_pubsub_e2e_c01_ack_loss_retransmit_duplicate_rejected_unordered()
     assert_unordered_complete_unique(cold_capture, cold_pub_id, 1U, 8U);
     assert_unordered_unique_only(hot_capture, hot_pub_id);
     assert_unordered_unique_only(cold_capture, cold_pub_id);
-    assert_publish_futures(hot_futures, CY_OK);
-    assert_publish_futures(cold_futures, CY_OK);
+    e2e::assert_future_error(hot_futures, CY_OK);
+    e2e::assert_future_error(cold_futures, CY_OK);
 
     std::vector<cy_future_t*> all_futures = hot_futures;
     all_futures.insert(all_futures.end(), cold_futures.begin(), cold_futures.end());
-    cleanup_case(net, now, all_futures, { hot_sub, cold_sub }, { hot_pub, cold_pub });
+    e2e::cleanup_case(net, now, all_futures, { hot_sub, cold_sub }, { hot_pub, cold_pub }, step_us, 50'000, 50'000U);
 }
 
 void test_api_pubsub_e2e_c02_ack_loss_retransmit_duplicate_rejected_ordered()
@@ -362,7 +273,7 @@ void test_api_pubsub_e2e_c02_ack_loss_retransmit_duplicate_rejected_ordered()
     std::vector<cy_future_t*> hot_futures{};
     std::vector<cy_future_t*> cold_futures{};
     for (std::uint64_t seq = 1U; seq <= 8U; seq++) {
-        set_now(net, now);
+        e2e::set_now(net, now);
         cy_future_t* const hot_fut  = publish_reliable(hot_pub, hot_pub_id, seq, now, 420'000);
         cy_future_t* const cold_fut = publish_reliable(cold_pub, cold_pub_id, seq, now, 420'000);
         TEST_ASSERT_NOT_NULL(hot_fut);
@@ -371,9 +282,9 @@ void test_api_pubsub_e2e_c02_ack_loss_retransmit_duplicate_rejected_ordered()
         cold_futures.push_back(cold_fut);
     }
 
-    TEST_ASSERT_TRUE(wait_all_futures(net, now, hot_futures));
-    TEST_ASSERT_TRUE(wait_all_futures(net, now, cold_futures));
-    drive_for(net, now, 140'000);
+    TEST_ASSERT_TRUE(e2e::wait_all_futures(net, now, hot_futures, future_wait_us, step_us));
+    TEST_ASSERT_TRUE(e2e::wait_all_futures(net, now, cold_futures, future_wait_us, step_us));
+    e2e::drive_for(net, now, 140'000, step_us);
 
     TEST_ASSERT_EQUAL_size_t(0U, hot_capture.malformed);
     TEST_ASSERT_EQUAL_size_t(0U, cold_capture.malformed);
@@ -381,12 +292,12 @@ void test_api_pubsub_e2e_c02_ack_loss_retransmit_duplicate_rejected_ordered()
     assert_unordered_complete_unique(cold_capture, cold_pub_id, 1U, 8U);
     assert_ordered_strictly_increasing(hot_capture, hot_pub_id);
     assert_ordered_strictly_increasing(cold_capture, cold_pub_id);
-    assert_publish_futures(hot_futures, CY_OK);
-    assert_publish_futures(cold_futures, CY_OK);
+    e2e::assert_future_error(hot_futures, CY_OK);
+    e2e::assert_future_error(cold_futures, CY_OK);
 
     std::vector<cy_future_t*> all_futures = hot_futures;
     all_futures.insert(all_futures.end(), cold_futures.begin(), cold_futures.end());
-    cleanup_case(net, now, all_futures, { hot_sub, cold_sub }, { hot_pub, cold_pub });
+    e2e::cleanup_case(net, now, all_futures, { hot_sub, cold_sub }, { hot_pub, cold_pub }, step_us, 50'000, 50'000U);
 }
 
 void test_api_pubsub_e2e_c03_retransmit_overtakes_newer_message_unordered_unique()
@@ -445,7 +356,7 @@ void test_api_pubsub_e2e_c03_retransmit_overtakes_newer_message_unordered_unique
     std::vector<cy_future_t*> hot_futures{};
     std::vector<cy_future_t*> cold_futures{};
 
-    set_now(net, now);
+    e2e::set_now(net, now);
     cy_future_t* const hot_fut_1  = publish_reliable(hot_pub, hot_pub_id, 1U, now, 420'000);
     cy_future_t* const cold_fut_1 = publish_reliable(cold_pub, cold_pub_id, 1U, now, 420'000);
     TEST_ASSERT_NOT_NULL(hot_fut_1);
@@ -453,9 +364,9 @@ void test_api_pubsub_e2e_c03_retransmit_overtakes_newer_message_unordered_unique
     hot_futures.push_back(hot_fut_1);
     cold_futures.push_back(cold_fut_1);
 
-    drive_for(net, now, 2'000);
+    e2e::drive_for(net, now, 2'000, step_us);
 
-    set_now(net, now);
+    e2e::set_now(net, now);
     cy_future_t* const hot_fut_2  = publish_reliable(hot_pub, hot_pub_id, 2U, now, 420'000);
     cy_future_t* const cold_fut_2 = publish_reliable(cold_pub, cold_pub_id, 2U, now, 420'000);
     TEST_ASSERT_NOT_NULL(hot_fut_2);
@@ -463,9 +374,9 @@ void test_api_pubsub_e2e_c03_retransmit_overtakes_newer_message_unordered_unique
     hot_futures.push_back(hot_fut_2);
     cold_futures.push_back(cold_fut_2);
 
-    TEST_ASSERT_TRUE(wait_all_futures(net, now, hot_futures));
-    TEST_ASSERT_TRUE(wait_all_futures(net, now, cold_futures));
-    drive_for(net, now, 180'000);
+    TEST_ASSERT_TRUE(e2e::wait_all_futures(net, now, hot_futures, future_wait_us, step_us));
+    TEST_ASSERT_TRUE(e2e::wait_all_futures(net, now, cold_futures, future_wait_us, step_us));
+    e2e::drive_for(net, now, 180'000, step_us);
 
     TEST_ASSERT_EQUAL_size_t(0U, hot_capture.malformed);
     TEST_ASSERT_EQUAL_size_t(0U, cold_capture.malformed);
@@ -473,12 +384,12 @@ void test_api_pubsub_e2e_c03_retransmit_overtakes_newer_message_unordered_unique
     assert_unordered_complete_unique(cold_capture, cold_pub_id, 1U, 2U);
     assert_unordered_unique_only(hot_capture, hot_pub_id);
     assert_unordered_unique_only(cold_capture, cold_pub_id);
-    assert_publish_futures(hot_futures, CY_OK);
-    assert_publish_futures(cold_futures, CY_OK);
+    e2e::assert_future_error(hot_futures, CY_OK);
+    e2e::assert_future_error(cold_futures, CY_OK);
 
     std::vector<cy_future_t*> all_futures = hot_futures;
     all_futures.insert(all_futures.end(), cold_futures.begin(), cold_futures.end());
-    cleanup_case(net, now, all_futures, { hot_sub, cold_sub }, { hot_pub, cold_pub });
+    e2e::cleanup_case(net, now, all_futures, { hot_sub, cold_sub }, { hot_pub, cold_pub }, step_us, 50'000, 50'000U);
 }
 
 void test_api_pubsub_e2e_c04_retransmit_overtakes_newer_message_ordered_restored()
@@ -537,7 +448,7 @@ void test_api_pubsub_e2e_c04_retransmit_overtakes_newer_message_ordered_restored
     std::vector<cy_future_t*> hot_futures{};
     std::vector<cy_future_t*> cold_futures{};
 
-    set_now(net, now);
+    e2e::set_now(net, now);
     cy_future_t* const hot_fut_1  = publish_reliable(hot_pub, hot_pub_id, 1U, now, 420'000);
     cy_future_t* const cold_fut_1 = publish_reliable(cold_pub, cold_pub_id, 1U, now, 420'000);
     TEST_ASSERT_NOT_NULL(hot_fut_1);
@@ -545,9 +456,9 @@ void test_api_pubsub_e2e_c04_retransmit_overtakes_newer_message_ordered_restored
     hot_futures.push_back(hot_fut_1);
     cold_futures.push_back(cold_fut_1);
 
-    drive_for(net, now, 2'000);
+    e2e::drive_for(net, now, 2'000, step_us);
 
-    set_now(net, now);
+    e2e::set_now(net, now);
     cy_future_t* const hot_fut_2  = publish_reliable(hot_pub, hot_pub_id, 2U, now, 420'000);
     cy_future_t* const cold_fut_2 = publish_reliable(cold_pub, cold_pub_id, 2U, now, 420'000);
     TEST_ASSERT_NOT_NULL(hot_fut_2);
@@ -555,9 +466,9 @@ void test_api_pubsub_e2e_c04_retransmit_overtakes_newer_message_ordered_restored
     hot_futures.push_back(hot_fut_2);
     cold_futures.push_back(cold_fut_2);
 
-    TEST_ASSERT_TRUE(wait_all_futures(net, now, hot_futures));
-    TEST_ASSERT_TRUE(wait_all_futures(net, now, cold_futures));
-    drive_for(net, now, 180'000);
+    TEST_ASSERT_TRUE(e2e::wait_all_futures(net, now, hot_futures, future_wait_us, step_us));
+    TEST_ASSERT_TRUE(e2e::wait_all_futures(net, now, cold_futures, future_wait_us, step_us));
+    e2e::drive_for(net, now, 180'000, step_us);
 
     TEST_ASSERT_EQUAL_size_t(0U, hot_capture.malformed);
     TEST_ASSERT_EQUAL_size_t(0U, cold_capture.malformed);
@@ -565,12 +476,12 @@ void test_api_pubsub_e2e_c04_retransmit_overtakes_newer_message_ordered_restored
     assert_unordered_complete_unique(cold_capture, cold_pub_id, 1U, 2U);
     assert_ordered_strictly_increasing(hot_capture, hot_pub_id);
     assert_ordered_strictly_increasing(cold_capture, cold_pub_id);
-    assert_publish_futures(hot_futures, CY_OK);
-    assert_publish_futures(cold_futures, CY_OK);
+    e2e::assert_future_error(hot_futures, CY_OK);
+    e2e::assert_future_error(cold_futures, CY_OK);
 
     std::vector<cy_future_t*> all_futures = hot_futures;
     all_futures.insert(all_futures.end(), cold_futures.begin(), cold_futures.end());
-    cleanup_case(net, now, all_futures, { hot_sub, cold_sub }, { hot_pub, cold_pub });
+    e2e::cleanup_case(net, now, all_futures, { hot_sub, cold_sub }, { hot_pub, cold_pub }, step_us, 50'000, 50'000U);
 }
 
 void test_api_pubsub_e2e_c05_ordered_gap_timeout_flush()
@@ -604,7 +515,7 @@ void test_api_pubsub_e2e_c05_ordered_gap_timeout_flush()
     cy_future_t* const hot_sub  = make_subscriber(net, "e2e/c05/hot", true, hot_capture);
     cy_future_t* const cold_sub = make_subscriber(net, "e2e/c05/cold", true, cold_capture);
 
-    set_now(net, now);
+    e2e::set_now(net, now);
     cy_future_t* const hot_fut_1  = publish_reliable(hot_pub, hot_pub_id, 1U, now, 90'000);
     cy_future_t* const cold_fut_1 = publish_reliable(cold_pub, cold_pub_id, 1U, now, 300'000);
     cy_future_t* const hot_fut_2  = publish_reliable(hot_pub, hot_pub_id, 2U, now, 300'000);
@@ -618,9 +529,9 @@ void test_api_pubsub_e2e_c05_ordered_gap_timeout_flush()
     const std::vector<cy_future_t*> hot_futures  = { hot_fut_1, hot_fut_2 };
     const std::vector<cy_future_t*> cold_futures = { cold_fut_1, cold_fut_2 };
 
-    TEST_ASSERT_TRUE(wait_all_futures(net, now, hot_futures));
-    TEST_ASSERT_TRUE(wait_all_futures(net, now, cold_futures));
-    drive_for(net, now, 120'000);
+    TEST_ASSERT_TRUE(e2e::wait_all_futures(net, now, hot_futures, future_wait_us, step_us));
+    TEST_ASSERT_TRUE(e2e::wait_all_futures(net, now, cold_futures, future_wait_us, step_us));
+    e2e::drive_for(net, now, 120'000, step_us);
 
     TEST_ASSERT_EQUAL_size_t(0U, hot_capture.malformed);
     TEST_ASSERT_EQUAL_size_t(0U, cold_capture.malformed);
@@ -639,7 +550,7 @@ void test_api_pubsub_e2e_c05_ordered_gap_timeout_flush()
 
     std::vector<cy_future_t*> all_futures = hot_futures;
     all_futures.insert(all_futures.end(), cold_futures.begin(), cold_futures.end());
-    cleanup_case(net, now, all_futures, { hot_sub, cold_sub }, { hot_pub, cold_pub });
+    e2e::cleanup_case(net, now, all_futures, { hot_sub, cold_sub }, { hot_pub, cold_pub }, step_us, 50'000, 50'000U);
 }
 
 void test_api_pubsub_e2e_c06_late_older_frame_after_timeout_rejected()
@@ -673,7 +584,7 @@ void test_api_pubsub_e2e_c06_late_older_frame_after_timeout_rejected()
     cy_future_t* const hot_sub  = make_subscriber(net, "e2e/c06/hot", true, hot_capture);
     cy_future_t* const cold_sub = make_subscriber(net, "e2e/c06/cold", true, cold_capture);
 
-    set_now(net, now);
+    e2e::set_now(net, now);
     cy_future_t* const hot_fut_1  = publish_reliable(hot_pub, hot_pub_id, 1U, now, 300'000);
     cy_future_t* const cold_fut_1 = publish_reliable(cold_pub, cold_pub_id, 1U, now, 300'000);
     cy_future_t* const hot_fut_2  = publish_reliable(hot_pub, hot_pub_id, 2U, now, 300'000);
@@ -687,9 +598,9 @@ void test_api_pubsub_e2e_c06_late_older_frame_after_timeout_rejected()
     const std::vector<cy_future_t*> hot_futures  = { hot_fut_1, hot_fut_2 };
     const std::vector<cy_future_t*> cold_futures = { cold_fut_1, cold_fut_2 };
 
-    TEST_ASSERT_TRUE(wait_all_futures(net, now, hot_futures));
-    TEST_ASSERT_TRUE(wait_all_futures(net, now, cold_futures));
-    drive_for(net, now, 140'000);
+    TEST_ASSERT_TRUE(e2e::wait_all_futures(net, now, hot_futures, future_wait_us, step_us));
+    TEST_ASSERT_TRUE(e2e::wait_all_futures(net, now, cold_futures, future_wait_us, step_us));
+    e2e::drive_for(net, now, 140'000, step_us);
 
     TEST_ASSERT_EQUAL_size_t(0U, hot_capture.malformed);
     TEST_ASSERT_EQUAL_size_t(0U, cold_capture.malformed);
@@ -697,12 +608,12 @@ void test_api_pubsub_e2e_c06_late_older_frame_after_timeout_rejected()
     assert_unordered_complete_unique(cold_capture, cold_pub_id, 1U, 2U);
     assert_ordered_strictly_increasing(hot_capture, hot_pub_id);
     assert_ordered_strictly_increasing(cold_capture, cold_pub_id);
-    assert_publish_futures(hot_futures, CY_OK);
-    assert_publish_futures(cold_futures, CY_OK);
+    e2e::assert_future_error(hot_futures, CY_OK);
+    e2e::assert_future_error(cold_futures, CY_OK);
 
     std::vector<cy_future_t*> all_futures = hot_futures;
     all_futures.insert(all_futures.end(), cold_futures.begin(), cold_futures.end());
-    cleanup_case(net, now, all_futures, { hot_sub, cold_sub }, { hot_pub, cold_pub });
+    e2e::cleanup_case(net, now, all_futures, { hot_sub, cold_sub }, { hot_pub, cold_pub }, step_us, 50'000, 50'000U);
 }
 
 void test_api_pubsub_e2e_c07_ordered_buffer_capacity_stress_large_jump_backfill()
@@ -740,7 +651,7 @@ void test_api_pubsub_e2e_c07_ordered_buffer_capacity_stress_large_jump_backfill(
     std::vector<cy_future_t*> cold_futures{};
 
     for (std::uint64_t seq = 1U; seq <= 30U; seq++) {
-        set_now(net, now);
+        e2e::set_now(net, now);
         cy_future_t* const hot_fut = publish_reliable(hot_pub, hot_pub_id, seq, now, 650'000);
         TEST_ASSERT_NOT_NULL(hot_fut);
         hot_futures.push_back(hot_fut);
@@ -752,9 +663,9 @@ void test_api_pubsub_e2e_c07_ordered_buffer_capacity_stress_large_jump_backfill(
         }
     }
 
-    TEST_ASSERT_TRUE(wait_all_futures(net, now, hot_futures));
-    TEST_ASSERT_TRUE(wait_all_futures(net, now, cold_futures));
-    drive_for(net, now, 220'000);
+    TEST_ASSERT_TRUE(e2e::wait_all_futures(net, now, hot_futures, future_wait_us, step_us));
+    TEST_ASSERT_TRUE(e2e::wait_all_futures(net, now, cold_futures, future_wait_us, step_us));
+    e2e::drive_for(net, now, 220'000, step_us);
 
     TEST_ASSERT_EQUAL_size_t(0U, hot_capture.malformed);
     TEST_ASSERT_EQUAL_size_t(0U, cold_capture.malformed);
@@ -771,12 +682,12 @@ void test_api_pubsub_e2e_c07_ordered_buffer_capacity_stress_large_jump_backfill(
 
     assert_unordered_complete_unique(cold_capture, cold_pub_id, 1U, 12U);
     assert_ordered_strictly_increasing(cold_capture, cold_pub_id);
-    assert_publish_futures(hot_futures, CY_OK);
-    assert_publish_futures(cold_futures, CY_OK);
+    e2e::assert_future_error(hot_futures, CY_OK);
+    e2e::assert_future_error(cold_futures, CY_OK);
 
     std::vector<cy_future_t*> all_futures = hot_futures;
     all_futures.insert(all_futures.end(), cold_futures.begin(), cold_futures.end());
-    cleanup_case(net, now, all_futures, { hot_sub, cold_sub }, { hot_pub, cold_pub });
+    e2e::cleanup_case(net, now, all_futures, { hot_sub, cold_sub }, { hot_pub, cold_pub }, step_us, 50'000, 50'000U);
 }
 
 void test_api_pubsub_e2e_c08_high_jitter_moderate_loss_ordered_monotonicity()
@@ -827,7 +738,7 @@ void test_api_pubsub_e2e_c08_high_jitter_moderate_loss_ordered_monotonicity()
     std::vector<cy_future_t*> hot_futures{};
     std::vector<cy_future_t*> cold_futures{};
     for (std::uint64_t seq = 1U; seq <= 14U; seq++) {
-        set_now(net, now);
+        e2e::set_now(net, now);
         cy_future_t* const hot_fut  = publish_reliable(hot_pub, hot_pub_id, seq, now, 700'000);
         cy_future_t* const cold_fut = publish_reliable(cold_pub, cold_pub_id, seq, now, 700'000);
         TEST_ASSERT_NOT_NULL(hot_fut);
@@ -836,9 +747,9 @@ void test_api_pubsub_e2e_c08_high_jitter_moderate_loss_ordered_monotonicity()
         cold_futures.push_back(cold_fut);
     }
 
-    TEST_ASSERT_TRUE(wait_all_futures(net, now, hot_futures));
-    TEST_ASSERT_TRUE(wait_all_futures(net, now, cold_futures));
-    drive_for(net, now, 220'000);
+    TEST_ASSERT_TRUE(e2e::wait_all_futures(net, now, hot_futures, future_wait_us, step_us));
+    TEST_ASSERT_TRUE(e2e::wait_all_futures(net, now, cold_futures, future_wait_us, step_us));
+    e2e::drive_for(net, now, 220'000, step_us);
 
     TEST_ASSERT_EQUAL_size_t(0U, hot_capture.malformed);
     TEST_ASSERT_EQUAL_size_t(0U, cold_capture.malformed);
@@ -848,12 +759,12 @@ void test_api_pubsub_e2e_c08_high_jitter_moderate_loss_ordered_monotonicity()
     assert_ordered_strictly_increasing(cold_capture, cold_pub_id);
     TEST_ASSERT_TRUE(sequences_for(hot_capture, hot_pub_id).size() >= 10U);
     TEST_ASSERT_TRUE(sequences_for(cold_capture, cold_pub_id).size() >= 10U);
-    assert_publish_futures(hot_futures, CY_OK);
-    assert_publish_futures(cold_futures, CY_OK);
+    e2e::assert_future_error(hot_futures, CY_OK);
+    e2e::assert_future_error(cold_futures, CY_OK);
 
     std::vector<cy_future_t*> all_futures = hot_futures;
     all_futures.insert(all_futures.end(), cold_futures.begin(), cold_futures.end());
-    cleanup_case(net, now, all_futures, { hot_sub, cold_sub }, { hot_pub, cold_pub });
+    e2e::cleanup_case(net, now, all_futures, { hot_sub, cold_sub }, { hot_pub, cold_pub }, step_us, 50'000, 50'000U);
 }
 
 void test_api_pubsub_e2e_c09_high_jitter_moderate_loss_unordered_completeness()
@@ -904,7 +815,7 @@ void test_api_pubsub_e2e_c09_high_jitter_moderate_loss_unordered_completeness()
     std::vector<cy_future_t*> hot_futures{};
     std::vector<cy_future_t*> cold_futures{};
     for (std::uint64_t seq = 1U; seq <= 14U; seq++) {
-        set_now(net, now);
+        e2e::set_now(net, now);
         cy_future_t* const hot_fut  = publish_reliable(hot_pub, hot_pub_id, seq, now, 700'000);
         cy_future_t* const cold_fut = publish_reliable(cold_pub, cold_pub_id, seq, now, 700'000);
         TEST_ASSERT_NOT_NULL(hot_fut);
@@ -913,9 +824,9 @@ void test_api_pubsub_e2e_c09_high_jitter_moderate_loss_unordered_completeness()
         cold_futures.push_back(cold_fut);
     }
 
-    TEST_ASSERT_TRUE(wait_all_futures(net, now, hot_futures));
-    TEST_ASSERT_TRUE(wait_all_futures(net, now, cold_futures));
-    drive_for(net, now, 220'000);
+    TEST_ASSERT_TRUE(e2e::wait_all_futures(net, now, hot_futures, future_wait_us, step_us));
+    TEST_ASSERT_TRUE(e2e::wait_all_futures(net, now, cold_futures, future_wait_us, step_us));
+    e2e::drive_for(net, now, 220'000, step_us);
 
     TEST_ASSERT_EQUAL_size_t(0U, hot_capture.malformed);
     TEST_ASSERT_EQUAL_size_t(0U, cold_capture.malformed);
@@ -923,12 +834,12 @@ void test_api_pubsub_e2e_c09_high_jitter_moderate_loss_unordered_completeness()
     assert_unordered_complete_unique(cold_capture, cold_pub_id, 1U, 14U);
     assert_unordered_unique_only(hot_capture, hot_pub_id);
     assert_unordered_unique_only(cold_capture, cold_pub_id);
-    assert_publish_futures(hot_futures, CY_OK);
-    assert_publish_futures(cold_futures, CY_OK);
+    e2e::assert_future_error(hot_futures, CY_OK);
+    e2e::assert_future_error(cold_futures, CY_OK);
 
     std::vector<cy_future_t*> all_futures = hot_futures;
     all_futures.insert(all_futures.end(), cold_futures.begin(), cold_futures.end());
-    cleanup_case(net, now, all_futures, { hot_sub, cold_sub }, { hot_pub, cold_pub });
+    e2e::cleanup_case(net, now, all_futures, { hot_sub, cold_sub }, { hot_pub, cold_pub }, step_us, 50'000, 50'000U);
 }
 
 void test_api_pubsub_e2e_c10_reordering_window_boundary_behavior()
@@ -971,7 +882,7 @@ void test_api_pubsub_e2e_c10_reordering_window_boundary_behavior()
     cy_future_t* const hot_sub  = make_subscriber(net, "e2e/c10/hot", true, hot_capture);
     cy_future_t* const cold_sub = make_subscriber(net, "e2e/c10/cold", true, cold_capture);
 
-    set_now(net, now);
+    e2e::set_now(net, now);
     cy_future_t* const hot_fut_1  = publish_reliable(hot_pub, hot_pub_id, 1U, now, 420'000);
     cy_future_t* const cold_fut_1 = publish_reliable(cold_pub, cold_pub_id, 1U, now, 420'000);
     cy_future_t* const hot_fut_2  = publish_reliable(hot_pub, hot_pub_id, 2U, now, 420'000);
@@ -985,9 +896,9 @@ void test_api_pubsub_e2e_c10_reordering_window_boundary_behavior()
     const std::vector<cy_future_t*> hot_futures  = { hot_fut_1, hot_fut_2 };
     const std::vector<cy_future_t*> cold_futures = { cold_fut_1, cold_fut_2 };
 
-    TEST_ASSERT_TRUE(wait_all_futures(net, now, hot_futures));
-    TEST_ASSERT_TRUE(wait_all_futures(net, now, cold_futures));
-    drive_for(net, now, 200'000);
+    TEST_ASSERT_TRUE(e2e::wait_all_futures(net, now, hot_futures, future_wait_us, step_us));
+    TEST_ASSERT_TRUE(e2e::wait_all_futures(net, now, cold_futures, future_wait_us, step_us));
+    e2e::drive_for(net, now, 200'000, step_us);
 
     TEST_ASSERT_EQUAL_size_t(0U, hot_capture.malformed);
     TEST_ASSERT_EQUAL_size_t(0U, cold_capture.malformed);
@@ -997,12 +908,12 @@ void test_api_pubsub_e2e_c10_reordering_window_boundary_behavior()
     assert_ordered_strictly_increasing(cold_capture, cold_pub_id);
     assert_unordered_unique_only(hot_capture, hot_pub_id);
     assert_unordered_unique_only(cold_capture, cold_pub_id);
-    assert_publish_futures(hot_futures, CY_OK);
-    assert_publish_futures(cold_futures, CY_OK);
+    e2e::assert_future_error(hot_futures, CY_OK);
+    e2e::assert_future_error(cold_futures, CY_OK);
 
     std::vector<cy_future_t*> all_futures = hot_futures;
     all_futures.insert(all_futures.end(), cold_futures.begin(), cold_futures.end());
-    cleanup_case(net, now, all_futures, { hot_sub, cold_sub }, { hot_pub, cold_pub });
+    e2e::cleanup_case(net, now, all_futures, { hot_sub, cold_sub }, { hot_pub, cold_pub }, step_us, 50'000, 50'000U);
 }
 
 } // namespace

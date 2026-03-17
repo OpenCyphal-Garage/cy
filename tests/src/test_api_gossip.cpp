@@ -1,5 +1,6 @@
 #include <cy_platform.h>
 #include <unity.h>
+#include "api_mock_platform_utils.hpp"
 #include "guarded_heap.h"
 #include "helpers.h"
 #include "message.h"
@@ -9,19 +10,9 @@
 #include <cstring>
 
 namespace {
-constexpr std::uint8_t header_gossip = 7U;
+constexpr std::uint8_t header_msg_be = 0U;
+constexpr std::uint8_t header_gossip = 8U;
 constexpr std::size_t  header_bytes  = 24U;
-
-struct test_subject_writer_t
-{
-    cy_subject_writer_t base{};
-};
-
-struct test_subject_reader_t
-{
-    cy_subject_reader_t base{};
-    std::size_t         extent{ 0U };
-};
 
 struct send_capture_t
 {
@@ -51,12 +42,12 @@ struct test_platform_t final
 
 test_platform_t* platform_from(cy_platform_t* const platform)
 {
-    return reinterpret_cast<test_platform_t*>(platform); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+    return api_test::platform_from<test_platform_t>(platform);
 }
 
 const test_platform_t* platform_from_const(const cy_platform_t* const platform)
 {
-    return reinterpret_cast<const test_platform_t*>(platform); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+    return api_test::platform_from_const<test_platform_t>(platform);
 }
 
 std::size_t flatten_fragments(const cy_bytes_t message, unsigned char* const out, const std::size_t out_size)
@@ -94,19 +85,12 @@ void capture_send(test_platform_t* const self,
 extern "C" cy_subject_writer_t* platform_subject_writer_new(cy_platform_t* const platform,
                                                             const std::uint32_t  subject_id)
 {
-    test_platform_t* const self = platform_from(platform);
-    auto* const            out =
-      static_cast<test_subject_writer_t*>(guarded_heap_alloc(&self->core_heap, sizeof(test_subject_writer_t)));
-    if (out != nullptr) {
-        out->base.subject_id = subject_id;
-    }
-    return (out != nullptr) ? &out->base : nullptr;
+    return api_test::subject_writer_new<test_platform_t>(platform, subject_id);
 }
 
 extern "C" void platform_subject_writer_destroy(cy_platform_t* const platform, cy_subject_writer_t* const writer)
 {
-    test_platform_t* const self = platform_from(platform);
-    guarded_heap_free(&self->core_heap, writer);
+    api_test::subject_writer_destroy<test_platform_t>(platform, writer);
 }
 
 extern "C" cy_err_t platform_subject_writer_send(cy_platform_t* const       platform,
@@ -127,20 +111,12 @@ extern "C" cy_subject_reader_t* platform_subject_reader_new(cy_platform_t* const
                                                             const std::uint32_t  subject_id,
                                                             const std::size_t    extent)
 {
-    test_platform_t* const self = platform_from(platform);
-    auto* const            out =
-      static_cast<test_subject_reader_t*>(guarded_heap_alloc(&self->core_heap, sizeof(test_subject_reader_t)));
-    if (out != nullptr) {
-        out->base.subject_id = subject_id;
-        out->extent          = extent;
-    }
-    return (out != nullptr) ? &out->base : nullptr;
+    return api_test::subject_reader_new<test_platform_t>(platform, subject_id, extent);
 }
 
 extern "C" void platform_subject_reader_destroy(cy_platform_t* const platform, cy_subject_reader_t* const reader)
 {
-    test_platform_t* const self = platform_from(platform);
-    guarded_heap_free(&self->core_heap, reader);
+    api_test::subject_reader_destroy<test_platform_t>(platform, reader);
 }
 
 extern "C" cy_err_t platform_unicast_send(cy_platform_t* const   platform,
@@ -172,15 +148,12 @@ extern "C" cy_us_t platform_now(cy_platform_t* const platform) { return platform
 
 extern "C" void* platform_realloc(cy_platform_t* const platform, void* const ptr, const std::size_t size)
 {
-    test_platform_t* const self = platform_from(platform);
-    return guarded_heap_realloc(&self->core_heap, ptr, size);
+    return api_test::core_heap_realloc<test_platform_t>(platform, ptr, size);
 }
 
 extern "C" std::uint64_t platform_random(cy_platform_t* const platform)
 {
-    test_platform_t* const self = platform_from(platform);
-    self->random_state          = (self->random_state * 6364136223846793005ULL) + 1ULL;
-    return self->random_state;
+    return api_test::random_lcg<test_platform_t>(platform);
 }
 
 extern "C" void platform_on_async_error(cy_t* const         cy,
@@ -211,9 +184,8 @@ void platform_init(test_platform_t& self)
     self.vtable.now                    = platform_now;
     self.vtable.realloc                = platform_realloc;
     self.vtable.random                 = platform_random;
-    self.platform.subject_id_modulus   = static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit);
-    self.platform.vtable               = &self.vtable;
-    self.cy                            = cy_new(&self.platform);
+    api_test::init_platform_base(self.platform, self.vtable);
+    self.cy = cy_new(&self.platform);
     TEST_ASSERT_NOT_NULL(self.cy);
     cy_async_error_handler_set(self.cy, platform_on_async_error);
 }
@@ -224,10 +196,7 @@ void platform_deinit(test_platform_t& self)
         cy_destroy(self.cy);
         self.cy = nullptr;
     }
-    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&self.core_heap));
-    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&self.core_heap));
-    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&self.message_heap));
-    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&self.message_heap));
+    api_test::assert_heaps_clean(self.core_heap, self.message_heap);
 }
 
 void dispatch_raw(test_platform_t&                      platform,
@@ -240,9 +209,10 @@ void dispatch_raw(test_platform_t&                      platform,
     cy_message_t* const msg = cy_test_message_make(&platform.message_heap, wire.data(), size);
     TEST_ASSERT_NOT_NULL(msg);
     cy_message_ts_t mts{};
-    mts.timestamp = ts;
-    mts.content   = msg;
-    cy_on_message(&platform.platform, lane, reader, mts);
+    mts.timestamp                         = ts;
+    mts.content                           = msg;
+    const std::uint32_t* const subject_id = (reader != nullptr) ? &reader->subject_id : nullptr;
+    cy_on_message(&platform.platform, lane, subject_id, mts);
 }
 
 void dispatch_gossip(test_platform_t&           platform,
@@ -287,71 +257,7 @@ std::uint64_t capture_u64(const send_capture_t& c, const std::size_t off)
     return out;
 }
 
-// Gossip repair unicast needs eligible peers. We intentionally seed the peer sampler by injecting two
-// distinct incoming gossips from two distinct lanes. This keeps the test API-level: no internal state poking.
-// The helper uses TTL>0 only to exercise the normal incoming-gossip path where peer learning is performed.
-void prime_peer_sampler(test_platform_t& platform, const cy_us_t ts)
-{
-    dispatch_gossip(platform,
-                    cy_lane_t{ .id = 201U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
-                    nullptr,
-                    1U,
-                    0,
-                    UINT64_C(0x1000000000002010),
-                    0U,
-                    "api/gossip/prime/one",
-                    ts);
-    dispatch_gossip(platform,
-                    cy_lane_t{ .id = 202U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
-                    nullptr,
-                    1U,
-                    0,
-                    UINT64_C(0x1000000000002020),
-                    0U,
-                    "api/gossip/prime/two",
-                    ts + 1);
-}
-
-// Scan captured platform sends and report whether we emitted a unicast gossip frame for the requested topic hash.
-// This is the primary black-box observation of urgent-repair behavior: the platform `unicast()` callback invocation.
-bool has_unicast_gossip_for_hash_since(const test_platform_t& platform,
-                                       const std::size_t      capture_start_index,
-                                       const std::uint64_t    topic_hash)
-{
-    const std::size_t start = std::min(capture_start_index, platform.capture_count);
-    for (std::size_t i = start; i < platform.capture_count; i++) {
-        const send_capture_t& cap = platform.captures.at(i);
-        if (!cap.unicast || (cap.size < header_bytes) || (capture_type(cap) != header_gossip)) {
-            continue;
-        }
-        if (capture_u64(cap, 8U) == topic_hash) {
-            return true;
-        }
-    }
-    return false;
-}
-
-// Returns the first unicast gossip capture for the requested topic hash emitted at/after capture_start_index.
-// This enables field-level assertions (e.g., forwarded lage) while staying API-level via platform callback capture.
-const send_capture_t* find_unicast_gossip_for_hash_since(const test_platform_t& platform,
-                                                         const std::size_t      capture_start_index,
-                                                         const std::uint64_t    topic_hash)
-{
-    const std::size_t start = std::min(capture_start_index, platform.capture_count);
-    for (std::size_t i = start; i < platform.capture_count; i++) {
-        const send_capture_t& cap = platform.captures.at(i);
-        if (!cap.unicast || (cap.size < header_bytes) || (capture_type(cap) != header_gossip)) {
-            continue;
-        }
-        if (capture_u64(cap, 8U) == topic_hash) {
-            return &cap;
-        }
-    }
-    return nullptr;
-}
-
-// Same as above, but for broadcast path (`subject_writer_send` captures). The first post-win poll is permitted
-// to take this path because gossip_poll() prioritizes due periodic broadcast over urgent queue processing.
+// Scan captured multicast sends (`subject_writer_send`) for a gossip frame matching the requested hash.
 bool has_broadcast_gossip_for_hash_since(const test_platform_t& platform,
                                          const std::size_t      capture_start_index,
                                          const std::uint64_t    topic_hash)
@@ -369,36 +275,52 @@ bool has_broadcast_gossip_for_hash_since(const test_platform_t& platform,
     return false;
 }
 
-// Validates collision local-win urgent repair without intrusive access:
-// 1) Trigger a collision where local topic wins arbitration.
-// 2) Verify the next poll emits either unicast OR broadcast gossip for the local hash.
-// 3) Trigger the same collision again after dedup timeout but before periodic broadcast deadline and verify
-//    the next poll emits unicast gossip for the local hash (urgent repair path).
-void test_api_collision_win_triggers_urgent_unicast()
+void spin_for(test_platform_t& platform, const cy_us_t duration, const cy_us_t step = 1000)
+{
+    const cy_us_t start = platform.now;
+    while ((platform.now - start) <= duration) {
+        TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
+        platform.now += step;
+    }
+}
+
+bool spin_until_multicast_for_hash(test_platform_t&    platform,
+                                   const std::uint64_t topic_hash,
+                                   const cy_us_t       duration,
+                                   const cy_us_t       step = 1000)
+{
+    const std::size_t start = platform.capture_count;
+    const cy_us_t     t0    = platform.now;
+    while ((platform.now - t0) <= duration) {
+        TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
+        if (has_broadcast_gossip_for_hash_since(platform, start, topic_hash)) {
+            return true;
+        }
+        platform.now += step;
+    }
+    return false;
+}
+
+void test_api_collision_win_triggers_urgent_multicast()
 {
     test_platform_t p{};
     platform_init(p);
 
     static const char* const local_topic_name = "api/gossip/urgent/collision/local/#1000000000001200";
-
-    cy_publisher_t* const pub = cy_advertise(p.cy, cy_str(local_topic_name));
+    cy_publisher_t* const    pub              = cy_advertise(p.cy, cy_str(local_topic_name));
     TEST_ASSERT_NOT_NULL(pub);
 
     const cy_topic_t* const local_topic = cy_topic_find_by_name(p.cy, cy_str(local_topic_name));
     TEST_ASSERT_NOT_NULL(local_topic);
     const std::uint64_t local_hash = cy_topic_hash(local_topic);
-    TEST_ASSERT_TRUE(local_hash > CY_SUBJECT_ID_PINNED_MAX);
 
     p.now = 30'000'000;
-    prime_peer_sampler(p, p.now);
-
-    p.unicast_send_count = 0U;
+    spin_for(p, 50'000); // drain startup urgent gossip from topic promotion
     p.capture_count      = 0U;
+    p.unicast_send_count = 0U;
+    p.subject_send_count = 0U;
 
-    // Build a colliding remote hash by shifting by one modulus:
-    // subject_id(hash + modulus, e) == subject_id(hash, e) for non-pinned topics.
     const std::uint64_t remote_colliding_hash = local_hash + static_cast<std::uint64_t>(CY_SUBJECT_ID_MODULUS_17bit);
-
     dispatch_gossip(p,
                     cy_lane_t{ .id = 203U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
                     nullptr,
@@ -409,77 +331,32 @@ void test_api_collision_win_triggers_urgent_unicast()
                     "api/gossip/urgent/collision/remote",
                     p.now);
 
-    // The very next poll is allowed to emit either path:
-    // - broadcast (if periodic gossip is due), or
-    // - unicast (if urgent queue is polled first).
-    const std::size_t capture_before_first_poll = p.capture_count;
-    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(p.cy));
-    const bool first_poll_unicast   = has_unicast_gossip_for_hash_since(p, capture_before_first_poll, local_hash);
-    const bool first_poll_broadcast = has_broadcast_gossip_for_hash_since(p, capture_before_first_poll, local_hash);
-    TEST_ASSERT_TRUE(first_poll_unicast || first_poll_broadcast);
-
-    // If the first poll broadcasted, the queued urgent gossip must be emitted on the next immediate poll.
-    const std::size_t capture_before_drain = p.capture_count;
-    p.now += 1;
-    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(p.cy));
-    if (first_poll_broadcast && !first_poll_unicast) {
-        // Capture-window check proves the send happened after the drain poll.
-        TEST_ASSERT_TRUE(has_unicast_gossip_for_hash_since(p, capture_before_drain, local_hash));
-    }
-
-    // Delay chosen to be:
-    // - greater than gossip dedup timeout (~1 s), so repeated repair is not rate-limited as duplicate,
-    // - much less than periodic broadcast (~3 s), so next poll should not be taken by broadcast again.
-    // If these protocol defaults change, this offset may need adjustment.
-    p.now += 1'200'000;
-    const std::size_t unicast_before_follow_up = p.unicast_send_count;
-    const std::size_t capture_before_follow_up = p.capture_count;
-    dispatch_gossip(p,
-                    cy_lane_t{ .id = 205U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
-                    nullptr,
-                    4U,
-                    -1,
-                    remote_colliding_hash,
-                    0U,
-                    "api/gossip/urgent/collision/remote/follow-up",
-                    p.now);
-    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(p.cy));
-    const bool follow_up_unicast = p.unicast_send_count > unicast_before_follow_up;
-    const bool follow_up_hash    = has_unicast_gossip_for_hash_since(p, capture_before_follow_up, local_hash);
+    TEST_ASSERT_TRUE(spin_until_multicast_for_hash(p, local_hash, 100'000));
+    TEST_ASSERT_EQUAL_size_t(0U, p.unicast_send_count);
 
     cy_unadvertise(pub);
     platform_deinit(p);
-    TEST_ASSERT_TRUE(follow_up_unicast);
-    TEST_ASSERT_TRUE(follow_up_hash);
 }
 
-// Validates divergence local-win urgent repair without intrusive access:
-// 1) Trigger divergence on the same topic hash (remote eviction counter differs).
-// 2) Ensure first post-win poll emits either unicast OR broadcast for local hash.
-// 3) Trigger follow-up divergence after dedup timeout and require unicast local gossip emission.
-void test_api_arbitration_win_triggers_urgent_unicast()
+void test_api_arbitration_win_triggers_urgent_multicast()
 {
     test_platform_t p{};
     platform_init(p);
 
     static const char* const local_topic_name = "api/gossip/urgent/arbitration/local/#1000000000001300";
-
-    cy_publisher_t* const pub = cy_advertise(p.cy, cy_str(local_topic_name));
+    cy_publisher_t* const    pub              = cy_advertise(p.cy, cy_str(local_topic_name));
     TEST_ASSERT_NOT_NULL(pub);
 
     const cy_topic_t* const local_topic = cy_topic_find_by_name(p.cy, cy_str(local_topic_name));
     TEST_ASSERT_NOT_NULL(local_topic);
     const std::uint64_t local_hash = cy_topic_hash(local_topic);
 
-    p.now = 30'000'000;
-    prime_peer_sampler(p, p.now);
-
-    p.unicast_send_count = 0U;
+    p.now = 31'000'000;
+    spin_for(p, 50'000);
     p.capture_count      = 0U;
+    p.unicast_send_count = 0U;
+    p.subject_send_count = 0U;
 
-    // Divergence trigger: same hash but different evictions.
-    // TTL is set to zero to eliminate forwarding side effects and isolate local-win urgent scheduling behavior.
-    // With local topic aged since creation and remote lage=-1, local should win arbitration.
     dispatch_gossip(p,
                     cy_lane_t{ .id = 204U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
                     nullptr,
@@ -490,221 +367,69 @@ void test_api_arbitration_win_triggers_urgent_unicast()
                     "api/gossip/urgent/arbitration/remote",
                     p.now);
 
-    // First post-win emission is intentionally flexible (broadcast OR unicast), see collision test rationale.
-    const std::size_t capture_before_first_poll = p.capture_count;
-    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(p.cy));
-    const bool first_poll_unicast   = has_unicast_gossip_for_hash_since(p, capture_before_first_poll, local_hash);
-    const bool first_poll_broadcast = has_broadcast_gossip_for_hash_since(p, capture_before_first_poll, local_hash);
-    TEST_ASSERT_TRUE(first_poll_unicast || first_poll_broadcast);
-
-    // If the first poll broadcasted, the queued urgent gossip must be emitted on the next immediate poll.
-    const std::size_t capture_before_drain = p.capture_count;
-    p.now += 1;
-    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(p.cy));
-    if (first_poll_broadcast && !first_poll_unicast) {
-        // Capture-window check proves the send happened after the drain poll.
-        TEST_ASSERT_TRUE(has_unicast_gossip_for_hash_since(p, capture_before_drain, local_hash));
-    }
-
-    // Same timing rationale as in collision test:
-    // exceed dedup window while staying well before periodic broadcast slot.
-    p.now += 1'200'000;
-    const std::size_t unicast_before_follow_up = p.unicast_send_count;
-    const std::size_t capture_before_follow_up = p.capture_count;
-    dispatch_gossip(p,
-                    cy_lane_t{ .id = 206U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
-                    nullptr,
-                    0U,
-                    -1,
-                    local_hash,
-                    1U,
-                    "api/gossip/urgent/arbitration/remote/follow-up",
-                    p.now);
-    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(p.cy));
-    const bool follow_up_unicast = p.unicast_send_count > unicast_before_follow_up;
-    const bool follow_up_hash    = has_unicast_gossip_for_hash_since(p, capture_before_follow_up, local_hash);
+    TEST_ASSERT_TRUE(spin_until_multicast_for_hash(p, local_hash, 100'000));
+    TEST_ASSERT_EQUAL_size_t(0U, p.unicast_send_count);
 
     cy_unadvertise(pub);
     platform_deinit(p);
-    TEST_ASSERT_TRUE(follow_up_unicast);
-    TEST_ASSERT_TRUE(follow_up_hash);
 }
 
-// A known-topic non-consensus gossip (different subject due to evictions mismatch) must schedule urgent repair.
-// We use TTL=0 to isolate arbitration behavior from forwarding and to ensure that the next emission is urgent-only.
-void test_api_known_topic_non_consensus_must_emit_urgent_on_next_poll()
+void test_api_known_topic_local_loss_does_not_emit_urgent_when_subject_unchanged()
 {
     test_platform_t p{};
     platform_init(p);
 
-    static const char* const local_topic_name = "api/gossip/urgent/non-consensus/local/#1000000000001400";
-
-    cy_publisher_t* const pub = cy_advertise(p.cy, cy_str(local_topic_name));
+    static const char* const local_topic_name = "api/gossip/known/loss/no-urgent/#1000000000001400";
+    cy_publisher_t* const    pub              = cy_advertise(p.cy, cy_str(local_topic_name));
     TEST_ASSERT_NOT_NULL(pub);
 
     const cy_topic_t* const local_topic = cy_topic_find_by_name(p.cy, cy_str(local_topic_name));
     TEST_ASSERT_NOT_NULL(local_topic);
     const std::uint64_t local_hash = cy_topic_hash(local_topic);
 
-    p.now = 40'000'000;
-    prime_peer_sampler(p, p.now);
-
-    // Drain startup gossip state so this test observes only the effect of the divergence injected below.
-    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(p.cy));
-    p.now += 1;
-    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(p.cy));
+    p.now = 32'000'000;
+    spin_for(p, 50'000);
     p.capture_count      = 0U;
     p.unicast_send_count = 0U;
+    p.subject_send_count = 0U;
 
     dispatch_gossip(p,
                     cy_lane_t{ .id = 211U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
-                    nullptr,
-                    0U,
-                    -1,
-                    local_hash,
-                    1U,
-                    "api/gossip/urgent/non-consensus/remote",
-                    p.now);
-    TEST_ASSERT_EQUAL_size_t(0U, p.unicast_send_count); // known non-consensus path never unicasts from receive frame
-
-    const std::size_t capture_before_poll = p.capture_count;
-    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(p.cy));
-    TEST_ASSERT_TRUE(p.unicast_send_count > 0U);
-    TEST_ASSERT_TRUE(has_unicast_gossip_for_hash_since(p, capture_before_poll, local_hash));
-
-    cy_unadvertise(pub);
-    platform_deinit(p);
-}
-
-// Known-topic + fresh TTL>0 gossip behavior matrix:
-// - consensus        -> immediate epidemic forward, no urgent required;
-// - divergence win   -> no immediate forward, urgent unicast on next poll;
-// - divergence loss  -> no immediate forward, urgent unicast on next poll.
-void test_api_known_topic_ttl_fresh_matrix_forward_vs_urgent()
-{
-    test_platform_t p{};
-    platform_init(p);
-
-    static const char* const local_topic_name = "api/gossip/known/matrix/local/#1000000000001500";
-
-    cy_publisher_t* const pub = cy_advertise(p.cy, cy_str(local_topic_name));
-    TEST_ASSERT_NOT_NULL(pub);
-
-    const cy_topic_t* const local_topic = cy_topic_find_by_name(p.cy, cy_str(local_topic_name));
-    TEST_ASSERT_NOT_NULL(local_topic);
-    const std::uint64_t local_hash = cy_topic_hash(local_topic);
-
-    p.now = 41'000'000;
-    prime_peer_sampler(p, p.now);
-
-    // Drain startup gossip state so this test observes only the matrix scenarios below.
-    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(p.cy));
-    p.now += 1;
-    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(p.cy));
-    p.capture_count      = 0U;
-    p.unicast_send_count = 0U;
-
-    // Consensus: fresh TTL>0 must forward immediately and does not require urgent follow-up.
-    // Also verify that forwarding uses the local (newer) lage rather than a lower incoming lage.
-    const std::size_t capture_before_consensus = p.capture_count;
-    const std::size_t unicast_before_consensus = p.unicast_send_count;
-    const std::int8_t incoming_consensus_lage  = -1;
-    dispatch_gossip(p,
-                    cy_lane_t{ .id = 212U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
-                    nullptr,
-                    4U,
-                    incoming_consensus_lage,
-                    local_hash,
-                    0U,
-                    "api/gossip/known/matrix/consensus",
-                    p.now);
-    TEST_ASSERT_TRUE(p.unicast_send_count > unicast_before_consensus);
-    TEST_ASSERT_TRUE(has_unicast_gossip_for_hash_since(p, capture_before_consensus, local_hash));
-    const send_capture_t* const consensus_forward =
-      find_unicast_gossip_for_hash_since(p, capture_before_consensus, local_hash);
-    TEST_ASSERT_NOT_NULL(consensus_forward);
-    const auto forwarded_consensus_lage = static_cast<std::int8_t>(consensus_forward->data[3]);
-    TEST_ASSERT_TRUE(forwarded_consensus_lage > incoming_consensus_lage);
-
-    const std::size_t unicast_before_consensus_poll = p.unicast_send_count;
-    p.now += 1;
-    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(p.cy));
-    TEST_ASSERT_EQUAL_size_t(unicast_before_consensus_poll, p.unicast_send_count);
-
-    // Divergence local win: forward is suppressed, urgent follows on next poll.
-    p.now += 10;
-    const std::size_t capture_before_local_win = p.capture_count;
-    const std::size_t unicast_before_local_win = p.unicast_send_count;
-    dispatch_gossip(p,
-                    cy_lane_t{ .id = 213U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
-                    nullptr,
-                    4U,
-                    -1,
-                    local_hash,
-                    1U,
-                    "api/gossip/known/matrix/win",
-                    p.now);
-    TEST_ASSERT_EQUAL_size_t(unicast_before_local_win, p.unicast_send_count);
-
-    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(p.cy));
-    TEST_ASSERT_TRUE(p.unicast_send_count > unicast_before_local_win);
-    TEST_ASSERT_TRUE(has_unicast_gossip_for_hash_since(p, capture_before_local_win, local_hash));
-
-    // Divergence local loss: forward is suppressed, urgent follows on next poll.
-    p.now += 10;
-    const std::size_t capture_before_local_loss = p.capture_count;
-    const std::size_t unicast_before_local_loss = p.unicast_send_count;
-    dispatch_gossip(p,
-                    cy_lane_t{ .id = 214U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
                     nullptr,
                     4U,
                     20,
                     local_hash,
                     2U,
-                    "api/gossip/known/matrix/loss",
+                    "api/gossip/known/loss/no-urgent/remote",
                     p.now);
-    TEST_ASSERT_EQUAL_size_t(unicast_before_local_loss, p.unicast_send_count);
 
-    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(p.cy));
-    TEST_ASSERT_TRUE(p.unicast_send_count > unicast_before_local_loss);
-    TEST_ASSERT_TRUE(has_unicast_gossip_for_hash_since(p, capture_before_local_loss, local_hash));
+    TEST_ASSERT_FALSE(spin_until_multicast_for_hash(p, local_hash, 50'000));
+    TEST_ASSERT_EQUAL_size_t(0U, p.unicast_send_count);
 
     cy_unadvertise(pub);
     platform_deinit(p);
 }
 
-// Unknown-topic + fresh TTL>0 gossip behavior matrix:
-// - no collision         -> immediate forward only;
-// - collision local win  -> urgent on next poll only;
-// - collision local loss -> immediate forward + urgent on next poll.
-void test_api_unknown_topic_ttl_fresh_matrix_forward_vs_urgent()
+void test_api_unknown_topic_no_collision_and_collision_win_paths()
 {
     test_platform_t p{};
     platform_init(p);
 
     static const char* const local_topic_name = "api/gossip/unknown/matrix/local/#1000000000001600";
-
-    cy_publisher_t* const pub = cy_advertise(p.cy, cy_str(local_topic_name));
+    cy_publisher_t* const    pub              = cy_advertise(p.cy, cy_str(local_topic_name));
     TEST_ASSERT_NOT_NULL(pub);
 
     const cy_topic_t* const local_topic = cy_topic_find_by_name(p.cy, cy_str(local_topic_name));
     TEST_ASSERT_NOT_NULL(local_topic);
     const std::uint64_t local_hash = cy_topic_hash(local_topic);
 
-    p.now = 42'000'000;
-    prime_peer_sampler(p, p.now);
-
-    // Drain startup gossip state so this test observes only the matrix scenarios below.
-    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(p.cy));
-    p.now += 1;
-    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(p.cy));
+    p.now = 33'000'000;
+    spin_for(p, 50'000);
     p.capture_count      = 0U;
     p.unicast_send_count = 0U;
+    p.subject_send_count = 0U;
 
-    // No collision: pinned hash is guaranteed to not collide with a non-pinned local topic.
-    const std::uint64_t no_collision_hash       = UINT64_C(1234);
-    const std::size_t   capture_before_consense = p.capture_count;
-    const std::size_t   unicast_before_consense = p.unicast_send_count;
+    const std::uint64_t no_collision_hash = UINT64_C(1234);
     dispatch_gossip(p,
                     cy_lane_t{ .id = 215U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
                     nullptr,
@@ -714,81 +439,22 @@ void test_api_unknown_topic_ttl_fresh_matrix_forward_vs_urgent()
                     0U,
                     "api/gossip/unknown/matrix/no-collision",
                     p.now);
-    TEST_ASSERT_TRUE(p.unicast_send_count > unicast_before_consense);
-    TEST_ASSERT_TRUE(has_unicast_gossip_for_hash_since(p, capture_before_consense, no_collision_hash));
+    TEST_ASSERT_FALSE(spin_until_multicast_for_hash(p, no_collision_hash, 50'000));
+    TEST_ASSERT_NULL(cy_topic_find_by_hash(p.cy, no_collision_hash));
 
-    const std::size_t unicast_before_consensus_poll = p.unicast_send_count;
-    p.now += 1;
-    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(p.cy));
-    TEST_ASSERT_EQUAL_size_t(unicast_before_consensus_poll, p.unicast_send_count);
-
-    // Collision local win: forward suppressed, urgent emitted on next poll.
-    const std::uint64_t colliding_hash_win = local_hash + static_cast<std::uint64_t>(CY_SUBJECT_ID_MODULUS_17bit);
-    p.now += 10;
-    const std::size_t capture_before_local_win = p.capture_count;
-    const std::size_t unicast_before_local_win = p.unicast_send_count;
+    const std::uint64_t colliding_hash = local_hash + static_cast<std::uint64_t>(CY_SUBJECT_ID_MODULUS_17bit);
     dispatch_gossip(p,
                     cy_lane_t{ .id = 216U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
                     nullptr,
                     4U,
                     -1,
-                    colliding_hash_win,
+                    colliding_hash,
                     0U,
                     "api/gossip/unknown/matrix/win",
                     p.now);
-    TEST_ASSERT_EQUAL_size_t(unicast_before_local_win, p.unicast_send_count);
-
-    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(p.cy));
-    TEST_ASSERT_TRUE(p.unicast_send_count > unicast_before_local_win);
-    TEST_ASSERT_TRUE(has_unicast_gossip_for_hash_since(p, capture_before_local_win, local_hash));
-
-    // Collision local loss: immediate forward remains required, then urgent follows on next poll.
-    const std::uint64_t colliding_hash_loss =
-      local_hash + (2U * static_cast<std::uint64_t>(CY_SUBJECT_ID_MODULUS_17bit));
-    p.now += 10;
-    const std::size_t capture_before_local_loss = p.capture_count;
-    const std::size_t unicast_before_local_loss = p.unicast_send_count;
-    dispatch_gossip(p,
-                    cy_lane_t{ .id = 217U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
-                    nullptr,
-                    4U,
-                    20,
-                    colliding_hash_loss,
-                    0U,
-                    "api/gossip/unknown/matrix/loss",
-                    p.now);
-    TEST_ASSERT_TRUE(p.unicast_send_count > unicast_before_local_loss);
-    TEST_ASSERT_TRUE(has_unicast_gossip_for_hash_since(p, capture_before_local_loss, colliding_hash_loss));
-
-    const std::size_t capture_before_urgent_follow_up = p.capture_count;
-    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(p.cy));
-    // Using a capture-window check avoids comparing counters that static analysis cannot alias across cy_spin_once().
-    TEST_ASSERT_TRUE(has_unicast_gossip_for_hash_since(p, capture_before_urgent_follow_up, local_hash));
+    TEST_ASSERT_TRUE(spin_until_multicast_for_hash(p, local_hash, 100'000));
 
     cy_unadvertise(pub);
-    platform_deinit(p);
-}
-
-void test_api_gossip_parser_rejects_broadcast_nonzero_ttl()
-{
-    test_platform_t p{};
-    platform_init(p);
-    cy_test_message_reset_counters();
-
-    const cy_subject_reader_t broad_reader = { .subject_id = cy_broadcast_subject_id(&p.platform) };
-    dispatch_gossip(p,
-                    cy_lane_t{ .id = 1U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
-                    &broad_reader,
-                    1U,
-                    0,
-                    UINT64_C(0x1000000000000001),
-                    0U,
-                    "api/gossip/ttl",
-                    100);
-    TEST_ASSERT_EQUAL_size_t(0U, p.unicast_send_count);
-    TEST_ASSERT_EQUAL_size_t(0U, p.subject_send_count);
-    TEST_ASSERT_EQUAL_size_t(1U, cy_test_message_destroy_count());
-    TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_live_count());
     platform_deinit(p);
 }
 
@@ -893,13 +559,13 @@ void test_api_scout_parser_rejects_empty_and_truncated_pattern()
     platform_deinit(p);
 }
 
-void test_api_gossip_invalid_frame_does_not_seed_peer_sampler()
+void test_api_gossip_invalid_frame_has_no_side_effects()
 {
     test_platform_t p{};
     platform_init(p);
     cy_test_message_reset_counters();
 
-    const cy_subject_reader_t broad_reader = { .subject_id = cy_broadcast_subject_id(&p.platform) };
+    const cy_subject_reader_t broad_reader = { .subject_id = 0x1FFFFUL };
     dispatch_gossip(p,
                     cy_lane_t{ .id = 31U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
                     &broad_reader,
@@ -920,6 +586,32 @@ void test_api_gossip_invalid_frame_does_not_seed_peer_sampler()
                     "api/gossip/valid/nopeer",
                     109);
     TEST_ASSERT_EQUAL_size_t(0U, p.unicast_send_count);
+    platform_deinit(p);
+}
+
+void test_api_message_with_reader_above_sid_max_treated_as_nonmulticast()
+{
+    test_platform_t p{};
+    platform_init(p);
+    cy_test_message_reset_counters();
+
+    const std::uint64_t            hash = UINT64_C(0x1000000000000046);
+    std::array<unsigned char, 256> wire{};
+    make_message_header(wire.data(), header_msg_be, UINT64_C(0xA5A5), hash);
+
+    const cy_subject_reader_t out_of_range_reader = {
+        .subject_id = CY_SUBJECT_ID_MAX(p.platform.subject_id_modulus) + 1U,
+    };
+    dispatch_raw(p,
+                 wire,
+                 header_bytes,
+                 cy_lane_t{ .id = 33U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
+                 &out_of_range_reader,
+                 112);
+
+    TEST_ASSERT_EQUAL_size_t(0U, p.subject_send_count);
+    TEST_ASSERT_EQUAL_size_t(0U, p.unicast_send_count);
+    TEST_ASSERT_NULL(cy_topic_find_by_hash(p.cy, hash));
     platform_deinit(p);
 }
 
@@ -954,7 +646,7 @@ void test_api_scout_match_triggers_gossip_response_and_fields_are_correct()
     platform_deinit(p);
 }
 
-void test_api_scout_broadcast_soon_optimization_suppresses_unicast()
+void test_api_scout_match_always_uses_unicast()
 {
     test_platform_t p{};
     platform_init(p);
@@ -969,80 +661,16 @@ void test_api_scout_broadcast_soon_optimization_suppresses_unicast()
 
     dispatch_scout(
       p, cy_lane_t{ .id = 77U, .ctx = { { 0 } }, .prio = cy_prio_nominal }, 0U, "api/gossip/broadcast/>", p.now);
-    TEST_ASSERT_EQUAL_size_t(0U, p.unicast_send_count);
+    TEST_ASSERT_TRUE(p.unicast_send_count > 0U);
 
     cy_unadvertise(pub);
     platform_deinit(p);
 }
 
-void test_api_repair_smoke_duplicate_suppression_and_unknown_topic_no_autocreate()
+void test_api_unknown_topic_no_pattern_does_not_autocreate()
 {
     test_platform_t p{};
     platform_init(p);
-    cy_publisher_t* const pub = cy_advertise(p.cy, cy_str("api/gossip/repair/topic"));
-    TEST_ASSERT_NOT_NULL(pub);
-    const cy_topic_t* const mine = cy_topic_find_by_name(p.cy, cy_str("api/gossip/repair/topic"));
-    TEST_ASSERT_NOT_NULL(mine);
-
-    // Prime peer set.
-    dispatch_gossip(p,
-                    cy_lane_t{ .id = 10U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
-                    nullptr,
-                    1U,
-                    0,
-                    UINT64_C(0x1001),
-                    0U,
-                    "x/1",
-                    300);
-    dispatch_gossip(p,
-                    cy_lane_t{ .id = 11U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
-                    nullptr,
-                    1U,
-                    0,
-                    UINT64_C(0x1002),
-                    0U,
-                    "x/2",
-                    301);
-
-    // Duplicate suppression smoke on forwarded unknown gossip.
-    const std::size_t unicast_before = p.unicast_send_count;
-    dispatch_gossip(p,
-                    cy_lane_t{ .id = 12U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
-                    nullptr,
-                    3U,
-                    0,
-                    UINT64_C(0x1003),
-                    1U,
-                    "x/3",
-                    302);
-    const std::size_t first_forward = p.unicast_send_count;
-    TEST_ASSERT_TRUE(first_forward >= unicast_before);
-    dispatch_gossip(p,
-                    cy_lane_t{ .id = 12U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
-                    nullptr,
-                    3U,
-                    0,
-                    UINT64_C(0x1003),
-                    1U,
-                    "x/3",
-                    303);
-    TEST_ASSERT_EQUAL_size_t(first_forward, p.unicast_send_count);
-
-    // Local-win divergence schedules urgent gossip; observe unicast repair emission after spins.
-    const std::size_t before_repair = p.unicast_send_count;
-    dispatch_gossip(p,
-                    cy_lane_t{ .id = 13U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
-                    nullptr,
-                    4U,
-                    -1,
-                    cy_topic_hash(mine),
-                    0U,
-                    "api/gossip/repair/topic",
-                    304);
-    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(p.cy)); // may broadcast first
-    p.now += 1;
-    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(p.cy)); // urgent pass
-    TEST_ASSERT_TRUE(p.unicast_send_count > before_repair);
 
     // Unknown topic and no pattern subscriber => no implicit topic creation.
     dispatch_gossip(p,
@@ -1056,7 +684,6 @@ void test_api_repair_smoke_duplicate_suppression_and_unknown_topic_no_autocreate
                     305);
     TEST_ASSERT_NULL(cy_topic_find_by_hash(p.cy, UINT64_C(0x10000000000ABC00)));
 
-    cy_unadvertise(pub);
     platform_deinit(p);
 }
 } // namespace
@@ -1072,20 +699,19 @@ extern "C" void tearDown() { TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_live_c
 int main()
 {
     UNITY_BEGIN();
-    RUN_TEST(test_api_collision_win_triggers_urgent_unicast);
-    RUN_TEST(test_api_arbitration_win_triggers_urgent_unicast);
-    RUN_TEST(test_api_known_topic_non_consensus_must_emit_urgent_on_next_poll);
-    RUN_TEST(test_api_known_topic_ttl_fresh_matrix_forward_vs_urgent);
-    RUN_TEST(test_api_unknown_topic_ttl_fresh_matrix_forward_vs_urgent);
-    RUN_TEST(test_api_gossip_parser_rejects_broadcast_nonzero_ttl);
+    RUN_TEST(test_api_collision_win_triggers_urgent_multicast);
+    RUN_TEST(test_api_arbitration_win_triggers_urgent_multicast);
+    RUN_TEST(test_api_known_topic_local_loss_does_not_emit_urgent_when_subject_unchanged);
+    RUN_TEST(test_api_unknown_topic_no_collision_and_collision_win_paths);
     RUN_TEST(test_api_gossip_parser_rejects_incompatibility_invalid_lage_and_short_header);
     RUN_TEST(test_api_gossip_parser_rejects_payload_truncated_and_overlong_name_length);
     RUN_TEST(test_api_gossip_parser_rejects_gossip_incompatibility_u32);
     RUN_TEST(test_api_gossip_parser_rejects_pinned_hash_with_nonzero_evictions);
     RUN_TEST(test_api_scout_parser_rejects_empty_and_truncated_pattern);
-    RUN_TEST(test_api_gossip_invalid_frame_does_not_seed_peer_sampler);
+    RUN_TEST(test_api_gossip_invalid_frame_has_no_side_effects);
+    RUN_TEST(test_api_message_with_reader_above_sid_max_treated_as_nonmulticast);
     RUN_TEST(test_api_scout_match_triggers_gossip_response_and_fields_are_correct);
-    RUN_TEST(test_api_scout_broadcast_soon_optimization_suppresses_unicast);
-    RUN_TEST(test_api_repair_smoke_duplicate_suppression_and_unknown_topic_no_autocreate);
+    RUN_TEST(test_api_scout_match_always_uses_unicast);
+    RUN_TEST(test_api_unknown_topic_no_pattern_does_not_autocreate);
     return UNITY_END();
 }

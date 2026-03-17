@@ -3,6 +3,8 @@
     <words>
       <w>Autodetected</w>
       <w>Cyclon</w>
+      <w>Enroute</w>
+      <w>Refcounted</w>
       <w>Zenoh</w>
       <w>Zubax</w>
       <w>acks</w>
@@ -12,13 +14,16 @@
       <w>bday</w>
       <w>blockingly</w>
       <w>cbuf</w>
+      <w>cobertura</w>
       <w>connext</w>
       <w>csma</w>
+      <w>cumul</w>
       <w>cyphal</w>
       <w>cyudp</w>
       <w>deinit</w>
       <w>dgrams</w>
       <w>dscp</w>
+      <w>enroute</w>
       <w>gaap</w>
       <w>gettime</w>
       <w>hexdumps</w>
@@ -35,6 +40,7 @@
       <w>libudpard</w>
       <w>mebi</w>
       <w>msize</w>
+      <w>nextprime</w>
       <w>noinit</w>
       <w>nolintbegin</w>
       <w>nsubs</w>

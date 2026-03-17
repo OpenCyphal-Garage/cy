@@ -1,7 +1,6 @@
-# Cyphal session layer design notes
+# Cyphal v1.1 design notes
 
-These notes are useful for understanding how the protocol is built but are generally not useful for end-users -- they should
- instead refer to the top-level `README.md` and also to the API documentation in [`cy.h`](./cy.h).
+These notes are useful for understanding how the protocol is built but may not be useful for end-users.
 
 The Cyphal session layer is a new addition in Cyphal v1.1. It provides higher-level protocol abstractions including named topics, new RPC semantics, optional reliable and ordered message delivery, and service discovery. The objective is to provide intentionally compact and highly robust publish-subscribe and request-response communication patterns that can be used in a variety of applications, including those with stringent real-time and reliability requirements. The solution is fully decentralized and is based on a simple CRDT consensus algorithm internally.
 
@@ -28,7 +27,7 @@ These are very basic functions that result in a very compact transport interface
 
 ## Session layer
 
-For the description of the CRDT consensus algorithm and the topic allocation protocol, please refer to the formal specifications in `/formal`.
+For the description of the CRDT consensus algorithm and the topic allocation protocol, please refer to the formal specifications in `/model`.
 
 The transport delivers deduplicated messages, but duplication due to retransmission in case of lost acks may still occur (for the transport such messages are seen as distinct). To mitigate, additional deduplication is performed at the session layer only for reliable messages based on their 64-bit unique tags.
 
@@ -120,7 +119,7 @@ static uint32_t topic_evictions_from_subject_id(const uint64_t hash,
 
 >TODO: Pinned topics on CAN must have no header to ensure backward compatibility, sort this out later.
 
-The transport layer just ferries **opaque blobs between nodes**. The job of the session layer is to build and interpret them. To enable that, the session layer adds small fixed-size headers to messages. All headers carry the header type in the first byte; the rest is header-specific. All headers have a fixed size of 24 bytes and favor natural alignment where possible to simplify parsing. The following header types are defined:
+The transport layer just ferries opaque blobs between nodes. The job of the session layer is to build and interpret them. To enable that, the session layer adds small fixed-size headers to messages. All headers carry the header type in the first byte; the rest is header-specific. All headers have a fixed size of 24 bytes and favor natural alignment where possible to simplify parsing. The following header types are defined:
 
 ```c++
 #define HEADER_BYTES     24U
@@ -129,12 +128,13 @@ typedef enum
     header_msg_be   = 0,    ///< Best-effort published message with user payload.
     header_msg_rel  = 1,    ///< Reliable published message with user payload. Requires acknowledgement.
     header_msg_ack  = 2,    ///< Acknowledgement of a reliable published message. No payload.
-    header_rsp_be   = 3,    ///< Best-effort response with user payload. Requires no acknowledgement.
-    header_rsp_rel  = 4,    ///< Reliable response with user payload. Requires acknowledgement.
-    header_rsp_ack  = 5,    ///< Acknowledgement of a reliable response. No payload.
-    header_rsp_nack = 6,    ///< Negative acknowledgement of a reliable message or response. No payload.
-    header_gossip   = 7,    ///< Topic allocation CRDT gossip. No payload.
-    header_scout    = 8,    ///< Discovery scout. No payload.
+    header_msg_nack = 3,    ///< Negative acknowledgement of a reliable published message. No payload.
+    header_rsp_be   = 4,    ///< Best-effort response with user payload. Requires no acknowledgement.
+    header_rsp_rel  = 5,    ///< Reliable response with user payload. Requires acknowledgement.
+    header_rsp_ack  = 6,    ///< Acknowledgement of a reliable response. No payload.
+    header_rsp_nack = 7,    ///< Negative acknowledgement of a reliable message or response. No payload.
+    header_gossip   = 8,    ///< Topic allocation CRDT gossip. No payload.
+    header_scout    = 9,    ///< Discovery scout. No payload.
     // Rest reserved for future use.
 } header_type_t;
 ```
@@ -162,11 +162,15 @@ uint64 tag              # For ordering recovery and acknowledgement & response c
 # Payload follows.
 ```
 
-#### Type 2 (publication acknowledgement)
+#### Types 2 (publication acknowledgement), 3 (publication negative acknowledgement)
 
-Sent in response to a reliable message publication. Message publications have no negative acknowledgements because they are inherently multicast: even if we can't accept a message, someone else might be able to.
+Sent in response to a reliable message publication. The priority level must match that of the original message.
 
-The ack priority level must match that of the original message.
+Acknowledgements are sent in response to successfully receiving a reliable message such that it is either passed to the application, or scheduled to be passed soon.
+
+Negative acknowledgements are currently used only with unicast messages. A negative acknowledgement is sent back to the message sender if a reliable message is unicast to a node that has no matching subscriber for the topic of the message. This is used to actively inform the sender that the local node is no longer interested in the topic after a local subscriber is destroyed, such that the sender can cease delivery attempts early without waiting for its corresponding local states to expire. The case when a subscriber exists but does not accept the message for any reason (e.g., OOM, ordering violation, etc.) is notably excluded at the moment.
+
+Multicast messages do not use negative acknowledgements because once a subscriber is destroyed, subject membership is ceased, so further messages from that topic will be unlikely to arrive.
 
 ```bash
 uint8  type
@@ -176,7 +180,7 @@ uint64 topic_hash       # From the acknowledged message.
 uint64 tag              # From the acknowledged message.
 ```
 
-#### Types 3 (best-effort response), 4 (reliable response), 5 (response ack), 6 (response nack)
+#### Types 4 (best-effort response), 5 (reliable response), 6 (response ack), 7 (response nack)
 
 Response tags are not used for ordering recovery since there is a seqno available, and there is no risk of reboot misattribution -- they are only needed for acknowledgement correlation and as such they are much narrower and there is no monotonicity requirement, the sender can choose values arbitrarily.
 
@@ -193,18 +197,13 @@ uint64 message_tag      # The tag of the published message this response pertain
 # Payload follows, unless ACK.
 ```
 
-#### Type 7 (topic allocation CRDT gossip)
+#### Type 8 (topic allocation CRDT gossip)
 
-This is broadcast at a constant rate and may also be epidemic unicast ad-hoc when consensus needs repair to speed up the repair process. Broadcast is the ultimate last-resort baseline for eventual convergence where all nodes MUST participate, while epidemic unicasting is an option.
-
-The TTL field is decremented every time the gossip is forwarded to gossip peers to prevent cycles. Broadcast gossips MUST have zero TTL.
-
-The TTL is only the last line of defence against cycles; each forwarding node must keep a short list of recently seen gossips to prevent redundant transmissions early.
+See the `model/` directory for the design rationale.
 
 ```bash
 uint8  type
-void8
-uint8  ttl              # Must be zero for broadcast gossips.
+void16
 int8   topic_log_age    # floor(log2(topic_age)) if topic_age>0 else -1
 uint32 incompatibility
 uint64 topic_hash
@@ -214,7 +213,7 @@ utf8[<=CY_TOPIC_NAME_MAX] topic_name  # Has 1 byte length prefix. The name is no
 # Total size is 24 bytes + topic name length.
 ```
 
-#### Type 8 (discovery scout)
+#### Type 9 (discovery scout)
 
 This is typically broadcast to let every node check if it has any matching topics. On match, responses are sent as the ordinary CRDT gossip message with zero TTL. Responses are usually unicast, but this is not required; the only requirement is that the requester should be likely to receive them.
 
@@ -232,13 +231,7 @@ Currently, the name has to be non-empty. Empty-name scouts are reserved for futu
 
 ### CRDT gossips
 
-The topic to subject-ID mapping is done via a CRDT described in the formal specification/verification model. For the CRDT to function, nodes must periodically exchange their states with each other. A simple and robust approach is to regularly broadcast all CRDT state of each node or a part of it, the limit case of the latter being a single topic per message with a scheduler choosing which topic to gossip next. The next topic to gossip is that which has recently seen conflicts/divergences, then the one whose gossips haven't been observed the longest.
-
-The broadcast gossip rate is constant on a large time interval, but short-term it is variable due to intentional dithering, which is introduced to enable duplicate gossip suppression, similar to GAAP/ZMAAP. Removal of duplicates speeds up topic discovery and consensus repair.
-
-While broadcast gossips are robust, they are slow. To improve CRDT repair time, Cyphal v1.1 includes epidemic unicast gossips, roughly derived from Cyclon/HyParView etc. Each node holds a randomly chosen set of remotes that are likely to be currently online, called "gossip peers"; the gossip peer set is refreshed stochastically. When consensus needs repair, the affected topics are scheduled to be broadcast-gossiped at the next opportunity (the broadcast rate is fixed so all we can do is to alter the schedule not the rate), and epidemic unicast gossips of the affected topics are emitted immediately to a randomly chosen small subset of the gossip peers (typ. 2 peers only) with some positive TTL (typ. ~16). Every peer upon reception of epidemic gossips will update its own CRDT state and forward the gossips (updated from the local CRDT state as necessary) unless they lost arbitration to local state, in which case new gossips with the newer CRDT state will be emitted instead.
-
-One idea that was considered to improve epidemic gossips was to include a Bloom filter of non-pinned topic hashes known to gossip sender, such that the peer registry of its peers would indicate which peers are likely to know a given topic. The idea was rejected because it is unlikely to help with epidemic mixing meaningfully and adds complexity. It might be a good seed for potential improvement ideas in the future though.
+The topic to subject-ID mapping is done via a CRDT described in the formal specification/verification model. For the CRDT to function, nodes must periodically exchange their states with each other. For the related models and theory, refer to the `model/` directory.
 
 #### Prior art
 
@@ -249,6 +242,7 @@ Distributed consensus:
 - [Epidemic broadcast trees](https://asc.di.fct.unl.pt/~jleitao/pdf/srds07-leitao.pdf)
 - [Gossip-based peer sampling](https://www.inf.u-szeged.hu/~jelasity/cikkek/tocs05.pdf)
 - [Cyclon](https://www.cs.unibo.it/babaoglu/courses/csns/resources/tutorials/cyclon.pdf)
+- [Kademlia](https://en.wikipedia.org/wiki/Kademlia)
 - [Chord](https://en.wikipedia.org/wiki/Chord_%28peer-to-peer%29)
 
 Multicast group assignment to named topics:
@@ -265,11 +259,11 @@ Security features are likely to be introduced as optional extensions of the prot
 ## Implementation-specific notes
 
 Pattern subscriptions are perhaps the most convoluted part of the library because patterns imply that a single
-subscription can match multiple topics, and a single topic may match multiple subscriptions under different names. The
-library introduces dynamically allocated coupling objects that link a topic with the matching subscribers. Also, the
-library has to manage the lifetime of subscriptions created automatically on a pattern match; such subscriptions and
-their topics are called "implicit" and they expire automatically when there is no activity for a certain large
-predefined timeout.
+subscription can match multiple topics, and a single topic may match multiple subscriptions under different names.
+The library introduces dynamically allocated coupling objects that link a topic with the matching subscribers.
+Also, the library has to manage the lifetime of subscriptions created automatically on a pattern match;
+such subscriptions and their topics are called "implicit" and they expire automatically when there is no
+activity for a certain large predefined timeout.
 
 ```mermaid
 classDiagram

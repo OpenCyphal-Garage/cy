@@ -130,7 +130,6 @@ static void fixture_init(fixture_t* const self)
     self->cy.async_error_handler      = fixture_on_async_error;
     olga_init(&self->cy.olga, &self->cy, olga_now);
     self->cy.ack_baseline_timeout = ACK_BASELINE_DEFAULT_TIMEOUT_us;
-    self->cy.gossip_next          = HEAT_DEATH;
     self->fail_after              = SIZE_MAX;
     self->new_alloc_count         = 0U;
     self->now                     = 10000;
@@ -297,8 +296,11 @@ static void dispatch_response_control(fixture_t* const fixture,
     cy_message_ts_t message = { .timestamp = timestamp, .content = msg };
     const cy_lane_t lane    = make_lane(remote_id);
     if (multicast) {
-        cy_subject_reader_t reader = { .subject_id = 1U };
-        cy_on_message(&fixture->platform, lane, &reader, message);
+        const uint32_t      subject_id   = 1U;
+        cy_subject_reader_t broad_reader = { .subject_id = 2U };
+        fixture->cy.broad_reader         = &broad_reader;
+        cy_on_message(&fixture->platform, lane, &subject_id, message);
+        fixture->cy.broad_reader = NULL;
     } else {
         cy_on_message(&fixture->platform, lane, NULL, message);
     }

@@ -11,8 +11,8 @@
 namespace e2e {
 namespace {
 
-constexpr std::uint8_t header_gossip    = 7U;
-constexpr std::uint8_t header_scout     = 8U;
+constexpr std::uint8_t header_gossip    = 8U;
+constexpr std::uint8_t header_scout     = 9U;
 constexpr std::size_t  header_size      = 24U;
 constexpr std::size_t  max_fault_copies = 1024U;
 constexpr std::size_t  registry_size    = 64U;
@@ -144,14 +144,14 @@ void frame_parse(frame_info_t& frame)
     frame.topic_hash     = 0U;
 
     if (frame.wire.size() >= header_size) {
-        if (frame.header_type <= 2U) {
+        if (frame.header_type <= 3U) {
             frame.has_tag = true;
             frame.tag     = read_u64(frame.wire, 16U);
-        } else if (frame.header_type <= 6U) {
+        } else if (frame.header_type <= 7U) {
             frame.has_tag = true;
             frame.tag     = frame.wire.at(1U);
         }
-        if ((frame.header_type <= 6U) || (frame.header_type == header_gossip)) {
+        if ((frame.header_type <= 7U) || (frame.header_type == header_gossip)) {
             frame.has_topic_hash = true;
             frame.topic_hash     = read_u64(frame.wire, 8U);
         }
@@ -261,10 +261,9 @@ op_fault_effect_t op_fault_evaluate_and_capture(sim_node_t& self, op_info_t op)
       (net.op_faults != nullptr) ? op_fault_plan_evaluate(*net.op_faults, op) : op_fault_effect_t{};
 
     op_fault_capture_t capture{};
-    capture.op         = op;
-    capture.failed     = effect.fail;
-    capture.error      = effect.error;
-    capture.spin_delay = effect.spin_delay;
+    capture.op     = op;
+    capture.failed = effect.fail;
+    capture.error  = effect.error;
     (void)op_fault_capture_push(net, capture);
     return effect;
 }
@@ -323,7 +322,7 @@ cy_err_t enqueue_subject(sim_node_t&                       src,
                          const std::vector<unsigned char>& wire)
 {
     const sim_net_t& net          = *src.network;
-    const bool       is_broadcast = subject_id == cy_broadcast_subject_id(&src.platform);
+    const bool       is_broadcast = subject_id == 0x1FFFFUL;
 
     cy_err_t result = CY_OK;
     for (std::size_t i = 0U; i < net.nodes.size(); i++) {
@@ -383,7 +382,7 @@ void deliver_frame(sim_net_t& net, const queued_frame_t& frame)
 
     const sim_subject_reader_t* const reader = find_reader(dst, frame.frame.subject_id);
     if (reader != nullptr) {
-        cy_on_message(&dst.platform, lane, &reader->base, mts);
+        cy_on_message(&dst.platform, lane, &reader->base.subject_id, mts);
     } else {
         cy_message_refcount_dec(msg);
     }
@@ -420,11 +419,7 @@ extern "C" cy_err_t sim_subject_writer_send(cy_platform_t* const       platform,
     op_info_t op{};
     op.node_index                     = self->index;
     op.kind                           = op_kind_t::subject_send;
-    op.now                            = self->now;
     op.deadline                       = deadline;
-    op.has_subject_id                 = true;
-    op.subject_id                     = writer->subject_id;
-    op.priority                       = priority;
     const op_fault_effect_t op_effect = op_fault_evaluate_and_capture(*self, op);
     if (op_effect.fail) {
         return op_effect.error;
@@ -434,7 +429,6 @@ extern "C" cy_err_t sim_subject_writer_send(cy_platform_t* const       platform,
     if (!flatten_fragments(message, wire)) {
         return CY_ERR_ARGUMENT;
     }
-    self->subject_send_count++;
     return enqueue_subject(*self, writer->subject_id, priority, wire);
 }
 
@@ -483,11 +477,9 @@ extern "C" cy_err_t sim_unicast_send(cy_platform_t* const   platform,
     op_info_t op{};
     op.node_index                     = self->index;
     op.kind                           = op_kind_t::unicast_send;
-    op.now                            = self->now;
     op.deadline                       = deadline;
     op.has_lane_id                    = true;
     op.lane_id                        = lane->id;
-    op.priority                       = lane->prio;
     const op_fault_effect_t op_effect = op_fault_evaluate_and_capture(*self, op);
     if (op_effect.fail) {
         return op_effect.error;
@@ -497,7 +489,6 @@ extern "C" cy_err_t sim_unicast_send(cy_platform_t* const   platform,
     if (!flatten_fragments(message, wire)) {
         return CY_ERR_ARGUMENT;
     }
-    self->unicast_send_count++;
     return enqueue_unicast(*self, lane->id, lane->prio, wire);
 }
 
@@ -514,13 +505,9 @@ extern "C" cy_err_t sim_spin(cy_platform_t* const platform, const cy_us_t deadli
     op_info_t op{};
     op.node_index = self->index;
     op.kind       = op_kind_t::spin;
-    op.now        = self->now;
     op.deadline   = deadline;
 
     const op_fault_effect_t op_effect = op_fault_evaluate_and_capture(*self, op);
-    if (op_effect.spin_delay > 0) {
-        self->now = saturating_add(self->now, op_effect.spin_delay);
-    }
     if (op_effect.fail) {
         return op_effect.error;
     }
@@ -682,12 +669,6 @@ void sim_net_node_now_set(sim_net_t& self, const std::size_t node_index, const c
     self.nodes.at(node_index).now = now;
 }
 
-cy_us_t sim_net_node_now(const sim_net_t& self, const std::size_t node_index)
-{
-    assert(node_index < self.nodes.size());
-    return self.nodes.at(node_index).now;
-}
-
 std::uint64_t sim_net_node_id(const sim_net_t& self, const std::size_t node_index)
 {
     assert(node_index < self.nodes.size());
@@ -700,12 +681,6 @@ cy_err_t sim_net_spin_node(sim_net_t& self, const std::size_t node_index)
 {
     assert(node_index < self.nodes.size());
     return cy_spin_once(self.nodes.at(node_index).cy);
-}
-
-cy_err_t sim_net_spin_node_until(sim_net_t& self, const std::size_t node_index, const cy_us_t now)
-{
-    sim_net_node_now_set(self, node_index, now);
-    return sim_net_spin_node(self, node_index);
 }
 
 void sim_net_deliver_due(sim_net_t& self, const cy_us_t now_limit)

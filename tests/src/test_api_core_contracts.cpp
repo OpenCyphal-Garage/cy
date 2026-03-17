@@ -1,5 +1,6 @@
 #include <cy_platform.h>
 #include <unity.h>
+#include "api_mock_platform_utils.hpp"
 #include "guarded_heap.h"
 #include "helpers.h"
 #include "message.h"
@@ -14,17 +15,6 @@ namespace {
 
 constexpr std::uint8_t header_msg_best_effort = 0U;
 constexpr std::size_t  header_bytes           = 24U;
-
-struct test_subject_writer_t
-{
-    cy_subject_writer_t base{};
-};
-
-struct test_subject_reader_t
-{
-    cy_subject_reader_t base{};
-    std::size_t         extent{ 0U };
-};
 
 struct callback_capture_t
 {
@@ -62,33 +52,27 @@ struct test_platform_t final
 
 test_platform_t* platform_from(cy_platform_t* const platform)
 {
-    return reinterpret_cast<test_platform_t*>(platform); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+    return api_test::platform_from<test_platform_t>(platform);
 }
 
 const test_platform_t* platform_from_const(const cy_platform_t* const platform)
 {
-    return reinterpret_cast<const test_platform_t*>(platform); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+    return api_test::platform_from_const<test_platform_t>(platform);
 }
 
 extern "C" cy_subject_writer_t* platform_subject_writer_new(cy_platform_t* const platform,
                                                             const std::uint32_t  subject_id)
 {
-    test_platform_t* const self = platform_from(platform);
+    const test_platform_t* const self = platform_from_const(platform);
     if (self->fail_subject_writer_new) {
         return nullptr;
     }
-    auto* const writer =
-      static_cast<test_subject_writer_t*>(guarded_heap_alloc(&self->core_heap, sizeof(test_subject_writer_t)));
-    if (writer != nullptr) {
-        writer->base.subject_id = subject_id;
-    }
-    return (writer != nullptr) ? &writer->base : nullptr;
+    return api_test::subject_writer_new<test_platform_t>(platform, subject_id);
 }
 
 extern "C" void platform_subject_writer_destroy(cy_platform_t* const platform, cy_subject_writer_t* const writer)
 {
-    test_platform_t* const self = platform_from(platform);
-    guarded_heap_free(&self->core_heap, writer);
+    api_test::subject_writer_destroy<test_platform_t>(platform, writer);
 }
 
 extern "C" cy_err_t platform_subject_writer_send(cy_platform_t* const       platform,
@@ -109,23 +93,16 @@ extern "C" cy_subject_reader_t* platform_subject_reader_new(cy_platform_t* const
                                                             const std::uint32_t  subject_id,
                                                             const std::size_t    extent)
 {
-    test_platform_t* const self = platform_from(platform);
+    const test_platform_t* const self = platform_from_const(platform);
     if (self->fail_subject_reader_new) {
         return nullptr;
     }
-    auto* const reader =
-      static_cast<test_subject_reader_t*>(guarded_heap_alloc(&self->core_heap, sizeof(test_subject_reader_t)));
-    if (reader != nullptr) {
-        reader->base.subject_id = subject_id;
-        reader->extent          = extent;
-    }
-    return (reader != nullptr) ? &reader->base : nullptr;
+    return api_test::subject_reader_new<test_platform_t>(platform, subject_id, extent);
 }
 
 extern "C" void platform_subject_reader_destroy(cy_platform_t* const platform, cy_subject_reader_t* const reader)
 {
-    test_platform_t* const self = platform_from(platform);
-    guarded_heap_free(&self->core_heap, reader);
+    api_test::subject_reader_destroy<test_platform_t>(platform, reader);
 }
 
 extern "C" cy_err_t platform_unicast_send(cy_platform_t* const   platform,
@@ -166,14 +143,12 @@ extern "C" void* platform_realloc(cy_platform_t* const platform, void* const ptr
         self->fail_alloc_count--;
         return nullptr;
     }
-    return guarded_heap_realloc(&self->core_heap, ptr, size);
+    return api_test::core_heap_realloc<test_platform_t>(platform, ptr, size);
 }
 
 extern "C" std::uint64_t platform_random(cy_platform_t* const platform)
 {
-    test_platform_t* const self = platform_from(platform);
-    self->random_state          = (self->random_state * UINT64_C(6364136223846793005)) + UINT64_C(1);
-    return self->random_state;
+    return api_test::random_lcg<test_platform_t>(platform);
 }
 
 extern "C" void platform_on_async_error(cy_t* const         cy,
@@ -218,9 +193,7 @@ void platform_prepare(test_platform_t* const self)
     self->vtable.realloc = platform_realloc;
     self->vtable.random  = platform_random;
 
-    self->platform.cy                 = nullptr;
-    self->platform.subject_id_modulus = static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit);
-    self->platform.vtable             = &self->vtable;
+    api_test::init_platform_base(self->platform, self->vtable);
 }
 
 void platform_init(test_platform_t* const self)
@@ -236,10 +209,7 @@ void platform_deinit(test_platform_t* const self)
         cy_destroy(self->cy);
         self->cy = nullptr;
     }
-    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&self->core_heap));
-    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&self->core_heap));
-    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&self->message_heap));
-    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&self->message_heap));
+    api_test::assert_heaps_clean(self->core_heap, self->message_heap);
 }
 
 void dispatch_best_effort_unicast(test_platform_t* const            self,
@@ -283,11 +253,11 @@ void test_api_core_time_and_spin_contracts()
     platform.spin_result     = CY_OK;
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_until(platform.cy, 900)); // deadline in the past
     TEST_ASSERT_EQUAL_size_t(1U, platform.spin_call_count);
-    TEST_ASSERT_EQUAL_INT64(900, platform.spin_last_deadline);
+    TEST_ASSERT_EQUAL_INT64(0, platform.spin_last_deadline);
 
     platform.spin_call_count = 0U;
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_until(platform.cy, 1450));
-    TEST_ASSERT_EQUAL_size_t(1U, platform.spin_call_count);
+    TEST_ASSERT_EQUAL_size_t(2U, platform.spin_call_count);
     TEST_ASSERT_EQUAL_INT64(1450, platform.spin_last_deadline);
     TEST_ASSERT_EQUAL_INT64(1450, platform.now);
 

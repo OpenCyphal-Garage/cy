@@ -1,5 +1,6 @@
 #include <cy_platform.h>
 #include <unity.h>
+#include "api_mock_platform_utils.hpp"
 #include "guarded_heap.h"
 #include "message.h"
 #include <algorithm>
@@ -12,17 +13,6 @@
 namespace {
 constexpr cy_us_t     ACK_TIMEOUT  = 100'000;
 constexpr std::size_t header_bytes = 24U;
-
-struct test_subject_writer_t
-{
-    cy_subject_writer_t base{};
-};
-
-struct test_subject_reader_t
-{
-    cy_subject_reader_t base{};
-    std::size_t         extent{ 0U };
-};
 
 struct test_platform_t final
 {
@@ -57,30 +47,23 @@ struct test_platform_t final
 
 test_platform_t* platform_from(cy_platform_t* const platform)
 {
-    return reinterpret_cast<test_platform_t*>(platform); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+    return api_test::platform_from<test_platform_t>(platform);
 }
 
 const test_platform_t* platform_from_const(const cy_platform_t* const platform)
 {
-    return reinterpret_cast<const test_platform_t*>(platform); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+    return api_test::platform_from_const<test_platform_t>(platform);
 }
 
 extern "C" cy_subject_writer_t* platform_subject_writer_new(cy_platform_t* const platform,
                                                             const std::uint32_t  subject_id)
 {
-    test_platform_t* const self = platform_from(platform);
-    auto* const            writer =
-      static_cast<test_subject_writer_t*>(guarded_heap_alloc(&self->core_heap, sizeof(test_subject_writer_t)));
-    if (writer != nullptr) {
-        writer->base.subject_id = subject_id;
-    }
-    return (writer != nullptr) ? &writer->base : nullptr;
+    return api_test::subject_writer_new<test_platform_t>(platform, subject_id);
 }
 
 extern "C" void platform_subject_writer_destroy(cy_platform_t* const platform, cy_subject_writer_t* const writer)
 {
-    test_platform_t* const self = platform_from(platform);
-    guarded_heap_free(&self->core_heap, writer);
+    api_test::subject_writer_destroy<test_platform_t>(platform, writer);
 }
 
 extern "C" cy_err_t platform_subject_writer_send(cy_platform_t* const       platform,
@@ -121,20 +104,12 @@ extern "C" cy_subject_reader_t* platform_subject_reader_new(cy_platform_t* const
                                                             const std::uint32_t  subject_id,
                                                             const std::size_t    extent)
 {
-    test_platform_t* const self = platform_from(platform);
-    auto* const            reader =
-      static_cast<test_subject_reader_t*>(guarded_heap_alloc(&self->core_heap, sizeof(test_subject_reader_t)));
-    if (reader != nullptr) {
-        reader->base.subject_id = subject_id;
-        reader->extent          = extent;
-    }
-    return (reader != nullptr) ? &reader->base : nullptr;
+    return api_test::subject_reader_new<test_platform_t>(platform, subject_id, extent);
 }
 
 extern "C" void platform_subject_reader_destroy(cy_platform_t* const platform, cy_subject_reader_t* const reader)
 {
-    test_platform_t* const self = platform_from(platform);
-    guarded_heap_free(&self->core_heap, reader);
+    api_test::subject_reader_destroy<test_platform_t>(platform, reader);
 }
 
 extern "C" cy_err_t platform_unicast_send(cy_platform_t* const   platform,
@@ -192,14 +167,12 @@ extern "C" void* platform_realloc(cy_platform_t* const platform, void* const ptr
         }
         self->new_alloc_count++;
     }
-    return guarded_heap_realloc(&self->core_heap, ptr, size);
+    return api_test::core_heap_realloc<test_platform_t>(platform, ptr, size);
 }
 
 extern "C" std::uint64_t platform_random(cy_platform_t* const platform)
 {
-    test_platform_t* const self = platform_from(platform);
-    self->random_state          = (self->random_state * 6364136223846793005ULL) + 1ULL;
-    return self->random_state;
+    return api_test::random_lcg<test_platform_t>(platform);
 }
 
 extern "C" void platform_on_async_error(cy_t* const         cy,
@@ -380,10 +353,7 @@ void test_begin(test_platform_t& p)
 void test_end(test_platform_t& p)
 {
     platform_deinit(&p);
-    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&p.core_heap));
-    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&p.core_heap));
-    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&p.message_heap));
-    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&p.message_heap));
+    api_test::assert_heaps_clean(p.core_heap, p.message_heap);
 }
 
 void platform_init(test_platform_t* const self)
@@ -408,9 +378,7 @@ void platform_init(test_platform_t* const self)
     self->vtable.realloc = platform_realloc;
     self->vtable.random  = platform_random;
 
-    self->platform.cy                 = nullptr;
-    self->platform.subject_id_modulus = static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit);
-    self->platform.vtable             = &self->vtable;
+    api_test::init_platform_base(self->platform, self->vtable);
 
     self->cy = cy_new(&self->platform);
     TEST_ASSERT_NOT_NULL(self->cy);
@@ -672,7 +640,7 @@ void test_initial_send_failure_returns_null()
     test_end(platform);
 }
 
-void test_single_remaining_not_last_attempt_stays_multicast()
+void test_single_remaining_retry_switches_to_unicast()
 {
     test_platform_t platform{};
     test_begin(platform);
@@ -692,8 +660,8 @@ void test_single_remaining_not_last_attempt_stays_multicast()
     const std::size_t multicast_before = platform.reliable_multicast_count;
     const cy_us_t     t0               = platform.now;
     spin_to(platform, t0 + ACK_TIMEOUT + 1);
-    TEST_ASSERT_EQUAL_size_t(unicast_before, platform.unicast_count);
-    TEST_ASSERT_TRUE(platform.reliable_multicast_count > multicast_before);
+    TEST_ASSERT_TRUE(platform.unicast_count > unicast_before);
+    TEST_ASSERT_EQUAL_size_t(multicast_before, platform.reliable_multicast_count);
 
     dispatch_ack(&platform, tag, hash, UINT64_C(0xA123), platform.now);
     assert_publish_state(fut, true, CY_OK);
@@ -1805,7 +1773,7 @@ int main()
     RUN_TEST(test_two_subscribers_none_ack_timeout);
     RUN_TEST(test_retransmission_on_timeout);
     RUN_TEST(test_initial_send_failure_returns_null);
-    RUN_TEST(test_single_remaining_not_last_attempt_stays_multicast);
+    RUN_TEST(test_single_remaining_retry_switches_to_unicast);
     RUN_TEST(test_retransmission_send_error_does_not_abort_future);
     RUN_TEST(test_retransmission_send_error_partial_known_acks_fails);
     RUN_TEST(test_retransmission_send_error_all_known_acks_succeeds);

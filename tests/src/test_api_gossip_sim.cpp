@@ -170,7 +170,7 @@ void enqueue_subject(sim_node_t&                                     src,
                      const std::size_t                               size)
 {
     sim_network_t& net          = *src.network;
-    const bool     is_broadcast = subject_id == cy_broadcast_subject_id(&src.platform);
+    const bool     is_broadcast = subject_id == 0x1FFFFUL;
     for (std::size_t i = 0U; i < net.node_count; i++) {
         if (i == src.index) {
             continue;
@@ -409,7 +409,7 @@ void deliver_event(sim_network_t& net, const sim_event_t& ev)
     } else {
         const sim_subject_reader_t* const reader = find_reader(dst, ev.subject_id);
         if (reader != nullptr) {
-            cy_on_message(&dst.platform, lane, &reader->base, mts);
+            cy_on_message(&dst.platform, lane, &reader->base.subject_id, mts);
         } else {
             cy_message_refcount_dec(msg);
         }

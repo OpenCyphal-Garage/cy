@@ -23,16 +23,6 @@ extern "C"
 {
 #endif
 
-/// The limit could be set arbitrarily, but chosen this way for compatibility with Cyphal v1.0,
-/// which only has 13-bit subject-IDs. Cyphal v1.1 will never allocate non-pinned topics in this subject-ID range.
-/// For pinned topics, hash<=CY_SUBJECT_ID_PINNED_MAX. The probability of a random hash falling into the pinned
-/// range is ~4.44e-16, or about one in two quadrillion, which is not practically possible.
-#define CY_SUBJECT_ID_PINNED_MAX 0x1FFFU
-
-/// This notably excludes the broadcast subject, which is always at the top, above this maximum.
-/// See cy_broadcast_subject_id().
-#define CY_SUBJECT_ID_MAX(modulus) (CY_SUBJECT_ID_PINNED_MAX + (modulus))
-
 #define CY_OK 0
 // error code 1 is omitted intentionally
 #define CY_ERR_ARGUMENT 2
@@ -44,6 +34,15 @@ extern "C"
 #define CY_ERR_DELIVERY 8  // Reliable message (publication or response) was not acknowledged by the remote(s).
 #define CY_ERR_LIVENESS 9  // Message (publication or response) did not arrive on time.
 #define CY_ERR_NACK     10 // Explicitly rejected by the remote.
+
+/// The limit could be set arbitrarily, but chosen this way for compatibility with Cyphal v1.0,
+/// which only has 13-bit subject-IDs. Cyphal v1.1 will never allocate non-pinned topics in this subject-ID range.
+/// For pinned topics, hash<=CY_SUBJECT_ID_PINNED_MAX. The probability of a random hash falling into the pinned
+/// range is ~4.44e-16, or about one in two quadrillion, which is not practically possible.
+#define CY_SUBJECT_ID_PINNED_MAX 0x1FFFU
+
+/// This notably excludes the broadcast subject and gossip shards, which are always at the top, above this maximum.
+#define CY_SUBJECT_ID_MAX(modulus) (CY_SUBJECT_ID_PINNED_MAX + (modulus))
 
 typedef uint_fast8_t cy_err_t;
 typedef int64_t      cy_us_t; ///< Monotonic microsecond timestamp. Signed to permit arithmetics in the past.

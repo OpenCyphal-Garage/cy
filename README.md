@@ -52,7 +52,7 @@ Additional features include tunable reliability, liveness monitoring, ordered de
 🌐 A live demo of the distributed consensus algorithm can be found at <https://gerasim.opencyphal.org>.
 
 For a more comprehensive design overview, refer to [`cy/README.md`](cy/README.md);
-formal verification models can be found in `formal/`.
+formal verification models can be found in `model/`.
 
 ## 📚 API crash course
 

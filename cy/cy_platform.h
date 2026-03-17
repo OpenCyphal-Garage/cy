@@ -17,9 +17,14 @@
 #include <stdint.h>
 
 /// See the subject_id_modulus for details.
-#define CY_SUBJECT_ID_MODULUS_17bit 122867UL     ///< Suitable for all Cyphal transports.
-#define CY_SUBJECT_ID_MODULUS_23bit 8380403UL    ///< Incompatible with Cyphal/CAN.
-#define CY_SUBJECT_ID_MODULUS_32bit 4294959083UL ///< Incompatible with Cyphal/CAN and Cyphal/UDPv4.
+#define CY_SUBJECT_ID_MODULUS_17bit 122743UL     ///< Suitable for all Cyphal transports.
+#define CY_SUBJECT_ID_MODULUS_23bit 8378431UL    ///< Incompatible with Cyphal/CAN.
+#define CY_SUBJECT_ID_MODULUS_32bit 4294954663UL ///< Incompatible with Cyphal/CAN and Cyphal/UDPv4.
+
+/// The maximum size of messages exchanged by the session layer itself, unrelated to the application data.
+/// Currently this includes only gossip and scout messages. In the future, additional messages may be introduced,
+/// but normally they should not exceed this limit to maximize wire interoperability.
+#define CY_AUX_SUBJECT_EXTENT 476U
 
 #ifdef __cplusplus
 extern "C"
@@ -63,6 +68,7 @@ typedef struct cy_subject_writer_t
 
 /// A subject reader is created when the higher layer requires data from the specified subject-ID.
 /// The transport layer must report all received messages via cy_on_message().
+/// Deduplication and long message support are not required on subjects above (CY_SUBJECT_ID_PINNED_MAX+modulus).
 /// Cy guarantees that there will be at most one subject reader per subject-ID.
 typedef struct cy_subject_reader_t
 {
@@ -81,7 +87,7 @@ struct cy_platform_t
     /// All nodes in the network shall share the same value.
     /// If heterogeneously redundant transports are used, then the smallest modulus shall be used.
     ///
-    /// The full range of used subject-ID values is [0, CY_SUBJECT_ID_PINNED_MAX + modulus],
+    /// The full range of used subject-ID values is [0, CY_SUBJECT_ID_PINNED_MAX+modulus],
     /// where the values below or equal to CY_SUBJECT_ID_PINNED_MAX are used for pinned topics only.
     ///
     /// The modulus shall be a prime number because the subject-ID function uses a quadratic probing strategy:
@@ -89,6 +95,22 @@ struct cy_platform_t
     /// Where 64-bit unsigned arithmetics is assumed (in particular, (hash + evictions^2) must wrap at 2**64).
     /// Further, to enable fast reconstruction of the eviction count from the subject-ID, we impose an additional
     /// constraint that subject_id_modulus mod 4 == 3.
+    ///
+    /// The range of subject-IDs between (CY_SUBJECT_ID_PINNED_MAX+modulus) and
+    /// 2^ceil(log2(CY_SUBJECT_ID_PINNED_MAX+modulus))-1 is not used for topic allocation;
+    /// these are used for the protocol itself: the maximum subject-ID is used for the broadcast subject,
+    /// which in turn is used for broadcast gossips, scout messages, and potentially other protocol needs;
+    /// the remaining subject-IDs in (CY_SUBJECT_ID_PINNED_MAX+modulus, broadcast_subject_id) are used
+    /// for sharded per-topic gossips for background gossip load distribution.
+    ///
+    /// Cy requires the strict transport layer contracts to be upheld only on the normal subjects in the range
+    /// [0, CY_SUBJECT_ID_PINNED_MAX+modulus].
+    /// The gossip shard and broadcast subjects relax the following requirements:
+    ///     - Message deduplication is not mandatory, which often allows elision of per-remote states.
+    ///     - Support for messages longer than CY_AUX_SUBJECT_EXTENT is not mandatory,
+    ///       which means that most transports can omit multi-frame support.
+    /// Together this enables much better scalability which is important for the broadcast subject in particular,
+    /// especially on resource-limited nodes.
     ///
     /// See https://en.wikipedia.org/wiki/Quadratic_probing
     /// See https://github.com/OpenCyphal-Garage/cy/issues/12#issuecomment-3577831960
@@ -114,6 +136,7 @@ typedef struct cy_platform_vtable_t
     /// The factory returns NULL on OOM.
     /// The write method non-blockingly publishes a new message on the subject; the message lifetime ends upon return
     /// from this function.
+    /// Valid subject-ID values are in the range [ 0, 2^ceil(log2(subject_id_modulus+CY_SUBJECT_ID_PINNED_MAX)) ).
     cy_subject_writer_t* (*subject_writer_new)(cy_platform_t*, uint32_t subject_id);
     void (*subject_writer_destroy)(cy_platform_t*, cy_subject_writer_t*);
     cy_err_t (*subject_writer_send)(cy_platform_t*, cy_subject_writer_t*, cy_us_t deadline, cy_prio_t, cy_bytes_t);
@@ -175,19 +198,12 @@ typedef struct cy_platform_vtable_t
     uint64_t (*random)(cy_platform_t*);
 } cy_platform_vtable_t;
 
-/// A special subject-ID is dedicated to broadcast subject. All nodes subscribe to this subject.
-/// This is where topic allocation CRDT gossips are published. Other uses are also possible that involve all nodes.
-/// This works because the primality of the subject-ID modulus implies that a few of the subject-IDs above the
-/// CY_SUBJECT_ID_MAX(modulus) will be unused.
-/// Cy does not require deduplication on the broadcast subject for transport implementation simplicity.
-uint32_t cy_broadcast_subject_id(const cy_platform_t* const platform);
-
 /// New message received, multicast or unicast. The data ownership is taken by this function.
-/// The subject reader is NULL for unicast messages.
-void cy_on_message(cy_platform_t* const             platform,
-                   const cy_lane_t                  lane,
-                   const cy_subject_reader_t* const subject_reader,
-                   const cy_message_ts_t            message);
+/// The subject ID is NULL for unicast messages; it is a pointer only to represent absence of value.
+void cy_on_message(cy_platform_t* const  platform,
+                   const cy_lane_t       lane,
+                   const uint32_t* const subject_id,
+                   const cy_message_ts_t message);
 
 #ifdef __cplusplus
 }

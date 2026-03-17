@@ -1,18 +1,8 @@
 #include <cy.c> // NOLINT(bugprone-suspicious-include)
 #include <unity.h>
 #include "guarded_heap.h"
+#include "intrusive_fixture_utils.h"
 #include <string.h>
-
-typedef struct
-{
-    cy_subject_writer_t base;
-} test_subject_writer_t;
-
-typedef struct
-{
-    cy_subject_reader_t base;
-    size_t              extent;
-} test_subject_reader_t;
 
 typedef struct
 {
@@ -60,18 +50,14 @@ static cy_subject_writer_t* fixture_subject_writer_new(cy_platform_t* const plat
     if (self->fail_subject_writer_new) {
         return NULL;
     }
-    test_subject_writer_t* const out = (test_subject_writer_t*)guarded_heap_alloc(&self->heap, sizeof(*out));
-    if (out != NULL) {
-        out->base.subject_id = subject_id;
-    }
-    return (out != NULL) ? &out->base : NULL;
+    return intrusive_subject_writer_new(&self->heap, subject_id);
 }
 
 static void fixture_subject_writer_destroy(cy_platform_t* const platform, cy_subject_writer_t* const writer)
 {
     fixture_t* const self = fixture_from(platform);
     self->subject_writer_destroy_count++;
-    guarded_heap_free(&self->heap, writer);
+    intrusive_subject_writer_destroy(&self->heap, writer);
 }
 
 static cy_err_t fixture_subject_writer_send(cy_platform_t* const       platform,
@@ -96,19 +82,14 @@ static cy_subject_reader_t* fixture_subject_reader_new(cy_platform_t* const plat
     if (self->fail_subject_reader_new) {
         return NULL;
     }
-    test_subject_reader_t* const out = (test_subject_reader_t*)guarded_heap_alloc(&self->heap, sizeof(*out));
-    if (out != NULL) {
-        out->base.subject_id = subject_id;
-        out->extent          = extent;
-    }
-    return (out != NULL) ? &out->base : NULL;
+    return intrusive_subject_reader_new(&self->heap, subject_id, extent);
 }
 
 static void fixture_subject_reader_destroy(cy_platform_t* const platform, cy_subject_reader_t* const reader)
 {
     fixture_t* const self = fixture_from(platform);
     self->subject_reader_destroy_count++;
-    guarded_heap_free(&self->heap, reader);
+    intrusive_subject_reader_destroy(&self->heap, reader);
 }
 
 static cy_err_t fixture_unicast_send(cy_platform_t* const   platform,
@@ -181,8 +162,7 @@ static void fixture_deinit(fixture_t* const self)
         cy_destroy(self->cy);
         self->cy = NULL;
     }
-    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&self->heap));
-    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&self->heap));
+    intrusive_assert_heap_clean(&self->heap);
 }
 
 static cy_topic_t* fixture_make_topic(fixture_t* const  self,
@@ -221,67 +201,6 @@ static void assert_subject_index_unique(const cy_t* const cy)
         first = false;
         p     = cavl2_next_greater(p);
     }
-}
-
-typedef struct
-{
-    cy_future_t base;
-    bool        done;
-    cy_tree_t** index_owner;
-    size_t*     dispose_count;
-} fake_future_t;
-
-static bool fake_future_done(const cy_future_t* const base)
-{
-    const fake_future_t* const self = (const fake_future_t*)base;
-    return self->done;
-}
-
-static cy_err_t fake_future_error(const cy_future_t* const base)
-{
-    (void)base;
-    return CY_OK;
-}
-
-static void fake_future_timeout(cy_future_t* const base, const cy_us_t scheduled, const cy_us_t now)
-{
-    (void)base;
-    (void)scheduled;
-    (void)now;
-}
-
-static void fake_future_dispose(cy_future_t* const base)
-{
-    fake_future_t* const self = (fake_future_t*)base;
-    self->done                = true;
-    if ((self->index_owner != NULL) && cavl2_is_inserted(*self->index_owner, &self->base.index)) {
-        cavl2_remove(self->index_owner, &self->base.index);
-    }
-    if (self->dispose_count != NULL) {
-        (*self->dispose_count)++;
-    }
-    mem_free(base->cy, base);
-}
-
-static const cy_future_vtable_t fake_future_vtable = { .done    = fake_future_done,
-                                                       .error   = fake_future_error,
-                                                       .timeout = fake_future_timeout,
-                                                       .dispose = fake_future_dispose };
-
-static fake_future_t* make_fake_future(cy_t* const       cy,
-                                       size_t* const     dispose_count,
-                                       const bool        done,
-                                       const uint64_t    key,
-                                       cy_tree_t** const index)
-{
-    fake_future_t* const out = (fake_future_t*)future_new(cy, &fake_future_vtable, sizeof(fake_future_t));
-    if (out != NULL) {
-        out->done          = done;
-        out->index_owner   = index;
-        out->dispose_count = dispose_count;
-        TEST_ASSERT_TRUE(future_index_insert(&out->base, index, key));
-    }
-    return out;
 }
 
 static void test_cy_destroy_null_is_noop(void) { cy_destroy(NULL); }
@@ -716,12 +635,10 @@ static void test_topic_new_pinned_starts_implicit_and_not_gossiped(void)
     TEST_ASSERT_TRUE(is_implicit(topic));
     TEST_ASSERT_TRUE(fix.cy->list_implicit.head == &topic->list_implicit);
     TEST_ASSERT_NULL(topic_find_by_subject_id(fix.cy, (uint32_t)pinned_hash));
-    TEST_ASSERT_FALSE(is_listed(&fix.cy->list_gossip, &topic->list_gossip));
-    TEST_ASSERT_FALSE(is_listed(&fix.cy->list_gossip_urgent, &topic->list_gossip_urgent));
+    TEST_ASSERT_FALSE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
 
-    schedule_gossip_urgent(topic);
-    TEST_ASSERT_FALSE(is_listed(&fix.cy->list_gossip, &topic->list_gossip));
-    TEST_ASSERT_FALSE(is_listed(&fix.cy->list_gossip_urgent, &topic->list_gossip_urgent));
+    schedule_gossip_urgent(topic, 1000);
+    TEST_ASSERT_FALSE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
     fixture_deinit(&fix);
 }
 
@@ -738,19 +655,15 @@ static void test_pinned_topic_sync_implicit_transitions_without_gossip(void)
     topic_sync_implicit(topic);
     TEST_ASSERT_FALSE(topic_validate_is_implicit(topic));
     TEST_ASSERT_FALSE(is_implicit(topic));
-    TEST_ASSERT_FALSE(is_listed(&fix.cy->list_gossip, &topic->list_gossip));
-    TEST_ASSERT_FALSE(is_listed(&fix.cy->list_gossip_urgent, &topic->list_gossip_urgent));
-    schedule_gossip(topic);
-    schedule_gossip_urgent(topic);
-    TEST_ASSERT_FALSE(is_listed(&fix.cy->list_gossip, &topic->list_gossip));
-    TEST_ASSERT_FALSE(is_listed(&fix.cy->list_gossip_urgent, &topic->list_gossip_urgent));
+    TEST_ASSERT_FALSE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
+    schedule_gossip_urgent(topic, 1000);
+    TEST_ASSERT_FALSE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
 
     topic->pub_count = 0U;
     topic_sync_implicit(topic);
     TEST_ASSERT_TRUE(topic_validate_is_implicit(topic));
     TEST_ASSERT_TRUE(is_implicit(topic));
-    TEST_ASSERT_FALSE(is_listed(&fix.cy->list_gossip, &topic->list_gossip));
-    TEST_ASSERT_FALSE(is_listed(&fix.cy->list_gossip_urgent, &topic->list_gossip_urgent));
+    TEST_ASSERT_FALSE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
     fixture_deinit(&fix);
 }
 
@@ -854,18 +767,19 @@ static void test_on_gossip_known_topic_equal_lage_prefers_higher_evictions(void)
     topic_merge_lage(topic_win, now, 5);
     topic_allocate(topic_win, 6U, now);
     TEST_ASSERT_EQUAL_UINT32(6U, topic_win->evictions);
-    TEST_ASSERT_EQUAL_INT(crdt_local_win,
-                          on_gossip_known_topic(fix.cy, now, topic_win, 5U, topic_lage(topic_win, now)));
+    on_gossip_known_topic(fix.cy, now, topic_win, 5U, topic_lage(topic_win, now), gossip_broadcast);
     TEST_ASSERT_EQUAL_UINT32(6U, topic_win->evictions);
-    TEST_ASSERT_TRUE(is_listed(&fix.cy->list_gossip_urgent, &topic_win->list_gossip_urgent));
+    TEST_ASSERT_TRUE(olga_is_pending(&fix.cy->olga, &topic_win->gossip_event));
+    TEST_ASSERT_TRUE(topic_win->gossip_event.handler == gossip_event_urgent);
 
     cy_topic_t* const topic_lose =
       fixture_make_explicit_topic(&fix, "alloc/divergence/eviction-lose", UINT64_C(0x1000000000001170));
     topic_merge_lage(topic_lose, now, 5);
     topic_allocate(topic_lose, 6U, now);
-    TEST_ASSERT_EQUAL_INT(crdt_local_loss,
-                          on_gossip_known_topic(fix.cy, now, topic_lose, 9U, topic_lage(topic_lose, now)));
+    on_gossip_known_topic(fix.cy, now, topic_lose, 9U, topic_lage(topic_lose, now), gossip_broadcast);
     TEST_ASSERT_EQUAL_UINT32(9U, topic_lose->evictions);
+    TEST_ASSERT_TRUE(olga_is_pending(&fix.cy->olga, &topic_lose->gossip_event));
+    TEST_ASSERT_TRUE(topic_lose->gossip_event.handler == gossip_event_periodic);
 
     topic_win->pub_count  = 0U;
     topic_lose->pub_count = 0U;
@@ -942,20 +856,23 @@ static void test_on_gossip_known_topic_divergence_paths(void)
 
     topic_merge_lage(t1, 50 * MEGA, 5);
     const uint32_t ev_before = t1->evictions;
-    TEST_ASSERT_EQUAL_INT(crdt_local_win, on_gossip_known_topic(fix.cy, 50 * MEGA, t1, ev_before + 1U, 1));
+    on_gossip_known_topic(fix.cy, 50 * MEGA, t1, ev_before + 1U, 1, gossip_broadcast);
     TEST_ASSERT_EQUAL_UINT32(ev_before, t1->evictions);
-    TEST_ASSERT_TRUE(is_listed(&fix.cy->list_gossip_urgent, &t1->list_gossip_urgent));
+    TEST_ASSERT_TRUE(olga_is_pending(&fix.cy->olga, &t1->gossip_event));
+    TEST_ASSERT_TRUE(t1->gossip_event.handler == gossip_event_urgent);
 
     topic_merge_lage(t2, 60 * MEGA, 1);
-    TEST_ASSERT_EQUAL_INT(crdt_local_loss, on_gossip_known_topic(fix.cy, 60 * MEGA, t2, t2->evictions + 3U, 8));
+    on_gossip_known_topic(fix.cy, 60 * MEGA, t2, t2->evictions + 3U, 8, gossip_broadcast);
     TEST_ASSERT_EQUAL_UINT32(3U, t2->evictions);
     TEST_ASSERT_TRUE(topic_lage(t2, 60 * MEGA) >= 4);
+    TEST_ASSERT_TRUE(olga_is_pending(&fix.cy->olga, &t2->gossip_event));
+    TEST_ASSERT_TRUE(t2->gossip_event.handler == gossip_event_periodic);
 
-    schedule_gossip(t1);
-    schedule_gossip(t2);
-    TEST_ASSERT_EQUAL_INT(crdt_consensus,
-                          on_gossip_known_topic(fix.cy, 70 * MEGA, t1, t1->evictions, topic_lage(t1, 70 * MEGA)));
-    TEST_ASSERT_TRUE(fix.cy->list_gossip.head == &t1->list_gossip);
+    schedule_gossip_periodic(t1, 70 * MEGA, false);
+    const cy_us_t deadline_before = t1->gossip_event.deadline;
+    on_gossip_known_topic(fix.cy, 70 * MEGA, t1, t1->evictions, topic_lage(t1, 70 * MEGA), gossip_broadcast);
+    TEST_ASSERT_TRUE(t1->gossip_event.handler == gossip_event_periodic);
+    TEST_ASSERT_TRUE(t1->gossip_event.deadline > deadline_before);
     t1->pub_count = 0U;
     t2->pub_count = 0U;
     topic_sync_implicit(t1);
@@ -973,11 +890,12 @@ static void test_on_gossip_unknown_topic_collision_paths(void)
     const uint32_t    remote_evictions = 0U;
     topic_merge_lage(mine, 100 * MEGA, 4);
 
-    TEST_ASSERT_EQUAL_INT(crdt_local_win, on_gossip_unknown_topic(fix.cy, 100 * MEGA, remote, remote_evictions, 1));
-    TEST_ASSERT_TRUE(is_listed(&fix.cy->list_gossip_urgent, &mine->list_gossip_urgent));
+    on_gossip_unknown_topic(fix.cy, 100 * MEGA, remote, remote_evictions, 1);
+    TEST_ASSERT_TRUE(olga_is_pending(&fix.cy->olga, &mine->gossip_event));
+    TEST_ASSERT_TRUE(mine->gossip_event.handler == gossip_event_urgent);
 
     const uint32_t before = mine->evictions;
-    TEST_ASSERT_EQUAL_INT(crdt_local_loss, on_gossip_unknown_topic(fix.cy, 110 * MEGA, remote, remote_evictions, 8));
+    on_gossip_unknown_topic(fix.cy, 110 * MEGA, remote, remote_evictions, 8);
     TEST_ASSERT_TRUE(mine->evictions > before);
     fixture_deinit(&fix);
 }
@@ -1020,7 +938,7 @@ static void test_topic_destroy_removes_indexes_and_lists_and_handles(void)
     char              name[CY_TOPIC_NAME_MAX + 1U] = { 0 };
     memcpy(name, topic->name, cy_topic_name(topic).len);
 
-    schedule_gossip_urgent(topic);
+    schedule_gossip_urgent(topic, 230 * MEGA);
     topic->pub_writer = fixture_subject_writer_new(&fix.platform, sid);
     topic->sub_reader = fixture_subject_reader_new(&fix.platform, sid, 123U);
     TEST_ASSERT_NOT_NULL(topic->pub_writer);
@@ -1031,8 +949,8 @@ static void test_topic_destroy_removes_indexes_and_lists_and_handles(void)
     TEST_ASSERT_NULL(cy_topic_find_by_hash(fix.cy, hash));
     TEST_ASSERT_NULL(cy_topic_find_by_name(fix.cy, cy_str(name)));
     TEST_ASSERT_NULL(topic_find_by_subject_id(fix.cy, sid));
-    TEST_ASSERT_EQUAL_size_t(1U, fix.subject_writer_destroy_count);
-    TEST_ASSERT_EQUAL_size_t(1U, fix.subject_reader_destroy_count);
+    TEST_ASSERT_EQUAL_size_t(2U, fix.subject_writer_destroy_count);
+    TEST_ASSERT_EQUAL_size_t(2U, fix.subject_reader_destroy_count);
     fixture_deinit(&fix);
 }
 

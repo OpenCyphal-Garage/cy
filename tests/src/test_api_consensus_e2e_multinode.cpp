@@ -2,6 +2,7 @@
 #include <unity.h>
 #include "e2e_faults.hpp"
 #include "e2e_sim_net.hpp"
+#include "e2e_scenario_utils.hpp"
 #include "e2e_test_utils.hpp"
 #include "helpers.h"
 #include "message.h"
@@ -65,38 +66,6 @@ extern "C" void on_arrival_capture(cy_future_t* const sub)
       .topic_hash   = arrival.breadcrumb.topic_hash,
     });
     cy_message_refcount_dec(arrival.message.content);
-}
-
-void set_now_all(e2e::sim_net_t& net, const cy_us_t now)
-{
-    for (std::size_t i = 0U; i < e2e::sim_net_node_count(net); i++) {
-        e2e::sim_net_node_now_set(net, i, now);
-    }
-}
-
-void drive_for(e2e::sim_net_t& net, cy_us_t& now, const cy_us_t duration, const bool allow_spin_media_failures)
-{
-    const cy_us_t end = now + duration;
-    while (now < end) {
-        const cy_err_t err = e2e::drive_round_all(net, now);
-        if (allow_spin_media_failures && (err == CY_ERR_MEDIA)) {
-            now += step_us;
-            continue;
-        }
-        TEST_ASSERT_EQUAL_INT(CY_OK, err);
-        now += step_us;
-    }
-}
-
-void drain_queue(e2e::sim_net_t& net, cy_us_t& now)
-{
-    std::size_t guard = 0U;
-    while (e2e::sim_net_pending_frames(net) > 0U) {
-        TEST_ASSERT_EQUAL_INT(CY_OK, e2e::drive_round_all(net, now));
-        now += step_us;
-        guard++;
-        TEST_ASSERT_TRUE(guard < 80'000U);
-    }
 }
 
 cy_err_t publish_best_effort(cy_publisher_t* const pub,
@@ -306,16 +275,16 @@ void one_topic_cleanup(one_topic_env_t& env, cy_us_t& now)
             cy_future_destroy(sub);
         }
     }
-    drive_for(env.net, now, 80'000, false);
+    e2e::drive_for_all(env.net, now, 80'000, step_us, false);
 
     for (cy_publisher_t* const pub : env.pubs) {
         if (pub != nullptr) {
             cy_unadvertise(pub);
         }
     }
-    drive_for(env.net, now, 80'000, false);
+    e2e::drive_for_all(env.net, now, 80'000, step_us, false);
 
-    drain_queue(env.net, now);
+    e2e::drain_queue_all(env.net, now, step_us, 80'000U);
     e2e::assert_quiescent(env.net);
 
     e2e::sim_net_deinit(env.net);
@@ -330,11 +299,11 @@ void test_api_consensus_e2e_m01_five_node_baseline_convergence()
     cy_us_t now = 0;
 
     for (std::size_t round = 0U; round < 32U; round++) {
-        set_now_all(env.net, now);
+        e2e::set_now_all(env.net, now);
         one_topic_publish_round(env, now);
-        drive_for(env.net, now, 20'000, false);
+        e2e::drive_for_all(env.net, now, 20'000, step_us, false);
     }
-    drive_for(env.net, now, 250'000, false);
+    e2e::drive_for_all(env.net, now, 250'000, step_us, false);
 
     one_topic_assert_reachability(env);
     one_topic_cleanup(env, now);
@@ -358,11 +327,11 @@ void test_api_consensus_e2e_m02_split_partition_heal_eventual_delivery()
     cy_us_t now = 0;
 
     for (std::size_t round = 0U; round < 40U; round++) {
-        set_now_all(env.net, now);
+        e2e::set_now_all(env.net, now);
         one_topic_publish_round(env, now);
-        drive_for(env.net, now, 20'000, false);
+        e2e::drive_for_all(env.net, now, 20'000, step_us, false);
     }
-    drive_for(env.net, now, 300'000, false);
+    e2e::drive_for_all(env.net, now, 300'000, step_us, false);
 
     one_topic_assert_reachability(env);
     one_topic_cleanup(env, now);
@@ -384,11 +353,11 @@ void test_api_consensus_e2e_m03_bridge_node_isolation_then_restore()
     cy_us_t now = 0;
 
     for (std::size_t round = 0U; round < 44U; round++) {
-        set_now_all(env.net, now);
+        e2e::set_now_all(env.net, now);
         one_topic_publish_round(env, now);
-        drive_for(env.net, now, 20'000, false);
+        e2e::drive_for_all(env.net, now, 20'000, step_us, false);
     }
-    drive_for(env.net, now, 320'000, false);
+    e2e::drive_for_all(env.net, now, 320'000, step_us, false);
 
     one_topic_assert_reachability(env);
     one_topic_cleanup(env, now);
@@ -423,11 +392,11 @@ void test_api_consensus_e2e_m04_rotating_partitions_eventual_recovery()
     cy_us_t now = 0;
 
     for (std::size_t round = 0U; round < 56U; round++) {
-        set_now_all(env.net, now);
+        e2e::set_now_all(env.net, now);
         one_topic_publish_round(env, now);
-        drive_for(env.net, now, 20'000, false);
+        e2e::drive_for_all(env.net, now, 20'000, step_us, false);
     }
-    drive_for(env.net, now, 400'000, false);
+    e2e::drive_for_all(env.net, now, 400'000, step_us, false);
 
     one_topic_assert_reachability(env);
     one_topic_cleanup(env, now);
@@ -465,7 +434,7 @@ void test_api_consensus_e2e_m05_three_colliding_topics_subject_uniqueness()
     }
 
     cy_us_t now = 0;
-    drive_for(net, now, 700'000, false);
+    e2e::drive_for_all(net, now, 700'000, step_us, false);
 
     std::array<std::uint64_t, colliding_topics.size()> hashes{};
     for (std::size_t topic = 0U; topic < colliding_topics.size(); topic++) {
@@ -475,7 +444,7 @@ void test_api_consensus_e2e_m05_three_colliding_topics_subject_uniqueness()
     }
 
     for (std::size_t round = 0U; round < 24U; round++) {
-        set_now_all(net, now);
+        e2e::set_now_all(net, now);
         for (std::size_t node = 0U; node < cfg.node_count; node++) {
             for (std::size_t topic = 0U; topic < colliding_topics.size(); topic++) {
                 const cy_err_t err = publish_best_effort(
@@ -483,9 +452,9 @@ void test_api_consensus_e2e_m05_three_colliding_topics_subject_uniqueness()
                 TEST_ASSERT_EQUAL_INT(CY_OK, err);
             }
         }
-        drive_for(net, now, 20'000, false);
+        e2e::drive_for_all(net, now, 20'000, step_us, false);
     }
-    drive_for(net, now, 280'000, false);
+    e2e::drive_for_all(net, now, 280'000, step_us, false);
 
     for (const arrival_capture_t& capture : captures) {
         TEST_ASSERT_EQUAL_size_t(0U, capture.malformed);
@@ -536,15 +505,15 @@ void test_api_consensus_e2e_m05_three_colliding_topics_subject_uniqueness()
             }
         }
     }
-    drive_for(net, now, 80'000, false);
+    e2e::drive_for_all(net, now, 80'000, step_us, false);
     for (const auto& row : pubs) {
         for (cy_publisher_t* const pub : row) {
             cy_unadvertise(pub);
         }
     }
-    drive_for(net, now, 80'000, false);
+    e2e::drive_for_all(net, now, 80'000, step_us, false);
 
-    drain_queue(net, now);
+    e2e::drain_queue_all(net, now, step_us, 80'000U);
     e2e::assert_quiescent(net);
     e2e::sim_net_deinit(net);
     e2e::assert_all_node_heaps_clean(net);
@@ -591,7 +560,7 @@ void test_api_consensus_e2e_m06_node_restart_rejoin_during_collision_migration()
     }
 
     cy_us_t now = 0;
-    drive_for(net, now, 600'000, false);
+    e2e::drive_for_all(net, now, 600'000, step_us, false);
 
     for (std::size_t round = 0U; round < 32U; round++) {
         if (round == 14U) {
@@ -605,12 +574,12 @@ void test_api_consensus_e2e_m06_node_restart_rejoin_during_collision_migration()
                     pubs.at(restart_node).at(topic) = nullptr;
                 }
             }
-            drive_for(net, now, 140'000, false);
+            e2e::drive_for_all(net, now, 140'000, step_us, false);
             create_node_handles(restart_node);
-            drive_for(net, now, 180'000, false);
+            e2e::drive_for_all(net, now, 180'000, step_us, false);
         }
 
-        set_now_all(net, now);
+        e2e::set_now_all(net, now);
         for (std::size_t node = 0U; node < node_count; node++) {
             for (std::size_t topic = 0U; topic < topic_count; topic++) {
                 if (pubs.at(node).at(topic) == nullptr) {
@@ -621,9 +590,9 @@ void test_api_consensus_e2e_m06_node_restart_rejoin_during_collision_migration()
                 TEST_ASSERT_EQUAL_INT(CY_OK, err);
             }
         }
-        drive_for(net, now, 20'000, false);
+        e2e::drive_for_all(net, now, 20'000, step_us, false);
     }
-    drive_for(net, now, 280'000, false);
+    e2e::drive_for_all(net, now, 280'000, step_us, false);
 
     for (const arrival_capture_t& capture : captures) {
         TEST_ASSERT_EQUAL_size_t(0U, capture.malformed);
@@ -660,7 +629,7 @@ void test_api_consensus_e2e_m06_node_restart_rejoin_during_collision_migration()
             }
         }
     }
-    drive_for(net, now, 80'000, false);
+    e2e::drive_for_all(net, now, 80'000, step_us, false);
     for (const auto& row : pubs) {
         for (cy_publisher_t* const pub : row) {
             if (pub != nullptr) {
@@ -668,9 +637,9 @@ void test_api_consensus_e2e_m06_node_restart_rejoin_during_collision_migration()
             }
         }
     }
-    drive_for(net, now, 80'000, false);
+    e2e::drive_for_all(net, now, 80'000, step_us, false);
 
-    drain_queue(net, now);
+    e2e::drain_queue_all(net, now, step_us, 80'000U);
     e2e::assert_quiescent(net);
     e2e::sim_net_deinit(net);
     e2e::assert_all_node_heaps_clean(net);
@@ -709,11 +678,11 @@ void test_api_consensus_e2e_m07_spin_failures_with_gossip_churn_eventual_recover
     cy_us_t now = 0;
 
     for (std::size_t round = 0U; round < 48U; round++) {
-        set_now_all(env.net, now);
+        e2e::set_now_all(env.net, now);
         one_topic_publish_round(env, now);
-        drive_for(env.net, now, 20'000, true);
+        e2e::drive_for_all(env.net, now, 20'000, step_us, true);
     }
-    drive_for(env.net, now, 300'000, true);
+    e2e::drive_for_all(env.net, now, 300'000, step_us, true);
 
     one_topic_assert_reachability(env);
     TEST_ASSERT_TRUE(
@@ -758,11 +727,11 @@ void test_api_consensus_e2e_m08_mixed_faults_and_platform_failures_stress()
     cy_us_t now = 0;
 
     for (std::size_t round = 0U; round < 64U; round++) {
-        set_now_all(env.net, now);
+        e2e::set_now_all(env.net, now);
         one_topic_publish_round(env, now);
-        drive_for(env.net, now, 20'000, true);
+        e2e::drive_for_all(env.net, now, 20'000, step_us, true);
     }
-    drive_for(env.net, now, 350'000, true);
+    e2e::drive_for_all(env.net, now, 350'000, step_us, true);
 
     one_topic_assert_reachability(env);
     one_topic_cleanup(env, now);
@@ -803,7 +772,7 @@ void test_api_consensus_e2e_m09_stale_gossip_replay_does_not_shift_stable_mappin
     }
 
     cy_us_t now = 0;
-    drive_for(net, now, 800'000, false);
+    e2e::drive_for_all(net, now, 800'000, step_us, false);
 
     std::array<std::uint64_t, topic_count> hashes{};
     for (std::size_t topic = 0U; topic < topic_count; topic++) {
@@ -813,7 +782,7 @@ void test_api_consensus_e2e_m09_stale_gossip_replay_does_not_shift_stable_mappin
     }
 
     for (std::size_t round = 0U; round < 24U; round++) {
-        set_now_all(net, now);
+        e2e::set_now_all(net, now);
         for (std::size_t node = 0U; node < node_count; node++) {
             for (std::size_t topic = 0U; topic < topic_count; topic++) {
                 const cy_err_t err = publish_best_effort(
@@ -821,9 +790,9 @@ void test_api_consensus_e2e_m09_stale_gossip_replay_does_not_shift_stable_mappin
                 TEST_ASSERT_EQUAL_INT(CY_OK, err);
             }
         }
-        drive_for(net, now, 20'000, false);
+        e2e::drive_for_all(net, now, 20'000, step_us, false);
     }
-    drive_for(net, now, 260'000, false);
+    e2e::drive_for_all(net, now, 260'000, step_us, false);
 
     std::array<std::uint32_t, topic_count> stable_subjects{};
     for (std::size_t topic = 0U; topic < topic_count; topic++) {
@@ -849,10 +818,10 @@ void test_api_consensus_e2e_m09_stale_gossip_replay_does_not_shift_stable_mappin
                                     now);
         }
     }
-    drive_for(net, now, 420'000, false);
+    e2e::drive_for_all(net, now, 420'000, step_us, false);
 
     for (std::size_t round = 0U; round < 10U; round++) {
-        set_now_all(net, now);
+        e2e::set_now_all(net, now);
         for (std::size_t node = 0U; node < node_count; node++) {
             for (std::size_t topic = 0U; topic < topic_count; topic++) {
                 const cy_err_t err = publish_best_effort(
@@ -860,9 +829,9 @@ void test_api_consensus_e2e_m09_stale_gossip_replay_does_not_shift_stable_mappin
                 TEST_ASSERT_EQUAL_INT(CY_OK, err);
             }
         }
-        drive_for(net, now, 20'000, false);
+        e2e::drive_for_all(net, now, 20'000, step_us, false);
     }
-    drive_for(net, now, 260'000, false);
+    e2e::drive_for_all(net, now, 260'000, step_us, false);
 
     for (std::size_t topic = 0U; topic < topic_count; topic++) {
         for (std::size_t node = 0U; node < node_count; node++) {
@@ -885,13 +854,13 @@ void test_api_consensus_e2e_m09_stale_gossip_replay_does_not_shift_stable_mappin
             }
         }
     }
-    drive_for(net, now, 80'000, false);
+    e2e::drive_for_all(net, now, 80'000, step_us, false);
     for (cy_publisher_t* const pub : pubs) {
         cy_unadvertise(pub);
     }
-    drive_for(net, now, 80'000, false);
+    e2e::drive_for_all(net, now, 80'000, step_us, false);
 
-    drain_queue(net, now);
+    e2e::drain_queue_all(net, now, step_us, 80'000U);
     e2e::assert_quiescent(net);
     e2e::sim_net_deinit(net);
     e2e::assert_all_node_heaps_clean(net);
@@ -917,11 +886,11 @@ std::vector<std::uint64_t> deterministic_transcript_run(const std::uint64_t seed
     cy_us_t now = 0;
 
     for (std::size_t round = 0U; round < 40U; round++) {
-        set_now_all(env.net, now);
+        e2e::set_now_all(env.net, now);
         one_topic_publish_round(env, now);
-        drive_for(env.net, now, 20'000, false);
+        e2e::drive_for_all(env.net, now, 20'000, step_us, false);
     }
-    drive_for(env.net, now, 250'000, false);
+    e2e::drive_for_all(env.net, now, 250'000, step_us, false);
 
     std::vector<std::uint64_t> transcript{};
     transcript.reserve(e2e::sim_net_captures(env.net).size() + 4U);

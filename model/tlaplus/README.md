@@ -1,6 +1,4 @@
-# Formal specification and verification
-
-For the formal proof write-up refer to **[PROOF.md](./PROOF.md)**.
+# TLA<sup>+</sup> model-based verification
 
 All operations defined on topics are extracted into `Core.tla`, where the operations are implemented as
 pure functions (called "operators" in TLA+ terminology).
@@ -39,7 +37,7 @@ Improve performance:
 Prove that the topic with the highest log-age will never change its subject-ID.
 We need to handle the case of one topic overtaking another in age.
 
-## Issues discovered in the original protocol design
+## Issues discovered in the original protocol design proposal
 
 ### Nonuniform ageing rate increases the worst-case convergence time
 
@@ -111,7 +109,7 @@ This state is suboptimal because now the lower subject-IDs remain unused purely 
 1. (1, 2, 4), (11, 3, 4).
 2. (2, 0, 3), (11, 3, 4).
 
-## TLA<sup>+</sup> resources
+## Resources
 
 - [Learn TLA<sup>+</sup>](https://learntla.com)
 - [Cheatsheet](https://mbt.informal.systems/docs/tla_basics_tutorials/tla+cheatsheet.html)

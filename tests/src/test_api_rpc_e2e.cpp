@@ -2,6 +2,7 @@
 #include <unity.h>
 #include "e2e_faults.hpp"
 #include "e2e_sim_net.hpp"
+#include "e2e_scenario_utils.hpp"
 #include "e2e_test_utils.hpp"
 #include "message.h"
 #include <algorithm>
@@ -17,10 +18,10 @@ namespace {
 
 constexpr std::uint8_t header_msg_rel  = 1U;
 constexpr std::uint8_t header_msg_ack  = 2U;
-constexpr std::uint8_t header_rsp_be   = 3U;
-constexpr std::uint8_t header_rsp_rel  = 4U;
-constexpr std::uint8_t header_rsp_ack  = 5U;
-constexpr std::uint8_t header_rsp_nack = 6U;
+constexpr std::uint8_t header_rsp_be   = 4U;
+constexpr std::uint8_t header_rsp_rel  = 5U;
+constexpr std::uint8_t header_rsp_ack  = 6U;
+constexpr std::uint8_t header_rsp_nack = 7U;
 
 constexpr std::size_t header_size      = 24U;
 constexpr cy_us_t     step_us          = 5'000;
@@ -196,32 +197,6 @@ void restore_realloc_wrapper()
         TEST_ASSERT_NOT_NULL(state.vtable);
         state.vtable->realloc = state.original;
         state                 = realloc_fail_state_t{};
-    }
-}
-
-void set_now(e2e::sim_net_t& net, const cy_us_t now)
-{
-    e2e::sim_net_node_now_set(net, e2e::sim_node_a, now);
-    e2e::sim_net_node_now_set(net, e2e::sim_node_b, now);
-}
-
-void drive_for(e2e::sim_net_t& net, cy_us_t& now, const cy_us_t duration)
-{
-    const cy_us_t end = now + duration;
-    while (now < end) {
-        TEST_ASSERT_EQUAL_INT(CY_OK, e2e::drive_round(net, now, now));
-        now += step_us;
-    }
-}
-
-void drain_queue(e2e::sim_net_t& net, cy_us_t& now)
-{
-    std::size_t guard = 0U;
-    while (e2e::sim_net_pending_frames(net) > 0U) {
-        TEST_ASSERT_EQUAL_INT(CY_OK, e2e::drive_round(net, now, now));
-        now += step_us;
-        guard++;
-        TEST_ASSERT_TRUE(guard < 30'000U);
     }
 }
 
@@ -448,7 +423,7 @@ void inject_response_wire(e2e::sim_net_t&                   net,
     if (as_multicast) {
         cy_subject_reader_t fake_reader{};
         fake_reader.subject_id = 1U;
-        cy_on_message(e2e::sim_net_platform(net, e2e::sim_node_a), lane, &fake_reader, mts);
+        cy_on_message(e2e::sim_net_platform(net, e2e::sim_node_a), lane, &fake_reader.subject_id, mts);
     } else {
         cy_on_message(e2e::sim_net_platform(net, e2e::sim_node_a), lane, nullptr, mts);
     }
@@ -503,46 +478,13 @@ bool wait_until(e2e::sim_net_t& net, cy_us_t& now, const cy_us_t timeout, Predic
     return false;
 }
 
-bool wait_all_done(e2e::sim_net_t& net, cy_us_t& now, const std::vector<cy_future_t*>& futures, const cy_us_t timeout)
-{
-    return wait_until(net, now, timeout, [&futures]() {
-        return std::ranges::all_of(
-          futures, [](const cy_future_t* const fut) { return (fut != nullptr) && cy_future_done(fut); });
-    });
-}
-
 void cleanup_case(e2e::sim_net_t&                     net,
                   cy_us_t&                            now,
                   const std::vector<cy_future_t*>&    futures,
                   const std::vector<cy_future_t*>&    subscribers,
                   const std::vector<cy_publisher_t*>& publishers)
 {
-    for (cy_future_t* const fut : futures) {
-        if (fut != nullptr) {
-            cy_future_destroy(fut);
-        }
-    }
-
-    for (cy_future_t* const sub : subscribers) {
-        if (sub != nullptr) {
-            cy_future_destroy(sub);
-        }
-    }
-    drive_for(net, now, 40'000);
-
-    for (cy_publisher_t* const pub : publishers) {
-        if (pub != nullptr) {
-            cy_unadvertise(pub);
-        }
-    }
-    drive_for(net, now, 40'000);
-
-    drain_queue(net, now);
-    e2e::assert_quiescent(net);
-
-    e2e::sim_net_deinit(net);
-    e2e::assert_all_heaps_clean(net);
-    e2e::assert_no_live_messages();
+    e2e::cleanup_case(net, now, futures, subscribers, publishers, step_us, 40'000, 30'000U);
 }
 
 extern "C" void on_request_future(cy_future_t* const future)
@@ -621,7 +563,7 @@ void test_api_rpc_e2e_r02_single_response_success_and_move_semantics()
     server_context_t             server{};
     cy_future_t* const           server_sub = make_server_subscriber(net, topic_name, server);
 
-    set_now(net, now);
+    e2e::set_now(net, now);
     cy_future_t* const request = request_once(client, now, 1U, 1U, 200'000, 200'000);
     TEST_ASSERT_NOT_NULL(request);
 
@@ -645,7 +587,7 @@ void test_api_rpc_e2e_r02_single_response_success_and_move_semantics()
     const cy_response_t none = cy_response_move(request);
     TEST_ASSERT_NULL(none.message.content);
 
-    drive_for(net, now, 220'000);
+    e2e::drive_for(net, now, 220'000, step_us);
     assert_request_state(request, true, CY_ERR_LIVENESS);
 
     cleanup_case(net, now, { request }, { server_sub }, { client });
@@ -663,7 +605,7 @@ void test_api_rpc_e2e_r03_stream_overwrite_latest_wins()
     server.responses_per_request  = 3U;
     cy_future_t* const server_sub = make_server_subscriber(net, topic_name, server);
 
-    set_now(net, now);
+    e2e::set_now(net, now);
     cy_future_t* const request = request_once(client, now, 2U, 1U, 200'000, 200'000);
     TEST_ASSERT_NOT_NULL(request);
 
@@ -695,7 +637,7 @@ void test_api_rpc_e2e_r04_failure_then_late_success_transition()
     server.responses_per_request  = 0U;
     cy_future_t* const server_sub = make_server_subscriber(net, topic_name, server);
 
-    set_now(net, now);
+    e2e::set_now(net, now);
     cy_future_t* const request = request_once(client, now, 3U, 1U, 80'000, 40'000);
     TEST_ASSERT_NOT_NULL(request);
 
@@ -737,7 +679,7 @@ void test_api_rpc_e2e_r05_reliable_response_ack_and_duplicate_ack()
     server.responses_per_request  = 0U;
     cy_future_t* const server_sub = make_server_subscriber(net, topic_name, server);
 
-    set_now(net, now);
+    e2e::set_now(net, now);
     cy_future_t* const request = request_once(client, now, 4U, 1U, 220'000, 220'000);
     TEST_ASSERT_NOT_NULL(request);
 
@@ -799,7 +741,7 @@ void test_api_rpc_e2e_r06_reliable_response_history_nack_and_unknown_nack()
     server.responses_per_request  = 0U;
     cy_future_t* const server_sub = make_server_subscriber(net, topic_name, server);
 
-    set_now(net, now);
+    e2e::set_now(net, now);
     cy_future_t* const request = request_once(client, now, 5U, 1U, 220'000, 220'000);
     TEST_ASSERT_NOT_NULL(request);
     const request_wire_info_t req_wire = last_request_wire(net);
@@ -863,7 +805,7 @@ void test_api_rpc_e2e_r07_zombie_ack_seen_nack_unseen()
     server.responses_per_request  = 0U;
     cy_future_t* const server_sub = make_server_subscriber(net, topic_name, server);
 
-    set_now(net, now);
+    e2e::set_now(net, now);
     cy_future_t* const request = request_once(client, now, 6U, 1U, 220'000, 220'000);
     TEST_ASSERT_NOT_NULL(request);
     const request_wire_info_t req_wire = last_request_wire(net);
@@ -926,7 +868,7 @@ void test_api_rpc_e2e_r08_multicast_response_is_rejected()
     cy_future_t* const sink_sub   = cy_subscribe(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("rpc/r08/sink"), 64U);
     TEST_ASSERT_NOT_NULL(sink_sub);
 
-    set_now(net, now);
+    e2e::set_now(net, now);
     cy_future_t* const request = request_once(client, now, 7U, 1U, 220'000, 220'000);
     TEST_ASSERT_NOT_NULL(request);
     const request_wire_info_t req_wire = last_request_wire(net);
@@ -968,7 +910,7 @@ void test_api_rpc_e2e_r09_request_callback_status_transitions()
     cy_future_t* const server_sub = make_server_subscriber(net, topic_name, server);
     callback_capture_t cb{};
 
-    set_now(net, now);
+    e2e::set_now(net, now);
     cy_future_t* const request = request_once(client, now, 8U, 1U, 80'000, 40'000, on_request_future, &cb);
     TEST_ASSERT_NOT_NULL(request);
     const request_wire_info_t req_wire = last_request_wire(net);
@@ -994,7 +936,7 @@ void test_api_rpc_e2e_r09_request_callback_status_transitions()
     cy_message_refcount_dec(response.message.content);
     assert_request_state(request, false, CY_OK);
 
-    drive_for(net, now, 80'000);
+    e2e::drive_for(net, now, 80'000, step_us);
     assert_request_state(request, true, CY_ERR_LIVENESS);
     TEST_ASSERT_TRUE(cb.done_error >= 2U);
     TEST_ASSERT_TRUE(cb.total >= 3U);
@@ -1013,7 +955,7 @@ void test_api_rpc_e2e_r10_initial_publish_failure_returns_null()
     cy_us_t now = 0;
 
     cy_publisher_t* const client = make_client(net, "rpc/r10/topic");
-    set_now(net, now);
+    e2e::set_now(net, now);
     TEST_ASSERT_NULL(request_once(client, now, 9U, 1U, 80'000, 40'000));
 
     e2e::sim_net_op_faults_set(net, nullptr);
@@ -1034,7 +976,7 @@ void test_api_rpc_e2e_r11_request_publish_fails_without_response()
     cy_us_t now = 0;
 
     cy_publisher_t* const client = make_client(net, "rpc/r11/topic");
-    set_now(net, now);
+    e2e::set_now(net, now);
     cy_future_t* const request = request_once(client, now, 10U, 1U, 80'000, 60'000);
     TEST_ASSERT_NOT_NULL(request);
 
@@ -1056,7 +998,7 @@ void test_api_rpc_e2e_r12_concurrent_requests_are_correlated()
     server_context_t             server{};
     cy_future_t* const           server_sub = make_server_subscriber(net, topic_name, server);
 
-    set_now(net, now);
+    e2e::set_now(net, now);
     cy_future_t* const req_a = request_once(client, now, 11U, 1U, 250'000, 200'000);
     cy_future_t* const req_b = request_once(client, now, 11U, 2U, 250'000, 200'000);
     TEST_ASSERT_NOT_NULL(req_a);
@@ -1095,7 +1037,7 @@ void test_api_rpc_e2e_r13_reliable_response_unknown_request_tag_nack()
     server.responses_per_request  = 0U;
     cy_future_t* const server_sub = make_server_subscriber(net, topic_name, server);
 
-    set_now(net, now);
+    e2e::set_now(net, now);
     cy_future_t* const request = request_once(client, now, 12U, 1U, 220'000, 220'000);
     TEST_ASSERT_NOT_NULL(request);
     const request_wire_info_t req_wire = last_request_wire(net);
@@ -1133,7 +1075,7 @@ void test_api_rpc_e2e_r14_zombie_unseen_remote_reliable_response_nack()
     server.responses_per_request  = 0U;
     cy_future_t* const server_sub = make_server_subscriber(net, topic_name, server);
 
-    set_now(net, now);
+    e2e::set_now(net, now);
     cy_future_t* const request = request_once(client, now, 13U, 1U, 220'000, 220'000);
     TEST_ASSERT_NOT_NULL(request);
     const request_wire_info_t req_wire = last_request_wire(net);
@@ -1193,7 +1135,7 @@ void test_api_rpc_e2e_r15_publish_failure_after_response_keeps_future_alive_unti
     server.responses_per_request  = 0U;
     cy_future_t* const server_sub = make_server_subscriber(net, topic_name, server);
 
-    set_now(net, now);
+    e2e::set_now(net, now);
     cy_future_t* const request = request_once(client, now, 14U, 1U, 80'000, 140'000);
     TEST_ASSERT_NOT_NULL(request);
     const request_wire_info_t req_wire = last_request_wire(net);
@@ -1213,10 +1155,10 @@ void test_api_rpc_e2e_r15_publish_failure_after_response_keeps_future_alive_unti
     cy_message_refcount_dec(response.message.content);
     assert_request_state(request, false, CY_OK);
 
-    drive_for(net, now, 120'000);
+    e2e::drive_for(net, now, 120'000, step_us);
     assert_request_state(request, false, CY_ERR_DELIVERY);
 
-    drive_for(net, now, 80'000);
+    e2e::drive_for(net, now, 80'000, step_us);
     assert_request_state(request, true, CY_ERR_LIVENESS);
 
     e2e::sim_net_faults_set(net, nullptr);
@@ -1231,7 +1173,7 @@ void test_api_rpc_e2e_r16_request_future_allocation_failure_returns_null()
 
     cy_publisher_t* const client = make_client(net, "rpc/r16/topic");
     install_fail_next_new_alloc(net, e2e::sim_node_a, 1U);
-    set_now(net, now);
+    e2e::set_now(net, now);
     TEST_ASSERT_NULL(request_once(client, now, 15U, 1U, 120'000, 120'000));
     restore_realloc_wrapper();
 
@@ -1249,7 +1191,7 @@ void test_api_rpc_e2e_r17_server_reliable_response_ack_success()
     reliable_server_context_t    server{};
     cy_future_t* const           server_sub = make_server_subscriber_reliable(net, topic_name, server);
 
-    set_now(net, now);
+    e2e::set_now(net, now);
     const std::size_t  before_controls = e2e::sim_net_captures(net).size();
     cy_future_t* const request         = request_once(client, now, 17U, 1U, 220'000, 220'000);
     TEST_ASSERT_NOT_NULL(request);
@@ -1290,7 +1232,7 @@ void test_api_rpc_e2e_r18_server_reliable_response_nack_after_request_destroy()
     deferred_reliable_server_context_t server{};
     cy_future_t* const                 server_sub = make_server_subscriber_capture_only(net, topic_name, server);
 
-    set_now(net, now);
+    e2e::set_now(net, now);
     cy_future_t* request = request_once(client, now, 18U, 1U, 220'000, 220'000);
     TEST_ASSERT_NOT_NULL(request);
 
@@ -1299,7 +1241,7 @@ void test_api_rpc_e2e_r18_server_reliable_response_nack_after_request_destroy()
     cy_future_destroy(request);
     request = nullptr;
 
-    set_now(net, now);
+    e2e::set_now(net, now);
     const auto         payload         = e2e::app_payload_pack(980U, 1U);
     const cy_bytes_t   msg             = { .size = payload.size(), .data = payload.data(), .next = nullptr };
     const std::size_t  before_controls = e2e::sim_net_captures(net).size();
@@ -1337,7 +1279,7 @@ void test_api_rpc_e2e_r19_server_reliable_response_ack_blackout_times_out()
     reliable_server_context_t server{};
     cy_future_t* const        server_sub = make_server_subscriber_reliable(net, topic_name, server);
 
-    set_now(net, now);
+    e2e::set_now(net, now);
     const std::size_t  before  = e2e::sim_net_captures(net).size();
     cy_future_t* const request = request_once(client, now, 19U, 1U, 220'000, 220'000);
     TEST_ASSERT_NOT_NULL(request);
@@ -1401,7 +1343,7 @@ void test_api_rpc_e2e_r20_server_reliable_response_late_ack_does_not_resurrect()
     reliable_server_context_t server{};
     cy_future_t* const        server_sub = make_server_subscriber_reliable(net, topic_name, server);
 
-    set_now(net, now);
+    e2e::set_now(net, now);
     cy_future_t* const request = request_once(client, now, 20U, 1U, 220'000, 220'000);
     TEST_ASSERT_NOT_NULL(request);
 
@@ -1411,7 +1353,7 @@ void test_api_rpc_e2e_r20_server_reliable_response_late_ack_does_not_resurrect()
     TEST_ASSERT_TRUE(wait_until_done(net, now, request, wait_timeout_us));
     TEST_ASSERT_EQUAL_INT(CY_ERR_DELIVERY, cy_future_error(server.futures.front()));
 
-    drive_for(net, now, ack_delay + 80'000);
+    e2e::drive_for(net, now, ack_delay + 80'000, step_us);
     TEST_ASSERT_TRUE(cy_future_done(server.futures.front()));
     TEST_ASSERT_EQUAL_INT(CY_ERR_DELIVERY, cy_future_error(server.futures.front()));
 
@@ -1431,7 +1373,7 @@ void test_api_rpc_e2e_r21_server_reliable_response_stream_two_messages()
     server.responses_per_request  = 2U;
     cy_future_t* const server_sub = make_server_subscriber_reliable(net, topic_name, server);
 
-    set_now(net, now);
+    e2e::set_now(net, now);
     const std::size_t  before_controls = e2e::sim_net_captures(net).size();
     cy_future_t* const request         = request_once(client, now, 21U, 1U, 250'000, 250'000);
     TEST_ASSERT_NOT_NULL(request);
@@ -1478,7 +1420,7 @@ void test_api_rpc_e2e_r22_response_count_invalid_future_returns_zero()
 
     TEST_ASSERT_EQUAL_UINT64(0U, cy_response_count(nullptr));
 
-    set_now(net, now);
+    e2e::set_now(net, now);
     cy_future_t* const publish = cy_publish_reliable(client, now + 100'000, msg);
     TEST_ASSERT_NOT_NULL(publish);
     TEST_ASSERT_EQUAL_UINT64(0U, cy_response_count(publish));
@@ -1498,7 +1440,7 @@ void test_api_rpc_e2e_r23_respond_reliable_argument_validation()
     deferred_reliable_server_context_t server{};
     cy_future_t* const                 server_sub = make_server_subscriber_capture_only(net, topic_name, server);
 
-    set_now(net, now);
+    e2e::set_now(net, now);
     cy_future_t* const request = request_once(client, now, 23U, 1U, 220'000, 220'000);
     TEST_ASSERT_NOT_NULL(request);
     TEST_ASSERT_TRUE(wait_until(net, now, wait_timeout_us, [&server]() { return server.captured; }));
@@ -1548,7 +1490,7 @@ void test_api_rpc_e2e_r24_respond_reliable_allocation_failures()
     deferred_reliable_server_context_t server{};
     cy_future_t* const                 server_sub = make_server_subscriber_capture_only(net, topic_name, server);
 
-    set_now(net, now);
+    e2e::set_now(net, now);
     cy_future_t* const request = request_once(client, now, 24U, 1U, 220'000, 220'000);
     TEST_ASSERT_NOT_NULL(request);
     TEST_ASSERT_TRUE(wait_until(net, now, wait_timeout_us, [&server]() { return server.captured; }));
@@ -1592,7 +1534,7 @@ void test_api_rpc_e2e_r25_respond_reliable_tag_exhaustion_returns_null()
     deferred_reliable_server_context_t server{};
     cy_future_t* const                 server_sub = make_server_subscriber_capture_only(net, topic_name, server);
 
-    set_now(net, now);
+    e2e::set_now(net, now);
     cy_future_t* const request = request_once(client, now, 25U, 1U, 220'000, 220'000);
     TEST_ASSERT_NOT_NULL(request);
     TEST_ASSERT_TRUE(wait_until(net, now, wait_timeout_us, [&server]() { return server.captured; }));
@@ -1645,7 +1587,7 @@ void test_api_rpc_e2e_r26_respond_reliable_retransmit_media_error_notifies_then_
     deferred_reliable_server_context_t server{};
     cy_future_t* const                 server_sub = make_server_subscriber_capture_only(net, topic_name, server);
 
-    set_now(net, now);
+    e2e::set_now(net, now);
     cy_future_t* const request = request_once(client, now, 26U, 1U, 220'000, 220'000);
     TEST_ASSERT_NOT_NULL(request);
     TEST_ASSERT_TRUE(wait_until(net, now, wait_timeout_us, [&server]() { return server.captured; }));
@@ -1703,7 +1645,7 @@ void test_api_rpc_e2e_r27_respond_reliable_lag_paths()
         deferred_reliable_server_context_t server{};
         cy_future_t* const                 server_sub = make_server_subscriber_capture_only(net, topic_name, server);
 
-        set_now(net, now);
+        e2e::set_now(net, now);
         cy_future_t* const request = request_once(client, now, 27U, 1U, 220'000, 220'000);
         TEST_ASSERT_NOT_NULL(request);
         TEST_ASSERT_TRUE(wait_until(net, now, wait_timeout_us, [&server]() { return server.captured; }));
@@ -1724,7 +1666,7 @@ void test_api_rpc_e2e_r27_respond_reliable_lag_paths()
 
         // Force scheduler lag deterministically by jumping the simulated clock forward.
         now = respond_deadline_local + lag_offset_from_deadline;
-        set_now(net, now);
+        e2e::set_now(net, now);
         TEST_ASSERT_EQUAL_INT(CY_OK, e2e::drive_round(net, now, now));
         now += step_us;
 
@@ -1753,7 +1695,7 @@ void test_api_rpc_e2e_r28_request_introspection_and_borrow_contract()
     server_context_t             server{};
     cy_future_t* const           server_sub = make_server_subscriber(net, topic_name, server);
 
-    set_now(net, now);
+    e2e::set_now(net, now);
     cy_future_t* const request = request_once(client, now, 28U, 1U, 220'000, 220'000);
     TEST_ASSERT_NOT_NULL(request);
     TEST_ASSERT_TRUE(cy_is_request(request));

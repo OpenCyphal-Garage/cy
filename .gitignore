@@ -23,10 +23,14 @@
 *.log
 *.tsv
 *.csv
+*.*-swp
 *.db
 *.profraw
 *.luarc*
 .scannerwork
+target*/
+*.data
+Cargo.lock
 build*/
 cmake*build*/
 .ipynb_checkpoints
@@ -35,3 +39,4 @@ cmake*build*/
 !/.idea/dictionaries/*
 .cache
 .sisyphus/
+__pycache__/

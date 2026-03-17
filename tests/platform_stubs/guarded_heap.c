@@ -241,35 +241,6 @@ static void quarantine_enqueue(header_t* const header)
     }
 }
 
-static void quarantine_release_owner(const guarded_heap_t* const owner)
-{
-    // Reset is heap-local, so only release quarantined blocks that belong to this owner.
-    header_t* prev = NULL;
-    header_t* cur  = g_quarantine_head;
-    while (cur != NULL) {
-        header_t* const next = cur->quarantine_next;
-        if (cur->owner == owner) {
-            if (prev != NULL) {
-                prev->quarantine_next = next;
-            } else {
-                g_quarantine_head = next;
-            }
-            if (g_quarantine_tail == cur) {
-                g_quarantine_tail = prev;
-            }
-            cur->quarantine_next = NULL;
-            if (g_quarantine_size == 0U) {
-                panic("quarantine size underflow");
-            }
-            g_quarantine_size--;
-            quarantine_release_fragment(cur);
-        } else {
-            prev = cur;
-        }
-        cur = next;
-    }
-}
-
 static void* allocate_fragment(guarded_heap_t* const self, const size_t size)
 {
     if (size == 0U) {
@@ -323,21 +294,6 @@ void guarded_heap_init(guarded_heap_t* const self, const uint64_t seed)
     self->allocated_fragments = 0U;
     self->allocated_bytes     = 0U;
     self->prng_state          = (seed != 0U) ? seed : UINT64_C(0xA0761D6478BD642F);
-}
-
-void guarded_heap_reset(guarded_heap_t* const self)
-{
-    if (self == NULL) {
-        panic("null heap");
-    }
-    if (self->allocated_fragments != 0U) {
-        panic("reset with outstanding fragments");
-    }
-    if (self->allocated_bytes != 0U) {
-        panic("reset with outstanding bytes");
-    }
-    quarantine_release_owner(self); // Validate and drain this heap's quarantined fragments.
-    self->prng_state ^= prng_next(&self->prng_state);
 }
 
 size_t guarded_heap_allocated_fragments(const guarded_heap_t* const self)

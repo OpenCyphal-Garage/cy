@@ -1,20 +1,10 @@
 #include <cy.c> // NOLINT(bugprone-suspicious-include)
 #include <unity.h>
 #include "guarded_heap.h"
+#include "intrusive_fixture_utils.h"
 #include "message.h"
 #include <stddef.h>
 #include <string.h>
-
-typedef struct
-{
-    cy_subject_writer_t base;
-} test_subject_writer_t;
-
-typedef struct
-{
-    cy_subject_reader_t base;
-    size_t              extent;
-} test_subject_reader_t;
 
 typedef struct
 {
@@ -57,11 +47,6 @@ typedef struct
     bool     saw_pending;
     cy_err_t last_error;
 } destroy_capture_t;
-
-static uint32_t deserialize_u32_local(const byte_t in[4])
-{
-    return (uint32_t)in[0] | ((uint32_t)in[1] << 8U) | ((uint32_t)in[2] << 16U) | ((uint32_t)in[3] << 24U);
-}
 
 static uint64_t deserialize_u48_local(const byte_t in[6])
 {
@@ -143,18 +128,13 @@ static cy_subject_writer_t* fixture_subject_writer_new(cy_platform_t* const plat
 {
     fixture_t* const self =
       fixture_from(platform); // clang-tidy/cppcheck don't infer through guarded_heap_alloc() context.
-    test_subject_writer_t* const out = guarded_heap_alloc(&self->core_heap, sizeof(test_subject_writer_t));
-    if (out != NULL) {
-        out->base.subject_id = subject_id;
-        return &out->base;
-    }
-    return NULL;
+    return intrusive_subject_writer_new(&self->core_heap, subject_id);
 }
 
 static void fixture_subject_writer_destroy(cy_platform_t* const platform, cy_subject_writer_t* const writer)
 {
     fixture_t* const self = fixture_from(platform);
-    guarded_heap_free(&self->core_heap, writer);
+    intrusive_subject_writer_destroy(&self->core_heap, writer);
 }
 
 static cy_err_t fixture_subject_writer_send(cy_platform_t* const       platform,
@@ -182,20 +162,14 @@ static cy_subject_reader_t* fixture_subject_reader_new(cy_platform_t* const plat
                                                        const uint32_t       subject_id,
                                                        const size_t         extent)
 {
-    fixture_t* const             self = fixture_from(platform);
-    test_subject_reader_t* const out  = guarded_heap_alloc(&self->core_heap, sizeof(test_subject_reader_t));
-    if (out != NULL) {
-        out->base.subject_id = subject_id;
-        out->extent          = extent;
-        return &out->base;
-    }
-    return NULL;
+    fixture_t* const self = fixture_from(platform);
+    return intrusive_subject_reader_new(&self->core_heap, subject_id, extent);
 }
 
 static void fixture_subject_reader_destroy(cy_platform_t* const platform, cy_subject_reader_t* const reader)
 {
     fixture_t* const self = fixture_from(platform);
-    guarded_heap_free(&self->core_heap, reader);
+    intrusive_subject_reader_destroy(&self->core_heap, reader);
 }
 
 static cy_err_t fixture_unicast_send(cy_platform_t* const   platform,
@@ -293,15 +267,6 @@ static void fixture_spin_to(fixture_t* const self, const cy_us_t now)
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(self->cy));
 }
 
-static void fixture_spin_for(fixture_t* const self, const cy_us_t duration, const cy_us_t step)
-{
-    const cy_us_t end = self->now + duration;
-    while (self->now < end) {
-        self->now += step;
-        TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(self->cy));
-    }
-}
-
 static void fixture_fail_multicast_header(fixture_t* const self,
                                           const uint8_t    header_type,
                                           const size_t     count,
@@ -391,7 +356,7 @@ static void dispatch_subscriber_message(fixture_t* const    self,
     wire[HEADER_BYTES]           = payload_byte;
     const cy_message_ts_t mts    = make_wire_message(self, wire, sizeof(wire), ts);
     cy_subject_reader_t   reader = { .subject_id = topic_subject_id((cy_topic_t*)topic) };
-    cy_on_message(&self->platform, make_lane(remote_id, cy_prio_nominal), &reader, mts);
+    cy_on_message(&self->platform, make_lane(remote_id, cy_prio_nominal), &reader.subject_id, mts);
 }
 
 static void dispatch_response_message(fixture_t* const    self,
@@ -432,14 +397,6 @@ static void dispatch_response_ack(fixture_t* const self,
     serialize_u64_local(&wire[16], message_tag);
     const cy_message_ts_t mts = make_wire_message(self, wire, sizeof(wire), ts);
     cy_on_message(&self->platform, make_lane(remote_id, cy_prio_nominal), NULL, mts);
-}
-
-static void bind_destroy_callback(cy_future_t* const future, destroy_capture_t* const capture)
-{
-    cy_user_context_t ctx = CY_USER_CONTEXT_EMPTY;
-    ctx.ptr[0]            = capture;
-    cy_future_context_set(future, ctx);
-    cy_future_callback_set(future, NULL);
 }
 
 static void destroy_on_notify(cy_future_t* const fut)

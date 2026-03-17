@@ -2,6 +2,7 @@
 #include <unity.h>
 #include "e2e_faults.hpp"
 #include "e2e_sim_net.hpp"
+#include "e2e_scenario_utils.hpp"
 #include "e2e_test_utils.hpp"
 #include "message.h"
 #include <algorithm>
@@ -25,7 +26,7 @@ constexpr cy_us_t future_timeout = 3'000'000;
 
 constexpr std::array<const char*, topic_count> colliding_topics = {
     "e2e/migrate/topic_alpha#123456789abcdeff",
-    "e2e/migrate/topic_beta#123456789abebef2",
+    "e2e/migrate/topic_beta#123456789abebe76",
 };
 
 struct global_stats_t final
@@ -147,26 +148,6 @@ std::uint64_t topic_hash_for(const cy_t* const cy, const char* const topic_name)
     return cy_topic_hash(topic);
 }
 
-void drive_for(e2e::sim_net_t& net, cy_us_t& now, const cy_us_t duration)
-{
-    const cy_us_t end = now + duration;
-    while (now < end) {
-        TEST_ASSERT_EQUAL_INT(CY_OK, e2e::drive_round(net, now, now));
-        now += step_us;
-    }
-}
-
-void drain_queue(e2e::sim_net_t& net, cy_us_t& now)
-{
-    std::size_t guard = 0U;
-    while (e2e::sim_net_pending_frames(net) > 0U) {
-        TEST_ASSERT_EQUAL_INT(CY_OK, e2e::drive_round(net, now, now));
-        now += step_us;
-        guard++;
-        TEST_ASSERT_TRUE(guard < 20'000U);
-    }
-}
-
 void destroy_futures(std::vector<future_state_t>& futures)
 {
     for (future_state_t& f : futures) {
@@ -202,7 +183,7 @@ void destroy_all_handles(e2e::sim_net_t& net, handles_t& handles, cy_us_t& now)
             }
         }
     }
-    drive_for(net, now, 80'000);
+    e2e::drive_for(net, now, 80'000, step_us);
 
     for (std::size_t node = 0U; node < e2e::sim_node_count; node++) {
         for (std::size_t t = 0U; t < topic_count; t++) {
@@ -212,7 +193,7 @@ void destroy_all_handles(e2e::sim_net_t& net, handles_t& handles, cy_us_t& now)
             }
         }
     }
-    drive_for(net, now, 80'000);
+    e2e::drive_for(net, now, 80'000, step_us);
 }
 
 extern "C" void on_arrival_capture(cy_future_t* const sub)
@@ -452,7 +433,7 @@ e_case_result_t run_e_case(const e_case_config_t& cfg)
         }
     }
 
-    drive_for(net, now, 120'000);
+    e2e::drive_for(net, now, 120'000, step_us);
 
     for (std::size_t t = 0U; t < topic_count; t++) {
         result.topic_hashes.at(t) = topic_hash_for(e2e::sim_net_cy(net, e2e::sim_node_a), colliding_topics.at(t));
@@ -485,7 +466,7 @@ e_case_result_t run_e_case(const e_case_config_t& cfg)
                 handles.sub.at(e2e::sim_node_b).at(0U) = nullptr;
             }
             subscriber_destroyed = true;
-            drive_for(net, now, 80'000);
+            e2e::drive_for(net, now, 80'000, step_us);
         }
 
         for (std::size_t t = 0U; t < topic_count; t++) {
@@ -501,7 +482,7 @@ e_case_result_t run_e_case(const e_case_config_t& cfg)
         now += step_us;
     }
 
-    drive_for(net, now, 2'000'000);
+    e2e::drive_for(net, now, 2'000'000, step_us);
     wait_futures(net, now, futures, result.success_futures, result.failed_futures, result.pending_futures);
     TEST_ASSERT_EQUAL_size_t(0U, result.pending_futures);
 
@@ -525,14 +506,14 @@ e_case_result_t run_e_case(const e_case_config_t& cfg)
     destroy_futures(futures);
     destroy_all_handles(net, handles, now);
 
-    drain_queue(net, now);
+    e2e::drain_queue(net, now, step_us, 20'000U);
     e2e::assert_quiescent(net);
 
     g_stats.scenarios++;
     g_stats.async_errors += e2e::sim_net_async_errors(net).size();
 
     e2e::sim_net_deinit(net);
-    e2e::assert_all_heaps_clean(net);
+    e2e::assert_all_node_heaps_clean(net);
     e2e::assert_no_live_messages();
 
     return result;

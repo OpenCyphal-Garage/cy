@@ -1,19 +1,8 @@
 #include <cy.c> // NOLINT(bugprone-suspicious-include)
 #include <unity.h>
 #include "guarded_heap.h"
-#include "helpers.h"
+#include "intrusive_fixture_utils.h"
 #include <string.h>
-
-typedef struct
-{
-    cy_subject_writer_t base;
-} test_subject_writer_t;
-
-typedef struct
-{
-    cy_subject_reader_t base;
-    size_t              extent;
-} test_subject_reader_t;
 
 typedef struct
 {
@@ -23,7 +12,6 @@ typedef struct
     size_t        size;
     unsigned char data[HEADER_BYTES + CY_TOPIC_NAME_MAX];
     uint8_t       type;
-    uint8_t       ttl;
     int8_t        lage;
     uint64_t      hash;
     uint32_t      evictions;
@@ -49,11 +37,8 @@ typedef struct
 
     size_t   subject_send_count;
     size_t   unicast_send_count;
-    size_t   subject_reader_destroy_count;
-    size_t   subject_writer_destroy_count;
     size_t   async_error_count;
     cy_err_t last_async_error;
-    uint16_t last_async_error_line;
 
     size_t         capture_count;
     send_capture_t capture[CAPTURE_CAPACITY];
@@ -94,11 +79,9 @@ static void capture_send(fixture_t* const self,
     out->lane_id    = lane_id;
     out->size       = flatten_fragments(message, out->data, sizeof(out->data));
     if (out->size > 0U) {
-        out->type = out->data[0];
+        out->type = out->data[0] & 63U;
     }
     if ((out->type == header_gossip) && (out->size >= HEADER_BYTES)) {
-        // Gossip wire header layout in cy.c: ttl at byte 2, hash at 8, evictions at 16.
-        out->ttl       = out->data[2];
         out->lage      = (int8_t)out->data[3];
         out->hash      = deserialize_u64(&out->data[8]);
         out->evictions = deserialize_u32(&out->data[16]);
@@ -119,25 +102,19 @@ static uint64_t fixture_random(cy_platform_t* const platform)
     if ((self->rand_sequence != NULL) && (self->rand_sequence_index < self->rand_sequence_size)) {
         return self->rand_sequence[self->rand_sequence_index++];
     }
-    self->rand_state = (self->rand_state * UINT64_C(6364136223846793005)) + UINT64_C(1);
-    return self->rand_state;
+    return intrusive_random_lcg(&self->rand_state);
 }
 
 static cy_subject_writer_t* fixture_subject_writer_new(cy_platform_t* const platform, const uint32_t subject_id)
 {
-    fixture_t* const             self = fixture_from(platform);
-    test_subject_writer_t* const out  = (test_subject_writer_t*)guarded_heap_alloc(&self->heap, sizeof(*out));
-    if (out != NULL) {
-        out->base.subject_id = subject_id;
-    }
-    return (out != NULL) ? &out->base : NULL;
+    fixture_t* const self = fixture_from(platform);
+    return intrusive_subject_writer_new(&self->heap, subject_id);
 }
 
 static void fixture_subject_writer_destroy(cy_platform_t* const platform, cy_subject_writer_t* const writer)
 {
     fixture_t* const self = fixture_from(platform);
-    self->subject_writer_destroy_count++;
-    guarded_heap_free(&self->heap, writer);
+    intrusive_subject_writer_destroy(&self->heap, writer);
 }
 
 static cy_err_t fixture_subject_writer_send(cy_platform_t* const       platform,
@@ -158,20 +135,14 @@ static cy_subject_reader_t* fixture_subject_reader_new(cy_platform_t* const plat
                                                        const uint32_t       subject_id,
                                                        const size_t         extent)
 {
-    fixture_t* const             self = fixture_from(platform);
-    test_subject_reader_t* const out  = (test_subject_reader_t*)guarded_heap_alloc(&self->heap, sizeof(*out));
-    if (out != NULL) {
-        out->base.subject_id = subject_id;
-        out->extent          = extent;
-    }
-    return (out != NULL) ? &out->base : NULL;
+    fixture_t* const self = fixture_from(platform);
+    return intrusive_subject_reader_new(&self->heap, subject_id, extent);
 }
 
 static void fixture_subject_reader_destroy(cy_platform_t* const platform, cy_subject_reader_t* const reader)
 {
     fixture_t* const self = fixture_from(platform);
-    self->subject_reader_destroy_count++;
-    guarded_heap_free(&self->heap, reader);
+    intrusive_subject_reader_destroy(&self->heap, reader);
 }
 
 static cy_err_t fixture_unicast_send(cy_platform_t* const   platform,
@@ -202,10 +173,10 @@ static cy_err_t fixture_spin(cy_platform_t* const platform, const cy_us_t deadli
 static void fixture_on_async_error(cy_t* const cy, cy_topic_t* const topic, const cy_err_t error, const uint16_t line)
 {
     (void)topic;
+    (void)line;
     fixture_t* const self = fixture_from(cy->platform);
     self->async_error_count++;
-    self->last_async_error      = error;
-    self->last_async_error_line = line;
+    self->last_async_error = error;
 }
 
 static void fixture_init(fixture_t* const self)
@@ -254,8 +225,7 @@ static void fixture_deinit(fixture_t* const self)
         self->platform.cy = NULL;
         self->cy          = NULL;
     }
-    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&self->heap));
-    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&self->heap));
+    intrusive_assert_heap_clean(&self->heap);
 }
 
 static void fixture_set_random_sequence(fixture_t* const self, const uint64_t* const seq, const size_t size)
@@ -265,671 +235,414 @@ static void fixture_set_random_sequence(fixture_t* const self, const uint64_t* c
     self->rand_sequence_index = 0U;
 }
 
-static void fixture_set_now(fixture_t* const self, const cy_us_t now) { self->now = now; }
-
-static cy_lane_t make_lane(const uint64_t id, const uint8_t marker)
-{
-    cy_lane_t out    = { .id = id, .ctx = { { 0 } }, .prio = cy_prio_nominal };
-    out.ctx.state[0] = marker;
-    return out;
-}
-
-static cy_topic_t* fixture_make_topic(fixture_t* const self, const char* const name, const uint32_t evictions)
+static cy_topic_t* fixture_make_topic(fixture_t* const  self,
+                                      const char* const name,
+                                      const uint64_t    hash,
+                                      const uint32_t    evictions)
 {
     cy_topic_t*    out = NULL;
-    const cy_str_t nn  = cy_str(name);
-    const uint64_t hh  = topic_hash(nn);
-    const cy_err_t er  = topic_new(self->cy, &out, nn, hh, evictions, LAGE_MIN);
+    const cy_err_t er  = topic_new(self->cy, &out, cy_str(name), hash, evictions, LAGE_MIN);
     TEST_ASSERT_EQUAL_INT(CY_OK, er);
     TEST_ASSERT_NOT_NULL(out);
     return out;
 }
 
-static cy_topic_t* fixture_make_explicit_topic(fixture_t* const self, const char* const name, const uint32_t evictions)
+static cy_topic_t* fixture_make_explicit_topic(fixture_t* const  self,
+                                               const char* const name,
+                                               const uint64_t    hash,
+                                               const uint32_t    evictions)
 {
-    cy_topic_t* const out = fixture_make_topic(self, name, evictions);
+    cy_topic_t* const out = fixture_make_topic(self, name, hash, evictions);
     out->pub_count        = 1U;
-    delist(&self->cy->list_implicit, &out->list_implicit);
-    schedule_gossip(out);
+    topic_sync_implicit(out);
+    TEST_ASSERT_FALSE(is_implicit(out));
     return out;
 }
 
-static void fixture_set_peer(fixture_t* const self, const size_t index, const uint64_t id, const cy_us_t last_seen)
+static cy_lane_t make_lane(const uint64_t id)
 {
-    TEST_ASSERT(index < GOSSIP_PEER_COUNT);
-    self->cy->gossip_peers[index].id        = id;
-    self->cy->gossip_peers[index].last_seen = last_seen;
-    memset(self->cy->gossip_peers[index].unicast_ctx.state,
-           (int)(id & 0xFFU),
-           sizeof(self->cy->gossip_peers[index].unicast_ctx.state));
-}
-
-static void fixture_on_gossip(fixture_t* const   self,
-                              const cy_us_t      ts,
-                              const uint_fast8_t ttl,
-                              const uint64_t     hash,
-                              const uint32_t     evictions,
-                              const int_fast8_t  lage,
-                              const cy_str_t     name,
-                              cy_topic_t** const out_topic,
-                              const cy_lane_t    lane)
-{
-    gossip_peer_update(self->cy, ts, lane);
-    on_gossip(self->cy, ts, ttl, hash, evictions, lage, name, out_topic, lane);
-}
-
-static size_t dedup_seen_count(const fixture_t* const self)
-{
-    size_t out = 0U;
-    for (size_t i = 0U; i < GOSSIP_DEDUP_CAPACITY; i++) {
-        if (self->cy->gossip_dedup[i].last_seen > BIG_BANG) {
-            out++;
-        }
-    }
+    cy_lane_t out    = { .id = id, .ctx = { { 0 } }, .prio = cy_prio_nominal };
+    out.ctx.state[0] = (byte_t)(id & 0xFFU);
     return out;
 }
 
-static bool dedup_has_hash(const fixture_t* const self, const uint64_t hash)
+static bool all_captures_match_lane(const fixture_t* const fix, const uint64_t lane_id)
 {
-    for (size_t i = 0U; i < GOSSIP_DEDUP_CAPACITY; i++) {
-        if (self->cy->gossip_dedup[i].hash == hash) {
-            return true;
+    for (size_t i = 0U; i < fix->capture_count; i++) {
+        if (!fix->capture[i].unicast || (fix->capture[i].lane_id != lane_id)) {
+            return false;
         }
     }
-    return false;
+    return true;
 }
 
-static bool dedup_mark(fixture_t* const self, const cy_us_t now, const uint64_t hash)
-{
-    gossip_dedup_t* const dedup = gossip_dedup_match_or_lru(self->cy, hash);
-    const bool            fresh = gossip_dedup_is_fresh(dedup, hash, now);
-    gossip_dedup_update(dedup, hash, now);
-    return fresh;
-}
-
-static bool capture_has_lane(const fixture_t* const self, const uint64_t lane_id)
-{
-    for (size_t i = 0U; i < self->capture_count; i++) {
-        if (self->capture[i].lane_id == lane_id) {
-            return true;
-        }
-    }
-    return false;
-}
-
-static void test_gossip_dedup_first_duplicate_and_expiry(void)
+static void test_topic_gossip_shard_subject_id_deterministic_and_bounded(void)
 {
     fixture_t fix;
     fixture_init(&fix);
-    fixture_set_now(&fix, 1000);
 
-    const uint64_t h = gossip_dedup_hash(UINT64_C(0x1234567800001111), 3U, 1);
-    TEST_ASSERT_TRUE(dedup_mark(&fix, 1000, h));
-    TEST_ASSERT_FALSE(dedup_mark(&fix, 1001, h));
-    TEST_ASSERT_TRUE(dedup_mark(&fix, 1000 + GOSSIP_DEDUP_TIMEOUT + 2, h));
+    const uint64_t h1   = UINT64_C(0x1000000000001201);
+    const uint64_t h2   = UINT64_C(0x1000000000001302);
+    const uint32_t sid1 = topic_gossip_shard_subject_id(fix.cy, h1);
+    const uint32_t sid2 = topic_gossip_shard_subject_id(fix.cy, h2);
+
+    TEST_ASSERT_EQUAL_UINT32(sid1, topic_gossip_shard_subject_id(fix.cy, h1));
+    TEST_ASSERT_TRUE(sid1 > CY_SUBJECT_ID_MAX(fix.cy->platform->subject_id_modulus));
+    TEST_ASSERT_TRUE(sid1 < fix.cy->broad_reader->subject_id);
+    TEST_ASSERT_TRUE(sid2 > CY_SUBJECT_ID_MAX(fix.cy->platform->subject_id_modulus));
+    TEST_ASSERT_TRUE(sid2 < fix.cy->broad_reader->subject_id);
 
     fixture_deinit(&fix);
 }
 
-static void test_gossip_dedup_expiry_boundary_is_strictly_greater_than_timeout(void)
+static void test_send_gossip_raw_writer_lane_and_noop_paths(void)
 {
     fixture_t fix;
     fixture_init(&fix);
 
-    const uint64_t h1 = gossip_dedup_hash(UINT64_C(0x1001), 1U, 1);
-    TEST_ASSERT_TRUE(dedup_mark(&fix, 10000, h1));
-    TEST_ASSERT_FALSE(dedup_mark(&fix, 10000 + GOSSIP_DEDUP_TIMEOUT, h1));
+    const cy_lane_t lane = make_lane(UINT64_C(0x99));
+    const cy_str_t  name = cy_str("intrusive/gossip/raw");
 
-    const uint64_t h2 = gossip_dedup_hash(UINT64_C(0x1002), 2U, 2);
-    TEST_ASSERT_TRUE(dedup_mark(&fix, 20000, h2));
-    TEST_ASSERT_TRUE(dedup_mark(&fix, 20000 + GOSSIP_DEDUP_TIMEOUT + 1, h2));
-
-    fixture_deinit(&fix);
-}
-
-static void test_gossip_dedup_capacity_eviction_replaces_oldest(void)
-{
-    fixture_t fix;
-    fixture_init(&fix);
-    for (size_t i = 0U; i < GOSSIP_DEDUP_CAPACITY; i++) {
-        TEST_ASSERT_TRUE(dedup_mark(&fix, (cy_us_t)(1000 + (cy_us_t)i), (uint64_t)(100 + i)));
-    }
-    TEST_ASSERT_EQUAL_size_t(GOSSIP_DEDUP_CAPACITY, dedup_seen_count(&fix));
-    TEST_ASSERT_TRUE(dedup_mark(&fix, 2000, UINT64_C(9999)));
-    bool found_oldest = false;
-    bool found_new    = false;
-    for (size_t i = 0U; i < GOSSIP_DEDUP_CAPACITY; i++) {
-        found_oldest = found_oldest || (fix.cy->gossip_dedup[i].hash == UINT64_C(100));
-        found_new    = found_new || (fix.cy->gossip_dedup[i].hash == UINT64_C(9999));
-    }
-    TEST_ASSERT_FALSE(found_oldest);
-    TEST_ASSERT_TRUE(found_new);
-    fixture_deinit(&fix);
-}
-
-static void test_gossip_dedup_update_on_send_prevents_immediate_reforward(void)
-{
-    fixture_t fix;
-    fixture_init(&fix);
-    const uint64_t h = gossip_dedup_hash(UINT64_C(0x9999), 4U, 2);
-    TEST_ASSERT_TRUE(dedup_mark(&fix, 10, h));
-    TEST_ASSERT_FALSE(dedup_mark(&fix, 11, h));
-    fixture_deinit(&fix);
-}
-
-static void test_gossip_random_peer_except_filters_stale_blacklisted_and_empty(void)
-{
-    fixture_t fix;
-    fixture_init(&fix);
-    const cy_us_t now = 10 * MEGA;
-    fixture_set_peer(&fix, 0U, UINT64_C(10), now - (GOSSIP_PERIOD_DEFAULT * 4));
-    fixture_set_peer(&fix, 1U, UINT64_C(20), now);
-    fixture_set_peer(&fix, 2U, UINT64_C(30), now);
-    const uint64_t seq[] = { 0U, 1U, 2U, 3U, 4U, 5U };
-    fixture_set_random_sequence(&fix, seq, sizeof(seq) / sizeof(seq[0]));
-
-    const uint64_t       blacklist1[] = { UINT64_C(20) };
-    gossip_peer_t* const p1           = gossip_random_peer_except(fix.cy, now, 1U, blacklist1);
-    TEST_ASSERT_NOT_NULL(p1);
-    TEST_ASSERT_EQUAL_UINT64(UINT64_C(30), p1->id);
-
-    const uint64_t blacklist2[] = { UINT64_C(20), UINT64_C(30) };
-    TEST_ASSERT_NULL(gossip_random_peer_except(fix.cy, now, 2U, blacklist2));
-    fixture_deinit(&fix);
-}
-
-static void test_gossip_random_peer_except_deterministic_selection_sanity(void)
-{
-    fixture_t fix;
-    fixture_init(&fix);
-    const cy_us_t now = 5 * MEGA;
-    fixture_set_peer(&fix, 0U, UINT64_C(100), now);
-    fixture_set_peer(&fix, 1U, UINT64_C(200), now);
-    fixture_set_peer(&fix, 2U, UINT64_C(300), now);
-    const uint64_t seq[] = { 0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U, 8U };
-    fixture_set_random_sequence(&fix, seq, sizeof(seq) / sizeof(seq[0]));
-
-    bool hit100 = false;
-    bool hit200 = false;
-    bool hit300 = false;
-    for (size_t i = 0U; i < 9U; i++) {
-        gossip_peer_t* const p = gossip_random_peer_except(fix.cy, now, 0U, NULL);
-        TEST_ASSERT_NOT_NULL(p);
-        hit100 = hit100 || (p->id == UINT64_C(100));
-        hit200 = hit200 || (p->id == UINT64_C(200));
-        hit300 = hit300 || (p->id == UINT64_C(300));
-    }
-    TEST_ASSERT_TRUE(hit100 && hit200 && hit300);
-    fixture_deinit(&fix);
-}
-
-static void test_send_gossip_raw_no_transport_is_noop(void)
-{
-    fixture_t fix;
-    fixture_init(&fix);
-    gossip_begin(fix.cy);
-    const cy_err_t err = send_gossip_raw(fix.cy, 100U, 3U, UINT64_C(0xD100000000000001), 0U, 0, str_empty, NULL, NULL);
-    TEST_ASSERT_EQUAL_INT(CY_OK, err);
+    TEST_ASSERT_EQUAL_INT(CY_OK, send_gossip_raw(fix.cy, 1000, UINT64_C(0x1000000000001234), 7U, -2, name, NULL, NULL));
     TEST_ASSERT_EQUAL_size_t(0U, fix.subject_send_count);
     TEST_ASSERT_EQUAL_size_t(0U, fix.unicast_send_count);
-    fixture_deinit(&fix);
-}
 
-static void test_send_gossip_raw_writer_and_lane_paths(void)
-{
-    fixture_t fix;
-    fixture_init(&fix);
-    gossip_begin(fix.cy);
+    TEST_ASSERT_EQUAL_INT(
+      CY_OK, send_gossip_raw(fix.cy, 1000, UINT64_C(0x1000000000001234), 7U, -2, name, fix.cy->broad_writer, NULL));
+    TEST_ASSERT_EQUAL_size_t(1U, fix.subject_send_count);
+    TEST_ASSERT_EQUAL_size_t(0U, fix.unicast_send_count);
 
-    const cy_lane_t lane = make_lane(UINT64_C(0x701), 0x71U);
-    cy_err_t        err  = send_gossip_raw(
-      fix.cy, 200U, 5U, UINT64_C(0xD100000000000002), 3U, 1, cy_str("gossip/send/raw"), fix.cy->broad_writer, &lane);
-    TEST_ASSERT_EQUAL_INT(CY_OK, err);
+    TEST_ASSERT_EQUAL_INT(CY_OK,
+                          send_gossip_raw(fix.cy, 1000, UINT64_C(0x1000000000001234), 7U, -2, name, NULL, &lane));
     TEST_ASSERT_EQUAL_size_t(1U, fix.subject_send_count);
     TEST_ASSERT_EQUAL_size_t(1U, fix.unicast_send_count);
-    TEST_ASSERT_EQUAL_UINT8(0U, fix.capture[0].ttl); // broadcast forces zero TTL
-    TEST_ASSERT_EQUAL_UINT8(0U, fix.capture[1].ttl); // shared frame when both writer and lane are provided
-    TEST_ASSERT_EQUAL_UINT64(lane.id, fix.capture[1].lane_id);
 
-    fix.fail_subject_send = true;
-    err =
-      send_gossip_raw(fix.cy, 201U, 4U, UINT64_C(0xD100000000000003), 1U, 0, str_empty, fix.cy->broad_writer, &lane);
-    TEST_ASSERT_EQUAL_INT(CY_ERR_MEDIA, err);
+    TEST_ASSERT_EQUAL_INT(
+      CY_OK, send_gossip_raw(fix.cy, 1000, UINT64_C(0x1000000000001234), 7U, -2, name, fix.cy->broad_writer, &lane));
     TEST_ASSERT_EQUAL_size_t(2U, fix.subject_send_count);
-    TEST_ASSERT_EQUAL_size_t(1U, fix.unicast_send_count); // writer failure short-circuits unicast send
-    fixture_deinit(&fix);
-}
-
-static void test_on_gossip_peer_fill_update_and_replacement_policy(void)
-{
-    fixture_t fix;
-    fixture_init(&fix);
-    for (size_t i = 0U; i < GOSSIP_PEER_COUNT; i++) {
-        fixture_set_peer(&fix, i, UINT64_C(1000) + (uint64_t)i, 10U);
-    }
-    fixture_set_peer(&fix, 0U, UINT64_C(1000), BIG_BANG);
-
-    const cy_lane_t lane_new = make_lane(UINT64_C(5555), 0xA5U);
-    fixture_on_gossip(&fix, 10, 1U, UINT64_C(0x123456), 0U, 0, str_empty, NULL, lane_new);
-    gossip_peer_t* peer = gossip_peer_find(fix.cy, UINT64_C(5555));
-    TEST_ASSERT_NOT_NULL(peer);
-    TEST_ASSERT_EQUAL_INT(10, peer->last_seen);
-    TEST_ASSERT_EQUAL_UINT8(0xA5U, peer->unicast_ctx.state[0]);
-
-    const cy_lane_t lane_update = make_lane(UINT64_C(5555), 0x5AU);
-    fixture_on_gossip(&fix, 20, 1U, UINT64_C(0x123457), 0U, 0, str_empty, NULL, lane_update);
-    peer = gossip_peer_find(fix.cy, UINT64_C(5555));
-    TEST_ASSERT_NOT_NULL(peer);
-    TEST_ASSERT_EQUAL_INT(20, peer->last_seen);
-    TEST_ASSERT_EQUAL_UINT8(0x5AU, peer->unicast_ctx.state[0]);
-
-    fix.cy->gossip_peer_replacement_moratorium_until = 1000;
-    const cy_lane_t lane_blocked                     = make_lane(UINT64_C(7777), 0x77U);
-    fixture_on_gossip(&fix, 100, 1U, UINT64_C(0xABCDE0), 0U, 0, str_empty, NULL, lane_blocked);
-    TEST_ASSERT_NULL(gossip_peer_find(fix.cy, UINT64_C(7777)));
-
-    fix.cy->gossip_peer_replacement_moratorium_until = 0;
-    {
-        const uint64_t seq_no_replace[] = { 1U }; // chance false (1 % 8 != 0)
-        fixture_set_random_sequence(&fix, seq_no_replace, 1U);
-        fixture_on_gossip(&fix, 2000, 1U, UINT64_C(0xABCDE1), 0U, 0, str_empty, NULL, lane_blocked);
-        TEST_ASSERT_NULL(gossip_peer_find(fix.cy, UINT64_C(7777)));
-    }
-    {
-        const uint64_t seq_replace[] = { 0U, 3U, 0U }; // chance true, choose slot 3, then dither
-        fixture_set_random_sequence(&fix, seq_replace, 3U);
-        fixture_on_gossip(&fix, 3000, 1U, UINT64_C(0xABCDE2), 0U, 0, str_empty, NULL, lane_blocked);
-        TEST_ASSERT_NOT_NULL(gossip_peer_find(fix.cy, UINT64_C(7777)));
-    }
-    {
-        const cy_us_t  moratorium  = fix.cy->gossip_peer_replacement_moratorium_until;
-        const uint64_t seq_again[] = { 0U, 0U, 0U };
-        fixture_set_random_sequence(&fix, seq_again, 3U);
-        fixture_on_gossip(
-          &fix, moratorium - 1, 1U, UINT64_C(0xABCDE3), 0U, 0, str_empty, NULL, make_lane(UINT64_C(8888), 0x88U));
-        TEST_ASSERT_NULL(gossip_peer_find(fix.cy, UINT64_C(8888)));
-    }
-    fixture_deinit(&fix);
-}
-
-static void test_on_gossip_peer_replacement_moratorium_boundary_inclusive(void)
-{
-    fixture_t fix;
-    fixture_init(&fix);
-    const cy_us_t ts_base = GOSSIP_PERIOD_DEFAULT * 10;
-
-    for (size_t i = 0U; i < GOSSIP_PEER_COUNT; i++) {
-        fixture_set_peer(&fix, i, UINT64_C(2000) + (uint64_t)i, ts_base);
-    }
-    fix.cy->gossip_peer_replacement_moratorium_until = ts_base + 1000;
-
-    const uint64_t seq[] = { 0U, 0U, 0U, 0U, 0U }; // chance=true, deterministic slot/dither
-    fixture_set_random_sequence(&fix, seq, sizeof(seq) / sizeof(seq[0]));
-    fixture_on_gossip(
-      &fix, ts_base + 1000, 1U, UINT64_C(0xC001), 0U, 0, str_empty, NULL, make_lane(UINT64_C(7777), 0x77U));
-    TEST_ASSERT_NOT_NULL(gossip_peer_find(fix.cy, UINT64_C(7777)));
-
-    fixture_deinit(&fix);
-}
-
-static void test_on_gossip_ttl_zero_and_duplicate_are_not_forwarded(void)
-{
-    fixture_t fix;
-    fixture_init(&fix);
-    const cy_us_t now = 100U;
-    fixture_set_peer(&fix, 0U, UINT64_C(10), now);
-    fixture_set_peer(&fix, 1U, UINT64_C(20), now);
-    fixture_set_peer(&fix, 2U, UINT64_C(30), now);
-
-    const cy_lane_t lane = make_lane(UINT64_C(99), 0x99U);
-    fixture_on_gossip(&fix, now, 0U, UINT64_C(0xA1), 1U, 0, str_empty, NULL, lane);
-    TEST_ASSERT_EQUAL_size_t(0U, fix.unicast_send_count);
-
-    const uint64_t seq[] = { 0U, 1U, 2U, 3U, 4U, 5U };
-    fixture_set_random_sequence(&fix, seq, sizeof(seq) / sizeof(seq[0]));
-    fixture_on_gossip(&fix, now + 1, 5U, UINT64_C(0xA2), 2U, 0, str_empty, NULL, lane);
-    const size_t first_count = fix.unicast_send_count;
-    TEST_ASSERT_TRUE(first_count > 0U);
-    fixture_on_gossip(&fix, now + 2, 5U, UINT64_C(0xA2), 2U, 0, str_empty, NULL, lane);
-    TEST_ASSERT_EQUAL_size_t(first_count, fix.unicast_send_count);
-
-    fixture_deinit(&fix);
-}
-
-static void test_on_gossip_forward_decrements_ttl_blacklists_sender_and_limits_fanout(void)
-{
-    fixture_t fix;
-    fixture_init(&fix);
-    const cy_us_t now = 200U;
-    fixture_set_peer(&fix, 0U, UINT64_C(99), now); // sender, must be excluded
-    fixture_set_peer(&fix, 1U, UINT64_C(10), now);
-    fixture_set_peer(&fix, 2U, UINT64_C(20), now);
-    fixture_set_peer(&fix, 3U, UINT64_C(30), now);
-
-    const uint64_t seq[] = { 0U, 1U, 2U, 3U };
-    fixture_set_random_sequence(&fix, seq, sizeof(seq) / sizeof(seq[0]));
-    fixture_on_gossip(&fix, now, 7U, UINT64_C(0xB1), 3U, 1, str_empty, NULL, make_lane(UINT64_C(99), 0x11U));
-    TEST_ASSERT_EQUAL_size_t(GOSSIP_OUTDEGREE, fix.unicast_send_count);
-    TEST_ASSERT_FALSE(capture_has_lane(&fix, UINT64_C(99)));
-    for (size_t i = 0U; i < fix.capture_count; i++) {
-        TEST_ASSERT_EQUAL_UINT8(header_gossip, fix.capture[i].type);
-        TEST_ASSERT_EQUAL_UINT8(6U, fix.capture[i].ttl);
-    }
-    fixture_deinit(&fix);
-}
-
-static void test_on_gossip_local_win_suppresses_forward_and_schedules_urgent(void)
-{
-    fixture_t fix;
-    fixture_init(&fix);
-    cy_topic_t* const topic = fixture_make_topic(&fix, "gossip/local/win", 5U);
-    topic_merge_lage(topic, 1000, 5);
-    fixture_set_peer(&fix, 0U, UINT64_C(10), 1000);
-    fixture_set_peer(&fix, 1U, UINT64_C(20), 1000);
-    const uint64_t evictions_before = topic->evictions;
-    fixture_on_gossip(&fix, 1000, 5U, topic->hash, 4U, 1, str_empty, NULL, make_lane(UINT64_C(50), 0x22U));
-    TEST_ASSERT_EQUAL_UINT64(evictions_before, topic->evictions);
-    TEST_ASSERT_EQUAL_size_t(0U, fix.unicast_send_count);
-    TEST_ASSERT_TRUE(is_listed(&fix.cy->list_gossip_urgent, &topic->list_gossip_urgent));
-    fixture_deinit(&fix);
-}
-
-static void test_on_gossip_local_lose_suppresses_forward_and_schedules_urgent(void)
-{
-    fixture_t fix;
-    fixture_init(&fix);
-    cy_topic_t* const topic = fixture_make_topic(&fix, "gossip/local/lose", 1U);
-    topic_merge_lage(topic, 2000, 1);
-    fixture_set_peer(&fix, 0U, UINT64_C(10), 2000);
-    fixture_set_peer(&fix, 1U, UINT64_C(20), 2000);
-    const uint64_t seq[] = { 0U, 1U, 2U, 3U };
-    fixture_set_random_sequence(&fix, seq, sizeof(seq) / sizeof(seq[0]));
-    fixture_on_gossip(&fix, 2000, 4U, topic->hash, 9U, 1, str_empty, NULL, make_lane(UINT64_C(40), 0x33U));
-    TEST_ASSERT_EQUAL_UINT32(9U, topic->evictions);
-    TEST_ASSERT_EQUAL_size_t(0U, fix.unicast_send_count); // known-topic local-loss no longer forwards
-    TEST_ASSERT_TRUE(is_listed(&fix.cy->list_gossip_urgent, &topic->list_gossip_urgent));
-    fixture_deinit(&fix);
-}
-
-static void test_on_gossip_unknown_out_topic_forward_and_error_reporting(void)
-{
-    fixture_t fix;
-    fixture_init(&fix);
-    const cy_us_t now = 4000U;
-
-    fixture_set_peer(&fix, 0U, UINT64_C(10), now);
-    fixture_set_peer(&fix, 1U, UINT64_C(20), now);
-    fixture_set_peer(&fix, 2U, UINT64_C(30), now);
-    const uint64_t seq[] = { 0U, 1U, 2U, 3U };
-    fixture_set_random_sequence(&fix, seq, sizeof(seq) / sizeof(seq[0]));
-
-    cy_topic_t  dummy_topic = { 0 };
-    cy_topic_t* out_topic   = &dummy_topic;
-    fix.fail_unicast_send   = true;
-    fixture_on_gossip(
-      &fix, now, 3U, UINT64_C(0x1000000000AA0011), 2U, 0, str_empty, &out_topic, make_lane(UINT64_C(999), 0x99U));
-    TEST_ASSERT_NULL(out_topic);
-    TEST_ASSERT_TRUE(fix.unicast_send_count > 0U); // unknown topic gossip forwarded
-    TEST_ASSERT_TRUE(fix.async_error_count > 0U);  // forwarding failures reported
-    fixture_deinit(&fix);
-}
-
-static void test_on_scout_broadcast_soon_and_unicast_paths(void)
-{
-    fixture_t fix;
-    fixture_init(&fix);
-    cy_topic_t* const topic = fixture_make_explicit_topic(&fix, "gossip/scout/cb/topic", 0U);
-    const cy_lane_t   lane  = make_lane(UINT64_C(0xCAFE), 0xCAU);
-    const cy_us_t     now   = 1000U;
-
-    fix.cy->gossip_next = now + (KILO * 50); // <= now+100k, broadcast soon
-    on_scout(fix.cy, now, cy_str("gossip/scout/cb/>"), lane);
-    TEST_ASSERT_EQUAL_size_t(0U, fix.unicast_send_count);
-
-    fix.cy->gossip_next = now + (KILO * 200); // > now+100k, unicast scout response
-    on_scout(fix.cy, now + 1U, cy_str("gossip/scout/cb/>"), lane);
-    TEST_ASSERT_TRUE(fix.unicast_send_count > 0U);
+    TEST_ASSERT_EQUAL_size_t(2U, fix.unicast_send_count);
+    TEST_ASSERT_TRUE(fix.capture_count >= 2U);
     TEST_ASSERT_EQUAL_UINT8(header_gossip, fix.capture[fix.capture_count - 1U].type);
-    TEST_ASSERT_EQUAL_UINT64(topic->hash, fix.capture[fix.capture_count - 1U].hash);
+    TEST_ASSERT_EQUAL_INT8(-2, fix.capture[fix.capture_count - 1U].lage);
+
     fixture_deinit(&fix);
 }
 
-static void test_on_scout_broadcast_soon_non_tail_triggers_unicast_and_reports_errors(void)
+static void test_send_gossip_raw_writer_failure_skips_unicast(void)
 {
     fixture_t fix;
     fixture_init(&fix);
-    fixture_make_explicit_topic(&fix, "gossip/scout/multi/a", 0U);
-    fixture_make_explicit_topic(&fix, "gossip/scout/multi/b", 0U);
-    const cy_lane_t lane = make_lane(UINT64_C(0xD00D), 0xD0U);
-    const cy_us_t   now  = 2000U;
 
-    fix.cy->gossip_next       = now + (KILO * 10); // broadcast soon
-    fix.fail_unicast_send     = true;
-    const size_t async_before = fix.async_error_count;
-    on_scout(fix.cy, now, cy_str("gossip/scout/multi/>"), lane);
-
-    TEST_ASSERT_EQUAL_size_t(1U, fix.unicast_send_count); // non-tail match still uses unicast
-    TEST_ASSERT_TRUE(capture_has_lane(&fix, lane.id));
-    TEST_ASSERT_TRUE(fix.async_error_count > async_before);
-    fixture_deinit(&fix);
-}
-
-static void test_gossip_poll_broadcast_path_due_and_dedup_success_only(void)
-{
-    fixture_t fix;
-    fixture_init(&fix);
-    fixture_set_now(&fix, 1000);
-    cy_topic_t* const topic = fixture_make_explicit_topic(&fix, "gossip/poll/broadcast", 0U);
-    fix.cy->gossip_next     = 1000;
+    const cy_lane_t lane = make_lane(UINT64_C(0x101));
+    const cy_str_t  name = cy_str("intrusive/gossip/raw/fail");
 
     fix.fail_subject_send = true;
-    gossip_poll(fix.cy, 1000);
+    TEST_ASSERT_EQUAL_INT(
+      CY_ERR_MEDIA,
+      send_gossip_raw(fix.cy, 1000, UINT64_C(0x1000000000001235), 0U, -1, name, fix.cy->broad_writer, &lane));
     TEST_ASSERT_EQUAL_size_t(1U, fix.subject_send_count);
-    TEST_ASSERT_EQUAL_size_t(0U, dedup_seen_count(&fix));
+    TEST_ASSERT_EQUAL_size_t(0U, fix.unicast_send_count);
 
-    fix.fail_subject_send = false;
-    fix.cy->gossip_next   = 1001;
-    gossip_poll(fix.cy, 1001);
-    TEST_ASSERT_TRUE(dedup_seen_count(&fix) > 0U);
-    TEST_ASSERT_TRUE(fix.cy->gossip_next > 1001);
-    (void)topic;
     fixture_deinit(&fix);
 }
 
-static void test_gossip_poll_urgent_path_and_unique_unicast(void)
+static void test_schedule_gossip_periodic_requires_nonimplicit_nonpinned_topic(void)
 {
     fixture_t fix;
     fixture_init(&fix);
-    fixture_set_now(&fix, 3000);
-    cy_topic_t* const topic = fixture_make_explicit_topic(&fix, "gossip/poll/urgent", 0U);
-    schedule_gossip_urgent(topic);
-    fix.cy->gossip_next = 4000;
-    fixture_set_peer(&fix, 0U, UINT64_C(10), 3000);
-    fixture_set_peer(&fix, 1U, UINT64_C(20), 3000);
-    fixture_set_peer(&fix, 2U, UINT64_C(30), 3000);
-    const uint64_t seq[] = { 0U, 1U, 2U, 3U };
-    fixture_set_random_sequence(&fix, seq, sizeof(seq) / sizeof(seq[0]));
-    gossip_poll(fix.cy, 3000);
+
+    cy_topic_t* const explicit_topic =
+      fixture_make_explicit_topic(&fix, "intrusive/gossip/explicit#1000000000001200", UINT64_C(0x1000000000001200), 0U);
+    cy_topic_t* const pinned_topic = fixture_make_topic(&fix, "intrusive/gossip/pinned", UINT64_C(123), 0U);
+
+    unschedule_gossip(explicit_topic);
+    schedule_gossip_periodic(explicit_topic, 1000, false);
+    TEST_ASSERT_TRUE(olga_is_pending(&fix.cy->olga, &explicit_topic->gossip_event));
+    TEST_ASSERT_TRUE(explicit_topic->gossip_event.handler == gossip_event_periodic);
+
+    schedule_gossip_periodic(pinned_topic, 1000, false);
+    TEST_ASSERT_FALSE(olga_is_pending(&fix.cy->olga, &pinned_topic->gossip_event));
+
+    fixture_deinit(&fix);
+}
+
+static void test_schedule_gossip_urgent_preempts_periodic_deadline(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    cy_topic_t* const topic =
+      fixture_make_explicit_topic(&fix, "intrusive/gossip/urgent#1000000000001201", UINT64_C(0x1000000000001201), 0U);
+
+    unschedule_gossip(topic);
+
+    const uint64_t seq_periodic[] = { UINT64_C(0xFFFFFFFFFFFFFFFF) };
+    fixture_set_random_sequence(&fix, seq_periodic, 1U);
+    schedule_gossip_periodic(topic, 10 * MEGA, false);
+    TEST_ASSERT_TRUE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
+    const cy_us_t periodic_deadline = topic->gossip_event.deadline;
+
+    const uint64_t seq_urgent[] = { 0U };
+    fixture_set_random_sequence(&fix, seq_urgent, 1U);
+    schedule_gossip_urgent(topic, 10 * MEGA);
+
+    TEST_ASSERT_TRUE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
+    TEST_ASSERT_TRUE(topic->gossip_event.handler == gossip_event_urgent);
+    TEST_ASSERT_TRUE(topic->gossip_event.deadline <= periodic_deadline);
+
+    fixture_deinit(&fix);
+}
+
+static void test_on_gossip_known_topic_local_win_schedules_urgent(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    const cy_us_t     now   = 20 * MEGA;
+    cy_topic_t* const topic = fixture_make_explicit_topic(
+      &fix, "intrusive/gossip/known/win#1000000000001202", UINT64_C(0x1000000000001202), 6U);
+
+    topic_merge_lage(topic, now, 5);
+    unschedule_gossip(topic);
+
+    on_gossip_known_topic(fix.cy, now, topic, 5U, topic_lage(topic, now), gossip_unicast);
+
+    TEST_ASSERT_EQUAL_UINT32(6U, topic->evictions);
+    TEST_ASSERT_TRUE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
+    TEST_ASSERT_TRUE(topic->gossip_event.handler == gossip_event_urgent);
+
+    fixture_deinit(&fix);
+}
+
+static void test_on_gossip_known_topic_local_loss_reallocates_and_suppresses_urgent_when_not_needed(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    const cy_us_t     now   = 21 * MEGA;
+    cy_topic_t* const topic = fixture_make_explicit_topic(
+      &fix, "intrusive/gossip/known/loss#1000000000001203", UINT64_C(0x1000000000001203), 1U);
+
+    topic_merge_lage(topic, now, 1);
+    unschedule_gossip(topic);
+
+    on_gossip_known_topic(fix.cy, now, topic, 4U, 8, gossip_broadcast);
+
+    TEST_ASSERT_EQUAL_UINT32(4U, topic->evictions);
+    TEST_ASSERT_TRUE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
+    TEST_ASSERT_TRUE(topic->gossip_event.handler == gossip_event_periodic);
+
+    fixture_deinit(&fix);
+}
+
+static void test_on_gossip_known_topic_consensus_scope_suppression_rules(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    const cy_us_t     now   = 22 * MEGA;
+    cy_topic_t* const topic = fixture_make_explicit_topic(
+      &fix, "intrusive/gossip/known/consensus#1000000000001204", UINT64_C(0x1000000000001204), 0U);
+
+    topic_merge_lage(topic, now, 3);
+    unschedule_gossip(topic);
+
+    const uint64_t seq_unsuppressed[] = { 0U };
+    fixture_set_random_sequence(&fix, seq_unsuppressed, 1U);
+    schedule_gossip_periodic(topic, now, false);
+    const cy_us_t baseline_deadline = topic->gossip_event.deadline;
+
+    const uint64_t seq_broadcast[] = { 0U };
+    fixture_set_random_sequence(&fix, seq_broadcast, 1U);
+    on_gossip_known_topic(fix.cy, now + 1, topic, topic->evictions, topic_lage(topic, now + 1), gossip_broadcast);
+    const cy_us_t suppressed_deadline = topic->gossip_event.deadline;
+
+    TEST_ASSERT_TRUE(topic->gossip_event.handler == gossip_event_periodic);
+    TEST_ASSERT_TRUE(suppressed_deadline > baseline_deadline);
+
+    unschedule_gossip(topic);
+    fixture_set_random_sequence(&fix, seq_unsuppressed, 1U);
+    schedule_gossip_periodic(topic, now, false);
+    const cy_us_t unicast_before = topic->gossip_event.deadline;
+
+    on_gossip_known_topic(fix.cy, now + 1, topic, topic->evictions, topic_lage(topic, now + 1), gossip_unicast);
+    TEST_ASSERT_EQUAL_UINT64(unicast_before, topic->gossip_event.deadline);
+
+    const uint64_t seq_urgent[] = { 0U };
+    fixture_set_random_sequence(&fix, seq_urgent, 1U);
+    schedule_gossip_urgent(topic, now);
+    TEST_ASSERT_TRUE(topic->gossip_event.handler == gossip_event_urgent);
+    const cy_us_t sharded_before = topic->gossip_event.deadline;
+
+    on_gossip_known_topic(fix.cy, now, topic, topic->evictions, topic_lage(topic, now), gossip_sharded);
+    TEST_ASSERT_TRUE(topic->gossip_event.handler == gossip_event_urgent);
+    TEST_ASSERT_EQUAL_UINT64(sharded_before, topic->gossip_event.deadline);
+
+    fixture_deinit(&fix);
+}
+
+static void test_on_gossip_unknown_topic_collision_win_and_loss(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    const cy_us_t  now       = 23 * MEGA;
+    const uint64_t mod       = (uint64_t)fix.cy->platform->subject_id_modulus;
+    const uint64_t base_hash = UINT64_C(0x1000000000001205);
+    const uint64_t remote    = base_hash + mod;
+
+    cy_topic_t* const topic = fixture_make_explicit_topic(&fix, "intrusive/gossip/unknown/local", base_hash, 0U);
+    topic_merge_lage(topic, now, 4);
+    unschedule_gossip(topic);
+
+    on_gossip_unknown_topic(fix.cy, now, remote, 0U, 1);
+    TEST_ASSERT_TRUE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
+    TEST_ASSERT_TRUE(topic->gossip_event.handler == gossip_event_urgent);
+    const uint32_t ev_before_loss = topic->evictions;
+
+    on_gossip_unknown_topic(fix.cy, now + MEGA, remote, 0U, 12);
+    TEST_ASSERT_TRUE(topic->evictions > ev_before_loss);
+
+    fixture_deinit(&fix);
+}
+
+static void test_gossip_event_periodic_uses_broadcast_then_shard_writer(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    cy_topic_t* const topic = fixture_make_explicit_topic(
+      &fix, "intrusive/gossip/periodic/shard#1000000000001206", UINT64_C(0x1000000000001206), 0U);
+
+    fix.capture_count      = 0U;
+    fix.subject_send_count = 0U;
+
+    topic->gossip_counter       = 0;
+    topic->gossip_event.user    = topic;
+    topic->gossip_event.handler = gossip_event_periodic;
+    gossip_event_periodic(&fix.cy->olga, &topic->gossip_event, 24 * MEGA);
+
+    TEST_ASSERT_TRUE(fix.subject_send_count > 0U);
+    TEST_ASSERT_EQUAL_UINT32(fix.cy->broad_reader->subject_id, fix.capture[0].subject_id);
+
+    fix.capture_count      = 0U;
+    fix.subject_send_count = 0U;
+    topic->gossip_counter  = fix.cy->gossip_broadcast_ratio;
+    topic->gossip_counter++;
+    topic->gossip_event.user    = topic;
+    topic->gossip_event.handler = gossip_event_periodic;
+    gossip_event_periodic(&fix.cy->olga, &topic->gossip_event, 25 * MEGA);
+
+    TEST_ASSERT_TRUE(fix.subject_send_count > 0U);
+    TEST_ASSERT_EQUAL_UINT32(topic_gossip_shard_subject_id(fix.cy, topic->hash), fix.capture[0].subject_id);
+
+    fix.capture_count           = 0U;
+    fix.subject_send_count      = 0U;
+    topic->gossip_counter       = fix.cy->gossip_broadcast_ratio;
+    topic->gossip_event.user    = topic;
+    topic->gossip_event.handler = gossip_event_periodic;
+    gossip_event_periodic(&fix.cy->olga, &topic->gossip_event, 26 * MEGA);
+
+    TEST_ASSERT_TRUE(fix.subject_send_count > 0U);
+    TEST_ASSERT_EQUAL_UINT32(fix.cy->broad_reader->subject_id, fix.capture[0].subject_id);
+
+    fixture_deinit(&fix);
+}
+
+static void test_gossip_event_periodic_reports_async_error_on_send_failure(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    cy_topic_t* const topic = fixture_make_explicit_topic(
+      &fix, "intrusive/gossip/periodic/fail#1000000000001208", UINT64_C(0x1000000000001208), 0U);
+
+    fix.fail_subject_send       = true;
+    fix.async_error_count       = 0U;
+    fix.subject_send_count      = 0U;
+    topic->gossip_counter       = 0;
+    topic->gossip_event.user    = topic;
+    topic->gossip_event.handler = gossip_event_periodic;
+    gossip_event_periodic(&fix.cy->olga, &topic->gossip_event, 27 * MEGA);
+
+    TEST_ASSERT_TRUE(fix.subject_send_count > 0U);
+    TEST_ASSERT_EQUAL_size_t(1U, fix.async_error_count);
+    TEST_ASSERT_EQUAL_INT(CY_ERR_MEDIA, fix.last_async_error);
+
+    fixture_deinit(&fix);
+}
+
+static void test_gossip_event_urgent_broadcasts_and_resets_counter(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    cy_topic_t* const topic = fixture_make_explicit_topic(
+      &fix, "intrusive/gossip/urgent/event#1000000000001207", UINT64_C(0x1000000000001207), 0U);
+
+    fix.capture_count           = 0U;
+    fix.subject_send_count      = 0U;
+    topic->gossip_counter       = 77;
+    topic->gossip_event.user    = topic;
+    topic->gossip_event.handler = gossip_event_urgent;
+
+    gossip_event_urgent(&fix.cy->olga, &topic->gossip_event, 26 * MEGA);
+
+    TEST_ASSERT_EQUAL_UINT8(0U, topic->gossip_counter);
+    TEST_ASSERT_TRUE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
+    TEST_ASSERT_TRUE(topic->gossip_event.handler == gossip_event_periodic);
+    TEST_ASSERT_TRUE(fix.subject_send_count > 0U);
+    TEST_ASSERT_EQUAL_UINT32(fix.cy->broad_reader->subject_id, fix.capture[0].subject_id);
+
+    fixture_deinit(&fix);
+}
+
+static void test_on_scout_responds_via_unicast_only(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    (void)fixture_make_explicit_topic(
+      &fix, "intrusive/gossip/scout/one#1000000000001210", UINT64_C(0x1000000000001210), 0U);
+    (void)fixture_make_explicit_topic(
+      &fix, "intrusive/gossip/scout/two#1000000000001211", UINT64_C(0x1000000000001211), 0U);
+
+    fix.capture_count      = 0U;
+    fix.unicast_send_count = 0U;
+    fix.subject_send_count = 0U;
+
+    on_scout(fix.cy, 27 * MEGA, cy_str("intrusive/gossip/scout/>"), make_lane(UINT64_C(0xABC)));
+
     TEST_ASSERT_EQUAL_size_t(0U, fix.subject_send_count);
-    TEST_ASSERT_EQUAL_size_t(GOSSIP_OUTDEGREE, fix.unicast_send_count);
-    TEST_ASSERT_NOT_EQUAL(fix.capture[0].lane_id, fix.capture[1].lane_id);
-    TEST_ASSERT_FALSE(is_listed(&fix.cy->list_gossip_urgent, &topic->list_gossip_urgent));
+    TEST_ASSERT_EQUAL_size_t(2U, fix.unicast_send_count);
+    TEST_ASSERT_EQUAL_size_t(2U, fix.capture_count);
+    TEST_ASSERT_TRUE(all_captures_match_lane(&fix, UINT64_C(0xABC)));
+    TEST_ASSERT_EQUAL_UINT8(header_gossip, fix.capture[0].type);
+    TEST_ASSERT_EQUAL_UINT8(header_gossip, fix.capture[1].type);
+
     fixture_deinit(&fix);
 }
 
-static void test_gossip_poll_urgent_requeue_sends_again_without_rate_limit(void)
+static void test_on_scout_reports_async_error_on_unicast_failure(void)
 {
     fixture_t fix;
     fixture_init(&fix);
-    const cy_us_t t0 = 3000000;
-    fixture_set_now(&fix, t0);
 
-    cy_topic_t* const topic = fixture_make_explicit_topic(&fix, "gossip/poll/urgent/rate-limit/requeue", 0U);
-    topic_merge_lage(topic, t0, 20);        // keep log-age stable over the short test interval
-    fix.cy->gossip_next = t0 + (10 * MEGA); // keep urgent path selected
-    fixture_set_peer(&fix, 0U, UINT64_C(10), t0);
-    fixture_set_peer(&fix, 1U, UINT64_C(20), t0);
-    fixture_set_peer(&fix, 2U, UINT64_C(30), t0);
+    (void)fixture_make_explicit_topic(
+      &fix, "intrusive/gossip/scout/fail/one#1000000000001212", UINT64_C(0x1000000000001212), 0U);
+    (void)fixture_make_explicit_topic(
+      &fix, "intrusive/gossip/scout/fail/two#1000000000001213", UINT64_C(0x1000000000001213), 0U);
 
-    schedule_gossip_urgent(topic);
-    gossip_poll(fix.cy, t0);
-    const size_t first = fix.unicast_send_count;
-    TEST_ASSERT_EQUAL_size_t(GOSSIP_OUTDEGREE, first);
+    fix.fail_unicast_send  = true;
+    fix.async_error_count  = 0U;
+    fix.unicast_send_count = 0U;
 
-    schedule_gossip_urgent(topic);
-    gossip_poll(fix.cy, t0 + 1);
-    TEST_ASSERT_EQUAL_size_t(first + GOSSIP_OUTDEGREE, fix.unicast_send_count); // immediate resend is allowed
+    on_scout(fix.cy, 28 * MEGA, cy_str("intrusive/gossip/scout/fail/>"), make_lane(UINT64_C(0xABD)));
 
-    schedule_gossip_urgent(topic);
-    gossip_poll(fix.cy, t0 + GOSSIP_DEDUP_TIMEOUT);
-    TEST_ASSERT_EQUAL_size_t(first + ((size_t)2U * GOSSIP_OUTDEGREE), fix.unicast_send_count);
+    TEST_ASSERT_EQUAL_size_t(2U, fix.unicast_send_count);
+    TEST_ASSERT_EQUAL_size_t(2U, fix.async_error_count);
+    TEST_ASSERT_EQUAL_INT(CY_ERR_MEDIA, fix.last_async_error);
 
-    schedule_gossip_urgent(topic);
-    gossip_poll(fix.cy, t0 + GOSSIP_DEDUP_TIMEOUT + 1);
-    TEST_ASSERT_EQUAL_size_t(first + ((size_t)3U * GOSSIP_OUTDEGREE), fix.unicast_send_count);
-    fixture_deinit(&fix);
-}
-
-static void test_gossip_poll_urgent_repeated_fault_detection_sends_without_rate_limit(void)
-{
-    fixture_t fix;
-    fixture_init(&fix);
-    const cy_us_t t0 = 5000000;
-    fixture_set_now(&fix, t0);
-
-    cy_topic_t* const topic = fixture_make_explicit_topic(&fix, "gossip/poll/urgent/rate-limit/fault", 5U);
-    topic_merge_lage(topic, t0, 20);        // keep log-age stable; we want "same fault" hash throughout
-    fix.cy->gossip_next = t0 + (10 * MEGA); // keep urgent path selected
-    fixture_set_peer(&fix, 0U, UINT64_C(10), t0);
-    fixture_set_peer(&fix, 1U, UINT64_C(20), t0);
-    fixture_set_peer(&fix, 2U, UINT64_C(30), t0);
-
-    // Same incoming divergence repeatedly: local wins each time, so the same repair gossip is requested repeatedly.
-    const cy_lane_t lane = make_lane(UINT64_C(999), 0x99U);
-    fixture_on_gossip(&fix, t0, 4U, topic->hash, 4U, 0, str_empty, NULL, lane);
-    gossip_poll(fix.cy, t0);
-    const size_t first = fix.unicast_send_count;
-    TEST_ASSERT_EQUAL_size_t(GOSSIP_OUTDEGREE, first);
-
-    fixture_on_gossip(&fix, t0 + 1, 4U, topic->hash, 4U, 0, str_empty, NULL, lane);
-    gossip_poll(fix.cy, t0 + 1);
-    TEST_ASSERT_EQUAL_size_t(first + GOSSIP_OUTDEGREE, fix.unicast_send_count);
-
-    fixture_on_gossip(&fix, t0 + GOSSIP_DEDUP_TIMEOUT + 1, 4U, topic->hash, 4U, 0, str_empty, NULL, lane);
-    gossip_poll(fix.cy, t0 + GOSSIP_DEDUP_TIMEOUT + 1);
-    TEST_ASSERT_EQUAL_size_t(first + ((size_t)2U * GOSSIP_OUTDEGREE), fix.unicast_send_count);
-    fixture_deinit(&fix);
-}
-
-static void test_gossip_poll_urgent_drop_when_no_eligible_and_dedup_on_success_only(void)
-{
-    fixture_t fix;
-    fixture_init(&fix);
-    fixture_set_now(&fix, 5000);
-    cy_topic_t* const topic = fixture_make_explicit_topic(&fix, "gossip/poll/urgent/drop", 0U);
-    fix.cy->gossip_next     = 6000;
-    schedule_gossip_urgent(topic);
-    gossip_poll(fix.cy, 5000);
-    TEST_ASSERT_EQUAL_size_t(0U, fix.unicast_send_count);
-    TEST_ASSERT_EQUAL_size_t(0U, dedup_seen_count(&fix));
-
-    fixture_set_peer(&fix, 0U, UINT64_C(10), 5001);
-    fixture_set_peer(&fix, 1U, UINT64_C(20), 5001);
-    schedule_gossip_urgent(topic);
-    fix.fail_unicast_send = true;
-    gossip_poll(fix.cy, 5001);
-    TEST_ASSERT_EQUAL_size_t(0U, dedup_seen_count(&fix));
-
-    schedule_gossip_urgent(topic);
-    fix.fail_unicast_send = false;
-    gossip_poll(fix.cy, 5002);
-    TEST_ASSERT_TRUE(dedup_seen_count(&fix) > 0U);
-    fixture_deinit(&fix);
-}
-
-static void test_gossip_poll_urgent_failed_epidemic_does_not_rate_limit_retry(void)
-{
-    fixture_t fix;
-    fixture_init(&fix);
-    const cy_us_t t0 = 6000000;
-    fixture_set_now(&fix, t0);
-
-    cy_topic_t* const topic = fixture_make_explicit_topic(&fix, "gossip/poll/urgent/fail/no-cache", 0U);
-    topic_merge_lage(topic, t0, 20);        // keep log-age stable over the short test interval
-    fix.cy->gossip_next = t0 + (10 * MEGA); // keep urgent path selected
-    fixture_set_peer(&fix, 0U, UINT64_C(10), t0);
-    fixture_set_peer(&fix, 1U, UINT64_C(20), t0);
-    fixture_set_peer(&fix, 2U, UINT64_C(30), t0);
-
-    schedule_gossip_urgent(topic);
-    fix.fail_unicast_send = true;
-    gossip_poll(fix.cy, t0);
-    TEST_ASSERT_EQUAL_size_t(GOSSIP_OUTDEGREE, fix.unicast_send_count); // attempted but failed
-    TEST_ASSERT_EQUAL_size_t(0U, dedup_seen_count(&fix));               // failed epidemic must not update dedup cache
-
-    schedule_gossip_urgent(topic);
-    fix.fail_unicast_send = false;
-    gossip_poll(fix.cy, t0 + 1);
-    TEST_ASSERT_EQUAL_size_t(2U * GOSSIP_OUTDEGREE, fix.unicast_send_count); // immediate retry allowed
-    TEST_ASSERT_TRUE(dedup_seen_count(&fix) > 0U);
-
-    schedule_gossip_urgent(topic);
-    gossip_poll(fix.cy, t0 + 2);
-    TEST_ASSERT_EQUAL_size_t(3U * GOSSIP_OUTDEGREE, fix.unicast_send_count);
-    fixture_deinit(&fix);
-}
-
-static void test_gossip_poll_urgent_not_suppressed_if_same_gossip_was_broadcast_just_now(void)
-{
-    fixture_t fix;
-    fixture_init(&fix);
-    const cy_us_t t0 = 7000000;
-    fixture_set_now(&fix, t0);
-
-    cy_topic_t* const topic = fixture_make_explicit_topic(&fix, "gossip/poll/urgent/after-broadcast", 0U);
-    topic_merge_lage(topic, t0, 20); // keep log-age stable across timeout checks
-    fix.cy->gossip_next = t0;        // force broadcast on first poll
-    fixture_set_peer(&fix, 0U, UINT64_C(10), t0);
-    fixture_set_peer(&fix, 1U, UINT64_C(20), t0);
-    fixture_set_peer(&fix, 2U, UINT64_C(30), t0);
-
-    gossip_poll(fix.cy, t0);
-    TEST_ASSERT_EQUAL_size_t(1U, fix.subject_send_count);
-    TEST_ASSERT_EQUAL_size_t(0U, fix.unicast_send_count);
-
-    schedule_gossip_urgent(topic);
-    gossip_poll(fix.cy, t0 + 1);
-    TEST_ASSERT_EQUAL_size_t(1U, fix.subject_send_count);
-    TEST_ASSERT_EQUAL_size_t(GOSSIP_OUTDEGREE, fix.unicast_send_count);
-
-    schedule_gossip_urgent(topic);
-    gossip_poll(fix.cy, t0 + GOSSIP_DEDUP_TIMEOUT + 1);
-    TEST_ASSERT_EQUAL_size_t(2U * GOSSIP_OUTDEGREE, fix.unicast_send_count);
-    fixture_deinit(&fix);
-}
-
-static void test_gossip_poll_urgent_failed_send_does_not_evict_existing_dedup_entries(void)
-{
-    fixture_t fix;
-    fixture_init(&fix);
-    fixture_set_now(&fix, 7000);
-
-    for (size_t i = 0U; i < GOSSIP_DEDUP_CAPACITY; i++) {
-        TEST_ASSERT_TRUE(dedup_mark(&fix, (cy_us_t)(1000 + i), UINT64_C(0xA000000000000000) + (uint64_t)i));
-    }
-    const uint64_t oldest_hash = UINT64_C(0xA000000000000000);
-    TEST_ASSERT_TRUE(dedup_has_hash(&fix, oldest_hash));
-
-    cy_topic_t* const topic       = fixture_make_explicit_topic(&fix, "gossip/poll/urgent/no-evict", 0U);
-    const uint64_t    urgent_hash = gossip_dedup_hash(topic->hash, topic->evictions, topic_lage(topic, 7000));
-    TEST_ASSERT_FALSE(dedup_has_hash(&fix, urgent_hash));
-
-    fix.cy->gossip_next = 8000;
-    schedule_gossip_urgent(topic);
-    gossip_poll(fix.cy, 7000); // no peers => no successful sends => dedup table must remain unchanged.
-    TEST_ASSERT_EQUAL_size_t(0U, fix.unicast_send_count);
-    TEST_ASSERT_TRUE(dedup_has_hash(&fix, oldest_hash));
-    TEST_ASSERT_FALSE(dedup_has_hash(&fix, urgent_hash));
     fixture_deinit(&fix);
 }
 
@@ -940,30 +653,19 @@ void tearDown(void) {}
 int main(void)
 {
     UNITY_BEGIN();
-    RUN_TEST(test_gossip_dedup_first_duplicate_and_expiry);
-    RUN_TEST(test_gossip_dedup_expiry_boundary_is_strictly_greater_than_timeout);
-    RUN_TEST(test_gossip_dedup_capacity_eviction_replaces_oldest);
-    RUN_TEST(test_gossip_dedup_update_on_send_prevents_immediate_reforward);
-    RUN_TEST(test_gossip_random_peer_except_filters_stale_blacklisted_and_empty);
-    RUN_TEST(test_gossip_random_peer_except_deterministic_selection_sanity);
-    RUN_TEST(test_send_gossip_raw_no_transport_is_noop);
-    RUN_TEST(test_send_gossip_raw_writer_and_lane_paths);
-    RUN_TEST(test_on_gossip_peer_fill_update_and_replacement_policy);
-    RUN_TEST(test_on_gossip_peer_replacement_moratorium_boundary_inclusive);
-    RUN_TEST(test_on_gossip_ttl_zero_and_duplicate_are_not_forwarded);
-    RUN_TEST(test_on_gossip_forward_decrements_ttl_blacklists_sender_and_limits_fanout);
-    RUN_TEST(test_on_gossip_local_win_suppresses_forward_and_schedules_urgent);
-    RUN_TEST(test_on_gossip_local_lose_suppresses_forward_and_schedules_urgent);
-    RUN_TEST(test_on_gossip_unknown_out_topic_forward_and_error_reporting);
-    RUN_TEST(test_on_scout_broadcast_soon_and_unicast_paths);
-    RUN_TEST(test_on_scout_broadcast_soon_non_tail_triggers_unicast_and_reports_errors);
-    RUN_TEST(test_gossip_poll_broadcast_path_due_and_dedup_success_only);
-    RUN_TEST(test_gossip_poll_urgent_path_and_unique_unicast);
-    RUN_TEST(test_gossip_poll_urgent_requeue_sends_again_without_rate_limit);
-    RUN_TEST(test_gossip_poll_urgent_repeated_fault_detection_sends_without_rate_limit);
-    RUN_TEST(test_gossip_poll_urgent_drop_when_no_eligible_and_dedup_on_success_only);
-    RUN_TEST(test_gossip_poll_urgent_failed_epidemic_does_not_rate_limit_retry);
-    RUN_TEST(test_gossip_poll_urgent_not_suppressed_if_same_gossip_was_broadcast_just_now);
-    RUN_TEST(test_gossip_poll_urgent_failed_send_does_not_evict_existing_dedup_entries);
+    RUN_TEST(test_topic_gossip_shard_subject_id_deterministic_and_bounded);
+    RUN_TEST(test_send_gossip_raw_writer_lane_and_noop_paths);
+    RUN_TEST(test_send_gossip_raw_writer_failure_skips_unicast);
+    RUN_TEST(test_schedule_gossip_periodic_requires_nonimplicit_nonpinned_topic);
+    RUN_TEST(test_schedule_gossip_urgent_preempts_periodic_deadline);
+    RUN_TEST(test_on_gossip_known_topic_local_win_schedules_urgent);
+    RUN_TEST(test_on_gossip_known_topic_local_loss_reallocates_and_suppresses_urgent_when_not_needed);
+    RUN_TEST(test_on_gossip_known_topic_consensus_scope_suppression_rules);
+    RUN_TEST(test_on_gossip_unknown_topic_collision_win_and_loss);
+    RUN_TEST(test_gossip_event_periodic_uses_broadcast_then_shard_writer);
+    RUN_TEST(test_gossip_event_periodic_reports_async_error_on_send_failure);
+    RUN_TEST(test_gossip_event_urgent_broadcasts_and_resets_counter);
+    RUN_TEST(test_on_scout_responds_via_unicast_only);
+    RUN_TEST(test_on_scout_reports_async_error_on_unicast_failure);
     return UNITY_END();
 }
