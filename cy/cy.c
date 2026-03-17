@@ -2084,7 +2084,6 @@ static cy_err_t do_publish_impl(cy_publisher_t* const  pub,
     const cy_platform_vtable_t* const vt    = cy->platform->vtable;
     assert(topic->pub_count > 0);
 
-    // TODO: How do we handle CAN compatibility? No header for pinned topics? The transport will strip the header?
     byte_t header[HEADER_BYTES] = { (byte_t)header_type, 0, 0, (byte_t)topic_lage(topic, cy_now(cy)) };
     (void)serialize_u32(&header[4], topic->evictions);
     (void)serialize_u64(&header[8], topic->hash);
