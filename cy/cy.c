@@ -2943,7 +2943,14 @@ typedef struct
     cy_us_t     now;
 } dedup_factory_context_t;
 
-// Returns true if duplicate.
+// Returns true if duplicate. Does not alter the state.
+static bool dedup_check(const dedup_t* const self, const uint64_t tag)
+{
+    const uint64_t rev = self->tag - tag; // Wrapping arithmetic.
+    return (rev < DEDUP_HISTORY) && bitmap_test(self->bitmap, (size_t)rev);
+}
+
+// Returns true if duplicate. Automatically marks the message as received.
 static bool dedup_update(dedup_t* const self, cy_topic_t* const owner, const uint64_t tag, const cy_us_t now)
 {
     // Update the recency information.
@@ -3359,6 +3366,20 @@ static bool on_message(cy_t* const           cy,
 
     // Reliable transfers may be duplicated in case of ACK loss.
     // Non-reliable transfers are deduplicated by the transport, which makes them much more efficient.
+    // Normally we automatically mark messages as received here in the dedup cache; however, if no local subscribers
+    // exist, we don't need to mutate the dedup cache but rather we can only passively consult with it to check
+    // if any messages have been confirmed earlier in case our acks got lost. This matters if we receive messages
+    // we didn't subscribe to like from a collided subject, or if the sender attempts to unicast etc.
+    if (topic->couplings == NULL) { // Subscribers do not exist. Do not accept the message.
+        if (reliable) {
+            dedup_t* const dedup =
+              CAVL2_TO_OWNER(cavl2_find(topic->sub_index_dedup_by_remote_id, &lane.id, dedup_cavl_compare),
+                             dedup_t, //
+                             index_remote_id);
+            return (dedup != NULL) && dedup_check(dedup, tag);
+        }
+        return false;
+    }
     if (reliable) {
         dedup_factory_context_t ctx = { .owner = topic, .remote_id = lane.id, .tag = tag, .now = message.timestamp };
         dedup_t* const dedup = CAVL2_TO_OWNER(cavl2_find_or_insert(&topic->sub_index_dedup_by_remote_id, // ------
