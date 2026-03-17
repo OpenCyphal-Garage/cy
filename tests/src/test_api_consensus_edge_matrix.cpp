@@ -2,6 +2,7 @@
 #include <unity.h>
 #include "e2e_faults.hpp"
 #include "e2e_sim_net.hpp"
+#include "e2e_scenario_utils.hpp"
 #include "e2e_test_utils.hpp"
 #include "message.h"
 #include <algorithm>
@@ -57,57 +58,12 @@ extern "C" void on_arrival_capture(cy_future_t* const sub)
     cy_message_refcount_dec(arrival.message.content);
 }
 
-void set_now(e2e::sim_net_t& net, const cy_us_t now)
-{
-    e2e::sim_net_node_now_set(net, e2e::sim_node_a, now);
-    e2e::sim_net_node_now_set(net, e2e::sim_node_b, now);
-}
-
-void drive_for(e2e::sim_net_t& net, cy_us_t& now, const cy_us_t duration)
-{
-    const cy_us_t end = now + duration;
-    while (now < end) {
-        TEST_ASSERT_EQUAL_INT(CY_OK, e2e::drive_round(net, now, now));
-        now += step_us;
-    }
-}
-
-void drain_queue(e2e::sim_net_t& net, cy_us_t& now)
-{
-    std::size_t guard = 0U;
-    while (e2e::sim_net_pending_frames(net) > 0U) {
-        TEST_ASSERT_EQUAL_INT(CY_OK, e2e::drive_round(net, now, now));
-        now += step_us;
-        guard++;
-        TEST_ASSERT_TRUE(guard < 100'000U);
-    }
-}
-
 void cleanup_case(e2e::sim_net_t&                     net,
                   cy_us_t&                            now,
                   const std::vector<cy_future_t*>&    subscribers,
                   const std::vector<cy_publisher_t*>& publishers)
 {
-    for (cy_future_t* const sub : subscribers) {
-        if (sub != nullptr) {
-            cy_future_destroy(sub);
-        }
-    }
-    drive_for(net, now, 100'000);
-
-    for (cy_publisher_t* const pub : publishers) {
-        if (pub != nullptr) {
-            cy_unadvertise(pub);
-        }
-    }
-    drive_for(net, now, 100'000);
-
-    drain_queue(net, now);
-    e2e::assert_quiescent(net);
-
-    e2e::sim_net_deinit(net);
-    e2e::assert_all_node_heaps_clean(net);
-    e2e::assert_no_live_messages();
+    e2e::cleanup_case(net, now, {}, subscribers, publishers, step_us, 100'000, 100'000U);
 }
 
 void publish_best_effort(cy_publisher_t* const pub,
@@ -178,14 +134,14 @@ void test_api_consensus_edge_partition_heal_eventual_bidirectional_delivery()
 
     cy_us_t now = 0;
     for (std::uint64_t seq = 1U; seq <= 36U; seq++) {
-        set_now(net, now);
+        e2e::set_now(net, now);
         publish_best_effort(pub_a, pub_id_a, seq, now);
         publish_best_effort(pub_b, pub_id_b, seq, now);
         TEST_ASSERT_EQUAL_INT(CY_OK, e2e::drive_round(net, now, now));
         now += 10'000;
     }
 
-    drive_for(net, now, 350'000);
+    e2e::drive_for(net, now, 350'000, step_us);
 
     TEST_ASSERT_EQUAL_size_t(0U, capture_a.malformed);
     TEST_ASSERT_EQUAL_size_t(0U, capture_b.malformed);
@@ -247,7 +203,7 @@ void test_api_consensus_edge_colliding_topics_discover_and_deliver_with_faults()
     TEST_ASSERT_NOT_NULL(pub_b);
 
     cy_us_t now = 0;
-    drive_for(net, now, 800'000);
+    e2e::drive_for(net, now, 800'000, step_us);
 
     const cy_topic_t* const a_topic_a = cy_topic_find_by_name(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str(topic_a));
     const cy_topic_t* const a_topic_b = cy_topic_find_by_name(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str(topic_b));
@@ -263,13 +219,13 @@ void test_api_consensus_edge_colliding_topics_discover_and_deliver_with_faults()
     TEST_ASSERT_TRUE(hash_a != hash_b);
 
     for (std::uint64_t seq = 1U; seq <= 24U; seq++) {
-        set_now(net, now);
+        e2e::set_now(net, now);
         publish_best_effort(pub_a, pub_id_a, seq, now);
         publish_best_effort(pub_b, pub_id_b, seq, now);
         TEST_ASSERT_EQUAL_INT(CY_OK, e2e::drive_round(net, now, now));
         now += 12'000;
     }
-    drive_for(net, now, 400'000);
+    e2e::drive_for(net, now, 400'000, step_us);
 
     TEST_ASSERT_EQUAL_size_t(0U, capture_a.malformed);
     TEST_ASSERT_EQUAL_size_t(0U, capture_b.malformed);

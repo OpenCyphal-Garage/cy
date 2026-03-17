@@ -1,20 +1,10 @@
 #include <cy.c> // NOLINT(bugprone-suspicious-include)
 #include <unity.h>
 #include "guarded_heap.h"
+#include "intrusive_fixture_utils.h"
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
-
-typedef struct
-{
-    cy_subject_writer_t base;
-} test_subject_writer_t;
-
-typedef struct
-{
-    cy_subject_reader_t base;
-    size_t              extent;
-} test_subject_reader_t;
 
 typedef struct
 {
@@ -74,8 +64,7 @@ static void* fixture_realloc(cy_platform_t* const platform, void* const ptr, con
 static uint64_t fixture_random(cy_platform_t* const platform)
 {
     fixture_t* const self = fixture_from(platform);
-    self->random_state    = (self->random_state * UINT64_C(6364136223846793005)) + UINT64_C(1);
-    return self->random_state;
+    return intrusive_random_lcg(&self->random_state);
 }
 
 static cy_subject_writer_t* fixture_subject_writer_new(cy_platform_t* const platform, const uint32_t subject_id)
@@ -84,18 +73,14 @@ static cy_subject_writer_t* fixture_subject_writer_new(cy_platform_t* const plat
     if (self->fail_subject_writer_new) {
         return NULL;
     }
-    test_subject_writer_t* const out = (test_subject_writer_t*)guarded_heap_alloc(&self->heap, sizeof(*out));
-    if (out != NULL) {
-        out->base.subject_id = subject_id;
-    }
-    return (out != NULL) ? &out->base : NULL;
+    return intrusive_subject_writer_new(&self->heap, subject_id);
 }
 
 static void fixture_subject_writer_destroy(cy_platform_t* const platform, cy_subject_writer_t* const writer)
 {
     fixture_t* const self = fixture_from(platform);
     self->subject_writer_destroy_count++;
-    guarded_heap_free(&self->heap, writer);
+    intrusive_subject_writer_destroy(&self->heap, writer);
 }
 
 static cy_err_t fixture_subject_writer_send(cy_platform_t* const       platform,
@@ -120,19 +105,14 @@ static cy_subject_reader_t* fixture_subject_reader_new(cy_platform_t* const plat
     if (self->fail_subject_reader_new) {
         return NULL;
     }
-    test_subject_reader_t* const out = (test_subject_reader_t*)guarded_heap_alloc(&self->heap, sizeof(*out));
-    if (out != NULL) {
-        out->base.subject_id = subject_id;
-        out->extent          = extent;
-    }
-    return (out != NULL) ? &out->base : NULL;
+    return intrusive_subject_reader_new(&self->heap, subject_id, extent);
 }
 
 static void fixture_subject_reader_destroy(cy_platform_t* const platform, cy_subject_reader_t* const reader)
 {
     fixture_t* const self = fixture_from(platform);
     self->subject_reader_destroy_count++;
-    guarded_heap_free(&self->heap, reader);
+    intrusive_subject_reader_destroy(&self->heap, reader);
 }
 
 static cy_err_t fixture_unicast_send(cy_platform_t* const   platform,
@@ -209,8 +189,7 @@ static void fixture_deinit(fixture_t* const self)
         cy_destroy(self->cy);
         self->cy = NULL;
     }
-    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&self->heap));
-    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&self->heap));
+    intrusive_assert_heap_clean(&self->heap);
 }
 
 static cy_topic_t* fixture_make_topic(fixture_t* const  self,

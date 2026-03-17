@@ -1,20 +1,10 @@
 #include <cy.c> // NOLINT(bugprone-suspicious-include)
 #include <unity.h>
 #include "guarded_heap.h"
+#include "intrusive_fixture_utils.h"
 #include "message.h"
 #include <stddef.h>
 #include <string.h>
-
-typedef struct
-{
-    cy_subject_writer_t base;
-} test_subject_writer_t;
-
-typedef struct
-{
-    cy_subject_reader_t base;
-    size_t              extent;
-} test_subject_reader_t;
 
 typedef struct
 {
@@ -138,18 +128,13 @@ static cy_subject_writer_t* fixture_subject_writer_new(cy_platform_t* const plat
 {
     fixture_t* const self =
       fixture_from(platform); // clang-tidy/cppcheck don't infer through guarded_heap_alloc() context.
-    test_subject_writer_t* const out = guarded_heap_alloc(&self->core_heap, sizeof(test_subject_writer_t));
-    if (out != NULL) {
-        out->base.subject_id = subject_id;
-        return &out->base;
-    }
-    return NULL;
+    return intrusive_subject_writer_new(&self->core_heap, subject_id);
 }
 
 static void fixture_subject_writer_destroy(cy_platform_t* const platform, cy_subject_writer_t* const writer)
 {
     fixture_t* const self = fixture_from(platform);
-    guarded_heap_free(&self->core_heap, writer);
+    intrusive_subject_writer_destroy(&self->core_heap, writer);
 }
 
 static cy_err_t fixture_subject_writer_send(cy_platform_t* const       platform,
@@ -177,20 +162,14 @@ static cy_subject_reader_t* fixture_subject_reader_new(cy_platform_t* const plat
                                                        const uint32_t       subject_id,
                                                        const size_t         extent)
 {
-    fixture_t* const             self = fixture_from(platform);
-    test_subject_reader_t* const out  = guarded_heap_alloc(&self->core_heap, sizeof(test_subject_reader_t));
-    if (out != NULL) {
-        out->base.subject_id = subject_id;
-        out->extent          = extent;
-        return &out->base;
-    }
-    return NULL;
+    fixture_t* const self = fixture_from(platform);
+    return intrusive_subject_reader_new(&self->core_heap, subject_id, extent);
 }
 
 static void fixture_subject_reader_destroy(cy_platform_t* const platform, cy_subject_reader_t* const reader)
 {
     fixture_t* const self = fixture_from(platform);
-    guarded_heap_free(&self->core_heap, reader);
+    intrusive_subject_reader_destroy(&self->core_heap, reader);
 }
 
 static cy_err_t fixture_unicast_send(cy_platform_t* const   platform,

@@ -2,6 +2,7 @@
 #include <unity.h>
 #include "e2e_faults.hpp"
 #include "e2e_sim_net.hpp"
+#include "e2e_scenario_utils.hpp"
 #include "e2e_test_utils.hpp"
 #include "message.h"
 #include <algorithm>
@@ -57,37 +58,6 @@ extern "C" void on_arrival_capture(cy_future_t* const sub)
     cy_message_refcount_dec(arrival.message.content);
 }
 
-void set_now(e2e::sim_net_t& net, const cy_us_t now)
-{
-    e2e::sim_net_node_now_set(net, e2e::sim_node_a, now);
-    e2e::sim_net_node_now_set(net, e2e::sim_node_b, now);
-}
-
-void drive_for(e2e::sim_net_t& net, cy_us_t& now, const cy_us_t duration, const bool allow_spin_media_failures)
-{
-    const cy_us_t end = now + duration;
-    while (now < end) {
-        const cy_err_t err = e2e::drive_round(net, now, now);
-        if (allow_spin_media_failures && (err == CY_ERR_MEDIA)) {
-            now += step_us;
-            continue;
-        }
-        TEST_ASSERT_EQUAL_INT(CY_OK, err);
-        now += step_us;
-    }
-}
-
-void drain_queue(e2e::sim_net_t& net, cy_us_t& now)
-{
-    std::size_t guard = 0U;
-    while (e2e::sim_net_pending_frames(net) > 0U) {
-        TEST_ASSERT_EQUAL_INT(CY_OK, e2e::drive_round(net, now, now));
-        now += step_us;
-        guard++;
-        TEST_ASSERT_TRUE(guard < 30'000U);
-    }
-}
-
 void drain_live_messages(e2e::sim_net_t& net, cy_us_t& now)
 {
     std::size_t guard = 0U;
@@ -97,35 +67,6 @@ void drain_live_messages(e2e::sim_net_t& net, cy_us_t& now)
         guard++;
         TEST_ASSERT_TRUE(guard < 30'000U);
     }
-}
-
-bool wait_all_futures(e2e::sim_net_t&                  net,
-                      cy_us_t&                         now,
-                      const std::vector<cy_future_t*>& futures,
-                      const bool                       allow_spin_media_failures)
-{
-    const cy_us_t end = now + wait_window_us;
-    while (now <= end) {
-        bool all_done = true;
-        for (cy_future_t* const fut : futures) {
-            TEST_ASSERT_NOT_NULL(fut);
-            if (!cy_future_done(fut)) {
-                all_done = false;
-                break;
-            }
-        }
-        if (all_done) {
-            return true;
-        }
-        const cy_err_t err = e2e::drive_round(net, now, now);
-        if (allow_spin_media_failures && (err == CY_ERR_MEDIA)) {
-            now += step_us;
-            continue;
-        }
-        TEST_ASSERT_EQUAL_INT(CY_OK, err);
-        now += step_us;
-    }
-    return false;
 }
 
 cy_publisher_t* make_publisher(e2e::sim_net_t& net, const char* const topic_name)
@@ -169,12 +110,12 @@ cy_future_t* publish_reliable_retry(e2e::sim_net_t&     net,
                                     const std::size_t   max_attempts = 256U)
 {
     for (std::size_t attempt = 0U; attempt < max_attempts; attempt++) {
-        set_now(net, now);
+        e2e::set_now(net, now);
         cy_future_t* const fut = publish_reliable(pub, pub_id, app_seq, now, deadline_offset);
         if (fut != nullptr) {
             return fut;
         }
-        drive_for(net, now, step_us, allow_spin_media_failures);
+        e2e::drive_for(net, now, step_us, step_us, allow_spin_media_failures);
     }
     return nullptr;
 }
@@ -274,16 +215,16 @@ void cleanup_case(e2e::sim_net_t&                     net,
             cy_future_destroy(sub);
         }
     }
-    drive_for(net, now, 40'000, false);
+    e2e::drive_for(net, now, 40'000, step_us, false);
 
     for (cy_publisher_t* const pub : publishers) {
         if (pub != nullptr) {
             cy_unadvertise(pub);
         }
     }
-    drive_for(net, now, 40'000, false);
+    e2e::drive_for(net, now, 40'000, step_us, false);
 
-    drain_queue(net, now);
+    e2e::drain_queue(net, now, step_us, 30'000U);
     drain_live_messages(net, now);
     // Fault-injection scenarios can legitimately leave async error captures behind.
     // Teardown only requires transport/message/heap quiescence.
@@ -355,8 +296,8 @@ void test_api_pubsub_e2e_f01_transient_subject_send_failures_recover()
         futures.push_back(fut);
     }
 
-    TEST_ASSERT_TRUE(wait_all_futures(net, now, futures, false));
-    drive_for(net, now, 200'000, false);
+    TEST_ASSERT_TRUE(e2e::wait_all_futures(net, now, futures, wait_window_us, step_us, false));
+    e2e::drive_for(net, now, 200'000, step_us, false);
 
     assert_no_malformed(capture, "f01");
     assert_unordered_complete_unique(capture, 501U, 1U, 8U);
@@ -388,7 +329,7 @@ void test_api_pubsub_e2e_f02_persistent_subject_send_failures_cause_future_failu
     std::vector<cy_future_t*> futures{};
     std::size_t               immediate_publish_failures = 0U;
     for (std::uint64_t seq = 1U; seq <= 6U; seq++) {
-        set_now(net, now);
+        e2e::set_now(net, now);
         cy_future_t* const fut = publish_reliable(pub, 502U, seq, now, 120'000);
         if (fut == nullptr) {
             immediate_publish_failures++;
@@ -398,9 +339,9 @@ void test_api_pubsub_e2e_f02_persistent_subject_send_failures_cause_future_failu
     }
 
     if (!futures.empty()) {
-        TEST_ASSERT_TRUE(wait_all_futures(net, now, futures, false));
+        TEST_ASSERT_TRUE(e2e::wait_all_futures(net, now, futures, wait_window_us, step_us, false));
     }
-    drive_for(net, now, 60'000, false);
+    e2e::drive_for(net, now, 60'000, step_us, false);
 
     assert_no_malformed(capture, "f02");
     TEST_ASSERT_TRUE(sequences_for(capture, 502U).empty());
@@ -440,15 +381,15 @@ void test_api_pubsub_e2e_f03_transient_unicast_send_failures_on_receiver_recover
     cy_future_t* const    sub = make_subscriber(net, "e2e/f03/topic", capture);
 
     std::vector<cy_future_t*> futures{};
-    set_now(net, now);
+    e2e::set_now(net, now);
     for (std::uint64_t seq = 1U; seq <= 8U; seq++) {
         cy_future_t* const fut = publish_reliable(pub, 503U, seq, now, 700'000);
         TEST_ASSERT_NOT_NULL(fut);
         futures.push_back(fut);
     }
 
-    TEST_ASSERT_TRUE(wait_all_futures(net, now, futures, false));
-    drive_for(net, now, 200'000, false);
+    TEST_ASSERT_TRUE(e2e::wait_all_futures(net, now, futures, wait_window_us, step_us, false));
+    e2e::drive_for(net, now, 200'000, step_us, false);
 
     assert_no_malformed(capture, "f03");
     assert_unordered_complete_unique(capture, 503U, 1U, 8U);
@@ -491,8 +432,8 @@ void test_api_pubsub_e2e_f04_mixed_subject_and_unicast_send_failures_still_conve
         futures.push_back(fut);
     }
 
-    TEST_ASSERT_TRUE(wait_all_futures(net, now, futures, false));
-    drive_for(net, now, 250'000, false);
+    TEST_ASSERT_TRUE(e2e::wait_all_futures(net, now, futures, wait_window_us, step_us, false));
+    e2e::drive_for(net, now, 250'000, step_us, false);
 
     assert_no_malformed(capture, "f04");
     assert_unordered_complete_unique(capture, 504U, 1U, 10U);
@@ -529,15 +470,15 @@ void test_api_pubsub_e2e_f05_transient_spin_failures_on_publisher_node_recover()
     cy_future_t* const    sub = make_subscriber(net, "e2e/f05/topic", capture);
 
     std::vector<cy_future_t*> futures{};
-    set_now(net, now);
+    e2e::set_now(net, now);
     for (std::uint64_t seq = 1U; seq <= 6U; seq++) {
         cy_future_t* const fut = publish_reliable(pub, 505U, seq, now, 900'000);
         TEST_ASSERT_NOT_NULL(fut);
         futures.push_back(fut);
     }
 
-    TEST_ASSERT_TRUE(wait_all_futures(net, now, futures, true));
-    drive_for(net, now, 250'000, true);
+    TEST_ASSERT_TRUE(e2e::wait_all_futures(net, now, futures, wait_window_us, step_us, true));
+    e2e::drive_for(net, now, 250'000, step_us, true);
 
     assert_no_malformed(capture, "f05");
     assert_unordered_complete_unique(capture, 505U, 1U, 6U);
@@ -573,15 +514,15 @@ void test_api_pubsub_e2e_f06_transient_spin_failures_on_subscriber_node_recover(
     cy_future_t* const    sub = make_subscriber(net, "e2e/f06/topic", capture);
 
     std::vector<cy_future_t*> futures{};
-    set_now(net, now);
+    e2e::set_now(net, now);
     for (std::uint64_t seq = 1U; seq <= 6U; seq++) {
         cy_future_t* const fut = publish_reliable(pub, 506U, seq, now, 900'000);
         TEST_ASSERT_NOT_NULL(fut);
         futures.push_back(fut);
     }
 
-    TEST_ASSERT_TRUE(wait_all_futures(net, now, futures, true));
-    drive_for(net, now, 250'000, true);
+    TEST_ASSERT_TRUE(e2e::wait_all_futures(net, now, futures, wait_window_us, step_us, true));
+    e2e::drive_for(net, now, 250'000, step_us, true);
 
     assert_no_malformed(capture, "f06");
     assert_unordered_complete_unique(capture, 506U, 1U, 6U);
@@ -629,8 +570,8 @@ void test_api_pubsub_e2e_f07_asymmetric_node_degradation_eventual_recovery()
         futures.push_back(fut);
     }
 
-    TEST_ASSERT_TRUE(wait_all_futures(net, now, futures, true));
-    drive_for(net, now, 250'000, true);
+    TEST_ASSERT_TRUE(e2e::wait_all_futures(net, now, futures, wait_window_us, step_us, true));
+    e2e::drive_for(net, now, 250'000, step_us, true);
 
     assert_no_malformed(capture, "f07");
     assert_unordered_complete_unique(capture, 507U, 1U, 8U);
@@ -695,8 +636,8 @@ void test_api_pubsub_e2e_f08_failure_storm_then_recovery_preserves_invariants()
         futures.push_back(fut);
     }
 
-    TEST_ASSERT_TRUE(wait_all_futures(net, now, futures, true));
-    drive_for(net, now, 300'000, true);
+    TEST_ASSERT_TRUE(e2e::wait_all_futures(net, now, futures, wait_window_us, step_us, true));
+    e2e::drive_for(net, now, 300'000, step_us, true);
 
     assert_no_malformed(capture, "f08");
     assert_unordered_complete_unique(capture, 508U, 1U, 10U);
