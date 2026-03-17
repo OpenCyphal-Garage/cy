@@ -180,12 +180,13 @@ typedef enum
     header_msg_be   = 0,
     header_msg_rel  = 1,
     header_msg_ack  = 2,
-    header_rsp_be   = 3,
-    header_rsp_rel  = 4,
-    header_rsp_ack  = 5,
-    header_rsp_nack = 6,
-    header_gossip   = 7,
-    header_scout    = 8,
+    header_msg_nack = 3,
+    header_rsp_be   = 4,
+    header_rsp_rel  = 5,
+    header_rsp_ack  = 6,
+    header_rsp_nack = 7,
+    header_gossip   = 8,
+    header_scout    = 9,
 } header_type_t;
 
 #define SEQNO48_MASK ((1ULL << 48U) - 1ULL)
@@ -2331,11 +2332,10 @@ static const cy_future_vtable_t publish_future_vtable = { .done    = publish_fut
                                                           .timeout = publish_future_timeout,
                                                           .dispose = publish_future_dispose };
 
-static void publish_future_on_ack(publish_future_t* const self, const uint64_t remote_id)
+static void publish_future_on_ack(publish_future_t* const self, const uint64_t remote_id, const bool positive)
 {
     assert(!self->done);
-    self->acknowledged = true; // a single ack makes it a success unless some attempts failed, this is by design.
-
+    // Regardless of whether it's a positive ack or a nack, we need to cease further deliveries.
     const size_t idx   = association_bisect(self->assoc_set, self->assoc_capacity, remote_id);
     const bool   known = (idx < self->assoc_capacity) && (self->assoc_set[idx]->remote_id == remote_id);
     if (known && bitmap_test(self->assoc_knockout, idx)) {
@@ -2344,8 +2344,11 @@ static void publish_future_on_ack(publish_future_t* const self, const uint64_t r
         assert(self->assoc_remaining > 0);
         self->assoc_remaining--;
     }
-    if (self->assoc_remaining == 0) { // also handles the case of no known associations at publication
-        publish_future_materialize(self, CY_OK);
+    if (positive) {
+        self->acknowledged = true;        // optimistic success based on a single +ack
+        if (self->assoc_remaining == 0) { // also handles the case of no known associations at publication
+            publish_future_materialize(self, CY_OK);
+        }
     }
 }
 
@@ -4415,6 +4418,7 @@ static void on_message_ack(cy_t* const       cy,
                            cy_topic_t* const topic,
                            const uint64_t    tag,
                            const cy_us_t     ts,
+                           const bool        positive,
                            const cy_lane_t   lane)
 {
     assert(topic != NULL);
@@ -4427,32 +4431,52 @@ static void on_message_ack(cy_t* const       cy,
         return; // We haven't published this seqno -- probably misdelivered ACK or wrong tag (e.g., from prior run).
     }
 
-    // Update the subscriber association set. Note that by design we don't require a pending future for this to work.
-    // Associations are destroyed only by the futures when a publish outcome is known.
+    // Update the subscriber association set. By design we don't require a pending future for this to work.
+    // Associations are destroyed only by the futures when a publish outcome is known, unless the remote tells us
+    // explicitly that it has no matching subscribers by sending a NACK.
     association_factory_context_t fac = { .topic = topic, .remote_id = lane.id };
     association_t* const ass = CAVL2_TO_OWNER(cavl2_find_or_insert(&topic->assoc_by_remote_id, // ---------------
                                                                    &lane.id,
                                                                    association_cavl_compare,
                                                                    &fac,
-                                                                   association_cavl_factory),
+                                                                   positive ? association_cavl_factory : NULL),
                                               association_t,
                                               index_remote_id);
-    if (ass != NULL) {
-        assert(topic->assoc_count > 0);
-        ass->last_seen   = ts;
-        ass->unicast_ctx = lane.ctx;       // Always update the latest return path discovery state.
-        if (seqno >= ass->seqno_witness) { // Prevent old pending futures from altering slack.
-            ass->slack         = 0;
-            ass->seqno_witness = seqno;
+    if (ass == NULL) {
+        if (positive) {
+            // NB: OOM here causes the empty-snapshot discovery path to lose this ACK. This is accepted by design:
+            // the message may be reported as non-delivered because there is not enough local memory to store state.
+            ON_ASYNC_ERROR(cy, topic, CY_ERR_MEMORY);
+        } else {
+            CY_TRACE(cy,
+                     "⛓ %s NACK unassociated N%016ju tag=%016ju: unsubscribed, dup, or remote error",
+                     topic_repr(topic).str,
+                     (uintmax_t)lane.id,
+                     (uintmax_t)tag);
         }
-        publish_future_t* const future = (publish_future_t*)future_index_lookup(topic->pub_futures_by_tag, tag);
-        if (future != NULL) {
-            publish_future_on_ack(future, lane.id);
+        return;
+    }
+
+    // Update the state of the local subscriber association.
+    // NACK for an association that is not currently used by any publisher future allows immediate removal.
+    assert(topic->assoc_count > 0);
+    ass->last_seen   = ts;
+    ass->unicast_ctx = lane.ctx;       // Always update the latest return path discovery state.
+    if (seqno >= ass->seqno_witness) { // Prevent delayed acks from overwriting newer states.
+        ass->slack         = positive ? 0 : topic->assoc_slack_limit;
+        ass->seqno_witness = seqno;
+        if (!positive && (ass->pending_count == 0)) {
+            ass->slack = 0;
+            association_forget(topic, ass);
+            return; // It is certain that no future is using this association, safe to remove & quit.
         }
-    } else {
-        // NB: OOM here causes the empty-snapshot discovery path to lose this ACK. This is accepted by design:
-        // the message may be reported as non-delivered because there is not enough local memory to store state.
-        ON_ASYNC_ERROR(cy, topic, CY_ERR_MEMORY);
+    }
+
+    // There are futures that might be interested.
+    assert(positive || (ass->pending_count > 0) || (seqno < ass->seqno_witness));
+    publish_future_t* const future = (publish_future_t*)future_index_lookup(topic->pub_futures_by_tag, tag);
+    if (future != NULL) {
+        publish_future_on_ack(future, lane.id, positive);
     }
 }
 
@@ -4460,10 +4484,10 @@ static void send_message_ack(cy_t* const     cy,
                              const cy_lane_t lane,
                              const uint64_t  tag,
                              const uint64_t  topic_hash,
-                             const cy_us_t   deadline)
+                             const cy_us_t   deadline,
+                             const bool      positive)
 {
-    byte_t header[HEADER_BYTES] = { 0 };
-    header[0]                   = (byte_t)header_msg_ack;
+    byte_t header[HEADER_BYTES] = { (byte_t)(positive ? header_msg_ack : header_msg_nack) };
     (void)serialize_u64(&header[8], topic_hash);
     (void)serialize_u64(&header[16], tag);
     const cy_err_t err = cy->platform->vtable->unicast(cy->platform, //
@@ -4472,10 +4496,11 @@ static void send_message_ack(cy_t* const     cy,
                                                        (cy_bytes_t){ .size = sizeof(header), .data = header });
     if (err != CY_OK) {
         CY_TRACE(cy,
-                 "⚠️ Failed to send message ACK to %016jx for tag %016jx on topic %016jx: %jd",
+                 "⚠️ %s failure T%016jx N%016jx tag=%016jx: error=%jd",
+                 positive ? "ACK" : "NACK",
+                 (uintmax_t)topic_hash,
                  (uintmax_t)lane.id,
                  (uintmax_t)tag,
-                 (uintmax_t)topic_hash,
                  (intmax_t)err);
     }
 }
@@ -4552,12 +4577,14 @@ void cy_on_message(cy_platform_t* const             platform,
             cy_topic_t* const topic     = cy_topic_find_by_hash(cy, hash);
             const uint32_t    sid_max   = CY_SUBJECT_ID_MAX(cy->platform->subject_id_modulus);
             const bool        multicast = (subject_reader != NULL) && (subject_reader->subject_id <= sid_max);
+            const bool        unicast   = (subject_reader == NULL);
             const bool        reliable  = type == header_msg_rel;
             if (multicast && (topic_subject_id_impl(hash, evictions, cy->platform->subject_id_modulus) !=
                               subject_reader->subject_id)) {
                 CY_TRACE(cy, "🫣 Inline CRDT gossip inconsistent with chosen subject, suspect publisher malfunction");
                 goto bad_message;
             }
+            const uint64_t tag = deserialize_u64(&header[16]);
             // Process the message if the topic is known.
             bool accepted = false;
             if (topic != NULL) {
@@ -4572,11 +4599,7 @@ void cy_on_message(cy_platform_t* const             platform,
                 // AcceptGossip(remote, topics) TLA+ operator.
                 // Aside from divergence handling, we also use this opportunity to sync the age.
                 on_gossip_known_topic(cy, message.timestamp, topic, evictions, lage, gossip_inline); // may alter topic
-                const uint64_t tag = deserialize_u64(&header[16]);
-                accepted           = on_message(cy, topic, tag, message, reliable, lane);
-                if (reliable && accepted) { // This is either new or retransmit, must ack either way.
-                    send_message_ack(cy, lane, tag, hash, message.timestamp + ACK_TX_TIMEOUT);
-                }
+                accepted = on_message(cy, topic, tag, message, reliable, lane);
             } else {
                 // We are using this subject for a different topic! There is an allocation collision that the
                 // sender doesn't know about. One of us has to move, either our topic or the remote one;
@@ -4586,13 +4609,20 @@ void cy_on_message(cy_platform_t* const             platform,
                 // to let everyone know that we're occupying this subject-ID and are not moving anywhere.
                 on_gossip_unknown_topic(cy, message.timestamp, hash, evictions, lage);
             }
-            if (reliable && !accepted && !multicast) {
-                (void)0; // TODO: send NACK so that the remote will cease delivery attempts.
+            // Must positive-ack if accepted, which can be true for new or retransmitted messages if acks are lost.
+            // Negative ack are used only when we see that the remote is trying to reach us using unicast and we have
+            // no subscribers on this topic (anymore) but the remote believes that we do; a negative ack is used to
+            // inform the remote that it should cease delivery attempts to save work instead of waiting for timeout.
+            // Note that we MUST NOT send a nack if we failed to accept the message due to reordering etc.
+            const bool has_subscribers = (topic != NULL) && (topic->couplings != NULL);
+            if ((reliable && accepted) || (reliable && unicast && !has_subscribers)) {
+                send_message_ack(cy, lane, tag, hash, message.timestamp + ACK_TX_TIMEOUT, accepted);
             }
             break;
         }
 
-        case header_msg_ack: {
+        case header_msg_ack:
+        case header_msg_nack: {
             if (subject_reader != NULL) {
                 goto bad_message; // Require ACKs to be unicast only.
             }
@@ -4600,14 +4630,16 @@ void cy_on_message(cy_platform_t* const             platform,
             if (incompatibility != 0) {
                 goto bad_message;
             }
-            const uint64_t    hash  = deserialize_u64(&header[8]);
-            const uint64_t    tag   = deserialize_u64(&header[16]);
-            cy_topic_t* const topic = cy_topic_find_by_hash(cy, hash);
+            const bool        positive = type == header_msg_ack;
+            const uint64_t    hash     = deserialize_u64(&header[8]);
+            const uint64_t    tag      = deserialize_u64(&header[16]);
+            cy_topic_t* const topic    = cy_topic_find_by_hash(cy, hash);
             if (topic != NULL) {
-                on_message_ack(cy, topic, tag, message.timestamp, lane);
+                on_message_ack(cy, topic, tag, message.timestamp, positive, lane);
             } else {
                 CY_TRACE(cy,
-                         "⚠️ Orphan message ACK N%016jx T%016jx tag=%016jx",
+                         "⚠️ Orphan message %s N%016jx T%016jx tag=%016jx",
+                         positive ? "ACK" : "NACK",
                          (uintmax_t)lane.id,
                          (uintmax_t)hash,
                          (uintmax_t)tag);

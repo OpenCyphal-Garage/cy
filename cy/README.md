@@ -1,7 +1,6 @@
-# Cyphal session layer design notes
+# Cyphal v1.1 design notes
 
-These notes are useful for understanding how the protocol is built but are generally not useful for end-users -- they should
- instead refer to the top-level `README.md` and also to the API documentation in [`cy.h`](./cy.h).
+These notes are useful for understanding how the protocol is built but may not be useful for end-users.
 
 The Cyphal session layer is a new addition in Cyphal v1.1. It provides higher-level protocol abstractions including named topics, new RPC semantics, optional reliable and ordered message delivery, and service discovery. The objective is to provide intentionally compact and highly robust publish-subscribe and request-response communication patterns that can be used in a variety of applications, including those with stringent real-time and reliability requirements. The solution is fully decentralized and is based on a simple CRDT consensus algorithm internally.
 
@@ -120,7 +119,7 @@ static uint32_t topic_evictions_from_subject_id(const uint64_t hash,
 
 >TODO: Pinned topics on CAN must have no header to ensure backward compatibility, sort this out later.
 
-The transport layer just ferries **opaque blobs between nodes**. The job of the session layer is to build and interpret them. To enable that, the session layer adds small fixed-size headers to messages. All headers carry the header type in the first byte; the rest is header-specific. All headers have a fixed size of 24 bytes and favor natural alignment where possible to simplify parsing. The following header types are defined:
+The transport layer just ferries opaque blobs between nodes. The job of the session layer is to build and interpret them. To enable that, the session layer adds small fixed-size headers to messages. All headers carry the header type in the first byte; the rest is header-specific. All headers have a fixed size of 24 bytes and favor natural alignment where possible to simplify parsing. The following header types are defined:
 
 ```c++
 #define HEADER_BYTES     24U
@@ -129,12 +128,13 @@ typedef enum
     header_msg_be   = 0,    ///< Best-effort published message with user payload.
     header_msg_rel  = 1,    ///< Reliable published message with user payload. Requires acknowledgement.
     header_msg_ack  = 2,    ///< Acknowledgement of a reliable published message. No payload.
-    header_rsp_be   = 3,    ///< Best-effort response with user payload. Requires no acknowledgement.
-    header_rsp_rel  = 4,    ///< Reliable response with user payload. Requires acknowledgement.
-    header_rsp_ack  = 5,    ///< Acknowledgement of a reliable response. No payload.
-    header_rsp_nack = 6,    ///< Negative acknowledgement of a reliable message or response. No payload.
-    header_gossip   = 7,    ///< Topic allocation CRDT gossip. No payload.
-    header_scout    = 8,    ///< Discovery scout. No payload.
+    header_msg_nack = 3,    ///< Negative acknowledgement of a reliable published message. No payload.
+    header_rsp_be   = 4,    ///< Best-effort response with user payload. Requires no acknowledgement.
+    header_rsp_rel  = 5,    ///< Reliable response with user payload. Requires acknowledgement.
+    header_rsp_ack  = 6,    ///< Acknowledgement of a reliable response. No payload.
+    header_rsp_nack = 7,    ///< Negative acknowledgement of a reliable message or response. No payload.
+    header_gossip   = 8,    ///< Topic allocation CRDT gossip. No payload.
+    header_scout    = 9,    ///< Discovery scout. No payload.
     // Rest reserved for future use.
 } header_type_t;
 ```
@@ -162,11 +162,15 @@ uint64 tag              # For ordering recovery and acknowledgement & response c
 # Payload follows.
 ```
 
-#### Type 2 (publication acknowledgement)
+#### Types 2 (publication acknowledgement), 3 (publication negative acknowledgement)
 
-Sent in response to a reliable message publication. Message publications have no negative acknowledgements because they are inherently multicast: even if we can't accept a message, someone else might be able to.
+Sent in response to a reliable message publication. The priority level must match that of the original message.
 
-The ack priority level must match that of the original message.
+Acknowledgements are sent in response to successfully receiving a reliable message such that it is either passed to the application, or scheduled to be passed soon.
+
+Negative acknowledgements are currently used only with unicast messages. A negative acknowledgement is sent back to the message sender if a reliable message is unicast to a node that has no matching subscriber for the topic of the message. This is used to actively inform the sender that the local node is no longer interested in the topic after a local subscriber is destroyed, such that the sender can cease delivery attempts early without waiting for its corresponding local states to expire. The case when a subscriber exists but does not accept the message for any reason (e.g., OOM, ordering violation, etc.) is notably excluded at the moment.
+
+Multicast messages do not use negative acknowledgements because once a subscriber is destroyed, subject membership is ceased, so further messages from that topic will be unlikely to arrive.
 
 ```bash
 uint8  type
@@ -176,7 +180,7 @@ uint64 topic_hash       # From the acknowledged message.
 uint64 tag              # From the acknowledged message.
 ```
 
-#### Types 3 (best-effort response), 4 (reliable response), 5 (response ack), 6 (response nack)
+#### Types 4 (best-effort response), 5 (reliable response), 6 (response ack), 7 (response nack)
 
 Response tags are not used for ordering recovery since there is a seqno available, and there is no risk of reboot misattribution -- they are only needed for acknowledgement correlation and as such they are much narrower and there is no monotonicity requirement, the sender can choose values arbitrarily.
 
@@ -193,7 +197,7 @@ uint64 message_tag      # The tag of the published message this response pertain
 # Payload follows, unless ACK.
 ```
 
-#### Type 7 (topic allocation CRDT gossip)
+#### Type 8 (topic allocation CRDT gossip)
 
 See the `model/` directory for the design rationale.
 
@@ -209,7 +213,7 @@ utf8[<=CY_TOPIC_NAME_MAX] topic_name  # Has 1 byte length prefix. The name is no
 # Total size is 24 bytes + topic name length.
 ```
 
-#### Type 8 (discovery scout)
+#### Type 9 (discovery scout)
 
 This is typically broadcast to let every node check if it has any matching topics. On match, responses are sent as the ordinary CRDT gossip message with zero TTL. Responses are usually unicast, but this is not required; the only requirement is that the requester should be likely to receive them.
 
@@ -255,11 +259,11 @@ Security features are likely to be introduced as optional extensions of the prot
 ## Implementation-specific notes
 
 Pattern subscriptions are perhaps the most convoluted part of the library because patterns imply that a single
-subscription can match multiple topics, and a single topic may match multiple subscriptions under different names. The
-library introduces dynamically allocated coupling objects that link a topic with the matching subscribers. Also, the
-library has to manage the lifetime of subscriptions created automatically on a pattern match; such subscriptions and
-their topics are called "implicit" and they expire automatically when there is no activity for a certain large
-predefined timeout.
+subscription can match multiple topics, and a single topic may match multiple subscriptions under different names.
+The library introduces dynamically allocated coupling objects that link a topic with the matching subscribers.
+Also, the library has to manage the lifetime of subscriptions created automatically on a pattern match;
+such subscriptions and their topics are called "implicit" and they expire automatically when there is no
+activity for a certain large predefined timeout.
 
 ```mermaid
 classDiagram
