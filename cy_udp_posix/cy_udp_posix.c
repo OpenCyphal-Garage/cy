@@ -331,7 +331,9 @@ static void v_on_msg(udpard_rx_t* const rx, udpard_rx_port_t* const port, const 
         cy_lane_t lane = { .id = tr.remote.uid, .prio = (cy_prio_t)tr.priority };
         static_assert(sizeof(tr.remote.endpoints) <= sizeof(lane.ctx), "");
         memcpy(&lane.ctx, tr.remote.endpoints, sizeof(tr.remote.endpoints));
-        cy_on_message(&owner->base, lane, (cy_subject_reader_t*)port->user, msg); // user is NULL for unicast
+        const uint32_t* const subject_id = (port->user == NULL) ? NULL // user is NULL for unicast
+                                                                : &((subject_reader_t*)port->user)->base.subject_id;
+        cy_on_message(&owner->base, lane, subject_id, msg);
     } else {
         udpard_fragment_free_all(tr.payload, udpard_make_deleter(owner->mem));
         owner->stats.message_loss_count++;

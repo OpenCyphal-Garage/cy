@@ -68,6 +68,7 @@ typedef struct cy_subject_writer_t
 
 /// A subject reader is created when the higher layer requires data from the specified subject-ID.
 /// The transport layer must report all received messages via cy_on_message().
+/// Deduplication and long message support are not required on subjects above (CY_SUBJECT_ID_PINNED_MAX+modulus).
 /// Cy guarantees that there will be at most one subject reader per subject-ID.
 typedef struct cy_subject_reader_t
 {
@@ -86,7 +87,7 @@ struct cy_platform_t
     /// All nodes in the network shall share the same value.
     /// If heterogeneously redundant transports are used, then the smallest modulus shall be used.
     ///
-    /// The full range of used subject-ID values is [0, CY_SUBJECT_ID_PINNED_MAX + modulus],
+    /// The full range of used subject-ID values is [0, CY_SUBJECT_ID_PINNED_MAX+modulus],
     /// where the values below or equal to CY_SUBJECT_ID_PINNED_MAX are used for pinned topics only.
     ///
     /// The modulus shall be a prime number because the subject-ID function uses a quadratic probing strategy:
@@ -198,11 +199,11 @@ typedef struct cy_platform_vtable_t
 } cy_platform_vtable_t;
 
 /// New message received, multicast or unicast. The data ownership is taken by this function.
-/// The subject reader is NULL for unicast messages.
-void cy_on_message(cy_platform_t* const             platform,
-                   const cy_lane_t                  lane,
-                   const cy_subject_reader_t* const subject_reader,
-                   const cy_message_ts_t            message);
+/// The subject ID is NULL for unicast messages; it is a pointer only to represent absence of value.
+void cy_on_message(cy_platform_t* const  platform,
+                   const cy_lane_t       lane,
+                   const uint32_t* const subject_id,
+                   const cy_message_ts_t message);
 
 #ifdef __cplusplus
 }

@@ -4551,10 +4551,10 @@ static void send_response_ack(cy_t* const     cy,
     }
 }
 
-void cy_on_message(cy_platform_t* const             platform,
-                   const cy_lane_t                  lane,
-                   const cy_subject_reader_t* const subject_reader,
-                   const cy_message_ts_t            message)
+void cy_on_message(cy_platform_t* const  platform,
+                   const cy_lane_t       lane,
+                   const uint32_t* const subject_id,
+                   const cy_message_ts_t message)
 {
     cy_t* const cy = platform->cy;
     assert((cy != NULL) && (message.timestamp >= 0));
@@ -4565,6 +4565,11 @@ void cy_on_message(cy_platform_t* const             platform,
     }
     message_skip(message.content, HEADER_BYTES);
     const header_type_t type = (header_type_t)header[0];
+
+    // Determine delivery scope.
+    const bool unicast   = (subject_id == NULL);
+    const bool multicast = !unicast && (*subject_id <= CY_SUBJECT_ID_MAX(cy->platform->subject_id_modulus));
+    const bool broadcast = !unicast && (*subject_id == cy->broad_reader->subject_id);
 
     // This is the central entry point for all incoming messages. It's complex but there's an advantage to keeping the
     // central dispatch logic in one place because of the tight coupling between different parts of the stack.
@@ -4582,13 +4587,10 @@ void cy_on_message(cy_platform_t* const             platform,
                 CY_TRACE(cy, "🫣 Inline CRDT gossip with nonzero evictions on a pinned subject");
                 goto bad_message;
             }
-            cy_topic_t* const topic     = cy_topic_find_by_hash(cy, hash);
-            const uint32_t    sid_max   = CY_SUBJECT_ID_MAX(cy->platform->subject_id_modulus);
-            const bool        multicast = (subject_reader != NULL) && (subject_reader->subject_id <= sid_max);
-            const bool        unicast   = (subject_reader == NULL);
-            const bool        reliable  = type == header_msg_rel;
-            if (multicast && (topic_subject_id_impl(hash, evictions, cy->platform->subject_id_modulus) !=
-                              subject_reader->subject_id)) {
+            cy_topic_t* const topic    = cy_topic_find_by_hash(cy, hash);
+            const bool        reliable = type == header_msg_rel;
+            if (multicast &&
+                (topic_subject_id_impl(hash, evictions, cy->platform->subject_id_modulus) != *subject_id)) {
                 CY_TRACE(cy, "🫣 Inline CRDT gossip inconsistent with chosen subject, suspect publisher malfunction");
                 goto bad_message;
             }
@@ -4631,7 +4633,7 @@ void cy_on_message(cy_platform_t* const             platform,
 
         case header_msg_ack:
         case header_msg_nack: {
-            if (subject_reader != NULL) {
+            if (!unicast) {
                 goto bad_message; // Require ACKs to be unicast only.
             }
             const uint32_t incompatibility = deserialize_u32(&header[4]);
@@ -4657,7 +4659,7 @@ void cy_on_message(cy_platform_t* const             platform,
 
         case header_rsp_be:
         case header_rsp_rel: {
-            if (subject_reader != NULL) {
+            if (!unicast) {
                 goto bad_message; // Require responses to be unicast only.
             }
             const bool     reliable    = type == header_rsp_rel;
@@ -4693,7 +4695,7 @@ void cy_on_message(cy_platform_t* const             platform,
 
         case header_rsp_ack:
         case header_rsp_nack: {
-            if (subject_reader != NULL) {
+            if (!unicast) {
                 goto bad_message; // Require ACKs to be unicast only.
             }
             const byte_t   tag         = header[1];
@@ -4746,9 +4748,7 @@ void cy_on_message(cy_platform_t* const             platform,
                 CY_TRACE(cy, "🫣 CRDT gossip with nonzero evictions on a pinned subject");
                 goto bad_message;
             }
-            const gossip_scope_t scope = (subject_reader == NULL)
-                                           ? gossip_unicast
-                                           : ((subject_reader == cy->broad_reader) ? gossip_broadcast : gossip_sharded);
+            const gossip_scope_t scope = unicast ? gossip_unicast : (broadcast ? gossip_broadcast : gossip_sharded);
             on_gossip(cy, message.timestamp, hash, evictions, lage, name, scope);
             break;
         }
