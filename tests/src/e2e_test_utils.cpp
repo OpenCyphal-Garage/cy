@@ -124,22 +124,6 @@ cy_err_t drive_round_all(sim_net_t& net, const cy_us_t now)
     return drive_round_vector(net, std::vector<cy_us_t>(count, now));
 }
 
-cy_err_t drive_round(sim_net_t& net)
-{
-    const std::size_t count = sim_net_node_count(net);
-    if (count == 0U) {
-        return CY_ERR_ARGUMENT;
-    }
-    if (count == 1U) {
-        return drive_round_all(net, sim_net_node_now(net, 0U));
-    }
-    std::vector<cy_us_t> now_by_node(count, 0);
-    for (std::size_t i = 0U; i < count; i++) {
-        now_by_node.at(i) = sim_net_node_now(net, i);
-    }
-    return drive_round_vector(net, now_by_node);
-}
-
 cy_err_t drive_round(sim_net_t& net, const cy_us_t now_a, const cy_us_t now_b)
 {
     const std::size_t count = sim_net_node_count(net);

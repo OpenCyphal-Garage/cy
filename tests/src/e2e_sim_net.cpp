@@ -419,11 +419,7 @@ extern "C" cy_err_t sim_subject_writer_send(cy_platform_t* const       platform,
     op_info_t op{};
     op.node_index                     = self->index;
     op.kind                           = op_kind_t::subject_send;
-    op.now                            = self->now;
     op.deadline                       = deadline;
-    op.has_subject_id                 = true;
-    op.subject_id                     = writer->subject_id;
-    op.priority                       = priority;
     const op_fault_effect_t op_effect = op_fault_evaluate_and_capture(*self, op);
     if (op_effect.fail) {
         return op_effect.error;
@@ -433,7 +429,6 @@ extern "C" cy_err_t sim_subject_writer_send(cy_platform_t* const       platform,
     if (!flatten_fragments(message, wire)) {
         return CY_ERR_ARGUMENT;
     }
-    self->subject_send_count++;
     return enqueue_subject(*self, writer->subject_id, priority, wire);
 }
 
@@ -482,11 +477,9 @@ extern "C" cy_err_t sim_unicast_send(cy_platform_t* const   platform,
     op_info_t op{};
     op.node_index                     = self->index;
     op.kind                           = op_kind_t::unicast_send;
-    op.now                            = self->now;
     op.deadline                       = deadline;
     op.has_lane_id                    = true;
     op.lane_id                        = lane->id;
-    op.priority                       = lane->prio;
     const op_fault_effect_t op_effect = op_fault_evaluate_and_capture(*self, op);
     if (op_effect.fail) {
         return op_effect.error;
@@ -496,7 +489,6 @@ extern "C" cy_err_t sim_unicast_send(cy_platform_t* const   platform,
     if (!flatten_fragments(message, wire)) {
         return CY_ERR_ARGUMENT;
     }
-    self->unicast_send_count++;
     return enqueue_unicast(*self, lane->id, lane->prio, wire);
 }
 
@@ -513,7 +505,6 @@ extern "C" cy_err_t sim_spin(cy_platform_t* const platform, const cy_us_t deadli
     op_info_t op{};
     op.node_index = self->index;
     op.kind       = op_kind_t::spin;
-    op.now        = self->now;
     op.deadline   = deadline;
 
     const op_fault_effect_t op_effect = op_fault_evaluate_and_capture(*self, op);
@@ -676,12 +667,6 @@ void sim_net_node_now_set(sim_net_t& self, const std::size_t node_index, const c
 {
     assert(node_index < self.nodes.size());
     self.nodes.at(node_index).now = now;
-}
-
-cy_us_t sim_net_node_now(const sim_net_t& self, const std::size_t node_index)
-{
-    assert(node_index < self.nodes.size());
-    return self.nodes.at(node_index).now;
 }
 
 std::uint64_t sim_net_node_id(const sim_net_t& self, const std::size_t node_index)

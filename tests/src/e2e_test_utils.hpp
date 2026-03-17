@@ -23,7 +23,6 @@ cy_err_t drive_round_all(sim_net_t& net, cy_us_t now);
 
 /// One deterministic event-loop step:
 /// deliver due -> spin node A -> spin node B -> deliver due.
-cy_err_t drive_round(sim_net_t& net);
 cy_err_t drive_round(sim_net_t& net, cy_us_t now_a, cy_us_t now_b);
 
 void assert_no_queued_frames(const sim_net_t& net);

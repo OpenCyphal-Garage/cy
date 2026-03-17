@@ -47,15 +47,10 @@ struct op_info_t final
     std::size_t   node_index{ 0U };
     op_kind_t     kind{ op_kind_t::subject_send };
 
-    cy_us_t now{ 0 };
     cy_us_t deadline{ 0 };
-
-    bool          has_subject_id{ false };
-    std::uint32_t subject_id{ 0U };
 
     bool          has_lane_id{ false };
     std::uint64_t lane_id{ 0U };
-    cy_prio_t     priority{ cy_prio_nominal };
 };
 
 using op_predicate_t = std::function<bool(const op_info_t&)>;

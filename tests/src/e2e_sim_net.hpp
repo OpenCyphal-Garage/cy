@@ -71,9 +71,6 @@ struct sim_node_t final
     std::uint64_t random_state{ UINT64_C(0x1020304050607080) };
 
     sim_subject_reader_t* readers{ nullptr };
-
-    std::size_t subject_send_count{ 0U };
-    std::size_t unicast_send_count{ 0U };
 };
 
 struct sim_net_config_t final
@@ -114,7 +111,6 @@ cy_platform_t*       sim_net_platform(sim_net_t& self, std::size_t node_index);
 const cy_platform_t* sim_net_platform(const sim_net_t& self, std::size_t node_index);
 
 void          sim_net_node_now_set(sim_net_t& self, std::size_t node_index, cy_us_t now);
-cy_us_t       sim_net_node_now(const sim_net_t& self, std::size_t node_index);
 std::uint64_t sim_net_node_id(const sim_net_t& self, std::size_t node_index);
 std::size_t   sim_net_node_count(const sim_net_t& self);
 
