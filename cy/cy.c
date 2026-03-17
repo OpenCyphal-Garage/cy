@@ -2344,11 +2344,9 @@ static void publish_future_on_ack(publish_future_t* const self, const uint64_t r
         assert(self->assoc_remaining > 0);
         self->assoc_remaining--;
     }
-    if (positive) {
-        self->acknowledged = true;        // optimistic success based on a single +ack
-        if (self->assoc_remaining == 0) { // also handles the case of no known associations at publication
-            publish_future_materialize(self, CY_OK);
-        }
+    self->acknowledged = self->acknowledged || positive;      // optimistic success based on a single +ack
+    if ((self->assoc_remaining == 0) && self->acknowledged) { // also handles the case of no known assoc at publication
+        publish_future_materialize(self, CY_OK);
     }
 }
 
@@ -4094,7 +4092,7 @@ static void topic_destroy(cy_topic_t* const topic)
     // Detach the gossip shards. This is NULL for pinned topics.
     if (topic->gossip_shard != NULL) {
         shard_t* const shard = topic->gossip_shard;
-        topic->gossip_shard = NULL;
+        topic->gossip_shard  = NULL;
         shard_deref(cy, shard);
     }
 
