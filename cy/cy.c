@@ -51,9 +51,7 @@ struct cy_tree_t
 #define KILO 1000LL
 #define MEGA 1000000LL
 
-// The earliest and latest representable time in microseconds.
-#define BIG_BANG   INT64_MIN
-#define HEAT_DEATH INT64_MAX
+#define BIG_BANG INT64_MIN
 
 // The log-age of a newly created topic.
 #define LAGE_MIN (-1)
@@ -3696,7 +3694,7 @@ void cy_subscriber_timeout_set(cy_future_t* const future, const cy_us_t timeout)
     if (cy_is_subscriber(future)) {
         subscriber_t* const self = (subscriber_t*)future;
         assert(!self->disposed); // use after free
-        assert((self->last_arrival.message.timestamp >= 0) && (self->last_arrival.message.timestamp < HEAT_DEATH));
+        assert((self->last_arrival.message.timestamp >= 0) && (self->last_arrival.message.timestamp < INT64_MAX));
         self->params.liveness_timeout = sooner(later(0, timeout), KILO * MEGA * MEGA);
         // Any argument resets the pending liveness error. It may re-appear later.
         if (self->error == CY_ERR_LIVENESS) {
@@ -4332,7 +4330,7 @@ cy_err_t cy_home_set(cy_t* const cy, const cy_str_t home)
 }
 cy_err_t cy_namespace_set(cy_t* const cy, const cy_str_t name_space) { return name_assign(cy, &cy->ns, name_space); }
 
-// Returns next deadline or HEAT_DEATH.
+// Returns next deadline or INT64_MAX.
 static cy_us_t poll(cy_t* const cy, cy_us_t* const out_now)
 {
     const olga_spin_result_t spin_result = olga_spin(&cy->olga);
