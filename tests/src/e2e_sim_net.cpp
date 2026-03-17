@@ -261,10 +261,9 @@ op_fault_effect_t op_fault_evaluate_and_capture(sim_node_t& self, op_info_t op)
       (net.op_faults != nullptr) ? op_fault_plan_evaluate(*net.op_faults, op) : op_fault_effect_t{};
 
     op_fault_capture_t capture{};
-    capture.op         = op;
-    capture.failed     = effect.fail;
-    capture.error      = effect.error;
-    capture.spin_delay = effect.spin_delay;
+    capture.op     = op;
+    capture.failed = effect.fail;
+    capture.error  = effect.error;
     (void)op_fault_capture_push(net, capture);
     return effect;
 }
@@ -518,9 +517,6 @@ extern "C" cy_err_t sim_spin(cy_platform_t* const platform, const cy_us_t deadli
     op.deadline   = deadline;
 
     const op_fault_effect_t op_effect = op_fault_evaluate_and_capture(*self, op);
-    if (op_effect.spin_delay > 0) {
-        self->now = saturating_add(self->now, op_effect.spin_delay);
-    }
     if (op_effect.fail) {
         return op_effect.error;
     }
@@ -700,12 +696,6 @@ cy_err_t sim_net_spin_node(sim_net_t& self, const std::size_t node_index)
 {
     assert(node_index < self.nodes.size());
     return cy_spin_once(self.nodes.at(node_index).cy);
-}
-
-cy_err_t sim_net_spin_node_until(sim_net_t& self, const std::size_t node_index, const cy_us_t now)
-{
-    sim_net_node_now_set(self, node_index, now);
-    return sim_net_spin_node(self, node_index);
 }
 
 void sim_net_deliver_due(sim_net_t& self, const cy_us_t now_limit)

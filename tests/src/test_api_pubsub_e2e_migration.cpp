@@ -740,7 +740,7 @@ d_case_result_t run_d_case(const d_case_config_t& cfg)
     drain_queue(net, now);
     e2e::assert_quiescent(net);
     e2e::sim_net_deinit(net);
-    e2e::assert_all_heaps_clean(net);
+    e2e::assert_all_node_heaps_clean(net);
     e2e::assert_no_live_messages();
     return result;
 }

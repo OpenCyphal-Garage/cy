@@ -87,16 +87,6 @@ fault_effect_t fault_plan_evaluate(const fault_plan_t& plan, const frame_info_t&
     return out;
 }
 
-frame_predicate_t fault_predicate_all()
-{
-    return [](const frame_info_t&) { return true; };
-}
-
-frame_predicate_t fault_predicate_none()
-{
-    return [](const frame_info_t&) { return false; };
-}
-
 frame_predicate_t fault_predicate_direction(const std::size_t source, const std::size_t destination)
 {
     return [source, destination](const frame_info_t& frame) {
@@ -109,21 +99,6 @@ frame_predicate_t fault_predicate_header_type(const std::uint8_t header_type)
     return [header_type](const frame_info_t& frame) { return frame.header_type == header_type; };
 }
 
-frame_predicate_t fault_predicate_tag(const std::uint64_t tag)
-{
-    return [tag](const frame_info_t& frame) { return frame.has_tag && (frame.tag == tag); };
-}
-
-frame_predicate_t fault_predicate_topic_hash(const std::uint64_t topic_hash)
-{
-    return [topic_hash](const frame_info_t& frame) { return frame.has_topic_hash && (frame.topic_hash == topic_hash); };
-}
-
-frame_predicate_t fault_predicate_subject_id(const std::uint32_t subject_id)
-{
-    return [subject_id](const frame_info_t& frame) { return frame.subject_id == subject_id; };
-}
-
 frame_predicate_t fault_predicate_send_time(const cy_us_t min_inclusive, const cy_us_t max_inclusive)
 {
     return [min_inclusive, max_inclusive](const frame_info_t& frame) {
@@ -134,7 +109,7 @@ frame_predicate_t fault_predicate_send_time(const cy_us_t min_inclusive, const c
 frame_predicate_t fault_predicate_every_nth(const std::size_t every_n, const std::size_t phase)
 {
     if (every_n == 0U) {
-        return fault_predicate_none();
+        return [](const frame_info_t&) { return false; };
     }
     const auto counter = std::make_shared<std::size_t>(0U);
     return [counter, every_n, phase](const frame_info_t&) {
@@ -142,11 +117,6 @@ frame_predicate_t fault_predicate_every_nth(const std::size_t every_n, const std
         *counter                = value + 1U;
         return (value % every_n) == (phase % every_n);
     };
-}
-
-frame_predicate_t fault_predicate_not(frame_predicate_t predicate)
-{
-    return [predicate = std::move(predicate)](const frame_info_t& frame) { return !predicate_match(predicate, frame); };
 }
 
 frame_predicate_t fault_predicate_all_of(std::vector<frame_predicate_t> predicates)
@@ -174,15 +144,6 @@ void op_fault_plan_add_fail(op_fault_plan_t& plan, const cy_err_t error, op_pred
     plan.rules.push_back(std::move(rule));
 }
 
-void op_fault_plan_add_spin_delay(op_fault_plan_t& plan, const cy_us_t delay, op_predicate_t predicate)
-{
-    op_fault_rule_t rule{};
-    rule.action    = op_fault_action_t::spin_delay;
-    rule.predicate = std::move(predicate);
-    rule.delay     = (delay > 0) ? delay : 0;
-    plan.rules.push_back(std::move(rule));
-}
-
 op_fault_effect_t op_fault_plan_evaluate(const op_fault_plan_t& plan, const op_info_t& op)
 {
     op_fault_effect_t out{};
@@ -194,11 +155,6 @@ op_fault_effect_t op_fault_plan_evaluate(const op_fault_plan_t& plan, const op_i
             case op_fault_action_t::fail:
                 out.fail  = true;
                 out.error = normalize_error(rule.error);
-                break;
-            case op_fault_action_t::spin_delay:
-                if (op.kind == op_kind_t::spin) {
-                    out.spin_delay = saturating_add_delay(out.spin_delay, rule.delay);
-                }
                 break;
         }
     }
@@ -213,11 +169,6 @@ op_predicate_t op_fault_predicate_all()
     return [](const op_info_t&) { return true; };
 }
 
-op_predicate_t op_fault_predicate_none()
-{
-    return [](const op_info_t&) { return false; };
-}
-
 op_predicate_t op_fault_predicate_node(const std::size_t node_index)
 {
     return [node_index](const op_info_t& op) { return op.node_index == node_index; };
@@ -226,16 +177,6 @@ op_predicate_t op_fault_predicate_node(const std::size_t node_index)
 op_predicate_t op_fault_predicate_kind(const op_kind_t kind)
 {
     return [kind](const op_info_t& op) { return op.kind == kind; };
-}
-
-op_predicate_t op_fault_predicate_subject_id(const std::uint32_t subject_id)
-{
-    return [subject_id](const op_info_t& op) { return op.has_subject_id && (op.subject_id == subject_id); };
-}
-
-op_predicate_t op_fault_predicate_lane_id(const std::uint64_t lane_id)
-{
-    return [lane_id](const op_info_t& op) { return op.has_lane_id && (op.lane_id == lane_id); };
 }
 
 op_predicate_t op_fault_predicate_deadline(const cy_us_t min_inclusive, const cy_us_t max_inclusive)
@@ -248,7 +189,7 @@ op_predicate_t op_fault_predicate_deadline(const cy_us_t min_inclusive, const cy
 op_predicate_t op_fault_predicate_every_nth(const std::size_t every_n, const std::size_t phase)
 {
     if (every_n == 0U) {
-        return op_fault_predicate_none();
+        return [](const op_info_t&) { return false; };
     }
     const auto counter = std::make_shared<std::size_t>(0U);
     return [counter, every_n, phase](const op_info_t&) {
@@ -258,23 +199,10 @@ op_predicate_t op_fault_predicate_every_nth(const std::size_t every_n, const std
     };
 }
 
-op_predicate_t op_fault_predicate_not(op_predicate_t predicate)
-{
-    return [predicate = std::move(predicate)](const op_info_t& op) { return !predicate_match(predicate, op); };
-}
-
 op_predicate_t op_fault_predicate_all_of(std::vector<op_predicate_t> predicates)
 {
     return [predicates = std::move(predicates)](const op_info_t& op) {
         return std::ranges::all_of(predicates,
-                                   [&op](const op_predicate_t& predicate) { return predicate_match(predicate, op); });
-    };
-}
-
-op_predicate_t op_fault_predicate_any_of(std::vector<op_predicate_t> predicates)
-{
-    return [predicates = std::move(predicates)](const op_info_t& op) {
-        return std::ranges::any_of(predicates,
                                    [&op](const op_predicate_t& predicate) { return predicate_match(predicate, op); });
     };
 }

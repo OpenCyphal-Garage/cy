@@ -34,8 +34,6 @@ struct op_fault_capture_t final
 
     bool     failed{ false };
     cy_err_t error{ CY_OK };
-
-    cy_us_t spin_delay{ 0 };
 };
 
 struct queued_frame_t final
@@ -121,7 +119,6 @@ std::uint64_t sim_net_node_id(const sim_net_t& self, std::size_t node_index);
 std::size_t   sim_net_node_count(const sim_net_t& self);
 
 cy_err_t sim_net_spin_node(sim_net_t& self, std::size_t node_index);
-cy_err_t sim_net_spin_node_until(sim_net_t& self, std::size_t node_index, cy_us_t now);
 
 void sim_net_deliver_due(sim_net_t& self, cy_us_t now_limit);
 

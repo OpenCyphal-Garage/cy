@@ -276,7 +276,7 @@ void cleanup_case(e2e::sim_net_t&                     net,
     e2e::assert_quiescent(net);
 
     e2e::sim_net_deinit(net);
-    e2e::assert_all_heaps_clean(net);
+    e2e::assert_all_node_heaps_clean(net);
     e2e::assert_no_live_messages();
 }
 

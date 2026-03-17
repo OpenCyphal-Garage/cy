@@ -532,7 +532,7 @@ e_case_result_t run_e_case(const e_case_config_t& cfg)
     g_stats.async_errors += e2e::sim_net_async_errors(net).size();
 
     e2e::sim_net_deinit(net);
-    e2e::assert_all_heaps_clean(net);
+    e2e::assert_all_node_heaps_clean(net);
     e2e::assert_no_live_messages();
 
     return result;
