@@ -209,9 +209,10 @@ void dispatch_raw(test_platform_t&                      platform,
     cy_message_t* const msg = cy_test_message_make(&platform.message_heap, wire.data(), size);
     TEST_ASSERT_NOT_NULL(msg);
     cy_message_ts_t mts{};
-    mts.timestamp = ts;
-    mts.content   = msg;
-    cy_on_message(&platform.platform, lane, reader, mts);
+    mts.timestamp                         = ts;
+    mts.content                           = msg;
+    const std::uint32_t* const subject_id = (reader != nullptr) ? &reader->subject_id : nullptr;
+    cy_on_message(&platform.platform, lane, subject_id, mts);
 }
 
 void dispatch_gossip(test_platform_t&           platform,

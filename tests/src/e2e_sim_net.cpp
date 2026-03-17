@@ -382,7 +382,7 @@ void deliver_frame(sim_net_t& net, const queued_frame_t& frame)
 
     const sim_subject_reader_t* const reader = find_reader(dst, frame.frame.subject_id);
     if (reader != nullptr) {
-        cy_on_message(&dst.platform, lane, &reader->base, mts);
+        cy_on_message(&dst.platform, lane, &reader->base.subject_id, mts);
     } else {
         cy_message_refcount_dec(msg);
     }

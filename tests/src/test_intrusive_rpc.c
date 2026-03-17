@@ -296,8 +296,11 @@ static void dispatch_response_control(fixture_t* const fixture,
     cy_message_ts_t message = { .timestamp = timestamp, .content = msg };
     const cy_lane_t lane    = make_lane(remote_id);
     if (multicast) {
-        cy_subject_reader_t reader = { .subject_id = 1U };
-        cy_on_message(&fixture->platform, lane, &reader, message);
+        const uint32_t      subject_id   = 1U;
+        cy_subject_reader_t broad_reader = { .subject_id = 2U };
+        fixture->cy.broad_reader         = &broad_reader;
+        cy_on_message(&fixture->platform, lane, &subject_id, message);
+        fixture->cy.broad_reader = NULL;
     } else {
         cy_on_message(&fixture->platform, lane, NULL, message);
     }

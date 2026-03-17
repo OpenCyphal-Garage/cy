@@ -356,7 +356,7 @@ static void dispatch_subscriber_message(fixture_t* const    self,
     wire[HEADER_BYTES]           = payload_byte;
     const cy_message_ts_t mts    = make_wire_message(self, wire, sizeof(wire), ts);
     cy_subject_reader_t   reader = { .subject_id = topic_subject_id((cy_topic_t*)topic) };
-    cy_on_message(&self->platform, make_lane(remote_id, cy_prio_nominal), &reader, mts);
+    cy_on_message(&self->platform, make_lane(remote_id, cy_prio_nominal), &reader.subject_id, mts);
 }
 
 static void dispatch_response_message(fixture_t* const    self,

@@ -409,7 +409,7 @@ void deliver_event(sim_network_t& net, const sim_event_t& ev)
     } else {
         const sim_subject_reader_t* const reader = find_reader(dst, ev.subject_id);
         if (reader != nullptr) {
-            cy_on_message(&dst.platform, lane, &reader->base, mts);
+            cy_on_message(&dst.platform, lane, &reader->base.subject_id, mts);
         } else {
             cy_message_refcount_dec(msg);
         }

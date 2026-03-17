@@ -165,9 +165,10 @@ void dispatch_raw(test_platform_t* const            self,
     cy_message_t* const msg = cy_test_message_make(&self->message_heap, wire.data(), wire.size());
     TEST_ASSERT_NOT_NULL(msg);
     cy_message_ts_t mts{};
-    mts.timestamp = timestamp;
-    mts.content   = msg;
-    cy_on_message(&self->platform, lane, reader, mts);
+    mts.timestamp                         = timestamp;
+    mts.content                           = msg;
+    const std::uint32_t* const subject_id = (reader != nullptr) ? &reader->subject_id : nullptr;
+    cy_on_message(&self->platform, lane, subject_id, mts);
 }
 
 std::uint32_t subject_id_for_hash(const std::uint64_t hash, const std::uint32_t evictions, const std::uint32_t modulus)

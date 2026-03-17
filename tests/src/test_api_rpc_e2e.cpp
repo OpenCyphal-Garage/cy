@@ -423,7 +423,7 @@ void inject_response_wire(e2e::sim_net_t&                   net,
     if (as_multicast) {
         cy_subject_reader_t fake_reader{};
         fake_reader.subject_id = 1U;
-        cy_on_message(e2e::sim_net_platform(net, e2e::sim_node_a), lane, &fake_reader, mts);
+        cy_on_message(e2e::sim_net_platform(net, e2e::sim_node_a), lane, &fake_reader.subject_id, mts);
     } else {
         cy_on_message(e2e::sim_net_platform(net, e2e::sim_node_a), lane, nullptr, mts);
     }
