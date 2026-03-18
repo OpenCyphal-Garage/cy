@@ -38,21 +38,9 @@ On an embedded system, one may also prefer to use [`o1heap`](https://github.com/
 management, but this is not a hard dependency -- any allocator will work. O1Heap is the recommended choice for embedded
 platforms due to its hard determinism and low fragmentation.
 
-## 💡 Design in a nutshell
-
-Cyphal v1.1 is a session layer built on top of the Cyphal v1.0 transport layers.
-The session layer provides named topics by automatically mapping topic names to subject-IDs.
-The mapping is done by maintaining a distributed allocation table based on a CRDT,
-which is kept consistent across the network using a gossip protocol.
-The session layer also provides a powerful pattern subscription mechanism that allows applications to discover
-topics and subscribe to them on the fly.
-A new RPC mechanism is available that allows sending responses and streaming data back to the publisher.
-Additional features include tunable reliability, liveness monitoring, ordered delivery, etc.
-
 🌐 A live demo of the distributed consensus algorithm can be found at <https://gerasim.opencyphal.org>.
 
-For a more comprehensive design overview, refer to [`cy/README.md`](cy/README.md);
-formal verification models can be found in `model/`.
+For a detailed design overview, refer to `model/`.
 
 ## 📚 API crash course
 
