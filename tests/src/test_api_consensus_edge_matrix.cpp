@@ -395,8 +395,8 @@ void test_api_consensus_edge_implicit_topic_expiry_large_time_jump_with_ordered_
 
     arrival_capture_t capture{};
 
-    cy_future_t* const sub =
-      cy_subscribe_ordered(e2e::sim_net_cy(net, subscriber_node), cy_str(topic_pattern), 64U, expiry_timeout_us + 100'000'000);
+    cy_future_t* const sub = cy_subscribe_ordered(
+      e2e::sim_net_cy(net, subscriber_node), cy_str(topic_pattern), 64U, expiry_timeout_us + 100'000'000);
     TEST_ASSERT_NOT_NULL(sub);
     cy_user_context_t ctx = CY_USER_CONTEXT_EMPTY;
     ctx.ptr[0]            = &capture;
