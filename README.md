@@ -21,8 +21,6 @@ and service discovery in only a few thousand lines of straightforward C.
 Runs anywhere, including small baremetal MCUs.
 The key design goals are simplicity and robustness.
 
-🚧 **WORK IN PROGRESS** 🏗️ The library is under active development; the API and functionality may change. Bugs afoot.
-
 To use the library in your project, simply copy `cy.c`, `cy.h`, and `cy_platform.h` into your source tree,
 or add this repository as a submodule.
 The following external dependencies are required, all single-header-only:
