@@ -1168,6 +1168,7 @@ static bool is_implicit(const cy_topic_t* const topic)
 }
 
 static void topic_sync_subject_reader(cy_topic_t* const topic);
+static void topic_decouple_subscriber_root(cy_topic_t* const topic, const subscriber_root_t* const root);
 
 static void unschedule_gossip(cy_topic_t* const topic);
 static void schedule_gossip_periodic(cy_topic_t* const topic, const cy_us_t now, const bool suppressed);
@@ -1209,6 +1210,11 @@ static void retire_expired_implicit_topics(cy_t* const cy, const cy_us_t now)
         assert(is_implicit(topic) && topic_validate_is_implicit(topic));
         if ((topic->ts_animated + cy->implicit_topic_timeout) < now) {
             CY_TRACE(cy, "⚰️ %s", topic_repr(topic).str);
+            // Expiration may occur while pattern subscribers are still alive, so we have to detach
+            // all couplings first to preserve subscriber invariants expected by topic_destroy().
+            while (topic->couplings != NULL) {
+                topic_decouple_subscriber_root(topic, topic->couplings->root);
+            }
             topic_destroy(topic);
         }
     }
@@ -3762,6 +3768,18 @@ static void topic_decouple_subscriber_root(cy_topic_t* const topic, const subscr
             mem_free(cy, this);
         } else {
             cpl = &this->next;
+        }
+    }
+    // Reordering states keep raw topic pointers, which are invalid once the topic is detached and later destroyed.
+    // Remove all reordering states bound to this topic under this subscriber root.
+    for (subscriber_t* sub = root->head; sub != NULL; sub = sub->next) {
+        for (reordering_t* rr = CAVL2_TO_OWNER(cavl2_min(sub->index_reordering_by_remote_id), reordering_t, index);
+             rr != NULL;) {
+            reordering_t* const next = (reordering_t*)cavl2_next_greater((cy_tree_t*)rr);
+            if (rr->topic == topic) {
+                reordering_destroy(rr);
+            }
+            rr = next;
         }
     }
     topic_sync_subject_reader(topic);
