@@ -12,6 +12,8 @@ Update docs/examples when public API behavior changes.
 
 When working with the CI, be aware that commits that contain `#yolo` run only the faster subset of CI jobs, which can be used to speed up the work.
 
+Do NOT start another build while one is still in progress. Building the full test suite with static analysis enabled may take about half an hour, wait for it to complete before starting another build. Parallelization within one build session is encouraged.
+
 ## Project structure
 
 - `cy/`: the library itself, which is transport-agnostic and platform-agnostic.
@@ -21,6 +23,8 @@ When working with the CI, be aware that commits that contain `#yolo` run only th
 - `model/`: formal protocol models. Read it to understand the protocol, esp. READMEs & notebooks.
 - `tools/`: various utilities useful for development, validation, and verification.
 - `papers/`: relevant publications and prior art.
+
+If you need a build directory, create one named with the `build` prefix. Do not use `cmake-build-*`, these are for CLion.
 
 ## Style conventions
 

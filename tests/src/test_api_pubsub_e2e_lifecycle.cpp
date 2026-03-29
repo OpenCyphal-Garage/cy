@@ -25,8 +25,8 @@ constexpr cy_us_t step_us        = 20'000;
 constexpr cy_us_t future_timeout = 3'000'000;
 
 constexpr std::array<const char*, topic_count> colliding_topics = {
-    "e2e/migrate/topic_alpha#123456789abcdeff",
-    "e2e/migrate/topic_beta#123456789abdbe72",
+    "e2e/migrate/alpha_0",
+    "e2e/migrate/beta_14014",
 };
 
 struct global_stats_t final

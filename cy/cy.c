@@ -60,6 +60,15 @@ struct cy_tree_t
 // For reference, 2**35 seconds is a little over one millennium.
 #define LAGE_MAX 35
 
+// Log-age value used by pinned topics. Pinned topics are maximally old so they always win age-based arbitration.
+#define LAGE_PINNED 127
+
+// Eviction counter threshold for pinned topics. A topic is pinned when evictions >= EVICTIONS_PINNED_MIN.
+// The pinned subject-ID is (UINT32_MAX-evictions), in [0, CY_SUBJECT_ID_PINNED_MAX].
+// Normal eviction counters never approach this range in practice (would take ~136 years of continuous churn at 1 Hz).
+// If they ever did, the topic would auto-pin to subject 8191, preventing the deadly eviction counter wraparound.
+#define EVICTIONS_PINNED_MIN (UINT32_MAX - CY_SUBJECT_ID_PINNED_MAX) // 0xFFFFE000
+
 #define GOSSIP_PERIOD_DITHER_RATIO 8
 
 // A topic created based on a pattern subscription will be deleted after it's been idle for this long.
@@ -111,12 +120,12 @@ struct cy_t
     cy_str_t ns;
 
     // Topics are indexed in multiple ways for various lookups.
-    // Remember that pinned topics have small hash ≤8184, hence they are always on the left of the hash tree,
-    // and can be traversed quickly if needed.
+    // Pinned topics are identified by evictions >= EVICTIONS_PINNED_MIN, not by their hash.
     wkv_t      topics_by_name;       // Contains ALL topics, may be empty.
     cy_tree_t* topics_by_hash;       // ditto
-    cy_tree_t* topics_by_subject_id; // All except pinned, since they do not collide. May be empty.
-    size_t     topic_count;
+    cy_tree_t* topics_by_subject_id; // Non-pinned only. Pinned topics are excluded because
+                                     // multiple topics may share a pinned subject-ID (non-unique mapping).
+    size_t topic_count;
 
     cy_list_t list_implicit; // Most recently animated topic is at the head.
 
@@ -146,7 +155,8 @@ struct cy_t
     cy_us_t    gossip_urgent_delay_max;
     byte_t     gossip_broadcast_ratio; // Nth gossip per topic is broadcast for observability.
     uint32_t   gossip_shard_count;
-    cy_tree_t* gossip_shards; // see shard_t.
+    cy_tree_t* writers; // writer_t AVL tree. Shared between topic subjects and gossip shards.
+    cy_tree_t* readers; // reader_t AVL tree. Shared between topic subjects and gossip shards.
 
     // Slow topic iteration state. Updated every spin; when NULL, restart from scratch.
     cy_topic_t* topic_iter;
@@ -770,73 +780,171 @@ void cy_future_destroy(cy_future_t* const self)
 }
 
 // =====================================================================================================================
-//                                                  GOSSIP SHARDS
+//                                              READER/WRITER REGISTRY
 // =====================================================================================================================
 
-// A gossip shard joined by the node. Usually there is one per topic, but sometimes collisions happen;
-// to manage that, we hold the refcount to allow sharing between topics. Indexing allows quick lookup on
-// new topic creation.
+// Refcounted subject writer and reader registries shared between topic subjects and gossip shards.
+// Multiple pinned topics may share a subject-ID (non-unique mapping), requiring shared reader/writer handles.
+// Gossip shards also share entries across topics that hash to the same shard subject-ID.
+// At most one writer_t exists per subject-ID in cy->writers; at most one reader_t per subject-ID in cy->readers.
+
 typedef struct
 {
-    cy_tree_t index;    // by shard subject-ID
-    size_t    refcount; // destroyed when zero
+    cy_tree_t            index;    // AVL node, keyed by handle->subject_id.
+    size_t               refcount; // Destroyed when zero.
+    cy_subject_writer_t* handle;   // Always non-NULL while in the tree.
+} writer_t;
 
-    cy_subject_writer_t* writer;
-    cy_subject_reader_t* reader;
-} shard_t;
+typedef struct
+{
+    cy_tree_t            index;    // AVL node, keyed by handle->subject_id.
+    size_t               refcount; // Destroyed when zero.
+    size_t               extent;   // Creation parameter high-water mark. Needed to decide when to recreate.
+    cy_subject_reader_t* handle;   // Always non-NULL while in the tree.
+} reader_t;
 
 typedef struct
 {
     cy_t*    cy;
     uint32_t subject_id;
-} shard_factory_context_t;
+} writer_factory_context_t;
 
-static int32_t shard_cavl_compare(const void* const user, const cy_tree_t* const node)
+typedef struct
+{
+    cy_t*    cy;
+    uint32_t subject_id;
+    size_t   extent;
+} reader_factory_context_t;
+
+static int32_t writer_cavl_compare(const void* const user, const cy_tree_t* const node)
 {
     const uint32_t outer = *(const uint32_t*)user;
-    const uint32_t inner = ((const shard_t*)node)->writer->subject_id;
+    const uint32_t inner = ((const writer_t*)node)->handle->subject_id;
     return (outer == inner) ? 0 : ((outer > inner) ? +1 : -1);
 }
 
-// Decrements the refcount, destroys the shard if zero.
-static void shard_deref(cy_t* const cy, shard_t* const shard)
+static int32_t reader_cavl_compare(const void* const user, const cy_tree_t* const node)
 {
-    assert((shard->writer != NULL) && (shard->reader != NULL));
-    assert(shard->refcount > 0);
-    assert(cavl2_is_inserted(cy->gossip_shards, &shard->index));
-    shard->refcount--;
-    if (shard->refcount == 0) {
-        CY_TRACE(cy, "🧊🗑 S%08jx", (uintmax_t)shard->writer->subject_id);
-        cavl2_remove(&cy->gossip_shards, &shard->index);
-        cy->platform->vtable->subject_writer_destroy(cy->platform, shard->writer);
-        cy->platform->vtable->subject_reader_destroy(cy->platform, shard->reader);
-        mem_free(cy, shard);
+    const uint32_t outer = *(const uint32_t*)user;
+    const uint32_t inner = ((const reader_t*)node)->handle->subject_id;
+    return (outer == inner) ? 0 : ((outer > inner) ? +1 : -1);
+}
+
+static cy_tree_t* writer_cavl_factory(void* const user)
+{
+    writer_factory_context_t* const ctx = (writer_factory_context_t*)user;
+    cy_t* const                     cy  = ctx->cy;
+    writer_t* const                 w   = (writer_t*)mem_alloc_zero(cy, sizeof(writer_t));
+    if (w != NULL) {
+        w->refcount = 0; // The caller will increment.
+        w->handle   = cy->platform->vtable->subject_writer_new(cy->platform, ctx->subject_id);
+        if (w->handle == NULL) {
+            mem_free(cy, w);
+            return NULL;
+        }
+        w->handle->subject_id = ctx->subject_id;
+    }
+    return (cy_tree_t*)w;
+}
+
+static cy_tree_t* reader_cavl_factory(void* const user)
+{
+    reader_factory_context_t* const ctx = (reader_factory_context_t*)user;
+    cy_t* const                     cy  = ctx->cy;
+    reader_t* const                 r   = (reader_t*)mem_alloc_zero(cy, sizeof(reader_t));
+    if (r != NULL) {
+        r->refcount = 0;
+        r->extent   = ctx->extent;
+        r->handle   = cy->platform->vtable->subject_reader_new(cy->platform, ctx->subject_id, ctx->extent);
+        if (r->handle == NULL) {
+            mem_free(cy, r);
+            return NULL;
+        }
+        r->handle->subject_id = ctx->subject_id;
+    }
+    return (cy_tree_t*)r;
+}
+
+// Find or create a writer for the given subject-ID. Returns NULL on OOM.
+static writer_t* writer_acquire(cy_t* const cy, const uint32_t subject_id)
+{
+    writer_factory_context_t fac = { .cy = cy, .subject_id = subject_id };
+    writer_t* const          w =
+      (writer_t*)cavl2_find_or_insert(&cy->writers, &subject_id, writer_cavl_compare, &fac, &writer_cavl_factory);
+    if (w != NULL) {
+        w->refcount++;
+    }
+    return w;
+}
+
+// Decrement refcount; destroy and free when it reaches zero.
+static void writer_release(cy_t* const cy, writer_t* const w)
+{
+    assert((w != NULL) && (w->handle != NULL) && (w->refcount > 0));
+    w->refcount--;
+    if (w->refcount == 0) {
+        cavl2_remove(&cy->writers, &w->index);
+        cy->platform->vtable->subject_writer_destroy(cy->platform, w->handle);
+        mem_free(cy, w);
     }
 }
 
-static cy_tree_t* shard_cavl_factory(void* const user)
+// Find or create a reader for the given subject-ID. Returns NULL on OOM.
+// If an existing reader's extent is too small, the handle is recreated with the larger extent.
+static reader_t* reader_acquire(cy_t* const cy, const uint32_t subject_id, const size_t extent)
 {
-    shard_factory_context_t* const ctx   = (shard_factory_context_t*)user;
-    cy_t* const                    cy    = ctx->cy;
-    shard_t* const                 shard = (shard_t*)mem_alloc_zero(cy, sizeof(shard_t));
-    if (shard != NULL) {
-        CY_TRACE(cy, "🧊✨ S%08jx", (uintmax_t)ctx->subject_id);
-        shard->refcount = 0; // The caller will increment.
-        shard->writer   = cy->platform->vtable->subject_writer_new(cy->platform, ctx->subject_id);
-        if (shard->writer == NULL) {
-            mem_free(cy, shard);
-            return NULL;
+    reader_factory_context_t fac = { .cy = cy, .subject_id = subject_id, .extent = extent };
+    reader_t* const          r =
+      (reader_t*)cavl2_find_or_insert(&cy->readers, &subject_id, reader_cavl_compare, &fac, &reader_cavl_factory);
+    if (r != NULL) {
+        r->refcount++;
+        if (extent > r->extent) { // Grow extent to accommodate the new user.
+            cy->platform->vtable->subject_reader_destroy(cy->platform, r->handle);
+            r->handle = cy->platform->vtable->subject_reader_new(cy->platform, subject_id, extent);
+            if (r->handle != NULL) {
+                r->handle->subject_id = subject_id;
+                r->extent             = extent;
+            } else {
+                // Recreation failed; remove from registry since handle is now NULL.
+                r->refcount--;
+                cavl2_remove(&cy->readers, &r->index);
+                mem_free(cy, r);
+                return NULL;
+            }
         }
-        shard->writer->subject_id = ctx->subject_id;
-        shard->reader = cy->platform->vtable->subject_reader_new(cy->platform, ctx->subject_id, CY_AUX_SUBJECT_EXTENT);
-        if (shard->reader == NULL) {
-            cy->platform->vtable->subject_writer_destroy(cy->platform, shard->writer);
-            mem_free(cy, shard);
-            return NULL;
-        }
-        shard->reader->subject_id = ctx->subject_id;
     }
-    return (cy_tree_t*)shard;
+    return r;
+}
+
+static void reader_release(cy_t* const cy, reader_t* const r)
+{
+    assert((r != NULL) && (r->handle != NULL) && (r->refcount > 0));
+    r->refcount--;
+    if (r->refcount == 0) {
+        cavl2_remove(&cy->readers, &r->index);
+        cy->platform->vtable->subject_reader_destroy(cy->platform, r->handle);
+        mem_free(cy, r);
+    }
+}
+
+// Recreate the reader handle with a larger extent. No-op if the current extent is sufficient.
+static void reader_grow_extent(cy_t* const cy, reader_t* const r, const size_t new_extent)
+{
+    assert((r != NULL) && (r->handle != NULL) && (r->refcount > 0));
+    if (new_extent > r->extent) {
+        const uint32_t subject_id = r->handle->subject_id;
+        cy->platform->vtable->subject_reader_destroy(cy->platform, r->handle);
+        r->handle = cy->platform->vtable->subject_reader_new(cy->platform, subject_id, new_extent);
+        if (r->handle != NULL) {
+            r->handle->subject_id = subject_id;
+            r->extent             = new_extent;
+        } else {
+            // Recreation failed; the reader is now broken. Remove from tree since handle is NULL.
+            // All holders lose their reference. This is a best-effort recovery situation.
+            cavl2_remove(&cy->readers, &r->index);
+            mem_free(cy, r);
+        }
+    }
 }
 
 // =====================================================================================================================
@@ -851,12 +959,12 @@ static cy_tree_t* shard_cavl_factory(void* const user)
 //
 // CRDT merge rules, first rule takes precedence:
 // - on collision (same subject-ID, different hash):
-//     1. winner is pinned;
-//     2. winner is older;
-//     3. winner has smaller hash.
+//     1. winner is older;
+//     2. winner has smaller hash.
 // - on divergence (same hash, different subject-ID):
 //     1. winner is older;
-//     2. winner has seen more evictions (i.e., larger subject-ID mod max_topics).
+//     2. winner has seen more evictions (pinned topics have very high evictions, so they always win;
+//        among pinned topics, smaller pin value = higher evictions, giving min-wins CRDT on pin).
 // When a topic is reallocated, it retains its current age.
 // Conflict resolution may result in a temporary jitter if it happens to occur near log2(age) integer boundary.
 struct cy_topic_t
@@ -871,7 +979,8 @@ struct cy_topic_t
 
     olga_event_t gossip_event;
     uint64_t     gossip_counter; // Reset on init and when CRDT needs repair.
-    shard_t*     gossip_shard;   // Refcounted, sometimes shared with other topics; NULL for pinned topics.
+    writer_t*    gossip_writer;  // Refcounted, from cy->writers. Gossip shard writer for this topic.
+    reader_t*    gossip_reader;  // Refcounted, from cy->readers. Gossip shard reader for this topic.
 
     cy_t* cy;
 
@@ -886,7 +995,9 @@ struct cy_topic_t
     // from the subject-ID index tree!
     uint32_t evictions;
 
-    // hash=rapidhash(topic_name); except for a pinned topic, hash=subject_id<=CY_SUBJECT_ID_PINNED_MAX.
+    // hash = rapidhash(stripped_topic_name). The pin suffix (e.g., "#1234") is stripped before hashing.
+    // For bare pin names (e.g., "#04d2" with no prefix), the pin value is used directly as the hash.
+    // Pinning is encoded in evictions, not in the hash. See is_pinned().
     uint64_t hash;
 
     // Event timestamps used for state management.
@@ -912,11 +1023,11 @@ struct cy_topic_t
     // whatever they may be (e.g., the transfer-ID counter etc, depending on the transport implementation).
     // When the topic is reallocated, the old writer is destroyed but the new one is not created until the next
     // publication attempt.
-    uint64_t             pub_tag_baseline; // Randomly chosen once when topic created.
-    uint64_t             pub_seqno;        // Grows from zero, added to the tag baseline to obtain the tag.
-    size_t               pub_count;        // Number of active advertisements; counted for garbage collection.
-    cy_subject_writer_t* pub_writer;       // Initially NULL, created ad-hoc, then lives on until topic destruction.
-    cy_tree_t*           pub_futures_by_tag;
+    uint64_t   pub_tag_baseline; // Randomly chosen once when topic created.
+    uint64_t   pub_seqno;        // Grows from zero, added to the tag baseline to obtain the tag.
+    size_t     pub_count;        // Number of active advertisements; counted for garbage collection.
+    writer_t*  pub_writer;       // Refcounted, from cy->writers. NULL until first publish (lazy).
+    cy_tree_t* pub_futures_by_tag;
 
     // Similar to publish futures but referencing request_future_t.
     cy_tree_t* request_futures_by_tag;
@@ -929,7 +1040,7 @@ struct cy_topic_t
     // prompt the library to attempt recovery by creating a new reader on the next opportunity. This eager logic is
     // the opposite of the lazy treatment of subject writers.
     struct cy_topic_coupling_t* couplings;
-    cy_subject_reader_t*        sub_reader;
+    reader_t*                   sub_reader; // Refcounted, from cy->readers. NULL unless couplings exist (eager).
     cy_tree_t*                  sub_index_dedup_by_remote_id;
     cy_list_t                   sub_list_dedup_by_recency;
 
@@ -1124,8 +1235,15 @@ static int32_t cavl_comp_topic_subject_id(const void* const user, const cy_tree_
     return (outer > inner) ? +1 : -1;
 }
 
+// A topic is pinned when its eviction counter is in the reserved range [EVICTIONS_PINNED_MIN, UINT32_MAX].
+// Pinning is encoded in evictions rather than in the hash, so the hash always reflects the topic name.
+static bool is_pinned(const uint32_t evictions) { return evictions >= EVICTIONS_PINNED_MIN; }
+
 static int_fast8_t topic_lage(const cy_topic_t* const topic, const cy_us_t now)
 {
+    if (is_pinned(topic->evictions)) {
+        return LAGE_PINNED; // Pinned topics are maximally old; they always win age-based arbitration.
+    }
     return log2_floor((uint64_t)later(0, (now - topic->ts_origin) / MEGA));
 }
 
@@ -1135,8 +1253,6 @@ static void topic_merge_lage(cy_topic_t* const topic, const cy_us_t now, int_fas
     r_lage           = (int_fast8_t)((r_lage < LAGE_MIN) ? LAGE_MIN : ((r_lage > LAGE_MAX) ? LAGE_MAX : r_lage));
     topic->ts_origin = sooner(topic->ts_origin, now - (pow2us(r_lage) * MEGA));
 }
-
-static bool is_pinned(const uint64_t hash) { return hash <= CY_SUBJECT_ID_PINNED_MAX; }
 
 // This comparator is only applicable on subject-ID allocation conflicts. As such, hashes must be different.
 static bool left_wins(const cy_topic_t* const left, const cy_us_t now, const int_fast8_t r_lage, const uint64_t r_hash)
@@ -1220,14 +1336,17 @@ static void retire_expired_implicit_topics(cy_t* const cy, const cy_us_t now)
     }
 }
 
-// Parses the hexadecimal hash override suffix if present and valid. Example: "sensors/temperature#1a2b".
-static bool parse_hash_override(const cy_str_t s, uint64_t* const out)
+// Parses the pinning suffix if present and valid. Example: "sensors/temperature#1a2b".
+// On success, *pin receives the parsed hex value, *prefix_len receives the length of the name before '#'.
+static bool parse_pin_suffix(const cy_str_t s, uint64_t* const pin, size_t* const prefix_len)
 {
-    *out                  = 0;
+    *pin                  = 0;
+    *prefix_len           = 0;
     const char* const end = s.str + s.len;
     for (size_t i = 0; i < smaller(s.len, 17); i++) {
         const unsigned char ch = (unsigned char)*(end - (i + 1));
         if (ch == '#') {
+            *prefix_len = s.len - i - 1; // Length of text before '#'.
             return i > 0;
         }
         uint64_t digit = 0;
@@ -1238,24 +1357,54 @@ static bool parse_hash_override(const cy_str_t s, uint64_t* const out)
         } else {
             break;
         }
-        *out |= digit << (i * 4U);
+        *pin |= digit << (i * 4U);
     }
     return false;
 }
 
 static uint64_t topic_hash(const cy_str_t name)
 {
-    uint64_t hash = 0;
-    if (!parse_hash_override(name, &hash)) {
-        hash = rapidhash(name.str, name.len);
+    uint64_t pin        = 0;
+    size_t   prefix_len = 0;
+    if (parse_pin_suffix(name, &pin, &prefix_len)) {
+        if (prefix_len > 0) {
+            return rapidhash(name.str, prefix_len); // Hash the name prefix before '#'.
+        }
+        // Bare pin name (e.g., "#04d2"): use the pin value directly as the hash.
+        // Pins are non-canonical (hex digits may be mixed case), so rapidhash("#abcd") != rapidhash("#ABCD"),
+        // but both resolve to pin 0xABCD. Using the pin value ensures they map to the same topic.
+        return pin;
     }
-    return hash;
+    return rapidhash(name.str, name.len);
+}
+
+// Extract the pinned eviction counter from a name. Returns 0 if not pinned (use normal evictions).
+static uint32_t parse_pin_evictions(const cy_str_t name)
+{
+    uint64_t pin        = 0;
+    size_t   prefix_len = 0;
+    if (parse_pin_suffix(name, &pin, &prefix_len) && (pin <= CY_SUBJECT_ID_PINNED_MAX)) {
+        return (uint32_t)(UINT32_MAX - (uint32_t)pin);
+    }
+    return 0;
+}
+
+// Return the name to store in topic_t: the part before '#' (if non-empty), else the full name.
+static cy_str_t topic_stored_name(const cy_str_t name)
+{
+    uint64_t pin        = 0;
+    size_t   prefix_len = 0;
+    if (parse_pin_suffix(name, &pin, &prefix_len) && (prefix_len > 0)) {
+        return (cy_str_t){ .str = name.str, .len = prefix_len };
+    }
+    return name;
 }
 
 static uint32_t topic_subject_id_impl(const uint64_t hash, const uint64_t evictions, const uint32_t subject_id_modulus)
 {
-    if (is_pinned(hash)) {
-        return (uint32_t)hash;
+    if (is_pinned((uint32_t)evictions)) {
+        // Pinned: subject-ID = UINT32_MAX - evictions, in [0, CY_SUBJECT_ID_PINNED_MAX].
+        return (uint32_t)(UINT32_MAX - (uint32_t)evictions);
     }
     assert(subject_id_modulus > 0);
     assert(evictions <= UINT32_MAX); // otherwise we'd have to use long-form mul_mod algorithm
@@ -1293,26 +1442,23 @@ static cy_topic_t* topic_find_by_subject_id(const cy_t* const cy, const uint32_t
     return topic;
 }
 
-// Subject writers are created lazily and never destroyed until the topic is finalized.
-// This avoids state loss on the platform side if the application opts to publish intermittently.
+// Subject writers are created lazily via the writer registry and never released until the topic is reallocated
+// or destroyed. This avoids state loss on the platform side if the application opts to publish intermittently.
 static cy_err_t topic_sync_subject_writer(cy_topic_t* const topic)
 {
     if (topic->pub_writer == NULL) {
-        cy_t* const    cy         = topic->cy;
-        const uint32_t subject_id = topic_subject_id(topic);
-        topic->pub_writer         = cy->platform->vtable->subject_writer_new(cy->platform, subject_id);
+        topic->pub_writer = writer_acquire(topic->cy, topic_subject_id(topic));
         if (topic->pub_writer == NULL) {
             return CY_ERR_MEMORY;
         }
-        topic->pub_writer->subject_id = subject_id;
     }
     return CY_OK;
 }
 
 static size_t subscription_extent_w_overhead(const cy_topic_t* const topic);
 
-// If subscribers exist but there is no subject reader, this function will attempt to create one.
-// Similarly, if no subscribers exist but there is a subject reader, it will be destroyed.
+// If subscribers exist but there is no subject reader, this function will acquire one from the reader registry.
+// Similarly, if no subscribers exist but there is a subject reader, it will be released.
 // We cannot keep an unused reader alive because it will feed data from the network which may be disruptive.
 static void topic_sync_subject_reader(cy_topic_t* const topic)
 {
@@ -1321,7 +1467,7 @@ static void topic_sync_subject_reader(cy_topic_t* const topic)
     if ((topic->couplings != NULL) && (topic->sub_reader == NULL)) { // A subject reader is needed but missing!
         const size_t extent = subscription_extent_w_overhead(topic);
         assert(extent >= HEADER_BYTES);
-        topic->sub_reader = cy->platform->vtable->subject_reader_new(cy->platform, subject_id, extent);
+        topic->sub_reader = reader_acquire(cy, subject_id, extent);
         CY_TRACE(topic->cy,
                  "🗞️ %s S%08jx extent=%zu result=%p",
                  topic_repr(topic).str,
@@ -1330,13 +1476,11 @@ static void topic_sync_subject_reader(cy_topic_t* const topic)
                  (void*)topic->sub_reader);
         if (topic->sub_reader == NULL) {
             ON_ASYNC_ERROR(cy, topic, CY_ERR_MEMORY);
-        } else {
-            topic->sub_reader->subject_id = subject_id;
         }
     }
-    assert((topic->sub_reader == NULL) || (topic->sub_reader->subject_id == subject_id));
+    assert((topic->sub_reader == NULL) || (topic->sub_reader->handle->subject_id == subject_id));
     if ((topic->couplings == NULL) && (topic->sub_reader != NULL)) { // No longer needed.
-        cy->platform->vtable->subject_reader_destroy(cy->platform, topic->sub_reader);
+        reader_release(cy, topic->sub_reader);
         topic->sub_reader = NULL;
     }
 }
@@ -1352,9 +1496,9 @@ static void topic_sync_subject_reader(cy_topic_t* const topic)
 // The subject reader is recovered eagerly; when that fails, it will be retried on every opportunity.
 // The subject writer is recovered lazily, when the application tries to publish again.
 //
-// When one topic displaces another from a subject, the old subject reader and/or writer are reused. This may sound
-// like an unnecessary complication (it's not expensive to create/destroy them as needed), but indirectly it helps
-// us make it explicit that there shall be no more than one reader/writer on any subject.
+// The reader/writer registry ensures at most one platform handle per subject-ID via refcounting.
+// When one topic displaces another, the registry handles the transition: the winner acquires first
+// (incrementing refcount), then the loser releases (decrementing), so the platform handle survives.
 //
 // NOLINTNEXTLINE(*-no-recursion)
 static void topic_allocate(cy_topic_t* const topic, const uint32_t new_evictions, const cy_us_t now)
@@ -1375,6 +1519,23 @@ static void topic_allocate(cy_topic_t* const topic, const uint32_t new_evictions
     // We're not allowed to alter the eviction counter as long as the topic remains in the tree! So we remove it first.
     // We use _if() version because the topic is not in the index if it's new or if we're re-entering recursively.
     cavl2_remove_if(&cy->topics_by_subject_id, &topic->index_subject_id);
+
+    // Pinned topics are not inserted into the subject-ID index because multiple topics may legitimately share a pinned
+    // subject-ID. Their reader/writer are shared through the refcounted registry. No collision detection is needed.
+    if (is_pinned(new_evictions)) {
+        if (topic->sub_reader != NULL) {
+            reader_release(cy, topic->sub_reader);
+            topic->sub_reader = NULL;
+        }
+        if (topic->pub_writer != NULL) {
+            writer_release(cy, topic->pub_writer);
+            topic->pub_writer = NULL;
+        }
+        topic->evictions = new_evictions;
+        topic_sync_subject_reader(topic);
+        schedule_gossip_urgent(topic, now);
+        return;
+    }
 
     // This mirrors the formal specification of AllocateTopic(t, topics) given in Core.tla.
     // Note that it is possible that subject_id(hash,old_evictions) == subject_id(hash,new_evictions),
@@ -1398,28 +1559,19 @@ static void topic_allocate(cy_topic_t* const topic, const uint32_t new_evictions
 #endif
 
     if (victory) { // Allocation done. Every affected topic will end up here eventually.
+        // Release old handles for the subject we're leaving.
         if (topic->sub_reader != NULL) {
             assert(topic->couplings != NULL);
-            cy->platform->vtable->subject_reader_destroy(cy->platform, topic->sub_reader);
+            reader_release(cy, topic->sub_reader);
             topic->sub_reader = NULL;
         }
         if (topic->pub_writer != NULL) {
-            cy->platform->vtable->subject_writer_destroy(cy->platform, topic->pub_writer);
+            writer_release(cy, topic->pub_writer);
             topic->pub_writer = NULL;
         }
 
-        // Before creating the new subject reader/writer, check if we can transfer them from the replaced topic.
-        // We are required to ensure that we do not create more than one reader/writer per subject.
-        // This logic helps make this concern explicit and is also good for avoiding redundancies.
         if (that != NULL) {
-            assert(topic_subject_id(that) == new_sid);
             cavl2_remove(&cy->topics_by_subject_id, &that->index_subject_id);
-            assert(topic->pub_writer == NULL);
-            assert(topic->sub_reader == NULL);
-            topic->pub_writer = that->pub_writer;
-            topic->sub_reader = that->sub_reader; // If we don't need it, we will destroy it later.
-            that->pub_writer  = NULL;
-            that->sub_reader  = NULL;
         }
 
         // Re-insert into the subject-ID index; this must succeed because we just removed the old one from the index.
@@ -1434,7 +1586,8 @@ static void topic_allocate(cy_topic_t* const topic, const uint32_t new_evictions
         assert(self == topic);
         (void)self;
 
-        // The subject reader, if needed, must be created eagerly. If not needed it will be destroyed here.
+        // The subject reader, if needed, must be acquired eagerly from the registry.
+        // If 'that' still holds its handles, the registry refcount keeps the platform handle alive.
         topic_sync_subject_reader(topic);
 
         // Ensure the change is announced to the network.
@@ -1442,9 +1595,16 @@ static void topic_allocate(cy_topic_t* const topic, const uint32_t new_evictions
         schedule_gossip_urgent(topic, now);
 
         // Re-allocate the defeated topic with incremented eviction counter.
+        // Its handles are released during its own allocation cycle.
         if (that != NULL) {
-            assert(that->pub_writer == NULL);
-            assert(that->sub_reader == NULL);
+            if (that->sub_reader != NULL) {
+                reader_release(cy, that->sub_reader);
+                that->sub_reader = NULL;
+            }
+            if (that->pub_writer != NULL) {
+                writer_release(cy, that->pub_writer);
+                that->pub_writer = NULL;
+            }
             topic_allocate(that, that->evictions + 1U, now);
         }
     } else {
@@ -1542,36 +1702,33 @@ static cy_err_t topic_new(cy_t* const        cy,
         goto fail;
     }
 
-    // Allocate the gossip shard.
+    // Allocate the gossip shard writer/reader from the registry. All topics gossip, including pinned ones.
     topic->gossip_event = OLGA_EVENT_INIT;
-    if (!is_pinned(topic->hash)) {
-        const uint32_t          shard_subject = topic_gossip_shard_subject_id(cy, topic->hash);
-        shard_factory_context_t shard_fac     = { .cy = cy, .subject_id = shard_subject };
-        topic->gossip_shard                   = (shard_t*)cavl2_find_or_insert(
-          &cy->gossip_shards, &shard_subject, shard_cavl_compare, &shard_fac, &shard_cavl_factory);
-        if (topic->gossip_shard == NULL) {
+    {
+        const uint32_t shard_subject = topic_gossip_shard_subject_id(cy, topic->hash);
+        topic->gossip_writer         = writer_acquire(cy, shard_subject);
+        if (topic->gossip_writer == NULL) {
             err = CY_ERR_MEMORY;
             cavl2_remove(&cy->topics_by_hash, &topic->index_hash);
             goto fail;
         }
-        topic->gossip_shard->refcount++;
-        assert(topic->gossip_shard->writer->subject_id == shard_subject);
-        assert(topic->gossip_shard->reader->subject_id == shard_subject);
-    } else {
-        topic->gossip_shard = NULL;
+        topic->gossip_reader = reader_acquire(cy, shard_subject, CY_AUX_SUBJECT_EXTENT);
+        if (topic->gossip_reader == NULL) {
+            writer_release(cy, topic->gossip_writer);
+            topic->gossip_writer = NULL;
+            err                  = CY_ERR_MEMORY;
+            cavl2_remove(&cy->topics_by_hash, &topic->index_hash);
+            goto fail;
+        }
     }
 
     // Initially, all topics are considered implicit until proven otherwise. See topic_sync_implicit().
     enlist_head(&cy->list_implicit, &topic->list_implicit);
 
-    if (!is_pinned(topic->hash)) {
-        // Allocate a subject-ID for the topic and insert it into the subject index tree.
-        // Pinned topics all have canonical names, and we have already ascertained that the name is unique,
-        // meaning that another pinned topic is not occupying the same subject-ID.
-        // Remember that topics arbitrate locally the same way they do externally, meaning that adding a new local topic
-        // may displace another local one.
-        topic_allocate(topic, topic->evictions, now);
-    }
+    // Allocate a subject-ID for the topic. For pinned topics, topic_allocate handles the early return
+    // (no subject-ID index insertion since multiple pinned topics may share a subject-ID).
+    // For non-pinned topics, this may displace another local topic through collision arbitration.
+    topic_allocate(topic, topic->evictions, now);
     cy->topic_count++;
     if (out_topic != NULL) {
         *out_topic = topic;
@@ -1594,14 +1751,17 @@ fail:
 
 static cy_err_t topic_ensure(cy_t* const cy, cy_topic_t** const out_topic, const cy_str_t resolved_name)
 {
-    cy_topic_t* const topic = cy_topic_find_by_name(cy, resolved_name);
+    const cy_str_t    stored_name = topic_stored_name(resolved_name);
+    cy_topic_t* const topic       = cy_topic_find_by_name(cy, stored_name);
     if (topic != NULL) {
         if (out_topic != NULL) {
             *out_topic = topic;
         }
         return 0;
     }
-    return topic_new(cy, out_topic, resolved_name, topic_hash(resolved_name), 0, LAGE_MIN);
+    const uint64_t hash      = topic_hash(resolved_name);
+    const uint32_t evictions = parse_pin_evictions(resolved_name);
+    return topic_new(cy, out_topic, stored_name, hash, evictions, LAGE_MIN);
 }
 
 // Create a new coupling between a topic and a subscriber.
@@ -1731,7 +1891,6 @@ static cy_err_t send_gossip_raw(const cy_t* const          cy,
 
 static cy_err_t send_gossip_multicast(const cy_topic_t* const topic, const cy_us_t now, cy_subject_writer_t* const wrt)
 {
-    assert(!is_pinned(topic->hash));
     return send_gossip_raw(topic->cy, //
                            now,
                            topic->hash,
@@ -1761,14 +1920,13 @@ static void gossip_event_periodic(olga_t* const olga, olga_event_t* const event,
     (void)olga;
     cy_topic_t* const topic = (cy_topic_t*)event->user;
     cy_t* const       cy    = topic->cy;
-    assert(!is_pinned(topic->hash));
     topic_sync_subject_reader(topic);            // use this opportunity to repair the subscription if broken
     schedule_gossip_periodic(topic, now, false); // reschedule even if failed -- anther node might pick up
     // optional extension (may not be modeled): prefer broadcast initially.
     const bool broadcast = (topic->gossip_counter < cy->gossip_broadcast_ratio) || //
                            ((topic->gossip_counter % cy->gossip_broadcast_ratio) == 0);
     topic->gossip_counter++;
-    cy_subject_writer_t* const writer = broadcast ? cy->broad_writer : topic->gossip_shard->writer;
+    cy_subject_writer_t* const writer = broadcast ? cy->broad_writer : topic->gossip_writer->handle;
     ON_ASYNC_ERROR_IF(cy, topic, send_gossip_multicast(topic, now, writer));
 }
 
@@ -1784,9 +1942,8 @@ static void gossip_event_urgent(olga_t* const olga, olga_event_t* const event, c
 
 static void schedule_gossip_periodic(cy_topic_t* const topic, const cy_us_t now, const bool suppressed)
 {
-    const cy_t* const cy       = topic->cy;
-    const bool        eligible = !is_pinned(topic->hash) && !is_implicit(topic);
-    if (eligible) {
+    const cy_t* const cy = topic->cy;
+    if (!is_implicit(topic)) {
         const cy_us_t dither    = cy->gossip_period / GOSSIP_PERIOD_DITHER_RATIO;
         cy_us_t       delay_min = 0;
         cy_us_t       delay_max = 0;
@@ -1816,15 +1973,13 @@ static void schedule_gossip_periodic(cy_topic_t* const topic, const cy_us_t now,
 // There is only one case when an urgent gossip is not required to be broadcast, see the model.
 static void schedule_gossip_urgent(cy_topic_t* const topic, const cy_us_t now)
 {
-    const cy_t* const cy = topic->cy;
-    if (!is_pinned(topic->hash)) {
-        const bool    first = !olga_is_pending(&cy->olga, &topic->gossip_event);
-        const cy_us_t at    = now + random_int(topic->cy, 0, cy->gossip_urgent_delay_max);
-        if ((at < topic->gossip_event.deadline) || first) {
-            olga_defer(&topic->cy->olga, at, topic, gossip_event_urgent, &topic->gossip_event);
-        } else {
-            topic->gossip_event.handler = gossip_event_urgent;
-        }
+    const cy_t* const cy    = topic->cy;
+    const bool        first = !olga_is_pending(&cy->olga, &topic->gossip_event);
+    const cy_us_t     at    = now + random_int(topic->cy, 0, cy->gossip_urgent_delay_max);
+    if ((at < topic->gossip_event.deadline) || first) {
+        olga_defer(&topic->cy->olga, at, topic, gossip_event_urgent, &topic->gossip_event);
+    } else {
+        topic->gossip_event.handler = gossip_event_urgent;
     }
 }
 
@@ -2105,8 +2260,8 @@ static cy_err_t do_publish_impl(cy_publisher_t* const  pub,
         return err;
     }
     assert(topic->pub_writer != NULL);
-    assert(topic_subject_id(topic) == topic->pub_writer->subject_id);
-    return vt->subject_writer_send(cy->platform, topic->pub_writer, deadline, pub->priority, headed_message);
+    assert(topic_subject_id(topic) == topic->pub_writer->handle->subject_id);
+    return vt->subject_writer_send(cy->platform, topic->pub_writer->handle, deadline, pub->priority, headed_message);
 }
 
 static cy_err_t do_publish(cy_publisher_t* const pub,
@@ -3514,13 +3669,12 @@ static void* wkv_cb_couple_new_subscription(const wkv_event_t evt)
     }
 
     // Sample the old parameters before the new coupling is created to decide if we need to refresh the subject reader.
-    const size_t   extent_old = (topic->sub_reader != NULL) ? subscription_extent_w_overhead(topic) : 0;
+    const size_t   extent_old = (topic->sub_reader != NULL) ? topic->sub_reader->extent : 0;
     const cy_err_t res = coupled ? CY_OK : topic_couple(topic, sub->root, evt.substitution_count, evt.substitutions);
     if (res == CY_OK) {
         if ((topic->sub_reader != NULL) && (subscription_extent_w_overhead(topic) > extent_old)) {
             CY_TRACE(cy, "🚧 %s subject reader refresh", topic_repr(topic).str);
-            cy->platform->vtable->subject_reader_destroy(cy->platform, topic->sub_reader);
-            topic->sub_reader = NULL;
+            reader_grow_extent(cy, topic->sub_reader, subscription_extent_w_overhead(topic));
         }
         topic_sync_subject_reader(topic);
     }
@@ -4083,13 +4237,13 @@ static void topic_destroy(cy_topic_t* const topic)
     // Ensure no gossip callback can run while we are tearing down storage it may touch.
     unschedule_gossip(topic);
 
-    // Remove subject reader/writer.
+    // Release subject reader/writer from registry.
     if (topic->sub_reader != NULL) {
-        cy->platform->vtable->subject_reader_destroy(cy->platform, topic->sub_reader);
+        reader_release(cy, topic->sub_reader);
         topic->sub_reader = NULL;
     }
     if (topic->pub_writer != NULL) {
-        cy->platform->vtable->subject_writer_destroy(cy->platform, topic->pub_writer);
+        writer_release(cy, topic->pub_writer);
         topic->pub_writer = NULL;
     }
 
@@ -4122,11 +4276,14 @@ static void topic_destroy(cy_topic_t* const topic)
         request_future_destroy(future);
     }
 
-    // Detach the gossip shards. This is NULL for pinned topics.
-    if (topic->gossip_shard != NULL) {
-        shard_t* const shard = topic->gossip_shard;
-        topic->gossip_shard  = NULL;
-        shard_deref(cy, shard);
+    // Release gossip shard reader/writer from registry.
+    if (topic->gossip_writer != NULL) {
+        writer_release(cy, topic->gossip_writer);
+        topic->gossip_writer = NULL;
+    }
+    if (topic->gossip_reader != NULL) {
+        reader_release(cy, topic->gossip_reader);
+        topic->gossip_reader = NULL;
     }
 
     // Delist and deindex.
@@ -4321,6 +4478,8 @@ void cy_destroy(cy_t* const cy)
         topic_destroy(topic);
     }
     assert(wkv_is_empty(&cy->topics_by_name));
+    assert(cy->writers == NULL); // All writer registry entries released by topic_destroy.
+    assert(cy->readers == NULL); // All reader registry entries released by topic_destroy.
 
     // Cleanup done, release the memory.
     mem_free(cy, (void*)cy->home.str);
@@ -4596,13 +4755,13 @@ void cy_on_message(cy_platform_t* const  platform,
         case header_msg_rel: {
             const byte_t incompatibility = header[2];
             const int8_t lage            = (int8_t)header[3];
-            if ((incompatibility != 0) || (lage < LAGE_MIN) || (lage > LAGE_MAX)) {
+            if ((incompatibility != 0) || (lage < LAGE_MIN) || ((lage > LAGE_MAX) && (lage != LAGE_PINNED))) {
                 goto bad_message;
             }
             const uint32_t evictions = deserialize_u32(&header[4]);
             const uint64_t hash      = deserialize_u64(&header[8]);
-            if (is_pinned(hash) && evictions != 0) {
-                CY_TRACE(cy, "🫣 Inline CRDT gossip with nonzero evictions on a pinned subject");
+            if (is_pinned(evictions) != (lage == LAGE_PINNED)) {
+                CY_TRACE(cy, "🫣 Inline CRDT gossip: pinned evictions/lage mismatch");
                 goto bad_message;
             }
             cy_topic_t* const topic    = cy_topic_find_by_hash(cy, hash);
@@ -4616,7 +4775,8 @@ void cy_on_message(cy_platform_t* const  platform,
             // Process the message if the topic is known.
             bool accepted = false;
             if (topic != NULL) {
-                assert((topic->sub_reader == NULL) || (topic_subject_id(topic) == topic->sub_reader->subject_id));
+                assert((topic->sub_reader == NULL) ||
+                       (topic_subject_id(topic) == topic->sub_reader->handle->subject_id));
                 // We have the topic, which may or may not be using the same subject-ID. If we use this subject-ID
                 // for another topic, then it constitutes both a divergence and a collision. The correct handling
                 // is to address the divergence by either moving the local topic if the gossiped state is newer,
@@ -4759,11 +4919,11 @@ void cy_on_message(cy_platform_t* const  platform,
                 (cy_message_read(message.content, 0, name.len, (byte_t*)name_buf) != name.len)) {
                 goto bad_message;
             }
-            if ((lage < LAGE_MIN) || (lage > LAGE_MAX)) {
+            if ((lage < LAGE_MIN) || ((lage > LAGE_MAX) && (lage != LAGE_PINNED))) {
                 goto bad_message;
             }
-            if (is_pinned(hash) && evictions != 0) {
-                CY_TRACE(cy, "🫣 CRDT gossip with nonzero evictions on a pinned subject");
+            if (is_pinned(evictions) != (lage == LAGE_PINNED)) {
+                CY_TRACE(cy, "🫣 CRDT gossip: pinned evictions/lage mismatch");
                 goto bad_message;
             }
             const gossip_scope_t scope = unicast ? gossip_unicast : (broadcast ? gossip_broadcast : gossip_sharded);

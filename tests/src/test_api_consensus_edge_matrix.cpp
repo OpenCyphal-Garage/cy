@@ -217,8 +217,8 @@ void test_api_consensus_edge_colliding_topics_discover_and_deliver_with_faults()
     constexpr std::uint32_t pub_id_a = 4201U;
     constexpr std::uint32_t pub_id_b = 4202U;
 
-    static constexpr const char* topic_a = "e2e/consensus/collide/a/#1000000000001000";
-    static constexpr const char* topic_b = "e2e/consensus/collide/b/#10000000007feff3";
+    static constexpr const char* topic_a = "e2e/consensus/collide/a_0";
+    static constexpr const char* topic_b = "e2e/consensus/collide/b_19583";
     static constexpr const char* pattern = "e2e/consensus/collide/>";
 
     e2e::fault_plan_t faults{};

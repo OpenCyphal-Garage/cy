@@ -373,7 +373,7 @@ void test_api_inline_msg_rejects_invalid_lage()
     platform_deinit(&platform);
 }
 
-void test_api_inline_msg_rejects_pinned_hash_nonzero_evictions()
+void test_api_inline_msg_rejects_pinned_evictions_lage_mismatch()
 {
     test_platform_t platform{};
     platform_init(&platform);
@@ -389,11 +389,18 @@ void test_api_inline_msg_rejects_pinned_hash_nonzero_evictions()
 
     const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("#0005"));
     TEST_ASSERT_NOT_NULL(topic);
-    TEST_ASSERT_TRUE(cy_topic_hash(topic) <= CY_SUBJECT_ID_PINNED_MAX);
+    TEST_ASSERT_TRUE(cy_topic_hash(topic) == 0x0005U); // Bare pin: hash equals pin value.
 
+    // Send a message with pinned evictions but non-pinned lage (mismatch should be rejected).
     std::array<unsigned char, header_bytes + 1U> wire{};
     make_message_header(wire.data(), header_msg_best_effort, UINT64_C(102), cy_topic_hash(topic));
-    wire[4]              = 1U; // evictions in little-endian u32 field [4..7]
+    // Set pinned evictions (UINT32_MAX - 5 = pin to subject 5) in little-endian.
+    const auto pinned_ev = static_cast<std::uint32_t>(UINT32_MAX - 5U);
+    wire[4]              = static_cast<unsigned char>(pinned_ev >> 0U);
+    wire[5]              = static_cast<unsigned char>(pinned_ev >> 8U);
+    wire[6]              = static_cast<unsigned char>(pinned_ev >> 16U);
+    wire[7]              = static_cast<unsigned char>(pinned_ev >> 24U);
+    // lage remains 0 (non-pinned), creating the mismatch.
     wire[header_bytes]   = 0x22U;
     const cy_lane_t lane = { .id = UINT64_C(0x902), .ctx = { { 0 } }, .prio = cy_prio_nominal };
 
@@ -1175,7 +1182,7 @@ int main()
     RUN_TEST(test_api_malformed_header_drops_message);
     RUN_TEST(test_api_inline_msg_rejects_nonzero_incompatibility);
     RUN_TEST(test_api_inline_msg_rejects_invalid_lage);
-    RUN_TEST(test_api_inline_msg_rejects_pinned_hash_nonzero_evictions);
+    RUN_TEST(test_api_inline_msg_rejects_pinned_evictions_lage_mismatch);
     RUN_TEST(test_api_inline_msg_rejects_multicast_subject_mismatch);
     RUN_TEST(test_api_inline_msg_unicast_skips_subject_consistency_check);
     RUN_TEST(test_api_inline_msg_unknown_topic_collision_path_smoke);

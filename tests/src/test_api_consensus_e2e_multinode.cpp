@@ -22,9 +22,9 @@ constexpr cy_us_t step_us             = 10'000;
 constexpr cy_us_t publish_deadline_us = 300'000;
 
 constexpr std::array<const char*, 3> colliding_topics = {
-    "e2e/migrate/topic_alpha#123456789abcdeff",
-    "e2e/migrate/topic_beta#123456789abebef2",
-    "e2e/migrate/topic_gamma#123456789ac09ee5",
+    "e2e/migrate/alpha_0",
+    "e2e/migrate/beta_14014",
+    "e2e/migrate/gamma_67275",
 };
 
 struct arrival_sample_t final

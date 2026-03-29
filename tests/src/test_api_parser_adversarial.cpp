@@ -173,8 +173,8 @@ void dispatch_raw(test_platform_t* const            self,
 
 std::uint32_t subject_id_for_hash(const std::uint64_t hash, const std::uint32_t evictions, const std::uint32_t modulus)
 {
-    if (hash <= CY_SUBJECT_ID_PINNED_MAX) {
-        return static_cast<std::uint32_t>(hash);
+    if (evictions >= (UINT32_MAX - CY_SUBJECT_ID_PINNED_MAX)) { // is_pinned(evictions)
+        return static_cast<std::uint32_t>(UINT32_MAX - evictions);
     }
     const std::uint64_t offset =
       (hash + (static_cast<std::uint64_t>(evictions) * static_cast<std::uint64_t>(evictions))) % modulus;

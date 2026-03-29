@@ -9,10 +9,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <iomanip>
 #include <ranges>
-#include <sstream>
-#include <string>
 #include <vector>
 
 namespace {
@@ -103,12 +100,23 @@ std::size_t count_by_publisher(const arrival_capture_t& capture, const std::uint
     return static_cast<std::size_t>(count);
 }
 
-std::string make_topic_name(const std::string& prefix, const std::uint64_t hash)
+// Pre-computed colliding topic name pairs: for each seed index, two topics whose rapidhash values
+// produce the same subject-ID (same hash % CY_SUBJECT_ID_MODULUS_16bit). All match "e2e/model/collide/>".
+struct colliding_pair_t
 {
-    std::ostringstream out;
-    out << prefix << '#' << std::hex << std::nouppercase << std::setfill('0') << std::setw(16) << hash;
-    return out.str();
-}
+    const char* a;
+    const char* b;
+};
+constexpr std::array<colliding_pair_t, 8> colliding_pairs = { {
+  { "e2e/model/collide/a_0", "e2e/model/collide/b_0_50364" },
+  { "e2e/model/collide/a_1", "e2e/model/collide/b_1_23316" },
+  { "e2e/model/collide/a_2", "e2e/model/collide/b_2_5405" },
+  { "e2e/model/collide/a_3", "e2e/model/collide/b_3_12235" },
+  { "e2e/model/collide/a_4", "e2e/model/collide/b_4_18819" },
+  { "e2e/model/collide/a_5", "e2e/model/collide/b_5_138023" },
+  { "e2e/model/collide/a_6", "e2e/model/collide/b_6_59419" },
+  { "e2e/model/collide/a_7", "e2e/model/collide/b_7_29554" },
+} };
 
 void configure_faults(e2e::fault_plan_t& faults, const std::uint64_t seed)
 {
@@ -147,13 +155,11 @@ void run_seed_case(const std::uint64_t seed)
     constexpr std::uint32_t pub_id_a = 4301U;
     constexpr std::uint32_t pub_id_b = 4302U;
 
-    const std::uint64_t hash_a = UINT64_C(0x1000000000100000) + (seed * UINT64_C(0x1000));
-    const std::uint64_t hash_b = hash_a + static_cast<std::uint64_t>(CY_SUBJECT_ID_MODULUS_16bit);
-
-    const std::string topic_a = make_topic_name("e2e/model/collide/a/", hash_a);
-    const std::string topic_b = make_topic_name("e2e/model/collide/b/", hash_b);
-    const cy_str_t    topic_a_name{ .len = topic_a.size(), .str = topic_a.c_str() };
-    const cy_str_t    topic_b_name{ .len = topic_b.size(), .str = topic_b.c_str() };
+    // Use pre-computed colliding pair; the seed selects which pair and also configures faults.
+    const auto pair_index = static_cast<std::size_t>(seed - UINT64_C(0x5101));
+    TEST_ASSERT_TRUE(pair_index < colliding_pairs.size());
+    const cy_str_t topic_a_name = cy_str(colliding_pairs.at(pair_index).a);
+    const cy_str_t topic_b_name = cy_str(colliding_pairs.at(pair_index).b);
 
     e2e::fault_plan_t faults{};
     configure_faults(faults, seed);

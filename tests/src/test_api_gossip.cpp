@@ -306,7 +306,7 @@ void test_api_collision_win_triggers_urgent_multicast()
     test_platform_t p{};
     platform_init(p);
 
-    static const char* const local_topic_name = "api/gossip/urgent/collision/local/#1000000000001200";
+    static const char* const local_topic_name = "api/gossip/urgent/collision/local";
     cy_publisher_t* const    pub              = cy_advertise(p.cy, cy_str(local_topic_name));
     TEST_ASSERT_NOT_NULL(pub);
 
@@ -343,7 +343,7 @@ void test_api_arbitration_win_triggers_urgent_multicast()
     test_platform_t p{};
     platform_init(p);
 
-    static const char* const local_topic_name = "api/gossip/urgent/arbitration/local/#1000000000001300";
+    static const char* const local_topic_name = "api/gossip/urgent/arbitration/local";
     cy_publisher_t* const    pub              = cy_advertise(p.cy, cy_str(local_topic_name));
     TEST_ASSERT_NOT_NULL(pub);
 
@@ -379,7 +379,7 @@ void test_api_known_topic_local_loss_does_not_emit_urgent_when_subject_unchanged
     test_platform_t p{};
     platform_init(p);
 
-    static const char* const local_topic_name = "api/gossip/known/loss/no-urgent/#1000000000001400";
+    static const char* const local_topic_name = "api/gossip/known/loss/no-urgent";
     cy_publisher_t* const    pub              = cy_advertise(p.cy, cy_str(local_topic_name));
     TEST_ASSERT_NOT_NULL(pub);
 
@@ -415,7 +415,7 @@ void test_api_unknown_topic_no_collision_and_collision_win_paths()
     test_platform_t p{};
     platform_init(p);
 
-    static const char* const local_topic_name = "api/gossip/unknown/matrix/local/#1000000000001600";
+    static const char* const local_topic_name = "api/gossip/unknown/matrix/local";
     cy_publisher_t* const    pub              = cy_advertise(p.cy, cy_str(local_topic_name));
     TEST_ASSERT_NOT_NULL(pub);
 
@@ -519,16 +519,18 @@ void test_api_gossip_parser_rejects_gossip_incompatibility_u32()
     platform_deinit(p);
 }
 
-void test_api_gossip_parser_rejects_pinned_hash_with_nonzero_evictions()
+void test_api_gossip_parser_rejects_pinned_evictions_lage_mismatch()
 {
     test_platform_t p{};
     platform_init(p);
     cy_test_message_reset_counters();
     const cy_lane_t lane = { .id = 22U, .ctx = { { 0 } }, .prio = cy_prio_nominal };
 
-    dispatch_gossip(p, lane, nullptr, 1U, 0, UINT64_C(1234), 1U, "api/gossip/pinned/reject", 105);
+    // Pinned evictions (>= 0xFFFFE000) with non-pinned lage (0) should be rejected.
+    dispatch_gossip(
+      p, lane, nullptr, 1U, 0, UINT64_C(0x1000000000000055), UINT32_C(0xFFFFE000), "api/gossip/pinned/reject", 105);
     TEST_ASSERT_EQUAL_size_t(0U, p.unicast_send_count);
-    TEST_ASSERT_NULL(cy_topic_find_by_hash(p.cy, UINT64_C(1234)));
+    TEST_ASSERT_NULL(cy_topic_find_by_hash(p.cy, UINT64_C(0x1000000000000055)));
     platform_deinit(p);
 }
 
@@ -706,7 +708,7 @@ int main()
     RUN_TEST(test_api_gossip_parser_rejects_incompatibility_invalid_lage_and_short_header);
     RUN_TEST(test_api_gossip_parser_rejects_payload_truncated_and_overlong_name_length);
     RUN_TEST(test_api_gossip_parser_rejects_gossip_incompatibility_u32);
-    RUN_TEST(test_api_gossip_parser_rejects_pinned_hash_with_nonzero_evictions);
+    RUN_TEST(test_api_gossip_parser_rejects_pinned_evictions_lage_mismatch);
     RUN_TEST(test_api_scout_parser_rejects_empty_and_truncated_pattern);
     RUN_TEST(test_api_gossip_invalid_frame_has_no_side_effects);
     RUN_TEST(test_api_message_with_reader_above_sid_max_treated_as_nonmulticast);

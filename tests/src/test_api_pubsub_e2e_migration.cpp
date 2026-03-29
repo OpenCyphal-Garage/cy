@@ -1,4 +1,5 @@
 #include <cy_platform.h>
+#include <rapidhash.h>
 #include <unity.h>
 #include "e2e_faults.hpp"
 #include "e2e_sim_net.hpp"
@@ -7,10 +8,8 @@
 #include "helpers.h"
 #include "message.h"
 #include <array>
-#include <charconv>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <limits>
 #include <optional>
 #include <numeric>
@@ -30,9 +29,9 @@ constexpr cy_us_t step_us        = 20'000;
 constexpr cy_us_t future_timeout = 3'000'000;
 
 constexpr std::array<const char*, max_topics> colliding_topics = {
-    "e2e/migrate/topic_alpha#123456789abcdeff",
-    "e2e/migrate/topic_beta#123456789abdbe72",
-    "e2e/migrate/topic_gamma#123456789abe9de5",
+    "e2e/migrate/alpha_0",
+    "e2e/migrate/beta_14014",
+    "e2e/migrate/gamma_67275",
 };
 
 struct subscriber_log_t final
@@ -115,21 +114,6 @@ std::uint32_t preferred_subject_id(const cy_platform_t* const platform, const st
     TEST_ASSERT_NOT_NULL(platform);
     TEST_ASSERT_TRUE(topic_hash > CY_SUBJECT_ID_PINNED_MAX);
     return static_cast<std::uint32_t>(CY_SUBJECT_ID_PINNED_MAX + 1U + (topic_hash % platform->subject_id_modulus));
-}
-
-bool topic_hash_from_pinned_literal(const char* const topic_name, std::uint64_t& out)
-{
-    if (topic_name == nullptr) {
-        return false;
-    }
-    const char* const marker = std::strrchr(topic_name, '#');
-    if ((marker == nullptr) || (marker[1] == '\0')) {
-        return false;
-    }
-    const char* const begin = marker + 1;
-    const char* const end   = begin + std::strlen(begin);
-    const auto        res   = std::from_chars(begin, end, out, 16);
-    return (res.ec == std::errc{}) && (res.ptr == end);
 }
 
 bool is_message_frame(const e2e::frame_info_t& frame)
@@ -478,12 +462,12 @@ d_case_result_t run_d_case(const d_case_config_t& cfg)
     handles_t       handles{};
     cy_us_t         now = 0;
 
+    // Compute hashes directly from topic names (rapidhash of the name since none have pin suffixes).
     for (std::size_t t = 0U; t < cfg.topic_count; t++) {
-        std::uint64_t parsed_hash = 0U;
-        TEST_ASSERT_TRUE(topic_hash_from_pinned_literal(colliding_topics.at(t), parsed_hash));
-        result.topic_hashes.at(t) = parsed_hash;
+        const cy_str_t name       = cy_str(colliding_topics.at(t));
+        result.topic_hashes.at(t) = rapidhash(name.str, name.len);
         result.preferred_subjects.at(t) =
-          preferred_subject_id(e2e::sim_net_platform(net, e2e::sim_node_a), parsed_hash);
+          preferred_subject_id(e2e::sim_net_platform(net, e2e::sim_node_a), result.topic_hashes.at(t));
     }
     const std::uint32_t preferred0 = result.preferred_subjects.at(0U);
     for (std::size_t t = 1U; t < cfg.topic_count; t++) {

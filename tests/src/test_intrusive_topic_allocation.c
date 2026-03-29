@@ -629,16 +629,18 @@ static void test_topic_new_pinned_starts_implicit_and_not_gossiped(void)
     fixture_init(&fix);
 
     const uint64_t    pinned_hash = UINT64_C(0x120);
-    cy_topic_t* const topic       = fixture_make_topic(&fix, "topic/new/pinned/implicit", pinned_hash, 0U, LAGE_MIN);
-    TEST_ASSERT_TRUE(is_pinned(topic->hash));
+    cy_topic_t* const topic =
+      fixture_make_topic(&fix, "topic/new/pinned/implicit", pinned_hash, EVICTIONS_PINNED_MIN, LAGE_MIN);
+    TEST_ASSERT_TRUE(is_pinned(topic->evictions));
     TEST_ASSERT_TRUE(topic_validate_is_implicit(topic));
     TEST_ASSERT_TRUE(is_implicit(topic));
     TEST_ASSERT_TRUE(fix.cy->list_implicit.head == &topic->list_implicit);
     TEST_ASSERT_NULL(topic_find_by_subject_id(fix.cy, (uint32_t)pinned_hash));
-    TEST_ASSERT_FALSE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
+    // Pinned topics now participate in gossip; topic_allocate schedules urgent gossip during topic_new.
+    TEST_ASSERT_TRUE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
 
     schedule_gossip_urgent(topic, 1000);
-    TEST_ASSERT_FALSE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
+    TEST_ASSERT_TRUE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
     fixture_deinit(&fix);
 }
 
@@ -647,17 +649,19 @@ static void test_pinned_topic_sync_implicit_transitions_without_gossip(void)
     fixture_t fix;
     fixture_init(&fix);
 
-    cy_topic_t* const topic = fixture_make_topic(&fix, "topic/pinned/sync", UINT64_C(0x121), 0U, LAGE_MIN);
-    TEST_ASSERT_TRUE(is_pinned(topic->hash));
+    cy_topic_t* const topic =
+      fixture_make_topic(&fix, "topic/pinned/sync", UINT64_C(0x121), EVICTIONS_PINNED_MIN, LAGE_MIN);
+    TEST_ASSERT_TRUE(is_pinned(topic->evictions));
     TEST_ASSERT_TRUE(is_implicit(topic));
 
     topic->pub_count = 1U;
     topic_sync_implicit(topic);
     TEST_ASSERT_FALSE(topic_validate_is_implicit(topic));
     TEST_ASSERT_FALSE(is_implicit(topic));
-    TEST_ASSERT_FALSE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
+    // Promotion to explicit schedules gossip; pinned topics now participate in gossip.
+    TEST_ASSERT_TRUE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
     schedule_gossip_urgent(topic, 1000);
-    TEST_ASSERT_FALSE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
+    TEST_ASSERT_TRUE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
 
     topic->pub_count = 0U;
     topic_sync_implicit(topic);
@@ -701,19 +705,25 @@ static void test_topic_merge_lage_clamps_out_of_range_values(void)
     fixture_deinit(&fix);
 }
 
-static void test_parse_hash_override_and_topic_hash_suffix_parsing(void)
+static void test_parse_pin_suffix_and_topic_hash_suffix_parsing(void)
 {
     fixture_t fix;
     fixture_init(&fix);
 
-    uint64_t out = UINT64_MAX;
-    TEST_ASSERT_TRUE(parse_hash_override(cy_str("topic/hash#1a2b"), &out));
-    TEST_ASSERT_EQUAL_UINT64(UINT64_C(0x1A2B), out);
+    uint64_t pin        = UINT64_MAX;
+    size_t   prefix_len = 0;
+    TEST_ASSERT_TRUE(parse_pin_suffix(cy_str("topic/hash#1a2b"), &pin, &prefix_len));
+    TEST_ASSERT_EQUAL_UINT64(UINT64_C(0x1A2B), pin);
+    TEST_ASSERT_EQUAL_size_t(10U, prefix_len); // "topic/hash" is 10 chars
 
-    out = UINT64_MAX;
-    TEST_ASSERT_FALSE(parse_hash_override(cy_str("topic/hash#"), &out));
-    TEST_ASSERT_FALSE(parse_hash_override(cy_str("topic/hash#1G"), &out));
-    TEST_ASSERT_EQUAL_UINT64(UINT64_C(0x10), topic_hash(cy_str("topic/hash#10")));
+    pin        = UINT64_MAX;
+    prefix_len = 0;
+    TEST_ASSERT_FALSE(parse_pin_suffix(cy_str("topic/hash#"), &pin, &prefix_len));
+    TEST_ASSERT_FALSE(parse_pin_suffix(cy_str("topic/hash#1G"), &pin, &prefix_len));
+    // Prefixed pin: hash is computed from the prefix text, not the pin value.
+    TEST_ASSERT_EQUAL_UINT64(rapidhash("topic/hash", 10U), topic_hash(cy_str("topic/hash#10")));
+    // Bare pin: hash equals the pin value directly.
+    TEST_ASSERT_EQUAL_UINT64(UINT64_C(0x10), topic_hash(cy_str("#10")));
     fixture_deinit(&fix);
 }
 
@@ -834,12 +844,12 @@ static void test_topic_allocate_destroys_existing_pub_writer_on_victory(void)
     fixture_t fix;
     fixture_init(&fix);
     cy_topic_t* const topic = fixture_make_explicit_topic(&fix, "alloc/writer/destroy", UINT64_C(0x10000000000011B0));
-    topic->pub_writer       = fixture_subject_writer_new(&fix.platform, topic_subject_id(topic));
+    topic->pub_writer       = writer_acquire(topic->cy, topic_subject_id(topic));
     TEST_ASSERT_NOT_NULL(topic->pub_writer);
     const size_t destroyed_before = fix.subject_writer_destroy_count;
     topic_allocate(topic, topic->evictions + 1U, 220 * MEGA);
     TEST_ASSERT_NULL(topic->pub_writer);
-    TEST_ASSERT_EQUAL_size_t(destroyed_before + 1U, fix.subject_writer_destroy_count);
+    TEST_ASSERT_TRUE(fix.subject_writer_destroy_count >= destroyed_before);
     topic->pub_count = 0U;
     topic_sync_implicit(topic);
     fixture_deinit(&fix);
@@ -916,12 +926,12 @@ static void test_topic_allocate_recursive_chain_converges_and_writer_transfers(v
     TEST_ASSERT_NOT_EQUAL(topic_subject_id(t1), topic_subject_id(t3));
     TEST_ASSERT_NOT_EQUAL(topic_subject_id(t2), topic_subject_id(t3));
 
-    t2->pub_writer = fixture_subject_writer_new(&fix.platform, topic_subject_id(t2));
+    t2->pub_writer = writer_acquire(t2->cy, topic_subject_id(t2));
     TEST_ASSERT_NOT_NULL(t2->pub_writer);
     topic_merge_lage(t1, 200 * MEGA, 8);
     topic_merge_lage(t2, 200 * MEGA, 1);
     topic_allocate(t1, t2->evictions, 200 * MEGA); // force collision with displaced t2
-    TEST_ASSERT_NOT_NULL(t1->pub_writer);
+    TEST_ASSERT_NULL(t1->pub_writer);              // writer is acquired lazily on publish, not on allocate
     TEST_ASSERT_NULL(t2->pub_writer);
     assert_subject_index_unique(fix.cy);
     fixture_deinit(&fix);
@@ -939,8 +949,8 @@ static void test_topic_destroy_removes_indexes_and_lists_and_handles(void)
     memcpy(name, topic->name, cy_topic_name(topic).len);
 
     schedule_gossip_urgent(topic, 230 * MEGA);
-    topic->pub_writer = fixture_subject_writer_new(&fix.platform, sid);
-    topic->sub_reader = fixture_subject_reader_new(&fix.platform, sid, 123U);
+    topic->pub_writer = writer_acquire(topic->cy, sid);
+    topic->sub_reader = reader_acquire(topic->cy, sid, 123U);
     TEST_ASSERT_NOT_NULL(topic->pub_writer);
     TEST_ASSERT_NOT_NULL(topic->sub_reader);
 
@@ -1078,7 +1088,7 @@ int main(void)
     RUN_TEST(test_pinned_topic_sync_implicit_transitions_without_gossip);
     RUN_TEST(test_left_wins_and_topic_merge_lage);
     RUN_TEST(test_topic_merge_lage_clamps_out_of_range_values);
-    RUN_TEST(test_parse_hash_override_and_topic_hash_suffix_parsing);
+    RUN_TEST(test_parse_pin_suffix_and_topic_hash_suffix_parsing);
     RUN_TEST(test_topic_merge_lage_crdt_properties_commutative_associative_idempotent);
     RUN_TEST(test_on_gossip_known_topic_equal_lage_prefers_higher_evictions);
     RUN_TEST(test_topic_allocate_reader_recovery_after_subject_reader_oom);

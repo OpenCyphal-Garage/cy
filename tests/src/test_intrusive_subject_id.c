@@ -104,8 +104,11 @@ static void check_subject_id_near_uint32_max(const uint32_t modulus)
 {
     const uint64_t hash = UINT32_MAX;
     TEST_ASSERT(hash > CY_SUBJECT_ID_PINNED_MAX);
-    for (uint64_t i = 0U; i < 65536U; i++) {
-        const uint32_t evictions  = (uint32_t)(UINT32_MAX - i);
+    // Only test non-pinned eviction values (below EVICTIONS_PINNED_MIN).
+    const uint32_t limit = (uint32_t)smaller(65536U, (uint64_t)UINT32_MAX - EVICTIONS_PINNED_MIN);
+    for (uint64_t i = 0U; i < limit; i++) {
+        const uint32_t evictions = (uint32_t)(EVICTIONS_PINNED_MIN - 1U - (uint32_t)i);
+        TEST_ASSERT(!is_pinned(evictions));
         const uint32_t subject_id = topic_subject_id_impl(hash, evictions, modulus);
         TEST_ASSERT_EQUAL_UINT32(expected_subject_id_no_overflow(hash, evictions, modulus), subject_id);
         TEST_ASSERT_EQUAL_UINT32(subject_id,
@@ -121,11 +124,13 @@ static void check_subject_id_u64_wrap_semantics(const uint32_t modulus)
         UINT64_C(0xFFFFFFFFF0000000),
         UINT64_C(0xFFFFFFFF00000000),
     };
+    // Use eviction values just below the pinned threshold; large enough to still trigger uint64 overflow
+    // when squared and added to the large hashes above.
     static const uint32_t evictions[] = {
-        UINT32_MAX,
-        UINT32_MAX - 1U,
-        UINT32_MAX - 4095U,
-        UINT32_MAX - 65535U,
+        EVICTIONS_PINNED_MIN - 1U,
+        EVICTIONS_PINNED_MIN - 2U,
+        EVICTIONS_PINNED_MIN - 4096U,
+        EVICTIONS_PINNED_MIN - 65536U,
     };
 
     bool saw_overflow              = false;
