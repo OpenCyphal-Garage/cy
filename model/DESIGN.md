@@ -37,11 +37,11 @@ The reliable delivery logic is built on the assumption that any given message ma
 
 ### Subject-ID ranges
 
-The set of subject-ID values ranges from zero (inclusive) up to some transport-specific boundary. For Cyphal/CAN, the maximum is $2^{17}-1$, while for Cyphal/UDP (and all IPv4-based transports in general) the maximum is $2^{23}-1$ due to L2 multicast limitations.
+The set of subject-ID values ranges from zero (inclusive) up to some transport-specific boundary. For Cyphal/CAN, the maximum is $2^{16}-1$, while for Cyphal/UDP (and all IPv4-based transports in general) the maximum is $2^{23}-1$ due to L2 multicast limitations.
 
 Subject-ID values from 0 to 8191 inclusive are reserved for pinned topics, which are guaranteed to be collision-free.
 
-The maximum subject-ID value is reserved for broadcast subject that is used for low-rate broadcast gossip propagation and scouts. For Cyphal/CAN, this is subject 131071=0x1ffff, for Cyphal/UDP this is 8388607=0x7fffff.
+The maximum subject-ID value is reserved for broadcast subject that is used for low-rate broadcast gossip propagation and scouts. For Cyphal/CAN, this is subject 65535=0xffff, for Cyphal/UDP this is 8388607=0x7fffff.
 
 Values from 8192 (inclusive) up to (8191+modulus) (inclusive) are used for automatic subject-ID allocation for topics. The modulus is the largest prime number not greater than the maximum subject-ID minus 8191 such that $\text{modulus} \mod 4 = 3$ holds. The latter condition enables very efficient constant-time reconstruction of the eviction counter from the subject-ID; while this capability is currently not used in the protocol design (an attempt to use it to optimize gossip propagation was made but rejected due to ambiguities that arise once the eviction counter exceeds half the modulus), it might come useful in the future, especially for diagnostics. For posterity, a simple solver that reconstructs the eviction counter from the subject-ID is provided below.
 
@@ -76,7 +76,7 @@ static bool is_quadratic_residue_prime(const uint32_t a, const uint32_t p)
 // Returns UINT32_MAX if the subject-ID was obtained using distinct parameters/expression (no solutions).
 // If evictions>floor(modulus/2), the subject-ID sequence repeats, leading to non-unique solutions.
 // Complexity is O(1).
-// This implementation has been exhaustively brute-force verified at least for modulus values 131071 and 8388607.
+// This implementation has been exhaustively brute-force verified at least for modulus values 57203, 131071, and 8388607.
 static uint32_t topic_evictions_from_subject_id(const uint64_t hash,
                                                 const uint32_t subject_id,
                                                 const uint32_t subject_id_modulus)

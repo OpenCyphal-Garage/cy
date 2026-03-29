@@ -243,7 +243,7 @@ static void fixture_init(fixture_t* const self)
     self->last_async_error_line         = 0U;
     self->platform.vtable               = &self->vtable;
     self->platform.cy                   = NULL;
-    self->platform.subject_id_modulus   = (uint32_t)CY_SUBJECT_ID_MODULUS_17bit;
+    self->platform.subject_id_modulus   = (uint32_t)CY_SUBJECT_ID_MODULUS_16bit;
     self->vtable.realloc                = fixture_realloc;
     self->vtable.subject_writer_new     = fixture_subject_writer_new;
     self->vtable.subject_writer_destroy = fixture_subject_writer_destroy;

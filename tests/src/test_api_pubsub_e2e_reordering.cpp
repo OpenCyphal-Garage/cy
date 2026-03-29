@@ -198,7 +198,7 @@ void test_api_pubsub_e2e_c01_ack_loss_retransmit_duplicate_rejected_unordered()
 
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xC01U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xC01U));
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
@@ -257,7 +257,7 @@ void test_api_pubsub_e2e_c02_ack_loss_retransmit_duplicate_rejected_ordered()
 
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xC02U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xC02U));
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
@@ -340,7 +340,7 @@ void test_api_pubsub_e2e_c03_retransmit_overtakes_newer_message_unordered_unique
 
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xC03U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xC03U));
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
@@ -432,7 +432,7 @@ void test_api_pubsub_e2e_c04_retransmit_overtakes_newer_message_ordered_restored
 
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xC04U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xC04U));
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
@@ -502,7 +502,7 @@ void test_api_pubsub_e2e_c05_ordered_gap_timeout_flush()
 
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xC05U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xC05U));
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
@@ -571,7 +571,7 @@ void test_api_pubsub_e2e_c06_late_older_frame_after_timeout_rejected()
 
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xC06U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xC06U));
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
@@ -634,7 +634,7 @@ void test_api_pubsub_e2e_c07_ordered_buffer_capacity_stress_large_jump_backfill(
 
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xC07U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xC07U));
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
@@ -723,7 +723,7 @@ void test_api_pubsub_e2e_c08_high_jitter_moderate_loss_ordered_monotonicity()
 
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xC08U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xC08U));
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
@@ -800,7 +800,7 @@ void test_api_pubsub_e2e_c09_high_jitter_moderate_loss_unordered_completeness()
 
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xC09U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xC09U));
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
@@ -868,7 +868,7 @@ void test_api_pubsub_e2e_c10_reordering_window_boundary_behavior()
 
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xC10U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xC10U));
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 

@@ -216,7 +216,7 @@ void one_topic_init(one_topic_env_t&                  env,
     e2e::sim_net_config_t cfg{};
     cfg.node_count         = node_count;
     cfg.random_seed_base   = seed;
-    cfg.subject_id_modulus = static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit);
+    cfg.subject_id_modulus = static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit);
     TEST_ASSERT_EQUAL_INT(CY_OK, e2e::sim_net_init_ex(env.net, cfg));
     e2e::sim_net_faults_set(env.net, frame_faults, op_faults);
 

@@ -148,9 +148,9 @@ static void check_subject_id_u64_wrap_semantics(const uint32_t modulus)
     TEST_ASSERT_TRUE(saw_overflow_wrap_obvious);
 }
 
-static void test_subject_id_math_modulus_17bit(void)
+static void test_subject_id_math_modulus_16bit(void)
 {
-    const uint32_t modulus = (uint32_t)CY_SUBJECT_ID_MODULUS_17bit;
+    const uint32_t modulus = (uint32_t)CY_SUBJECT_ID_MODULUS_16bit;
     check_subject_id_unique_until_half_modulus(modulus);
     check_subject_id_threshold_repeat_exhaustive(modulus);
     check_subject_id_near_uint32_max(modulus);
@@ -178,7 +178,7 @@ void tearDown(void) {}
 int main(void)
 {
     UNITY_BEGIN();
-    RUN_TEST(test_subject_id_math_modulus_17bit);
+    RUN_TEST(test_subject_id_math_modulus_16bit);
     RUN_TEST(test_subject_id_math_modulus_23bit);
     RUN_TEST(test_subject_id_wrap_semantics_modulus_32bit);
     return UNITY_END();

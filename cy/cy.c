@@ -4166,7 +4166,7 @@ static bool is_prime_u32(const uint32_t n)
 
 static bool is_valid_subject_id_modulus(const uint32_t modulus)
 {
-    return (modulus >= CY_SUBJECT_ID_MODULUS_17bit) && is_prime_u32(modulus) && (modulus % 4U == 3U);
+    return (modulus >= CY_SUBJECT_ID_MODULUS_16bit) && is_prime_u32(modulus) && (modulus % 4U == 3U);
 }
 
 static cy_us_t olga_now(olga_t* const sched) { return cy_now((cy_t*)sched->user); }
