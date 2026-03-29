@@ -30,7 +30,7 @@
 .scannerwork
 target*/
 *.data
-Cargo.lock
+*.lock
 build*/
 cmake*build*/
 .ipynb_checkpoints

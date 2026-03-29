@@ -10,7 +10,7 @@ import random
 import string
 import sys
 
-from rapidhash import rapidhash
+from rapidhash import rapidhash  # The package published on PyPI is NOT COMPATIBLE with rapidhash.h! Use local version.
 
 ALPHABET = string.ascii_letters + string.digits
 PINNED_SUBJECT_ID_MAX = 2**13 - 1
