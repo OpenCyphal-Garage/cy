@@ -231,3 +231,7 @@ cy_gen_test_arch_matrix(test_api_consensus_e2e_multinode 11 "CY_CONFIG_TRACE=1"
         src/test_api_consensus_e2e_multinode.cpp
         ${cy_api_e2e_common_sources}
 )
+cy_gen_test_arch_matrix(test_api_pinning_e2e_pattern_match 11 "CY_CONFIG_TRACE=1"
+        src/test_api_pinning_e2e_pattern_match.cpp
+        ${cy_api_e2e_common_sources}
+)
