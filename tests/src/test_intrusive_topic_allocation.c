@@ -710,20 +710,33 @@ static void test_parse_pin_suffix_and_topic_hash_suffix_parsing(void)
     fixture_t fix;
     fixture_init(&fix);
 
-    uint64_t pin        = UINT64_MAX;
+    uint16_t pin        = UINT16_MAX;
     size_t   prefix_len = 0;
     TEST_ASSERT_TRUE(parse_pin_suffix(cy_str("topic/hash#1a2b"), &pin, &prefix_len));
-    TEST_ASSERT_EQUAL_UINT64(UINT64_C(0x1A2B), pin);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_C(0x1A2B), pin);
     TEST_ASSERT_EQUAL_size_t(10U, prefix_len); // "topic/hash" is 10 chars
 
-    pin        = UINT64_MAX;
+    pin        = UINT16_MAX;
     prefix_len = 0;
     TEST_ASSERT_FALSE(parse_pin_suffix(cy_str("topic/hash#"), &pin, &prefix_len));
     TEST_ASSERT_FALSE(parse_pin_suffix(cy_str("topic/hash#1G"), &pin, &prefix_len));
-    // Prefixed pin: hash is computed from the prefix text, not the pin value.
-    TEST_ASSERT_EQUAL_UINT64(rapidhash("topic/hash", 10U), topic_hash(cy_str("topic/hash#10")));
-    // Bare pin: hash equals the pin value directly.
-    TEST_ASSERT_EQUAL_UINT64(UINT64_C(0x10), topic_hash(cy_str("#10")));
+    // Canonical pin format: exactly 4 lowercase hex digits.
+    TEST_ASSERT_TRUE(parse_pin_suffix(cy_str("#0010"), &pin, &prefix_len));
+    TEST_ASSERT_EQUAL_UINT16(UINT16_C(0x0010), pin);
+    TEST_ASSERT_EQUAL_size_t(0U, prefix_len);
+    TEST_ASSERT_TRUE(parse_pin_suffix(cy_str("x#0010"), &pin, &prefix_len));
+    TEST_ASSERT_EQUAL_UINT16(UINT16_C(0x0010), pin);
+    TEST_ASSERT_EQUAL_size_t(1U, prefix_len);
+    TEST_ASSERT_FALSE(parse_pin_suffix(cy_str("#2000"), &pin, &prefix_len));  // > CY_SUBJECT_ID_PINNED_MAX
+    TEST_ASSERT_FALSE(parse_pin_suffix(cy_str("#ABCD"), &pin, &prefix_len));  // uppercase
+    TEST_ASSERT_FALSE(parse_pin_suffix(cy_str("#01"), &pin, &prefix_len));    // too few digits
+    TEST_ASSERT_FALSE(parse_pin_suffix(cy_str("#00001"), &pin, &prefix_len)); // '#' not at position -5
+    // Non-canonical suffixes are not pins; the full name is hashed as-is.
+    TEST_ASSERT_EQUAL_UINT64(rapidhash("topic/hash#10", 13U), topic_hash(cy_str("topic/hash#10")));
+    TEST_ASSERT_EQUAL_UINT64(rapidhash("#10", 3U), topic_hash(cy_str("#10")));
+    // Canonical pin: prefixed hash is prefix-only, bare hash is full name.
+    TEST_ASSERT_EQUAL_UINT64(rapidhash("topic/hash", 10U), topic_hash(cy_str("topic/hash#0010")));
+    TEST_ASSERT_EQUAL_UINT64(rapidhash("#0010", 5U), topic_hash(cy_str("#0010")));
     fixture_deinit(&fix);
 }
 

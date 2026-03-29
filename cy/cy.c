@@ -1335,54 +1335,57 @@ static void retire_expired_implicit_topics(cy_t* const cy, const cy_us_t now)
     }
 }
 
-// Parses the pinning suffix if present and valid. Example: "sensors/temperature#1a2b".
-// On success, *pin receives the parsed hex value, *prefix_len receives the length of the name before '#'.
-static bool parse_pin_suffix(const cy_str_t s, uint64_t* const pin, size_t* const prefix_len)
+// Parses the canonical pinning suffix: '#' followed by exactly 4 lowercase hex digits, e.g., "#0123".
+// The pin value must be in [0, CY_SUBJECT_ID_PINNED_MAX]. On success, *pin receives the parsed value,
+// *prefix_len receives the length of the name before '#'.
+static bool parse_pin_suffix(const cy_str_t s, uint16_t* const pin, size_t* const prefix_len)
 {
-    *pin                  = 0;
-    *prefix_len           = 0;
-    const char* const end = s.str + s.len;
-    for (size_t i = 0; i < smaller(s.len, 17); i++) {
-        const unsigned char ch = (unsigned char)*(end - (i + 1));
-        if (ch == '#') {
-            *prefix_len = s.len - i - 1; // Length of text before '#'.
-            return i > 0;
-        }
-        uint64_t digit = 0;
-        if ((ch >= '0') && (ch <= '9')) {
-            digit = ch - '0';
-        } else if ((ch >= 'a') && (ch <= 'f')) {
-            digit = ch - 'a' + 10U;
-        } else {
-            break;
-        }
-        *pin |= digit << (i * 4U);
+    *pin        = 0;
+    *prefix_len = 0;
+    if (s.len < 5) {
+        return false;
     }
-    return false;
+    const char* const digits = s.str + s.len - 4;
+    if (*(digits - 1) != '#') {
+        return false;
+    }
+    for (size_t i = 0; i < 4; i++) {
+        const unsigned char ch = (unsigned char)digits[i];
+        uint16_t            d  = 0;
+        if ((ch >= '0') && (ch <= '9')) {
+            d = (uint16_t)(unsigned)(ch - '0');
+        } else if ((ch >= 'a') && (ch <= 'f')) {
+            d = (uint16_t)(ch - 'a' + 10U);
+        } else {
+            return false;
+        }
+        *pin = (uint16_t)((unsigned)(*pin << 4U) | d);
+    }
+    if (*pin > CY_SUBJECT_ID_PINNED_MAX) {
+        return false;
+    }
+    *prefix_len = s.len - 5;
+    return true;
 }
 
 static uint64_t topic_hash(const cy_str_t name)
 {
-    uint64_t pin        = 0;
+    uint16_t pin        = 0;
     size_t   prefix_len = 0;
-    if (parse_pin_suffix(name, &pin, &prefix_len)) {
-        if (prefix_len > 0) {
-            return rapidhash(name.str, prefix_len); // Hash the name prefix before '#'.
-        }
-        // Bare pin name (e.g., "#04d2"): use the pin value directly as the hash.
-        // Pins are non-canonical (hex digits may be mixed case), so rapidhash("#abcd") != rapidhash("#ABCD"),
-        // but both resolve to pin 0xABCD. Using the pin value ensures they map to the same topic.
-        return pin;
+    if (parse_pin_suffix(name, &pin, &prefix_len) && (prefix_len > 0)) {
+        return rapidhash(name.str, prefix_len);
     }
+    // Bare pin "#0123" or non-pin: hash the full name. Canonical pin format ensures unique representation.
     return rapidhash(name.str, name.len);
 }
 
 // Extract the pinned eviction counter from a name. Returns 0 if not pinned (use normal evictions).
 static uint32_t parse_pin_evictions(const cy_str_t name)
 {
-    uint64_t pin        = 0;
+    uint16_t pin        = 0;
     size_t   prefix_len = 0;
-    if (parse_pin_suffix(name, &pin, &prefix_len) && (pin <= CY_SUBJECT_ID_PINNED_MAX)) {
+    if (parse_pin_suffix(name, &pin, &prefix_len)) {
+        assert(pin <= CY_SUBJECT_ID_PINNED_MAX);
         return (uint32_t)(UINT32_MAX - (uint32_t)pin);
     }
     return 0;
@@ -1391,7 +1394,7 @@ static uint32_t parse_pin_evictions(const cy_str_t name)
 // Return the name to store in topic_t: the part before '#' (if non-empty), else the full name.
 static cy_str_t topic_stored_name(const cy_str_t name)
 {
-    uint64_t pin        = 0;
+    uint16_t pin        = 0;
     size_t   prefix_len = 0;
     if (parse_pin_suffix(name, &pin, &prefix_len) && (prefix_len > 0)) {
         return (cy_str_t){ .str = name.str, .len = prefix_len };

@@ -358,7 +358,9 @@ Such topics where the subject-ID is manually assigned are called *pinned topics*
 
 A pinned topic has the desired subject-ID encoded as a hexadecimal number at the end of its name
 following a `#` character; e.g., `foo/bar#1234` is a pinned topic with subject-ID 4660.
-The pinned subject-ID must be in the range \[0, 8191\], or \[0, 0x1FFF\] in hexadecimal.
+The pinned subject-ID must be in the range \[0, 8191\], or \[0, 0x1FFF\] in hexadecimal;
+the pin expression must have exactly 4 lowercase hexadecimal digits (five digits overall),
+from `#0000` to `#1fff` inclusive.
 This range is never used for automatically allocated topics, so there is no risk of collision with non-pinned topics.
 
 Pinning does not affect the topic identity; as such, for topic identification purposes, only the part of the name

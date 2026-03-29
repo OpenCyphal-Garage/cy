@@ -1,4 +1,5 @@
 #include <cy_platform.h>
+#include <rapidhash.h>
 #include <unity.h>
 #include "api_mock_platform_utils.hpp"
 #include "helpers.h"
@@ -389,7 +390,7 @@ void test_api_inline_msg_rejects_pinned_evictions_lage_mismatch()
 
     const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("#0005"));
     TEST_ASSERT_NOT_NULL(topic);
-    TEST_ASSERT_TRUE(cy_topic_hash(topic) == 0x0005U); // Bare pin: hash equals pin value.
+    TEST_ASSERT_TRUE(cy_topic_hash(topic) == rapidhash("#0005", 5U)); // Bare pin: canonical format, hash is rapidhash.
 
     // Send a message with pinned evictions but non-pinned lage (mismatch should be rejected).
     std::array<unsigned char, header_bytes + 1U> wire{};

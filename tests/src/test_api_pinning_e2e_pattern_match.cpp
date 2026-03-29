@@ -264,10 +264,10 @@ void test_multinode_cross_pinned_pattern_delivery()
     TEST_ASSERT_NOT_NULL(pub_1);
     TEST_ASSERT_NOT_NULL(pub_2);
 
-    arrival_capture_t captures[node_count]{};
-    cy_future_t*      subs[node_count]{};
+    std::array<arrival_capture_t, node_count> captures{};
+    std::array<cy_future_t*, node_count>      subs{};
     for (std::size_t i = 0U; i < node_count; i++) {
-        subs[i] = make_pattern_sub(e2e::sim_net_cy(net, i), pattern, captures[i]);
+        subs.at(i) = make_pattern_sub(e2e::sim_net_cy(net, i), pattern, captures.at(i));
     }
 
     cy_us_t now = 0;
@@ -283,8 +283,8 @@ void test_multinode_cross_pinned_pattern_delivery()
     }
     e2e::drive_for_all(net, now, delivery_time, step_us);
 
-    for (std::size_t i = 0U; i < node_count; i++) {
-        TEST_ASSERT_EQUAL_size_t(0U, captures[i].malformed);
+    for (const auto& cap : captures) {
+        TEST_ASSERT_EQUAL_size_t(0U, cap.malformed);
     }
 
     // Each node should receive messages from the other two publishers.
@@ -303,8 +303,8 @@ void test_multinode_cross_pinned_pattern_delivery()
         TEST_ASSERT_NOT_NULL(cy_topic_find_by_name(cy, cy_str(stored_2)));
     }
 
-    for (std::size_t i = 0U; i < node_count; i++) {
-        cy_future_destroy(subs[i]);
+    for (auto& sub : subs) {
+        cy_future_destroy(sub);
     }
     e2e::drive_for_all(net, now, 100'000, step_us);
     cy_unadvertise(pub_0);
@@ -345,7 +345,7 @@ void test_pinned_topic_substitutions_correct()
     e2e::drive_for(net, now, delivery_time, step_us);
 
     TEST_ASSERT_EQUAL_size_t(0U, capture.malformed);
-    TEST_ASSERT_TRUE(capture.samples.size() > 0U);
+    TEST_ASSERT_FALSE(capture.samples.empty());
 
     // Look up the topic on the subscriber node and verify substitutions.
     const std::uint64_t     hash  = capture.samples.front().topic_hash;
