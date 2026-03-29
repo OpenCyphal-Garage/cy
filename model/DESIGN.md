@@ -83,7 +83,7 @@ static uint32_t topic_evictions_from_subject_id(const uint64_t hash,
 {
     const uint32_t p = subject_id_modulus;
     assert((p > 3) && ((p & 3U) == 3U)); // Method below requires p&3=3, i.e. p%4=3
-    if ((subject_id <= CY_SUBJECT_ID_PINNED_MAX) || is_pinned(hash)) {
+    if (subject_id <= CY_SUBJECT_ID_PINNED_MAX) {
         return 0; // Pinned subjects are collision-free, assume zero evictions.
     }
 

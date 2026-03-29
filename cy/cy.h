@@ -37,8 +37,8 @@ extern "C"
 
 /// The limit could be set arbitrarily, but chosen this way for compatibility with Cyphal v1.0,
 /// which only has 13-bit subject-IDs. Cyphal v1.1 will never allocate non-pinned topics in this subject-ID range.
-/// For pinned topics, hash<=CY_SUBJECT_ID_PINNED_MAX. The probability of a random hash falling into the pinned
-/// range is ~4.44e-16, or about one in two quadrillion, which is not practically possible.
+/// Pinned topics are identified by evictions >= (UINT32_MAX - CY_SUBJECT_ID_PINNED_MAX).
+/// The pinned subject-ID is UINT32_MAX - evictions.
 #define CY_SUBJECT_ID_PINNED_MAX 0x1FFFU
 
 /// This notably excludes the broadcast subject and gossip shards, which are always at the top, above this maximum.

@@ -347,14 +347,47 @@ while (true)
 
 That's it! See the `examples/` folder for more complete examples, and read the API docs in [`cy.h`](cy/cy.h).
 
+## 🥽 Advanced usage
+
+### 📍 Topic pinning to disable CRDT consensus-based allocation
+
+By default, the CRDT allocation protocol will ensure that each topic gets a dedicated subject-ID.
+Some deployments, in particular hard real-time/safety-critical ones,
+may want to avoid dependency on the CRDT consensus protocol and instead assign some of the topics to subjects manually.
+Such topics where the subject-ID is manually assigned are called *pinned topics*.
+
+A pinned topic has the desired subject-ID encoded as a hexadecimal number at the end of its name
+following a `#` character; e.g., `foo/bar#1234` is a pinned topic with subject-ID 4660.
+The pinned subject-ID must be in the range \[0, 8191\], or \[0, 0x1FFF\] in hexadecimal.
+This range is never used for automatically allocated topics, so there is no risk of collision with non-pinned topics.
+
+Pinning does not affect the topic identity; as such, for topic identification purposes, only the part of the name
+before the `#` of the pinning expression is significant.
+
+A topic being pinned inconsistently across the network is treated as an allocation divergence and is resolved by
+converging all to the lowest pinned subject-ID among the available ones.
+For example, given `foo/bar` (non-pinned), `foo/bar#1234`, and `foo/bar#0123`,
+the network will converge to `foo/bar#0123`.
+
+Unlike the default automatic allocation mode, manual assignments allow multiple topics to share the same subject-ID ---
+each participant of such multi-tenant subjects will filter out messages of interest upon arrival;
+usually this is only a good idea for relatively low-rate topics.
+For example, having `foo#1234` and `bar#1234` simultaneously is valid;
+a node that subscribes to either will receive messages from both and filter out the relevant traffic locally in software
+(Cy does the necessary routing/filtering internally so the application doesn't have to).
+
+Bit of a special case is when the topic name is empty before the `#`, the so called *bare pinned topics*.
+This is introduced for the sake of backward compatibility with Cyphal/CAN v1.0;
+the difference is that the identity of such topics is tied to the subject they are pinned to:
+`#1234` and `#0123` are distinct topics.
+This should only be used when interacting with old v1.0 publishers/subscribers.
+
 ## 🚌 Compatibility with Cyphal/CAN v1.0
 
 Cyphal v1.1 is wire-compatible with Cyphal/CAN v1.0.
 
-To publish or subscribe to v1.0 subjects, use pinned topics of the form `whatever/#abcd`,
-where `abcd` is the subject-ID of the topic as a hexadecimal number,
-and the part before `#` is arbitrary and does not influence the topic hash (it is only meaningful for pattern matching).
-For example, to subscribe to subject-ID 1234, use the topic name `#04d2`.
+To join a Cyphal/CAN v1.0 subject, use bare pinned topics with the name of the form `#1234`,
+where `1234` is the desired subject-ID. The part of the topic name before `#` must be empty in this case.
 
 Cyphal v1.1 has no RPC in the same way as Cyphal/CAN v1.0 does; instead, it uses pub/sub for everything, including
 request/response interactions. Thus, to use RPC in a legacy CAN network, a low-level CAN transport access is required.
