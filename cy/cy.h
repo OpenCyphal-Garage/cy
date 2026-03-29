@@ -523,6 +523,12 @@ cy_future_t* cy_respond_reliable(cy_breadcrumb_t* const breadcrumb, const cy_us_
 //                                                  NODE & TOPIC
 // =====================================================================================================================
 
+typedef struct
+{
+    cy_str_t name; // Resolved, normalized canonical topic name (pin-free).
+    uint16_t pin;  // Pinned subject-ID, or UINT16_MAX if not pinned.
+} cy_resolved_t;
+
 /// The new instance will be heap-allocated via the platform layer API.
 cy_t* cy_new(cy_platform_t* const platform);
 
@@ -587,10 +593,11 @@ cy_err_t cy_remap(cy_t* const cy, const cy_str_t from, const cy_str_t to);
 /// TODO not implemented
 cy_err_t cy_remap_parse(cy_t* const cy, const cy_str_t spec_string);
 
-/// Invokes cy_name_resolve() using the home and the namespace of the node, then applies remapping, if any.
-/// The result is a fully resolved topic name.
-/// On failure, the output string has length SIZE_MAX and NULL data pointer.
-cy_str_t cy_resolve(const cy_t* const cy, const cy_str_t name, const size_t dest_size, char* dest);
+/// Evaluates a topic expression: extracts the pin allocation directive (if any), strips it,
+/// then resolves the remaining name using the home and the namespace of the node, then applies remapping, if any.
+/// The result contains the resolved name (pin-free) and the pin value (UINT16_MAX if not pinned).
+/// On failure, the name field has length SIZE_MAX and NULL data pointer.
+cy_resolved_t cy_resolve(const cy_t* const cy, const cy_str_t expr, const size_t dest_size, char* dest);
 
 // TODO: add a way to dump/restore topic configuration for instant initialization. This may be platform-specific.
 
@@ -633,13 +640,24 @@ cy_user_context_t* cy_topic_user_context(cy_topic_t* const topic);
 /// and ROS2 where the maximum is 248. In practice, topics very rarely exceed ~100 characters.
 #define CY_TOPIC_NAME_MAX 200
 
-/// A valid name consists of printable ASCII characters except SPACE.
+/// A valid name consists of printable ASCII characters except: SPACE ! " # $ % & '
+/// In other words, all ASCII codes in [40, 126] are accepted.
+/// The number sign # is valid in topic pinning expression only, which is not present in normalized names.
 /// A normalized name does not begin with a separator, does not end with a separator, and does not contain
 /// consecutive separators.
-extern const char cy_name_sep;  ///< `/`
-extern const char cy_name_home; ///< `~` -- replaced with the home of the current node. Homes should be unique.
-extern const char cy_name_one;  ///< `*` -- matches any single name component: "abc/*/def" => "abc/123/def".
-extern const char cy_name_any;  ///< `>` -- matches zero or more components: "abc/>" => "abc", "abc/def", "abc/def/ghi".
+extern const char   cy_name_sep;        ///< `/`
+extern const char   cy_name_home;       ///< `~` -- replaced with the home of the current node. Homes should be unique.
+extern const char   cy_name_one;        ///< `*` -- matches any single name component: "abc/*/def" => "abc/123/def".
+extern const char   cy_name_any;        ///< `>` -- matches 0+ components: "abc/>" => "abc", "abc/def", "abc/def/ghi".
+extern const char   cy_name_pin_prefix; ///< `#` -- followed by 4 lowercase hexadecimal digits specifying subject-ID.
+extern const size_t cy_name_pin_expr_len;
+
+/// Returns the pinned subject-ID from a pin expression at the end of a topic expression,
+/// or UINT16_MAX if there is no valid pin expression.
+/// A valid pin expression is '#' followed by exactly 4 lowercase hex digits [0-9a-f],
+/// with a pin value in [0, CY_SUBJECT_ID_PINNED_MAX].
+/// This function does not validate the preceding name; use cy_name_is_valid() for that.
+uint16_t cy_name_pin(cy_str_t name);
 
 /// True iff the given name is valid according to the Cy naming rules. An empty name is not a valid name.
 bool cy_name_is_valid(const cy_str_t name);

@@ -378,11 +378,7 @@ For example, having `foo#1234` and `bar#1234` simultaneously is valid;
 a node that subscribes to either will receive messages from both and filter out the relevant traffic locally in software
 (Cy does the necessary routing/filtering internally so the application doesn't have to).
 
-Bit of a special case is when the topic name is empty before the `#`, the so called *bare pinned topics*.
-This is introduced for the sake of backward compatibility with Cyphal/CAN v1.0;
-the difference is that the identity of such topics is tied to the subject they are pinned to:
-`#1234` and `#0123` are distinct topics.
-This should only be used when interacting with old v1.0 publishers/subscribers.
+A topic name may not be empty, therefore `#1234` is invalid because the part before `#` is empty.
 
 ## 🚌 Compatibility with Cyphal/CAN v1.0
 

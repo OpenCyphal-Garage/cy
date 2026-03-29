@@ -381,16 +381,16 @@ void test_api_inline_msg_rejects_pinned_evictions_lage_mismatch()
     cy_test_message_reset_counters();
 
     self_unsub_capture_t capture{};
-    cy_future_t* const   sub = cy_subscribe(platform.cy, cy_str("#0005"), 256U);
+    cy_future_t* const   sub = cy_subscribe(platform.cy, cy_str("v1#0005"), 256U);
     TEST_ASSERT_NOT_NULL(sub);
     cy_user_context_t context = CY_USER_CONTEXT_EMPTY;
     context.ptr[0]            = &capture;
     cy_future_context_set(sub, context);
     cy_future_callback_set(sub, on_arrival_count_only);
 
-    const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("#0005"));
+    const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("v1"));
     TEST_ASSERT_NOT_NULL(topic);
-    TEST_ASSERT_TRUE(cy_topic_hash(topic) == rapidhash("#0005", 5U)); // Bare pin: canonical format, hash is rapidhash.
+    TEST_ASSERT_TRUE(cy_topic_hash(topic) == rapidhash("v1", 2U)); // Pin stripped; name is "v1".
 
     // Send a message with pinned evictions but non-pinned lage (mismatch should be rejected).
     std::array<unsigned char, header_bytes + 1U> wire{};

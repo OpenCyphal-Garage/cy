@@ -1335,73 +1335,6 @@ static void retire_expired_implicit_topics(cy_t* const cy, const cy_us_t now)
     }
 }
 
-// Parses the canonical pinning suffix: '#' followed by exactly 4 lowercase hex digits, e.g., "#0123".
-// The pin value must be in [0, CY_SUBJECT_ID_PINNED_MAX]. On success, *pin receives the parsed value,
-// *prefix_len receives the length of the name before '#'.
-static bool parse_pin_suffix(const cy_str_t s, uint16_t* const pin, size_t* const prefix_len)
-{
-    *pin        = 0;
-    *prefix_len = 0;
-    if (s.len < 5) {
-        return false;
-    }
-    const char* const digits = s.str + s.len - 4;
-    if (*(digits - 1) != '#') {
-        return false;
-    }
-    for (size_t i = 0; i < 4; i++) {
-        const unsigned char ch = (unsigned char)digits[i];
-        uint16_t            d  = 0;
-        if ((ch >= '0') && (ch <= '9')) {
-            d = (uint16_t)(unsigned)(ch - '0');
-        } else if ((ch >= 'a') && (ch <= 'f')) {
-            d = (uint16_t)(ch - 'a' + 10U);
-        } else {
-            return false;
-        }
-        *pin = (uint16_t)((unsigned)(*pin << 4U) | d);
-    }
-    if (*pin > CY_SUBJECT_ID_PINNED_MAX) {
-        return false;
-    }
-    *prefix_len = s.len - 5;
-    return true;
-}
-
-static uint64_t topic_hash(const cy_str_t name)
-{
-    uint16_t pin        = 0;
-    size_t   prefix_len = 0;
-    if (parse_pin_suffix(name, &pin, &prefix_len) && (prefix_len > 0)) {
-        return rapidhash(name.str, prefix_len);
-    }
-    // Bare pin "#0123" or non-pin: hash the full name. Canonical pin format ensures unique representation.
-    return rapidhash(name.str, name.len);
-}
-
-// Extract the pinned eviction counter from a name. Returns 0 if not pinned (use normal evictions).
-static uint32_t parse_pin_evictions(const cy_str_t name)
-{
-    uint16_t pin        = 0;
-    size_t   prefix_len = 0;
-    if (parse_pin_suffix(name, &pin, &prefix_len)) {
-        assert(pin <= CY_SUBJECT_ID_PINNED_MAX);
-        return (uint32_t)(UINT32_MAX - (uint32_t)pin);
-    }
-    return 0;
-}
-
-// Return the name to store in topic_t: the part before '#' (if non-empty), else the full name.
-static cy_str_t topic_stored_name(const cy_str_t name)
-{
-    uint16_t pin        = 0;
-    size_t   prefix_len = 0;
-    if (parse_pin_suffix(name, &pin, &prefix_len) && (prefix_len > 0)) {
-        return (cy_str_t){ .str = name.str, .len = prefix_len };
-    }
-    return name;
-}
-
 static uint32_t topic_subject_id_impl(const uint64_t hash, const uint64_t evictions, const uint32_t subject_id_modulus)
 {
     if (is_pinned((uint32_t)evictions)) {
@@ -1751,19 +1684,18 @@ fail:
     return err;
 }
 
-static cy_err_t topic_ensure(cy_t* const cy, cy_topic_t** const out_topic, const cy_str_t resolved_name)
+static cy_err_t topic_ensure(cy_t* const cy, cy_topic_t** const out_topic, const cy_resolved_t resolved)
 {
-    const cy_str_t    stored_name = topic_stored_name(resolved_name);
-    cy_topic_t* const topic       = cy_topic_find_by_name(cy, stored_name);
+    cy_topic_t* const topic = cy_topic_find_by_name(cy, resolved.name);
     if (topic != NULL) {
         if (out_topic != NULL) {
             *out_topic = topic;
         }
         return 0;
     }
-    const uint64_t hash      = topic_hash(resolved_name);
-    const uint32_t evictions = parse_pin_evictions(resolved_name);
-    return topic_new(cy, out_topic, stored_name, hash, evictions, LAGE_MIN);
+    const uint64_t hash      = rapidhash(resolved.name.str, resolved.name.len);
+    const uint32_t evictions = (resolved.pin != UINT16_MAX) ? (UINT32_MAX - (uint32_t)resolved.pin) : 0;
+    return topic_new(cy, out_topic, resolved.name, hash, evictions, LAGE_MIN);
 }
 
 // Create a new coupling between a topic and a subscriber.
@@ -1821,7 +1753,7 @@ static cy_topic_t* topic_subscribe_if_matching(cy_t* const       cy,
                                                const int_fast8_t lage)
 {
     assert((cy != NULL) && (resolved_name.str != NULL));
-    if ((resolved_name.len == 0) || (topic_hash(resolved_name) != hash)) {
+    if ((resolved_name.len == 0) || (rapidhash(resolved_name.str, resolved_name.len) != hash)) {
         return NULL; // Ensure the remote is not trying to feed us a bad name.
     }
     if (NULL == wkv_route(&cy->subscribers_by_pattern, resolved_name, NULL, wkv_cb_first)) {
@@ -2187,12 +2119,12 @@ cy_publisher_t* cy_advertise_client(cy_t* const cy, const cy_str_t name, const s
     if (cy == NULL) {
         return NULL;
     }
-    char           name_buf[CY_TOPIC_NAME_MAX];
-    const cy_str_t resolved = cy_resolve(cy, name, sizeof(name_buf), name_buf);
-    if (resolved.len > CY_TOPIC_NAME_MAX) {
+    char                name_buf[CY_TOPIC_NAME_MAX];
+    const cy_resolved_t resolved = cy_resolve(cy, name, sizeof(name_buf), name_buf);
+    if (resolved.name.len > CY_TOPIC_NAME_MAX) {
         return NULL;
     }
-    if (!cy_name_is_verbatim(resolved)) {
+    if (!cy_name_is_verbatim(resolved.name)) {
         return NULL; // Wildcard publishers are not defined.
     }
     cy_publisher_t* const pub = mem_alloc_zero(cy, sizeof(*pub));
@@ -3686,12 +3618,12 @@ static void* wkv_cb_couple_new_subscription(const wkv_event_t evt)
 // Either finds an existing subscriber root or creates a new one. NULL if OOM.
 // A subscriber root corresponds to a unique subscription name (with possible wildcards), hosting at least one
 // live subscriber.
-static cy_err_t ensure_subscriber_root(cy_t* const cy, const cy_str_t resolved_name, subscriber_root_t** const out_root)
+static cy_err_t ensure_subscriber_root(cy_t* const cy, const cy_resolved_t resolved, subscriber_root_t** const out_root)
 {
-    assert((cy != NULL) && (resolved_name.str != NULL) && (resolved_name.len > 0U) && (out_root != NULL));
+    assert((cy != NULL) && (resolved.name.str != NULL) && (resolved.name.len > 0U) && (out_root != NULL));
 
     // Find or allocate a tree node. If exists, return as-is.
-    wkv_node_t* const node = wkv_set(&cy->subscribers_by_name, resolved_name);
+    wkv_node_t* const node = wkv_set(&cy->subscribers_by_name, resolved.name);
     if (node == NULL) {
         return CY_ERR_MEMORY;
     }
@@ -3699,13 +3631,13 @@ static cy_err_t ensure_subscriber_root(cy_t* const cy, const cy_str_t resolved_n
         subscriber_root_t* const root = (subscriber_root_t*)node->value;
         *out_root                     = root;
         if (root->needs_scouting) {
-            const cy_err_t err   = do_send_scout(cy, cy_now(cy), resolved_name);
+            const cy_err_t err   = do_send_scout(cy, cy_now(cy), resolved.name);
             root->needs_scouting = err != CY_OK;
             ON_ASYNC_ERROR_IF(cy, NULL, err);
         }
         return CY_OK;
     }
-    CY_TRACE(cy, "✨'%.*s'", STRFMT_ARG(resolved_name));
+    CY_TRACE(cy, "✨'%.*s'", STRFMT_ARG(resolved.name));
 
     // Otherwise, allocate a new root, if possible.
     node->value = mem_alloc_zero(cy, sizeof(subscriber_root_t));
@@ -3718,8 +3650,8 @@ static cy_err_t ensure_subscriber_root(cy_t* const cy, const cy_str_t resolved_n
 
     // Insert the new root into the indexes.
     root->index_name = node;
-    if (!cy_name_is_verbatim(resolved_name)) {
-        root->index_pattern = wkv_set(&cy->subscribers_by_pattern, resolved_name);
+    if (!cy_name_is_verbatim(resolved.name)) {
+        root->index_pattern = wkv_set(&cy->subscribers_by_pattern, resolved.name);
         if (root->index_pattern == NULL) {
             wkv_del(&cy->subscribers_by_name, node);
             mem_free(cy, root);
@@ -3727,15 +3659,13 @@ static cy_err_t ensure_subscriber_root(cy_t* const cy, const cy_str_t resolved_n
         }
         assert(root->index_pattern->value == NULL);
         root->index_pattern->value = root;
-        // Publish the first scout message. If it fails, we may try again later, but the loss of a scout message
-        // is not essential since the subscriber monitors gossips continuously and subscribes on match always.
-        const cy_err_t err   = do_send_scout(cy, cy_now(cy), resolved_name);
-        root->needs_scouting = err != CY_OK;
+        const cy_err_t err         = do_send_scout(cy, cy_now(cy), resolved.name);
+        root->needs_scouting       = err != CY_OK;
         ON_ASYNC_ERROR_IF(cy, NULL, err);
     } else {
         root->index_pattern  = NULL;
-        root->needs_scouting = false; // this is not a pattern subscriber
-        const cy_err_t res   = topic_ensure(cy, NULL, resolved_name);
+        root->needs_scouting = false;
+        const cy_err_t res   = topic_ensure(cy, NULL, resolved);
         if (res != CY_OK) {
             wkv_del(&cy->subscribers_by_name, node);
             mem_free(cy, root);
@@ -3750,13 +3680,16 @@ static cy_err_t ensure_subscriber_root(cy_t* const cy, const cy_str_t resolved_n
 static subscriber_t* subscribe(cy_t* const cy, const cy_str_t name, const subscriber_params_t params)
 {
     assert((cy != NULL) && (params.reordering_window >= -1));
-    char           name_buf[CY_TOPIC_NAME_MAX + 1U];
-    const cy_str_t resolved = cy_resolve(cy, name, sizeof(name_buf), name_buf);
-    if (resolved.len > CY_TOPIC_NAME_MAX) {
+    char                name_buf[CY_TOPIC_NAME_MAX + 1U];
+    const cy_resolved_t resolved = cy_resolve(cy, name, sizeof(name_buf), name_buf);
+    if (resolved.name.len > CY_TOPIC_NAME_MAX) {
         return NULL;
     }
-    name_buf[resolved.len]  = 0; // this is not needed for the logic but helps with tracing (if enabled)
-    subscriber_t* const sub = future_new(cy, &subscriber_vtable, sizeof(subscriber_t));
+    if ((resolved.pin != UINT16_MAX) && !cy_name_is_verbatim(resolved.name)) {
+        return NULL; // Pin expression in a pattern subscription makes no sense.
+    }
+    name_buf[resolved.name.len] = 0; // this is not needed for the logic but helps with tracing (if enabled)
+    subscriber_t* const sub     = future_new(cy, &subscriber_vtable, sizeof(subscriber_t));
     if (sub == NULL) {
         return NULL;
     }
@@ -3771,15 +3704,15 @@ static subscriber_t* subscribe(cy_t* const cy, const cy_str_t name, const subscr
     assert(sub->root != NULL);
     sub->next       = sub->root->head;
     sub->root->head = sub;
-    if (NULL != wkv_match(&cy->topics_by_name, resolved, sub, wkv_cb_couple_new_subscription)) {
+    if (NULL != wkv_match(&cy->topics_by_name, resolved.name, sub, wkv_cb_couple_new_subscription)) {
         subscriber_destroy(sub);
         return NULL;
     }
-    sub->verbatim = cy_name_is_verbatim(resolved); // Cache once, is useful.
+    sub->verbatim = cy_name_is_verbatim(resolved.name); // Cache once, is useful.
     // liveness monitoring is disabled by default
     CY_TRACE(cy,
              "✨'%.*s' extent_pure=%zu rwin=%jd",
-             STRFMT_ARG(resolved),
+             STRFMT_ARG(resolved.name),
              params.extent_pure,
              (intmax_t)params.reordering_window);
     return sub;
@@ -4564,21 +4497,26 @@ cy_us_t cy_now(const cy_t* const cy)
 
 cy_us_t cy_uptime(const cy_t* const cy) { return cy_now(cy) - cy->ts_started; }
 
-cy_str_t cy_resolve(const cy_t* const cy, const cy_str_t name, const size_t dest_size, char* dest)
+cy_resolved_t cy_resolve(const cy_t* const cy, const cy_str_t expr, const size_t dest_size, char* dest)
 {
-    const cy_str_t result = cy_name_resolve(name, cy_namespace(cy), cy_home(cy), dest_size, dest);
-    if (result.len <= CY_TOPIC_NAME_MAX) {
+    const uint16_t pin        = cy_name_pin(expr);
+    cy_str_t       to_resolve = expr;
+    if (pin != UINT16_MAX) {
+        to_resolve.len -= cy_name_pin_expr_len; // Strip "#XXXX" before name resolution.
+    }
+    const cy_str_t name = cy_name_resolve(to_resolve, cy_namespace(cy), cy_home(cy), dest_size, dest);
+    if (name.len <= CY_TOPIC_NAME_MAX) {
         // TODO: remapping!
         (void)0;
     }
-    return result;
+    return (cy_resolved_t){ .name = name, .pin = pin };
 }
 
 cy_topic_t* cy_topic_find_by_name(const cy_t* const cy, const cy_str_t name)
 {
     const wkv_node_t* const node  = wkv_get(&cy->topics_by_name, name);
     cy_topic_t* const       topic = (node != NULL) ? (cy_topic_t*)node->value : NULL;
-    assert(topic == cy_topic_find_by_hash(cy, topic_hash(name)));
+    assert(topic == cy_topic_find_by_hash(cy, rapidhash(name.str, name.len)));
     return topic;
 }
 
@@ -4961,13 +4899,41 @@ bad_message:
 //                                                      NAMES
 // =====================================================================================================================
 
-const char cy_name_sep  = '/';
-const char cy_name_home = '~';
-const char cy_name_one  = '*';
-const char cy_name_any  = '>';
+const char   cy_name_sep          = '/';
+const char   cy_name_home         = '~';
+const char   cy_name_one          = '*';
+const char   cy_name_any          = '>';
+const char   cy_name_pin_prefix   = '#';
+const size_t cy_name_pin_expr_len = 5;
 
-// Accepts all printable ASCII characters except SPACE.
-static bool is_valid_char(const char c) { return (c >= 33) && (c <= 126); }
+// Accepts printable ASCII in range [40, 126]. Rejects SPACE (32) and ASCII 33-39 (! " # $ % & ').
+// The number sign '#' is valid only in topic pin expressions, which are stripped before normalization.
+static bool is_valid_char(const char c) { return (c >= 40) && (c <= 126); }
+
+uint16_t cy_name_pin(const cy_str_t name)
+{
+    if (name.len < cy_name_pin_expr_len) {
+        return UINT16_MAX;
+    }
+    const char* const digits = name.str + name.len - 4;
+    if (*(digits - 1) != cy_name_pin_prefix) {
+        return UINT16_MAX;
+    }
+    uint16_t pin = 0;
+    for (size_t i = 0; i < 4; i++) {
+        const unsigned char ch = (unsigned char)digits[i];
+        uint16_t            d  = 0;
+        if ((ch >= '0') && (ch <= '9')) {
+            d = (uint16_t)(unsigned)(ch - '0');
+        } else if ((ch >= 'a') && (ch <= 'f')) {
+            d = (uint16_t)(ch - 'a' + 10U);
+        } else {
+            return UINT16_MAX;
+        }
+        pin = (uint16_t)((unsigned)(pin << 4U) | d);
+    }
+    return (pin <= CY_SUBJECT_ID_PINNED_MAX) ? pin : UINT16_MAX;
+}
 
 // Normalizes the name and copies it into a heap-allocated storage.
 // On OOM failure, the original is left unchanged.
@@ -4999,11 +4965,19 @@ bool cy_name_is_valid(const cy_str_t name)
     if ((name.len == 0) || (name.len > CY_TOPIC_NAME_MAX) || (name.str == NULL)) {
         return false;
     }
-    for (size_t i = 0; i < name.len; ++i) {
-        const char c = name.str[i];
-        if (!is_valid_char(c)) {
+    // If a pin expression is present, validate only the prefix (the pin expression itself is already validated).
+    const uint16_t pin       = cy_name_pin(name);
+    const size_t   check_len = (pin != UINT16_MAX) ? (name.len - cy_name_pin_expr_len) : name.len;
+    if ((pin != UINT16_MAX) && (check_len == 0)) {
+        return false; // Bare pins (empty prefix) are not allowed.
+    }
+    for (size_t i = 0; i < check_len; ++i) {
+        if (!is_valid_char(name.str[i])) {
             return false;
         }
+    }
+    if ((pin != UINT16_MAX) && !cy_name_is_verbatim(name)) {
+        return false; // Pin expression in a pattern makes no sense.
     }
     return true;
 }

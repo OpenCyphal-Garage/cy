@@ -22,12 +22,26 @@ void test_name_is_valid_simple()
 
 void test_name_is_valid_printable_ascii()
 {
-    // All printable ASCII except space (33..126) should be valid as single-char names.
-    TEST_ASSERT_TRUE(cy_name_is_valid(cy_str("!"))); // 33
-    TEST_ASSERT_TRUE(cy_name_is_valid(cy_str("~"))); // 126
-    TEST_ASSERT_TRUE(cy_name_is_valid(cy_str("#"))); // 35
+    // Valid name characters are ASCII 40-126. ASCII 33-39 (! " # $ % & ') are reserved.
+    TEST_ASSERT_TRUE(cy_name_is_valid(cy_str("("))); // 40 -- lowest valid
+    TEST_ASSERT_TRUE(cy_name_is_valid(cy_str("~"))); // 126 -- highest valid
     TEST_ASSERT_TRUE(cy_name_is_valid(cy_str("Z"))); // 90
     TEST_ASSERT_TRUE(cy_name_is_valid(cy_str("{"))); // 123
+    // Reserved characters are invalid in names (but '#' is valid in pin expressions).
+    TEST_ASSERT_FALSE(cy_name_is_valid(cy_str("!"))); // 33
+    TEST_ASSERT_FALSE(cy_name_is_valid(cy_str("#"))); // 35 -- only valid as part of pin expr
+    TEST_ASSERT_FALSE(cy_name_is_valid(cy_str("$"))); // 36
+    TEST_ASSERT_FALSE(cy_name_is_valid(cy_str("'"))); // 39 -- last reserved
+    // Pin expression at end of verbatim name is valid.
+    TEST_ASSERT_TRUE(cy_name_is_valid(cy_str("foo#0123")));
+    TEST_ASSERT_TRUE(cy_name_is_valid(cy_str("x#0000")));
+    // Bare pins (empty prefix) and malformed pins are invalid.
+    TEST_ASSERT_FALSE(cy_name_is_valid(cy_str("#0123")));    // bare pin
+    TEST_ASSERT_FALSE(cy_name_is_valid(cy_str("foo#123")));  // too few digits -> '#' in name
+    TEST_ASSERT_FALSE(cy_name_is_valid(cy_str("foo#ABCD"))); // uppercase -> '#' in name
+    TEST_ASSERT_FALSE(cy_name_is_valid(cy_str("foo#2000"))); // out of range
+    // Pin in a pattern is meaningless.
+    TEST_ASSERT_FALSE(cy_name_is_valid(cy_str("foo/*/bar#0123")));
 }
 
 void test_name_is_valid_empty()

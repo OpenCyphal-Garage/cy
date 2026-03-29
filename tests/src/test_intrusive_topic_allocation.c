@@ -383,7 +383,7 @@ static void test_topic_subscribe_if_matching_oom_topic_new(void)
     TEST_ASSERT_NOT_NULL(sub);
 
     const cy_str_t name                = cy_str("topic/auto/oom/new/x");
-    const uint64_t hash                = topic_hash(name);
+    const uint64_t hash                = rapidhash(name.str, name.len);
     const size_t   async_errors_before = fix.async_error_count;
     fix.fail_alloc_size                = sizeof(cy_topic_t);
     fix.fail_alloc_count               = 1U;
@@ -403,7 +403,7 @@ static void test_topic_subscribe_if_matching_rejects_invalid_and_no_match(void)
     fixture_init(&fix);
 
     const cy_str_t name = cy_str("topic/auto/no/match");
-    const uint64_t hash = topic_hash(name);
+    const uint64_t hash = rapidhash(name.str, name.len);
 
     TEST_ASSERT_NULL(topic_subscribe_if_matching(fix.cy, name, hash + 1U, 0U, LAGE_MIN)); // hash mismatch
     TEST_ASSERT_NULL(topic_subscribe_if_matching(fix.cy, str_empty, 0U, 0U, LAGE_MIN));   // empty name
@@ -420,7 +420,7 @@ static void test_topic_subscribe_if_matching_oom_coupling_rolls_back_topic(void)
     TEST_ASSERT_NOT_NULL(sub);
 
     const cy_str_t name                = cy_str("topic/auto/oom/coupling/x");
-    const uint64_t hash                = topic_hash(name);
+    const uint64_t hash                = rapidhash(name.str, name.len);
     const size_t   async_errors_before = fix.async_error_count;
     fix.fail_alloc_size                = sizeof(cy_topic_coupling_t) + sizeof(cy_substitution_t);
     fix.fail_alloc_count               = 1U;
@@ -459,14 +459,19 @@ static void test_subscribe_guard_and_allocation_failure_paths(void)
     subscriber_root_t* root = NULL;
     fix.fail_alloc_size     = 0U;
     fix.fail_alloc_count    = 1U;
-    TEST_ASSERT_EQUAL_INT(CY_ERR_MEMORY, ensure_subscriber_root(fix.cy, cy_str("alloc/sub/node-oom"), &root));
+    TEST_ASSERT_EQUAL_INT(CY_ERR_MEMORY,
+                          ensure_subscriber_root(
+                            fix.cy, (cy_resolved_t){ .name = cy_str("alloc/sub/node-oom"), .pin = UINT16_MAX }, &root));
     TEST_ASSERT_NULL(root);
     TEST_ASSERT_NULL(wkv_get(&fix.cy->subscribers_by_name, cy_str("alloc/sub/node-oom")));
 
     root                 = NULL;
     fix.fail_alloc_size  = sizeof(cy_topic_t);
     fix.fail_alloc_count = 1U;
-    TEST_ASSERT_EQUAL_INT(CY_ERR_MEMORY, ensure_subscriber_root(fix.cy, cy_str("alloc/sub/topic-ensure-oom"), &root));
+    TEST_ASSERT_EQUAL_INT(
+      CY_ERR_MEMORY,
+      ensure_subscriber_root(
+        fix.cy, (cy_resolved_t){ .name = cy_str("alloc/sub/topic-ensure-oom"), .pin = UINT16_MAX }, &root));
     TEST_ASSERT_NULL(root);
     TEST_ASSERT_NULL(wkv_get(&fix.cy->subscribers_by_name, cy_str("alloc/sub/topic-ensure-oom")));
 
@@ -486,7 +491,8 @@ static void test_ensure_subscriber_root_pattern_index_oom(void)
     fix.fail_alloc_size     = sizeof(wkv_node_t);
     fix.fail_alloc_count    = 1U;
     subscriber_root_t* root = NULL;
-    TEST_ASSERT_EQUAL_INT(CY_ERR_MEMORY, ensure_subscriber_root(fix.cy, pattern, &root));
+    TEST_ASSERT_EQUAL_INT(CY_ERR_MEMORY,
+                          ensure_subscriber_root(fix.cy, (cy_resolved_t){ .name = pattern, .pin = UINT16_MAX }, &root));
     TEST_ASSERT_NULL(root);
     TEST_ASSERT_NULL(wkv_get(&fix.cy->subscribers_by_name, pattern));
     TEST_ASSERT_TRUE(wkv_is_empty(&fix.cy->subscribers_by_pattern));
@@ -499,7 +505,8 @@ static void test_subscribe_pattern_coupling_oom_rolls_back(void)
     fixture_init(&fix);
 
     static const char* const topic_name = "alloc/sub/coupling/fail/topic";
-    const uint64_t           hash       = topic_hash(cy_str(topic_name));
+    const cy_str_t           name_str   = cy_str(topic_name);
+    const uint64_t           hash       = rapidhash(name_str.str, name_str.len);
     cy_topic_t* const        topic      = fixture_make_explicit_topic(&fix, topic_name, hash);
     TEST_ASSERT_NULL(topic->couplings);
 
@@ -521,7 +528,8 @@ static void test_subscribe_existing_root_refreshes_reader_extent(void)
     fixture_init(&fix);
 
     static const char* const topic_name = "alloc/sub/extent/refresh";
-    const uint64_t           hash       = topic_hash(cy_str(topic_name));
+    const cy_str_t           name_str   = cy_str(topic_name);
+    const uint64_t           hash       = rapidhash(name_str.str, name_str.len);
     cy_topic_t* const        topic      = fixture_make_explicit_topic(&fix, topic_name, hash);
 
     cy_future_t* const sub_small = cy_subscribe(fix.cy, cy_str("alloc/sub/extent/*"), 8U);
@@ -586,9 +594,10 @@ static void test_topic_new_error_duplicate_name(void)
     fixture_t fix;
     fixture_init(&fix);
 
-    static const char* const name = "topic/new/error/dup-name";
-    const uint64_t           hash = topic_hash(cy_str(name));
-    cy_topic_t* const        mine = fixture_make_topic(&fix, name, hash, 0U, LAGE_MIN);
+    static const char* const name     = "topic/new/error/dup-name";
+    const cy_str_t           name_str = cy_str(name);
+    const uint64_t           hash     = rapidhash(name_str.str, name_str.len);
+    cy_topic_t* const        mine     = fixture_make_topic(&fix, name, hash, 0U, LAGE_MIN);
     TEST_ASSERT_NOT_NULL(mine);
 
     cy_topic_t* out = mine;
@@ -705,38 +714,47 @@ static void test_topic_merge_lage_clamps_out_of_range_values(void)
     fixture_deinit(&fix);
 }
 
-static void test_parse_pin_suffix_and_topic_hash_suffix_parsing(void)
+static void test_cy_name_pin_and_topic_expression_parsing(void)
 {
     fixture_t fix;
     fixture_init(&fix);
 
-    uint16_t pin        = UINT16_MAX;
-    size_t   prefix_len = 0;
-    TEST_ASSERT_TRUE(parse_pin_suffix(cy_str("topic/hash#1a2b"), &pin, &prefix_len));
-    TEST_ASSERT_EQUAL_UINT16(UINT16_C(0x1A2B), pin);
-    TEST_ASSERT_EQUAL_size_t(10U, prefix_len); // "topic/hash" is 10 chars
+    // Canonical pin: '#' + exactly 4 lowercase hex digits, value in [0, CY_SUBJECT_ID_PINNED_MAX].
+    TEST_ASSERT_EQUAL_UINT16(UINT16_C(0x1A2B), cy_name_pin(cy_str("topic/hash#1a2b")));
+    TEST_ASSERT_EQUAL_UINT16(UINT16_C(0x0010), cy_name_pin(cy_str("#0010")));
+    TEST_ASSERT_EQUAL_UINT16(UINT16_C(0x0010), cy_name_pin(cy_str("x#0010")));
 
-    pin        = UINT16_MAX;
-    prefix_len = 0;
-    TEST_ASSERT_FALSE(parse_pin_suffix(cy_str("topic/hash#"), &pin, &prefix_len));
-    TEST_ASSERT_FALSE(parse_pin_suffix(cy_str("topic/hash#1G"), &pin, &prefix_len));
-    // Canonical pin format: exactly 4 lowercase hex digits.
-    TEST_ASSERT_TRUE(parse_pin_suffix(cy_str("#0010"), &pin, &prefix_len));
-    TEST_ASSERT_EQUAL_UINT16(UINT16_C(0x0010), pin);
-    TEST_ASSERT_EQUAL_size_t(0U, prefix_len);
-    TEST_ASSERT_TRUE(parse_pin_suffix(cy_str("x#0010"), &pin, &prefix_len));
-    TEST_ASSERT_EQUAL_UINT16(UINT16_C(0x0010), pin);
-    TEST_ASSERT_EQUAL_size_t(1U, prefix_len);
-    TEST_ASSERT_FALSE(parse_pin_suffix(cy_str("#2000"), &pin, &prefix_len));  // > CY_SUBJECT_ID_PINNED_MAX
-    TEST_ASSERT_FALSE(parse_pin_suffix(cy_str("#ABCD"), &pin, &prefix_len));  // uppercase
-    TEST_ASSERT_FALSE(parse_pin_suffix(cy_str("#01"), &pin, &prefix_len));    // too few digits
-    TEST_ASSERT_FALSE(parse_pin_suffix(cy_str("#00001"), &pin, &prefix_len)); // '#' not at position -5
-    // Non-canonical suffixes are not pins; the full name is hashed as-is.
-    TEST_ASSERT_EQUAL_UINT64(rapidhash("topic/hash#10", 13U), topic_hash(cy_str("topic/hash#10")));
-    TEST_ASSERT_EQUAL_UINT64(rapidhash("#10", 3U), topic_hash(cy_str("#10")));
-    // Canonical pin: prefixed hash is prefix-only, bare hash is full name.
-    TEST_ASSERT_EQUAL_UINT64(rapidhash("topic/hash", 10U), topic_hash(cy_str("topic/hash#0010")));
-    TEST_ASSERT_EQUAL_UINT64(rapidhash("#0010", 5U), topic_hash(cy_str("#0010")));
+    // Invalid pins return UINT16_MAX.
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, cy_name_pin(cy_str("topic/hash#")));   // no digits after '#'
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, cy_name_pin(cy_str("topic/hash#1G"))); // invalid hex digit
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, cy_name_pin(cy_str("#2000")));         // > CY_SUBJECT_ID_PINNED_MAX
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, cy_name_pin(cy_str("#ABCD")));         // uppercase
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, cy_name_pin(cy_str("#01")));           // too few digits
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, cy_name_pin(cy_str("#00001")));        // '#' not at position -5
+
+    // Non-canonical suffixes are not pins; rapidhash covers the full name as-is.
+    {
+        const cy_str_t n = cy_str("topic/hash#10");
+        TEST_ASSERT_EQUAL_UINT64(rapidhash("topic/hash#10", 13U), rapidhash(n.str, n.len));
+    }
+    {
+        const cy_str_t n = cy_str("#10");
+        TEST_ASSERT_EQUAL_UINT64(rapidhash("#10", 3U), rapidhash(n.str, n.len));
+    }
+    // Canonical pin: the stripped prefix is what gets hashed (pin suffix is not part of the hash).
+    {
+        const cy_str_t n   = cy_str("topic/hash#0010");
+        const uint16_t pin = cy_name_pin(n);
+        TEST_ASSERT_NOT_EQUAL(UINT16_MAX, pin);
+        TEST_ASSERT_EQUAL_UINT64(rapidhash("topic/hash", 10U), rapidhash(n.str, n.len - cy_name_pin_expr_len));
+    }
+    {
+        const cy_str_t n   = cy_str("#0010");
+        const uint16_t pin = cy_name_pin(n);
+        // Bare pin with no prefix -- cy_name_pin returns a valid pin but the prefix is empty.
+        TEST_ASSERT_NOT_EQUAL(UINT16_MAX, pin);
+        TEST_ASSERT_EQUAL_size_t(0U, n.len - cy_name_pin_expr_len);
+    }
     fixture_deinit(&fix);
 }
 
@@ -1101,7 +1119,7 @@ int main(void)
     RUN_TEST(test_pinned_topic_sync_implicit_transitions_without_gossip);
     RUN_TEST(test_left_wins_and_topic_merge_lage);
     RUN_TEST(test_topic_merge_lage_clamps_out_of_range_values);
-    RUN_TEST(test_parse_pin_suffix_and_topic_hash_suffix_parsing);
+    RUN_TEST(test_cy_name_pin_and_topic_expression_parsing);
     RUN_TEST(test_topic_merge_lage_crdt_properties_commutative_associative_idempotent);
     RUN_TEST(test_on_gossip_known_topic_equal_lage_prefers_higher_evictions);
     RUN_TEST(test_topic_allocate_reader_recovery_after_subject_reader_oom);
