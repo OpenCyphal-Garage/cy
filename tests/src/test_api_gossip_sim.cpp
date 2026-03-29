@@ -346,7 +346,7 @@ void network_node_init(sim_network_t& net, const std::size_t index)
     node.vtable.random                 = sim_random;
 
     node.platform.vtable             = &node.vtable;
-    node.platform.subject_id_modulus = static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit);
+    node.platform.subject_id_modulus = static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit);
     node.platform.cy                 = nullptr;
     node.cy                          = cy_new(&node.platform);
     TEST_ASSERT_NOT_NULL(node.cy);

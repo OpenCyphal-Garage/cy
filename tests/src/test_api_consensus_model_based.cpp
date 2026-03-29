@@ -148,7 +148,7 @@ void run_seed_case(const std::uint64_t seed)
     constexpr std::uint32_t pub_id_b = 4302U;
 
     const std::uint64_t hash_a = UINT64_C(0x1000000000100000) + (seed * UINT64_C(0x1000));
-    const std::uint64_t hash_b = hash_a + static_cast<std::uint64_t>(CY_SUBJECT_ID_MODULUS_17bit);
+    const std::uint64_t hash_b = hash_a + static_cast<std::uint64_t>(CY_SUBJECT_ID_MODULUS_16bit);
 
     const std::string topic_a = make_topic_name("e2e/model/collide/a/", hash_a);
     const std::string topic_b = make_topic_name("e2e/model/collide/b/", hash_b);
@@ -159,7 +159,7 @@ void run_seed_case(const std::uint64_t seed)
     configure_faults(faults, seed);
 
     e2e::sim_net_t net{};
-    TEST_ASSERT_EQUAL_INT(CY_OK, e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), seed));
+    TEST_ASSERT_EQUAL_INT(CY_OK, e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), seed));
     e2e::sim_net_faults_set(net, &faults);
 
     arrival_capture_t capture_a{};

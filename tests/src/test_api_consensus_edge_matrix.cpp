@@ -163,7 +163,7 @@ void test_api_consensus_edge_partition_heal_eventual_bidirectional_delivery()
 
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(
-      CY_OK, e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), UINT64_C(0xE001)));
+      CY_OK, e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), UINT64_C(0xE001)));
     e2e::sim_net_faults_set(net, &faults);
 
     cy_publisher_t* const pub_a =
@@ -237,7 +237,7 @@ void test_api_consensus_edge_colliding_topics_discover_and_deliver_with_faults()
 
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(
-      CY_OK, e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), UINT64_C(0xE002)));
+      CY_OK, e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), UINT64_C(0xE002)));
     e2e::sim_net_faults_set(net, &faults);
 
     cy_future_t* const sub_a = cy_subscribe(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str(pattern), 64U);

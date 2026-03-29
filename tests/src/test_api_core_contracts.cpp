@@ -498,7 +498,7 @@ void test_api_core_cy_new_validation_and_failure_paths()
     TEST_ASSERT_NULL(cy_new(&platform.platform));
     platform.platform.subject_id_modulus = 65537U; // prime but mod 4 != 3
     TEST_ASSERT_NULL(cy_new(&platform.platform));
-    platform.platform.subject_id_modulus = static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit);
+    platform.platform.subject_id_modulus = static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit);
 
     platform_deinit(&platform);
 

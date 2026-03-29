@@ -84,7 +84,7 @@ static void reorder_env_init(reorder_env_t* const self)
 
     guarded_heap_init(&self->fixture.heap, UINT64_C(0xA110CA7E5EED1234));
     self->fixture.platform.vtable             = &self->fixture.vtable;
-    self->fixture.platform.subject_id_modulus = (uint32_t)CY_SUBJECT_ID_MODULUS_17bit;
+    self->fixture.platform.subject_id_modulus = (uint32_t)CY_SUBJECT_ID_MODULUS_16bit;
     self->fixture.platform.cy                 = &self->fixture.cy;
     self->fixture.vtable.now                  = fixture_now;
     self->fixture.vtable.realloc              = fixture_realloc;

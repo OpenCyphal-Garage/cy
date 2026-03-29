@@ -31,8 +31,8 @@ constexpr cy_us_t future_timeout = 3'000'000;
 
 constexpr std::array<const char*, max_topics> colliding_topics = {
     "e2e/migrate/topic_alpha#123456789abcdeff",
-    "e2e/migrate/topic_beta#123456789abebe76",
-    "e2e/migrate/topic_gamma#123456789ac09ded",
+    "e2e/migrate/topic_beta#123456789abdbe72",
+    "e2e/migrate/topic_gamma#123456789abe9de5",
 };
 
 struct subscriber_log_t final
@@ -465,7 +465,7 @@ d_case_result_t run_d_case(const d_case_config_t& cfg)
 
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), cfg.seed));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), cfg.seed));
 
     const e2e::fault_plan_t faults = build_fault_plan(cfg);
     if (faults.rules.empty()) {

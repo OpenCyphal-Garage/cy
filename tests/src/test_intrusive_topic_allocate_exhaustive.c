@@ -155,7 +155,7 @@ static void fixture_init(fixture_t* const self)
     guarded_heap_init(&self->heap, UINT64_C(0xD00DFEEDBADC0FFE));
 
     self->platform.vtable               = &self->vtable;
-    self->platform.subject_id_modulus   = (uint32_t)CY_SUBJECT_ID_MODULUS_17bit;
+    self->platform.subject_id_modulus   = (uint32_t)CY_SUBJECT_ID_MODULUS_16bit;
     self->vtable.subject_writer_new     = fixture_subject_writer_new;
     self->vtable.subject_writer_destroy = fixture_subject_writer_destroy;
     self->vtable.subject_writer_send    = fixture_subject_writer_send;
@@ -529,7 +529,7 @@ static void test_topic_allocate_seeded_probabilistic_oracle_equivalence(void)
 
 static void test_topic_allocate_high_eviction_bounded_exhaustive_oracle_equivalence(void)
 {
-    static const uint32_t modulus = (uint32_t)CY_SUBJECT_ID_MODULUS_17bit;
+    static const uint32_t modulus = (uint32_t)CY_SUBJECT_ID_MODULUS_16bit;
     uint32_t              ev_domain[6];
     const size_t          ev_domain_count = fill_high_eviction_domain(modulus, ev_domain);
     size_t                case_count      = 0U;

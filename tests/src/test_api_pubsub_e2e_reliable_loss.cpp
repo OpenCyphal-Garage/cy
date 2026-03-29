@@ -159,7 +159,7 @@ void test_api_pubsub_e2e_b01_drop_first_data_frame_for_each_message()
 
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xB01U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xB01U));
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
@@ -200,7 +200,7 @@ void test_api_pubsub_e2e_b02_drop_every_nth_data_frame()
 
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xB02U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xB02U));
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
@@ -238,7 +238,7 @@ void test_api_pubsub_e2e_b03_mid_stream_burst_data_loss_window()
 
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xB03U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xB03U));
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
@@ -275,7 +275,7 @@ void test_api_pubsub_e2e_b04_drop_first_ack_for_each_message()
 
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xB04U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xB04U));
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
@@ -320,7 +320,7 @@ void test_api_pubsub_e2e_b05_drop_acks_for_first_k_retry_cycles_then_recover()
 
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xB05U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xB05U));
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
@@ -376,7 +376,7 @@ void test_api_pubsub_e2e_b06_mixed_data_and_ack_loss_pattern()
 
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xB06U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xB06U));
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
@@ -415,7 +415,7 @@ void test_api_pubsub_e2e_b07_one_way_partition_a_to_b_then_heal_before_deadlines
 
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xB07U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xB07U));
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
@@ -453,7 +453,7 @@ void test_api_pubsub_e2e_b08_one_way_partition_b_to_a_ack_blackout_then_heal()
 
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xB08U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xB08U));
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
@@ -489,7 +489,7 @@ void test_api_pubsub_e2e_b09_full_partition_interval_then_heal_within_deadlines(
 
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xB09U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xB09U));
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
@@ -525,7 +525,7 @@ void test_api_pubsub_e2e_b10_partition_longer_than_deadline_expected_failures()
 
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xB10U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xB10U));
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
@@ -560,7 +560,7 @@ void test_api_pubsub_e2e_b11_late_ack_after_failure_does_not_resurrect_future()
 
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xB11U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xB11U));
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
@@ -605,7 +605,7 @@ void test_api_pubsub_e2e_b12_transient_ack_send_media_failures_on_receiver_side_
 
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xB12U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xB12U));
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 

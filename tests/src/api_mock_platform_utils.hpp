@@ -88,7 +88,7 @@ std::uint64_t random_lcg(cy_platform_t* const platform)
 inline void init_platform_base(cy_platform_t& platform, cy_platform_vtable_t& vtable)
 {
     platform.cy                 = nullptr;
-    platform.subject_id_modulus = static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit);
+    platform.subject_id_modulus = static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit);
     platform.vtable             = &vtable;
 }
 

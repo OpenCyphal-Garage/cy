@@ -39,7 +39,7 @@ static void fixture_init(fixture_t* const self)
     memset(self, 0, sizeof(*self));
     guarded_heap_init(&self->heap, UINT64_C(0xB17E5D0C1234ABCD));
     self->platform.vtable             = &self->vtable;
-    self->platform.subject_id_modulus = (uint32_t)CY_SUBJECT_ID_MODULUS_17bit;
+    self->platform.subject_id_modulus = (uint32_t)CY_SUBJECT_ID_MODULUS_16bit;
     self->platform.cy                 = &self->cy;
     self->vtable.realloc              = fixture_realloc;
     self->vtable.random               = fixture_random;
@@ -530,7 +530,7 @@ static void test_internal_helpers_branch_matrix(void)
     TEST_ASSERT_FALSE(is_prime_u32(4U));
     TEST_ASSERT_FALSE(is_prime_u32(9U));
     TEST_ASSERT_TRUE(is_prime_u32(17U));
-    TEST_ASSERT_TRUE(is_valid_subject_id_modulus((uint32_t)CY_SUBJECT_ID_MODULUS_17bit));
+    TEST_ASSERT_TRUE(is_valid_subject_id_modulus((uint32_t)CY_SUBJECT_ID_MODULUS_16bit));
     TEST_ASSERT_FALSE(is_valid_subject_id_modulus(4U));
 }
 

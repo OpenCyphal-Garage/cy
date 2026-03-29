@@ -196,7 +196,7 @@ void test_api_pubsub_e2e_a01_best_effort_happy_unordered()
 {
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xA01U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xA01U));
     cy_us_t now = 0;
 
     cy_publisher_t* const pub = make_publisher(net, "e2e/a01/topic");
@@ -220,7 +220,7 @@ void test_api_pubsub_e2e_a02_best_effort_happy_ordered()
 {
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xA02U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xA02U));
     cy_us_t now = 0;
 
     cy_publisher_t* const pub = make_publisher(net, "e2e/a02/topic");
@@ -245,7 +245,7 @@ void test_api_pubsub_e2e_a03_reliable_happy_unordered()
 {
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xA03U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xA03U));
     cy_us_t now = 0;
 
     cy_publisher_t* const pub = make_publisher(net, "e2e/a03/topic");
@@ -274,7 +274,7 @@ void test_api_pubsub_e2e_a04_reliable_happy_ordered()
 {
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xA04U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xA04U));
     cy_us_t now = 0;
 
     cy_publisher_t* const pub = make_publisher(net, "e2e/a04/topic");
@@ -304,7 +304,7 @@ void test_api_pubsub_e2e_a05_reliable_burst_no_faults_unordered()
 {
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xA05U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xA05U));
     cy_us_t now = 0;
 
     cy_publisher_t* const pub = make_publisher(net, "e2e/a05/topic");
@@ -333,7 +333,7 @@ void test_api_pubsub_e2e_a06_reliable_burst_no_faults_ordered()
 {
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xA06U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xA06U));
     cy_us_t now = 0;
 
     cy_publisher_t* const pub = make_publisher(net, "e2e/a06/topic");
@@ -363,7 +363,7 @@ void test_api_pubsub_e2e_a07_late_subscriber_join_post_subscribe_only()
 {
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xA07U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xA07U));
     cy_us_t now = 0;
 
     cy_publisher_t* const pub = make_publisher(net, "e2e/a07/topic");
@@ -393,7 +393,7 @@ void test_api_pubsub_e2e_a08_unsubscribe_resubscribe_during_active_publishing()
 {
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xA08U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xA08U));
     cy_us_t now = 0;
 
     cy_publisher_t* const pub = make_publisher(net, "e2e/a08/topic");
@@ -437,7 +437,7 @@ void test_api_pubsub_e2e_a09_response_frame_metadata_is_parsed_per_response_head
 {
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xA09U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xA09U));
     cy_us_t now = 0;
 
     static constexpr const char* topic_name = "e2e/a09/topic";

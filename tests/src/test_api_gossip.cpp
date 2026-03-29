@@ -320,7 +320,7 @@ void test_api_collision_win_triggers_urgent_multicast()
     p.unicast_send_count = 0U;
     p.subject_send_count = 0U;
 
-    const std::uint64_t remote_colliding_hash = local_hash + static_cast<std::uint64_t>(CY_SUBJECT_ID_MODULUS_17bit);
+    const std::uint64_t remote_colliding_hash = local_hash + static_cast<std::uint64_t>(CY_SUBJECT_ID_MODULUS_16bit);
     dispatch_gossip(p,
                     cy_lane_t{ .id = 203U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
                     nullptr,
@@ -442,7 +442,7 @@ void test_api_unknown_topic_no_collision_and_collision_win_paths()
     TEST_ASSERT_FALSE(spin_until_multicast_for_hash(p, no_collision_hash, 50'000));
     TEST_ASSERT_NULL(cy_topic_find_by_hash(p.cy, no_collision_hash));
 
-    const std::uint64_t colliding_hash = local_hash + static_cast<std::uint64_t>(CY_SUBJECT_ID_MODULUS_17bit);
+    const std::uint64_t colliding_hash = local_hash + static_cast<std::uint64_t>(CY_SUBJECT_ID_MODULUS_16bit);
     dispatch_gossip(p,
                     cy_lane_t{ .id = 216U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
                     nullptr,

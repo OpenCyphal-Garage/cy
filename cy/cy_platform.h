@@ -17,7 +17,7 @@
 #include <stdint.h>
 
 /// See the subject_id_modulus for details.
-#define CY_SUBJECT_ID_MODULUS_17bit 122743UL     ///< Suitable for all Cyphal transports.
+#define CY_SUBJECT_ID_MODULUS_16bit 57203UL      ///< Suitable for all Cyphal transports.
 #define CY_SUBJECT_ID_MODULUS_23bit 8378431UL    ///< Incompatible with Cyphal/CAN.
 #define CY_SUBJECT_ID_MODULUS_32bit 4294954663UL ///< Incompatible with Cyphal/CAN and Cyphal/UDPv4.
 
