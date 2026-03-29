@@ -57,6 +57,7 @@ Checks: >-
   -*-deprecated-headers,
   -*-nested-conditional-operator,
   -*-security.ArrayBound,
+  -*-implicit-bool-conversion,
 CheckOptions:
   - key: misc-const-correctness.TransformPointersAsValues
     value: 'true'

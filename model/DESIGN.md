@@ -39,7 +39,7 @@ The reliable delivery logic is built on the assumption that any given message ma
 
 The set of subject-ID values ranges from zero (inclusive) up to some transport-specific boundary. For Cyphal/CAN, the maximum is $2^{17}-1$, while for Cyphal/UDP (and all IPv4-based transports in general) the maximum is $2^{23}-1$ due to L2 multicast limitations.
 
-Subject-ID values from 0 to 8191 inclusive are reserved for pinned topics, which are guaranteed to be collision-free.
+Subject-ID values from 0 to 8191 inclusive are reserved for pinned topics.
 
 The maximum subject-ID value is reserved for broadcast subject that is used for low-rate broadcast gossip propagation and scouts. For Cyphal/CAN, this is subject 131071=0x1ffff, for Cyphal/UDP this is 8388607=0x7fffff.
 
@@ -116,8 +116,6 @@ static uint32_t topic_evictions_from_subject_id(const uint64_t hash,
 ```
 
 ### Headers
-
->TODO: Pinned topics on CAN must have no header to ensure backward compatibility, sort this out later.
 
 The transport layer just ferries opaque blobs between nodes. The job of the session layer is to build and interpret them. To enable that, the session layer adds small fixed-size headers to messages. All headers carry the header type in the first byte; the rest is header-specific. All headers have a fixed size of 24 bytes and favor natural alignment where possible to simplify parsing. The following header types are defined:
 
@@ -201,10 +199,12 @@ uint64 message_tag      # The tag of the published message this response pertain
 
 See the `model/` directory for the design rationale.
 
+Pinned topics are manually assigned a specific subject-ID; they carry the log age of 127. They ignore collisions, meaning that multiple pinned topics may share a subject.
+
 ```bash
 uint8  type
 void16
-int8   topic_log_age    # floor(log2(topic_age)) if topic_age>0 else -1
+int8   topic_log_age    # floor(log2(topic_age)) if topic_age>0 else -1; 127 for pinned topics.
 uint32 incompatibility
 uint64 topic_hash
 uint32 topic_evictions
