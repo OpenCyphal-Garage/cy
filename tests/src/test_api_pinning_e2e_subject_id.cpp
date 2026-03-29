@@ -68,7 +68,10 @@ extern "C" void on_arrival_capture(cy_future_t* const sub)
     cy_message_refcount_dec(arrival.message.content);
 }
 
-void publish_one(cy_publisher_t* const pub, const std::uint32_t publisher_id, const std::uint64_t seq, const cy_us_t now)
+void publish_one(cy_publisher_t* const pub,
+                 const std::uint32_t   publisher_id,
+                 const std::uint64_t   seq,
+                 const cy_us_t         now)
 {
     const auto       payload = e2e::app_payload_pack(publisher_id, seq);
     const cy_bytes_t msg     = { .size = payload.size(), .data = payload.data(), .next = nullptr };
@@ -96,7 +99,7 @@ std::optional<std::uint32_t> last_subject_id_for_hash(const std::vector<e2e::fra
 
 // Collect all distinct subject-IDs for message frames matching a topic hash.
 std::set<std::uint32_t> all_subject_ids_for_hash(const std::vector<e2e::frame_capture_t>& captures,
-                                                  const std::uint64_t                      topic_hash)
+                                                 const std::uint64_t                      topic_hash)
 {
     std::set<std::uint32_t> result{};
     for (const e2e::frame_capture_t& cap : captures) {
@@ -130,7 +133,7 @@ void test_pinned_subject_id_matches_hex_suffix()
     // Advertise on node A, subscribe on node B so the message is actually sent on the wire.
     cy_publisher_t* const pub = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("e2e/sid/basic#1234"));
     TEST_ASSERT_NOT_NULL(pub);
-    arrival_capture_t     capture{};
+    arrival_capture_t  capture{};
     cy_future_t* const sub = make_sub(e2e::sim_net_cy(net, e2e::sim_node_b), "e2e/sid/basic", capture);
 
     cy_us_t now = 0;
@@ -180,9 +183,9 @@ void test_pinned_subject_id_boundary_values()
     TEST_ASSERT_NOT_NULL(pub_one);
     TEST_ASSERT_NOT_NULL(pub_max);
 
-    arrival_capture_t capture_min{};
-    arrival_capture_t capture_one{};
-    arrival_capture_t capture_max{};
+    arrival_capture_t  capture_min{};
+    arrival_capture_t  capture_one{};
+    arrival_capture_t  capture_max{};
     cy_future_t* const sub_min = make_sub(e2e::sim_net_cy(net, e2e::sim_node_b), "e2e/sid/bound/min", capture_min);
     cy_future_t* const sub_one = make_sub(e2e::sim_net_cy(net, e2e::sim_node_b), "e2e/sid/bound/one", capture_one);
     cy_future_t* const sub_max = make_sub(e2e::sim_net_cy(net, e2e::sim_node_b), "e2e/sid/bound/max", capture_max);
@@ -232,16 +235,12 @@ void test_auto_allocated_never_in_pinned_range()
 
     // Create several unpinned topics with diverse names.
     static constexpr std::array<const char*, 6> topic_names = {
-        "e2e/sid/auto/alpha",
-        "e2e/sid/auto/beta",
-        "e2e/sid/auto/gamma",
-        "e2e/sid/auto/delta",
-        "e2e/sid/auto/epsilon",
-        "e2e/sid/auto/zeta",
+        "e2e/sid/auto/alpha", "e2e/sid/auto/beta",    "e2e/sid/auto/gamma",
+        "e2e/sid/auto/delta", "e2e/sid/auto/epsilon", "e2e/sid/auto/zeta",
     };
 
-    std::array<cy_publisher_t*, 6>  pubs{};
-    std::array<cy_future_t*, 6>     subs{};
+    std::array<cy_publisher_t*, 6>   pubs{};
+    std::array<cy_future_t*, 6>      subs{};
     std::array<arrival_capture_t, 6> captures{};
 
     for (std::size_t i = 0U; i < topic_names.size(); i++) {
@@ -286,8 +285,7 @@ void test_pinning_does_not_affect_identity()
     TEST_ASSERT_EQUAL_INT(
       CY_OK, e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), UINT64_C(0xB004)));
 
-    cy_publisher_t* const pub =
-      cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("e2e/sid/ident/topic#0abc"));
+    cy_publisher_t* const pub = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("e2e/sid/ident/topic#0abc"));
     TEST_ASSERT_NOT_NULL(pub);
 
     const cy_topic_t* const topic = cy_publisher_topic(pub);
@@ -313,8 +311,7 @@ void test_pinning_does_not_affect_identity()
     TEST_ASSERT_EQUAL_UINT64(cy_topic_hash(topic), cy_topic_hash(cy_publisher_topic(pub2)));
 
     // Advertising the unpinned version should also reuse the same topic.
-    cy_publisher_t* const pub3 =
-      cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("e2e/sid/ident/topic"));
+    cy_publisher_t* const pub3 = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("e2e/sid/ident/topic"));
     TEST_ASSERT_NOT_NULL(pub3);
     TEST_ASSERT_EQUAL_UINT64(cy_topic_hash(topic), cy_topic_hash(cy_publisher_topic(pub3)));
 
@@ -351,8 +348,8 @@ void test_bare_pinned_topics_distinct_identity()
     TEST_ASSERT_EQUAL_UINT64(UINT64_C(0x0123), hash_b);
 
     // Subscribe to each bare pin on node B and verify independent delivery.
-    arrival_capture_t capture_a{};
-    arrival_capture_t capture_b{};
+    arrival_capture_t  capture_a{};
+    arrival_capture_t  capture_b{};
     cy_future_t* const sub_a = make_sub(e2e::sim_net_cy(net, e2e::sim_node_b), "#1234", capture_a);
     cy_future_t* const sub_b = make_sub(e2e::sim_net_cy(net, e2e::sim_node_b), "#0123", capture_b);
 
@@ -408,8 +405,8 @@ void test_bare_pin_differs_from_prefixed_pin()
 
     // Despite different hashes, both share subject-ID 0x0ABC (multi-tenant).
     // Subscribe to each and verify independent delivery.
-    arrival_capture_t capture_bare{};
-    arrival_capture_t capture_prefixed{};
+    arrival_capture_t  capture_bare{};
+    arrival_capture_t  capture_prefixed{};
     cy_future_t* const sub_bare     = make_sub(e2e::sim_net_cy(net, e2e::sim_node_b), "#0abc", capture_bare);
     cy_future_t* const sub_prefixed = make_sub(e2e::sim_net_cy(net, e2e::sim_node_b), "foo", capture_prefixed);
 
@@ -433,8 +430,7 @@ void test_bare_pin_differs_from_prefixed_pin()
     TEST_ASSERT_TRUE(count_by_publisher(capture_prefixed, 6041U) > 0U);
     TEST_ASSERT_EQUAL_size_t(0U, count_by_publisher(capture_prefixed, 6040U));
 
-    e2e::cleanup_case(
-      net, now, {}, { sub_bare, sub_prefixed }, { pub_bare, pub_prefixed }, step_us, 100'000, 100'000U);
+    e2e::cleanup_case(net, now, {}, { sub_bare, sub_prefixed }, { pub_bare, pub_prefixed }, step_us, 100'000, 100'000U);
 }
 
 } // namespace

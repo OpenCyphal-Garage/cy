@@ -18,10 +18,10 @@
 
 namespace {
 
-constexpr cy_us_t step_us           = 1'000;
-constexpr cy_us_t publish_deadline  = 200'000;
-constexpr cy_us_t converge_time     = 800'000;
-constexpr cy_us_t delivery_time     = 400'000;
+constexpr cy_us_t step_us          = 1'000;
+constexpr cy_us_t publish_deadline = 200'000;
+constexpr cy_us_t converge_time    = 800'000;
+constexpr cy_us_t delivery_time    = 400'000;
 
 struct arrival_sample_t final
 {
@@ -106,7 +106,7 @@ void test_pinned_topic_matches_chevron_pattern()
     cy_publisher_t* const pub = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("e2e/pin/alpha#0100"));
     TEST_ASSERT_NOT_NULL(pub);
 
-    arrival_capture_t capture{};
+    arrival_capture_t  capture{};
     cy_future_t* const sub = make_pattern_sub(e2e::sim_net_cy(net, e2e::sim_node_b), "e2e/pin/>", capture);
 
     cy_us_t now = 0;
@@ -124,7 +124,8 @@ void test_pinned_topic_matches_chevron_pattern()
     TEST_ASSERT_TRUE(count_by_publisher(capture, pub_id) > 0U);
 
     // The pinned topic should be discoverable by its stored name (without the pin suffix).
-    const cy_topic_t* const topic = cy_topic_find_by_name(e2e::sim_net_cy(net, e2e::sim_node_b), cy_str("e2e/pin/alpha"));
+    const cy_topic_t* const topic =
+      cy_topic_find_by_name(e2e::sim_net_cy(net, e2e::sim_node_b), cy_str("e2e/pin/alpha"));
     TEST_ASSERT_NOT_NULL(topic);
 
     e2e::cleanup_case(net, now, {}, { sub }, { pub }, step_us, 100'000, 100'000U);
@@ -141,11 +142,10 @@ void test_pinned_topic_matches_star_pattern()
     TEST_ASSERT_EQUAL_INT(
       CY_OK, e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), UINT64_C(0xA102)));
 
-    cy_publisher_t* const pub =
-      cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("e2e/pin/star/alpha#0300"));
+    cy_publisher_t* const pub = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("e2e/pin/star/alpha#0300"));
     TEST_ASSERT_NOT_NULL(pub);
 
-    arrival_capture_t capture{};
+    arrival_capture_t  capture{};
     cy_future_t* const sub = make_pattern_sub(e2e::sim_net_cy(net, e2e::sim_node_b), "e2e/pin/star/*", capture);
 
     cy_us_t now = 0;
@@ -190,12 +190,11 @@ void test_mixed_pinned_unpinned_all_match_same_pattern()
 
     cy_publisher_t* const pub_a =
       cy_advertise(e2e::sim_net_cy(net, publisher_node_a), cy_str("e2e/pin/mix/alpha#0100"));
-    cy_publisher_t* const pub_b =
-      cy_advertise(e2e::sim_net_cy(net, publisher_node_b), cy_str("e2e/pin/mix/beta"));
+    cy_publisher_t* const pub_b = cy_advertise(e2e::sim_net_cy(net, publisher_node_b), cy_str("e2e/pin/mix/beta"));
     TEST_ASSERT_NOT_NULL(pub_a);
     TEST_ASSERT_NOT_NULL(pub_b);
 
-    arrival_capture_t capture{};
+    arrival_capture_t  capture{};
     cy_future_t* const sub = make_pattern_sub(e2e::sim_net_cy(net, subscriber_node), "e2e/pin/mix/>", capture);
 
     cy_us_t now = 0;
@@ -241,10 +240,10 @@ void test_multinode_cross_pinned_pattern_delivery()
     constexpr std::uint32_t pub_id_1   = 5011U;
     constexpr std::uint32_t pub_id_2   = 5012U;
 
-    static constexpr const char* topic_0   = "e2e/pin/cross/a#0400";
-    static constexpr const char* topic_1   = "e2e/pin/cross/b#0500";
-    static constexpr const char* topic_2   = "e2e/pin/cross/c";
-    static constexpr const char* pattern   = "e2e/pin/cross/>";
+    static constexpr const char* topic_0 = "e2e/pin/cross/a#0400";
+    static constexpr const char* topic_1 = "e2e/pin/cross/b#0500";
+    static constexpr const char* topic_2 = "e2e/pin/cross/c";
+    static constexpr const char* pattern = "e2e/pin/cross/>";
 
     // Stored names (without pin suffixes).
     static constexpr const char* stored_0 = "e2e/pin/cross/a";
@@ -330,11 +329,10 @@ void test_pinned_topic_substitutions_correct()
     TEST_ASSERT_EQUAL_INT(
       CY_OK, e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), UINT64_C(0xA105)));
 
-    cy_publisher_t* const pub =
-      cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("e2e/pin/subst/alpha#0100"));
+    cy_publisher_t* const pub = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("e2e/pin/subst/alpha#0100"));
     TEST_ASSERT_NOT_NULL(pub);
 
-    arrival_capture_t capture{};
+    arrival_capture_t  capture{};
     cy_future_t* const sub = make_pattern_sub(e2e::sim_net_cy(net, e2e::sim_node_b), "e2e/pin/subst/*", capture);
 
     cy_us_t now = 0;
@@ -350,7 +348,7 @@ void test_pinned_topic_substitutions_correct()
     TEST_ASSERT_TRUE(capture.samples.size() > 0U);
 
     // Look up the topic on the subscriber node and verify substitutions.
-    const std::uint64_t   hash  = capture.samples.front().topic_hash;
+    const std::uint64_t     hash  = capture.samples.front().topic_hash;
     const cy_topic_t* const topic = cy_topic_find_by_hash(e2e::sim_net_cy(net, e2e::sim_node_b), hash);
     TEST_ASSERT_NOT_NULL(topic);
 
@@ -373,9 +371,9 @@ void test_multiple_patterns_selective_match_with_pinning()
     constexpr std::uint32_t pub_id_a = 5030U;
     constexpr std::uint32_t pub_id_b = 5031U;
 
-    constexpr std::size_t publisher_node   = 0U;
-    constexpr std::size_t subscriber_a     = 1U;
-    constexpr std::size_t subscriber_b     = 2U;
+    constexpr std::size_t publisher_node = 0U;
+    constexpr std::size_t subscriber_a   = 1U;
+    constexpr std::size_t subscriber_b   = 2U;
 
     e2e::sim_net_config_t cfg{};
     cfg.node_count       = 3U;
@@ -385,16 +383,14 @@ void test_multiple_patterns_selective_match_with_pinning()
     TEST_ASSERT_EQUAL_INT(CY_OK, e2e::sim_net_init_ex(net, cfg));
 
     // Publisher node advertises one pinned and one unpinned topic under different prefixes.
-    cy_publisher_t* const pub_a =
-      cy_advertise(e2e::sim_net_cy(net, publisher_node), cy_str("e2e/pin/sel/a/x#0600"));
-    cy_publisher_t* const pub_b =
-      cy_advertise(e2e::sim_net_cy(net, publisher_node), cy_str("e2e/pin/sel/b/y"));
+    cy_publisher_t* const pub_a = cy_advertise(e2e::sim_net_cy(net, publisher_node), cy_str("e2e/pin/sel/a/x#0600"));
+    cy_publisher_t* const pub_b = cy_advertise(e2e::sim_net_cy(net, publisher_node), cy_str("e2e/pin/sel/b/y"));
     TEST_ASSERT_NOT_NULL(pub_a);
     TEST_ASSERT_NOT_NULL(pub_b);
 
     // Each subscriber node uses a different pattern that should match only one topic.
-    arrival_capture_t capture_a{};
-    arrival_capture_t capture_b{};
+    arrival_capture_t  capture_a{};
+    arrival_capture_t  capture_b{};
     cy_future_t* const sub_a = make_pattern_sub(e2e::sim_net_cy(net, subscriber_a), "e2e/pin/sel/a/>", capture_a);
     cy_future_t* const sub_b = make_pattern_sub(e2e::sim_net_cy(net, subscriber_b), "e2e/pin/sel/b/*", capture_b);
 
