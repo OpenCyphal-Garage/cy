@@ -799,8 +799,7 @@ typedef struct
 {
     cy_tree_t            index;    // AVL node, keyed by handle->subject_id.
     size_t               refcount; // Destroyed when zero.
-    size_t               extent;   // Creation parameter high-water mark. Needed to decide when to recreate.
-    cy_subject_reader_t* handle;   // Always non-NULL while in the tree.
+    cy_subject_reader_t* handle;   // Always non-NULL while in the tree. Extent stored in handle->extent.
 } reader_t;
 
 typedef struct
@@ -854,13 +853,13 @@ static cy_tree_t* reader_cavl_factory(void* const user)
     reader_t* const                 r   = (reader_t*)mem_alloc_zero(cy, sizeof(reader_t));
     if (r != NULL) {
         r->refcount = 0;
-        r->extent   = ctx->extent;
         r->handle   = cy->platform->vtable->subject_reader_new(cy->platform, ctx->subject_id, ctx->extent);
         if (r->handle == NULL) {
             mem_free(cy, r);
             return NULL;
         }
         r->handle->subject_id = ctx->subject_id;
+        r->handle->extent     = ctx->extent; // In case the platform layer didn't set it.
     }
     return (cy_tree_t*)r;
 }
@@ -898,12 +897,12 @@ static reader_t* reader_acquire(cy_t* const cy, const uint32_t subject_id, const
       (reader_t*)cavl2_find_or_insert(&cy->readers, &subject_id, reader_cavl_compare, &fac, &reader_cavl_factory);
     if (r != NULL) {
         r->refcount++;
-        if (extent > r->extent) { // Grow extent to accommodate the new user.
+        if (extent > r->handle->extent) { // Grow extent to accommodate the new user.
             cy->platform->vtable->subject_reader_destroy(cy->platform, r->handle);
             r->handle = cy->platform->vtable->subject_reader_new(cy->platform, subject_id, extent);
             if (r->handle != NULL) {
                 r->handle->subject_id = subject_id;
-                r->extent             = extent;
+                r->handle->extent     = extent;
             } else {
                 // Recreation failed; remove from registry since handle is now NULL.
                 r->refcount--;
@@ -931,13 +930,13 @@ static void reader_release(cy_t* const cy, reader_t* const r)
 static void reader_grow_extent(cy_t* const cy, reader_t* const r, const size_t new_extent)
 {
     assert((r != NULL) && (r->handle != NULL) && (r->refcount > 0));
-    if (new_extent > r->extent) {
+    if (new_extent > r->handle->extent) {
         const uint32_t subject_id = r->handle->subject_id;
         cy->platform->vtable->subject_reader_destroy(cy->platform, r->handle);
         r->handle = cy->platform->vtable->subject_reader_new(cy->platform, subject_id, new_extent);
         if (r->handle != NULL) {
             r->handle->subject_id = subject_id;
-            r->extent             = new_extent;
+            r->handle->extent     = new_extent;
         } else {
             // Recreation failed; the reader is now broken. Remove from tree since handle is NULL.
             // All holders lose their reference. This is a best-effort recovery situation.
@@ -3669,7 +3668,7 @@ static void* wkv_cb_couple_new_subscription(const wkv_event_t evt)
     }
 
     // Sample the old parameters before the new coupling is created to decide if we need to refresh the subject reader.
-    const size_t   extent_old = (topic->sub_reader != NULL) ? topic->sub_reader->extent : 0;
+    const size_t   extent_old = (topic->sub_reader != NULL) ? topic->sub_reader->handle->extent : 0;
     const cy_err_t res = coupled ? CY_OK : topic_couple(topic, sub->root, evt.substitution_count, evt.substitutions);
     if (res == CY_OK) {
         if ((topic->sub_reader != NULL) && (subscription_extent_w_overhead(topic) > extent_old)) {
@@ -4417,6 +4416,9 @@ cy_t* cy_new(cy_platform_t* const platform)
         platform->cy = NULL;
         return NULL;
     }
+    cy->broad_reader->subject_id = broadcast_subject_id;
+    cy->broad_reader->extent     = CY_AUX_SUBJECT_EXTENT;
+
     cy->broad_writer = cy->platform->vtable->subject_writer_new(cy->platform, broadcast_subject_id);
     if (cy->broad_writer == NULL) {
         cy->platform->vtable->subject_reader_destroy(cy->platform, cy->broad_reader);
@@ -4426,7 +4428,6 @@ cy_t* cy_new(cy_platform_t* const platform)
         platform->cy = NULL;
         return NULL;
     }
-    cy->broad_reader->subject_id = broadcast_subject_id;
     cy->broad_writer->subject_id = broadcast_subject_id;
 
     cy->async_error_handler = default_async_error_handler;

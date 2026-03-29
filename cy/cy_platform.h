@@ -73,6 +73,7 @@ typedef struct cy_subject_writer_t
 typedef struct cy_subject_reader_t
 {
     uint32_t subject_id;
+    size_t   extent;
 } cy_subject_reader_t;
 
 /// Abstracts away the specifics of the transport (UDP, serial, CAN, etc) and the platform where Cy is running

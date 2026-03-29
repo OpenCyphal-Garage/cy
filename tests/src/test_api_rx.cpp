@@ -436,7 +436,7 @@ void test_api_inline_msg_rejects_multicast_subject_mismatch()
     const std::uint32_t       expected = compute_subject_id(hash, 0U, modulus);
     const std::uint32_t       max_sid  = CY_SUBJECT_ID_MAX(modulus);
     const std::uint32_t       mismatch = (expected < max_sid) ? (expected + 1U) : (expected - 1U);
-    const cy_subject_reader_t reader   = { .subject_id = mismatch };
+    const cy_subject_reader_t reader   = { .subject_id = mismatch, .extent = 0 };
 
     std::array<unsigned char, header_bytes + 1U> wire{};
     make_message_header(wire.data(), header_msg_best_effort, UINT64_C(103), hash);
@@ -507,7 +507,7 @@ void test_api_inline_msg_unknown_topic_collision_path_smoke()
     const std::uint32_t modulus     = platform.platform.subject_id_modulus;
     const std::uint64_t remote_hash = cy_topic_hash(local_topic) + static_cast<std::uint64_t>(modulus);
     TEST_ASSERT_NULL(cy_topic_find_by_hash(platform.cy, remote_hash));
-    const cy_subject_reader_t reader = { .subject_id = compute_subject_id(remote_hash, 0U, modulus) };
+    const cy_subject_reader_t reader = { .subject_id = compute_subject_id(remote_hash, 0U, modulus), .extent = 0 };
 
     std::array<unsigned char, header_bytes + 1U> wire{};
     make_message_header(wire.data(), header_msg_best_effort, UINT64_C(105), remote_hash);

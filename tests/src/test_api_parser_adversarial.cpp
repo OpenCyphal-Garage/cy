@@ -262,7 +262,7 @@ void test_api_parser_adversarial_mutation_corpus()
     TEST_ASSERT_TRUE(!corpus.empty());
 
     const std::uint32_t       sid        = subject_id_for_hash(topic_hash, 0U, platform.platform.subject_id_modulus);
-    const cy_subject_reader_t reader     = { .subject_id = sid };
+    const cy_subject_reader_t reader     = { .subject_id = sid, .extent = 0 };
     std::size_t               spin_count = 0U;
 
     for (std::size_t i = 0U; i < corpus.size(); i++) {

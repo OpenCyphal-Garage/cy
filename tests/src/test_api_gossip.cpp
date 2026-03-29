@@ -567,7 +567,7 @@ void test_api_gossip_invalid_frame_has_no_side_effects()
     platform_init(p);
     cy_test_message_reset_counters();
 
-    const cy_subject_reader_t broad_reader = { .subject_id = 0x1FFFFUL };
+    const cy_subject_reader_t broad_reader = { .subject_id = 0x1FFFFUL, .extent = 0 };
     dispatch_gossip(p,
                     cy_lane_t{ .id = 31U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
                     &broad_reader,
@@ -603,6 +603,7 @@ void test_api_message_with_reader_above_sid_max_treated_as_nonmulticast()
 
     const cy_subject_reader_t out_of_range_reader = {
         .subject_id = CY_SUBJECT_ID_MAX(p.platform.subject_id_modulus) + 1U,
+        .extent     = 0,
     };
     dispatch_raw(p,
                  wire,
