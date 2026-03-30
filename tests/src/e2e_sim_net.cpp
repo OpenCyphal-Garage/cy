@@ -395,6 +395,8 @@ extern "C" cy_subject_writer_t* sim_subject_writer_new(cy_platform_t* const plat
       static_cast<sim_subject_writer_t*>(guarded_heap_alloc(&self->core_heap, sizeof(sim_subject_writer_t)));
     if (out != nullptr) {
         out->base.subject_id = subject_id;
+        assert(self->active_writer_subjects.count(subject_id) == 0U);
+        self->active_writer_subjects.insert(subject_id);
     }
     return (out != nullptr) ? &out->base : nullptr;
 }
@@ -402,6 +404,7 @@ extern "C" cy_subject_writer_t* sim_subject_writer_new(cy_platform_t* const plat
 extern "C" void sim_subject_writer_destroy(cy_platform_t* const platform, cy_subject_writer_t* const writer)
 {
     sim_node_t* const self = node_from(platform);
+    assert(self->active_writer_subjects.erase(writer->subject_id) == 1U);
     guarded_heap_free(&self->core_heap, writer);
 }
 
@@ -444,14 +447,28 @@ extern "C" cy_subject_reader_t* sim_subject_reader_new(cy_platform_t* const plat
         out->extent          = extent;
         out->next            = self->readers;
         self->readers        = out;
+        assert(self->active_reader_subjects.count(subject_id) == 0U);
+        self->active_reader_subjects.insert(subject_id);
     }
     return (out != nullptr) ? &out->base : nullptr;
+}
+
+extern "C" void sim_subject_reader_extent_set(cy_platform_t* const       platform,
+                                              cy_subject_reader_t* const reader,
+                                              const std::size_t          extent)
+{
+    sim_node_t* const self = node_from(platform);
+    assert(self->active_reader_subjects.count(reader->subject_id) == 1U);
+    auto* const r =
+      reinterpret_cast<sim_subject_reader_t*>(reader); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+    r->extent = extent;
 }
 
 extern "C" void sim_subject_reader_destroy(cy_platform_t* const platform, cy_subject_reader_t* const reader)
 {
     sim_node_t* const self = node_from(platform);
-    auto* const       ptr =
+    assert(self->active_reader_subjects.erase(reader->subject_id) == 1U);
+    auto* const ptr =
       reinterpret_cast<sim_subject_reader_t*>(reader); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
     sim_subject_reader_t** p = &self->readers;
     while (*p != nullptr) {
@@ -583,17 +600,18 @@ cy_err_t sim_net_init_ex(sim_net_t& self, const sim_net_config_t& config)
         node.now          = 0;
         node.random_state = config.random_seed_base + (i * UINT64_C(0x9E3779B97F4A7C15));
 
-        node.vtable.subject_writer_new     = sim_subject_writer_new;
-        node.vtable.subject_writer_destroy = sim_subject_writer_destroy;
-        node.vtable.subject_writer_send    = sim_subject_writer_send;
-        node.vtable.subject_reader_new     = sim_subject_reader_new;
-        node.vtable.subject_reader_destroy = sim_subject_reader_destroy;
-        node.vtable.unicast                = sim_unicast_send;
-        node.vtable.unicast_extent_set     = sim_unicast_extent_set;
-        node.vtable.spin                   = sim_spin;
-        node.vtable.now                    = sim_now;
-        node.vtable.realloc                = sim_realloc;
-        node.vtable.random                 = sim_random;
+        node.vtable.subject_writer_new        = sim_subject_writer_new;
+        node.vtable.subject_writer_destroy    = sim_subject_writer_destroy;
+        node.vtable.subject_writer_send       = sim_subject_writer_send;
+        node.vtable.subject_reader_new        = sim_subject_reader_new;
+        node.vtable.subject_reader_extent_set = sim_subject_reader_extent_set;
+        node.vtable.subject_reader_destroy    = sim_subject_reader_destroy;
+        node.vtable.unicast                   = sim_unicast_send;
+        node.vtable.unicast_extent_set        = sim_unicast_extent_set;
+        node.vtable.spin                      = sim_spin;
+        node.vtable.now                       = sim_now;
+        node.vtable.realloc                   = sim_realloc;
+        node.vtable.random                    = sim_random;
 
         node.platform.cy                 = nullptr;
         node.platform.subject_id_modulus = config.subject_id_modulus;

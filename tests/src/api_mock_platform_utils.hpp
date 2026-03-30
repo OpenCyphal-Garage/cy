@@ -64,6 +64,16 @@ cy_subject_reader_t* subject_reader_new(cy_platform_t* const platform,
 }
 
 template <typename Platform>
+void subject_reader_extent_set(cy_platform_t* const       platform,
+                               cy_subject_reader_t* const reader,
+                               const std::size_t          extent)
+{
+    (void)platform;
+    auto* const r = reinterpret_cast<subject_reader_t*>(reader); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+    r->extent     = extent;
+}
+
+template <typename Platform>
 void subject_reader_destroy(cy_platform_t* const platform, cy_subject_reader_t* const reader)
 {
     Platform* const self = platform_from<Platform>(platform);

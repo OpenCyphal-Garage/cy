@@ -4,6 +4,7 @@
 #include "guarded_heap.h"
 #include <cstddef>
 #include <cstdint>
+#include <set>
 #include <vector>
 
 namespace e2e {
@@ -71,6 +72,9 @@ struct sim_node_t final
     std::uint64_t random_state{ UINT64_C(0x1020304050607080) };
 
     sim_subject_reader_t* readers{ nullptr };
+
+    std::set<std::uint32_t> active_reader_subjects;
+    std::set<std::uint32_t> active_writer_subjects;
 };
 
 struct sim_net_config_t final

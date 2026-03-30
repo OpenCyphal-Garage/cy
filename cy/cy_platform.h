@@ -143,8 +143,13 @@ typedef struct cy_platform_vtable_t
     cy_err_t (*subject_writer_send)(cy_platform_t*, cy_subject_writer_t*, cy_us_t deadline, cy_prio_t, cy_bytes_t);
 
     /// The factory returns NULL on OOM.
+    /// The extent setter is similar to unicast_extent_set(); it is used when subscription configuration is changed
+    /// such that the extent that was used when the subject reader was created is no longer sufficient;
+    /// this is preferred over destruction/recreation of the reader because it avoids a hard-to-handle failure case
+    /// when the subsequent recreation fails, potentially leaving all topics dependent on this reader broken.
     cy_subject_reader_t* (*subject_reader_new)(cy_platform_t*, uint32_t subject_id, size_t extent);
     void (*subject_reader_destroy)(cy_platform_t*, cy_subject_reader_t*);
+    void (*subject_reader_extent_set)(cy_platform_t*, cy_subject_reader_t*, size_t extent);
 
     // === UNICAST ===
 

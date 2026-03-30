@@ -490,6 +490,15 @@ static void v_subject_reader_tombstone(cy_platform_t* const platform, cy_subject
     CY_TRACE(owner->base.cy, "⚰️ n_readers=%zu ptr=%p deferred", owner->stats.subject_reader_count, (void*)self);
 }
 
+static void v_subject_reader_extent_set(cy_platform_t* const       base,
+                                        cy_subject_reader_t* const reader_base,
+                                        const size_t               extent)
+{
+    (void)base;
+    subject_reader_t* const self = (subject_reader_t*)reader_base;
+    self->port.extent            = extent;
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // UNICAST
 
@@ -732,11 +741,12 @@ static uint64_t v_random(cy_platform_t* const base)
 
 static const cy_platform_vtable_t platform_vtable = {
     // MULTICAST
-    .subject_writer_new     = v_subject_writer_new,
-    .subject_writer_destroy = v_subject_writer_destroy,
-    .subject_writer_send    = v_subject_writer_send,
-    .subject_reader_new     = v_subject_reader_new,
-    .subject_reader_destroy = v_subject_reader_tombstone,
+    .subject_writer_new        = v_subject_writer_new,
+    .subject_writer_destroy    = v_subject_writer_destroy,
+    .subject_writer_send       = v_subject_writer_send,
+    .subject_reader_new        = v_subject_reader_new,
+    .subject_reader_destroy    = v_subject_reader_tombstone,
+    .subject_reader_extent_set = v_subject_reader_extent_set,
     // UNICAST
     .unicast            = v_unicast_send,
     .unicast_extent_set = v_unicast_extent_set,

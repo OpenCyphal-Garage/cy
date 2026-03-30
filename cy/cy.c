@@ -889,7 +889,7 @@ static void writer_release(cy_t* const cy, writer_t* const w)
 }
 
 // Find or create a reader for the given subject-ID. Returns NULL on OOM.
-// If an existing reader's extent is too small, the handle is recreated with the larger extent.
+// If an existing reader's extent is too small, it is extended.
 static reader_t* reader_acquire(cy_t* const cy, const uint32_t subject_id, const size_t extent)
 {
     reader_factory_context_t fac = { .cy = cy, .subject_id = subject_id, .extent = extent };
@@ -898,18 +898,8 @@ static reader_t* reader_acquire(cy_t* const cy, const uint32_t subject_id, const
     if (r != NULL) {
         r->refcount++;
         if (extent > r->handle->extent) { // Grow extent to accommodate the new user.
-            cy->platform->vtable->subject_reader_destroy(cy->platform, r->handle);
-            r->handle = cy->platform->vtable->subject_reader_new(cy->platform, subject_id, extent);
-            if (r->handle != NULL) {
-                r->handle->subject_id = subject_id;
-                r->handle->extent     = extent;
-            } else {
-                // Recreation failed; remove from registry since handle is now NULL.
-                r->refcount--;
-                cavl2_remove(&cy->readers, &r->index);
-                mem_free(cy, r);
-                return NULL;
-            }
+            cy->platform->vtable->subject_reader_extent_set(cy->platform, r->handle, extent);
+            r->handle->extent = extent;
         }
     }
     return r;
@@ -926,23 +916,13 @@ static void reader_release(cy_t* const cy, reader_t* const r)
     }
 }
 
-// Recreate the reader handle with a larger extent. No-op if the current extent is sufficient.
+// No-op if the current extent is sufficient.
 static void reader_grow_extent(cy_t* const cy, reader_t* const r, const size_t new_extent)
 {
     assert((r != NULL) && (r->handle != NULL) && (r->refcount > 0));
     if (new_extent > r->handle->extent) {
-        const uint32_t subject_id = r->handle->subject_id;
-        cy->platform->vtable->subject_reader_destroy(cy->platform, r->handle);
-        r->handle = cy->platform->vtable->subject_reader_new(cy->platform, subject_id, new_extent);
-        if (r->handle != NULL) {
-            r->handle->subject_id = subject_id;
-            r->handle->extent     = new_extent;
-        } else {
-            // Recreation failed; the reader is now broken. Remove from tree since handle is NULL.
-            // All holders lose their reference. This is a best-effort recovery situation.
-            cavl2_remove(&cy->readers, &r->index);
-            mem_free(cy, r);
-        }
+        cy->platform->vtable->subject_reader_extent_set(cy->platform, r->handle, new_extent);
+        r->handle->extent = new_extent;
     }
 }
 

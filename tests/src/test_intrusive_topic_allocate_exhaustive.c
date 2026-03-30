@@ -21,6 +21,9 @@ typedef struct
     size_t subject_writer_destroy_count;
     size_t async_error_count;
 
+    subject_tracker_t active_readers;
+    subject_tracker_t active_writers;
+
     uint64_t random_state;
 } fixture_t;
 
@@ -73,12 +76,17 @@ static cy_subject_writer_t* fixture_subject_writer_new(cy_platform_t* const plat
     if (self->fail_subject_writer_new) {
         return NULL;
     }
-    return intrusive_subject_writer_new(&self->heap, subject_id);
+    cy_subject_writer_t* const w = intrusive_subject_writer_new(&self->heap, subject_id);
+    if (w != NULL) {
+        subject_tracker_add(&self->active_writers, subject_id);
+    }
+    return w;
 }
 
 static void fixture_subject_writer_destroy(cy_platform_t* const platform, cy_subject_writer_t* const writer)
 {
     fixture_t* const self = fixture_from(platform);
+    subject_tracker_remove(&self->active_writers, writer->subject_id);
     self->subject_writer_destroy_count++;
     intrusive_subject_writer_destroy(&self->heap, writer);
 }
@@ -105,12 +113,26 @@ static cy_subject_reader_t* fixture_subject_reader_new(cy_platform_t* const plat
     if (self->fail_subject_reader_new) {
         return NULL;
     }
-    return intrusive_subject_reader_new(&self->heap, subject_id, extent);
+    cy_subject_reader_t* const r = intrusive_subject_reader_new(&self->heap, subject_id, extent);
+    if (r != NULL) {
+        subject_tracker_add(&self->active_readers, subject_id);
+    }
+    return r;
+}
+
+static void fixture_subject_reader_extent_set(cy_platform_t* const       platform,
+                                              cy_subject_reader_t* const reader,
+                                              const size_t               extent)
+{
+    fixture_t* const self = fixture_from(platform);
+    subject_tracker_assert_contains(&self->active_readers, reader->subject_id);
+    intrusive_subject_reader_extent_set(reader, extent);
 }
 
 static void fixture_subject_reader_destroy(cy_platform_t* const platform, cy_subject_reader_t* const reader)
 {
     fixture_t* const self = fixture_from(platform);
+    subject_tracker_remove(&self->active_readers, reader->subject_id);
     self->subject_reader_destroy_count++;
     intrusive_subject_reader_destroy(&self->heap, reader);
 }
@@ -154,21 +176,22 @@ static void fixture_init(fixture_t* const self)
     memset(self, 0, sizeof(*self));
     guarded_heap_init(&self->heap, UINT64_C(0xD00DFEEDBADC0FFE));
 
-    self->platform.vtable               = &self->vtable;
-    self->platform.subject_id_modulus   = (uint32_t)CY_SUBJECT_ID_MODULUS_16bit;
-    self->vtable.subject_writer_new     = fixture_subject_writer_new;
-    self->vtable.subject_writer_destroy = fixture_subject_writer_destroy;
-    self->vtable.subject_writer_send    = fixture_subject_writer_send;
-    self->vtable.subject_reader_new     = fixture_subject_reader_new;
-    self->vtable.subject_reader_destroy = fixture_subject_reader_destroy;
-    self->vtable.unicast                = fixture_unicast_send;
-    self->vtable.unicast_extent_set     = fixture_unicast_extent_set;
-    self->vtable.spin                   = fixture_spin;
-    self->vtable.now                    = fixture_now;
-    self->vtable.realloc                = fixture_realloc;
-    self->vtable.random                 = fixture_random;
-    self->random_state                  = UINT64_C(0xA5A5A5A55A5A5A5A);
-    self->now                           = (cy_us_t)(1000 * MEGA);
+    self->platform.vtable                  = &self->vtable;
+    self->platform.subject_id_modulus      = (uint32_t)CY_SUBJECT_ID_MODULUS_16bit;
+    self->vtable.subject_writer_new        = fixture_subject_writer_new;
+    self->vtable.subject_writer_destroy    = fixture_subject_writer_destroy;
+    self->vtable.subject_writer_send       = fixture_subject_writer_send;
+    self->vtable.subject_reader_new        = fixture_subject_reader_new;
+    self->vtable.subject_reader_extent_set = fixture_subject_reader_extent_set;
+    self->vtable.subject_reader_destroy    = fixture_subject_reader_destroy;
+    self->vtable.unicast                   = fixture_unicast_send;
+    self->vtable.unicast_extent_set        = fixture_unicast_extent_set;
+    self->vtable.spin                      = fixture_spin;
+    self->vtable.now                       = fixture_now;
+    self->vtable.realloc                   = fixture_realloc;
+    self->vtable.random                    = fixture_random;
+    self->random_state                     = UINT64_C(0xA5A5A5A55A5A5A5A);
+    self->now                              = (cy_us_t)(1000 * MEGA);
 
     self->cy = cy_new(&self->platform);
     TEST_ASSERT_NOT_NULL(self->cy);

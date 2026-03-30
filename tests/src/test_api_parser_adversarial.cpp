@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <set>
 #include <vector>
 
 namespace {
@@ -27,6 +28,9 @@ struct test_platform_t final
 
     std::size_t subject_send_count{ 0U };
     std::size_t unicast_send_count{ 0U };
+
+    std::set<std::uint32_t> active_reader_subjects;
+    std::set<std::uint32_t> active_writer_subjects;
 };
 
 std::size_t g_async_error_count = 0U; // NOLINT(*-non-const-global-variables)
@@ -39,11 +43,19 @@ test_platform_t* platform_from(cy_platform_t* const platform)
 extern "C" cy_subject_writer_t* platform_subject_writer_new(cy_platform_t* const platform,
                                                             const std::uint32_t  subject_id)
 {
-    return api_test::subject_writer_new<test_platform_t>(platform, subject_id);
+    cy_subject_writer_t* const out = api_test::subject_writer_new<test_platform_t>(platform, subject_id);
+    if (out != nullptr) {
+        test_platform_t* const self = platform_from(platform);
+        TEST_ASSERT_EQUAL_INT(0, self->active_writer_subjects.count(subject_id));
+        self->active_writer_subjects.insert(subject_id);
+    }
+    return out;
 }
 
 extern "C" void platform_subject_writer_destroy(cy_platform_t* const platform, cy_subject_writer_t* const writer)
 {
+    test_platform_t* const self = platform_from(platform);
+    TEST_ASSERT_EQUAL_INT(1, self->active_writer_subjects.erase(writer->subject_id));
     api_test::subject_writer_destroy<test_platform_t>(platform, writer);
 }
 
@@ -65,11 +77,28 @@ extern "C" cy_subject_reader_t* platform_subject_reader_new(cy_platform_t* const
                                                             const std::uint32_t  subject_id,
                                                             const std::size_t    extent)
 {
-    return api_test::subject_reader_new<test_platform_t>(platform, subject_id, extent);
+    cy_subject_reader_t* const out = api_test::subject_reader_new<test_platform_t>(platform, subject_id, extent);
+    if (out != nullptr) {
+        test_platform_t* const self = platform_from(platform);
+        TEST_ASSERT_EQUAL_INT(0, self->active_reader_subjects.count(subject_id));
+        self->active_reader_subjects.insert(subject_id);
+    }
+    return out;
+}
+
+extern "C" void platform_subject_reader_extent_set(cy_platform_t* const       platform,
+                                                   cy_subject_reader_t* const reader,
+                                                   const std::size_t          extent)
+{
+    test_platform_t* const self = platform_from(platform);
+    TEST_ASSERT_EQUAL_INT(1, self->active_reader_subjects.count(reader->subject_id));
+    api_test::subject_reader_extent_set<test_platform_t>(platform, reader, extent);
 }
 
 extern "C" void platform_subject_reader_destroy(cy_platform_t* const platform, cy_subject_reader_t* const reader)
 {
+    test_platform_t* const self = platform_from(platform);
+    TEST_ASSERT_EQUAL_INT(1, self->active_reader_subjects.erase(reader->subject_id));
     api_test::subject_reader_destroy<test_platform_t>(platform, reader);
 }
 
@@ -129,17 +158,18 @@ void platform_init(test_platform_t* const self)
     guarded_heap_init(&self->core_heap, UINT64_C(0xFACEB00C12345678));
     guarded_heap_init(&self->message_heap, UINT64_C(0xDEC0DE1234567890));
 
-    self->vtable.subject_writer_new     = platform_subject_writer_new;
-    self->vtable.subject_writer_destroy = platform_subject_writer_destroy;
-    self->vtable.subject_writer_send    = platform_subject_writer_send;
-    self->vtable.subject_reader_new     = platform_subject_reader_new;
-    self->vtable.subject_reader_destroy = platform_subject_reader_destroy;
-    self->vtable.unicast                = platform_unicast_send;
-    self->vtable.unicast_extent_set     = platform_unicast_extent_set;
-    self->vtable.spin                   = platform_spin;
-    self->vtable.now                    = platform_now;
-    self->vtable.realloc                = platform_realloc;
-    self->vtable.random                 = platform_random;
+    self->vtable.subject_writer_new        = platform_subject_writer_new;
+    self->vtable.subject_writer_destroy    = platform_subject_writer_destroy;
+    self->vtable.subject_writer_send       = platform_subject_writer_send;
+    self->vtable.subject_reader_new        = platform_subject_reader_new;
+    self->vtable.subject_reader_extent_set = platform_subject_reader_extent_set;
+    self->vtable.subject_reader_destroy    = platform_subject_reader_destroy;
+    self->vtable.unicast                   = platform_unicast_send;
+    self->vtable.unicast_extent_set        = platform_unicast_extent_set;
+    self->vtable.spin                      = platform_spin;
+    self->vtable.now                       = platform_now;
+    self->vtable.realloc                   = platform_realloc;
+    self->vtable.random                    = platform_random;
 
     api_test::init_platform_base(self->platform, self->vtable);
     self->cy = cy_new(&self->platform);
