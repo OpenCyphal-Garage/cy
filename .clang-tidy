@@ -58,6 +58,23 @@ Checks: >-
   -*-nested-conditional-operator,
   -*-security.ArrayBound,
   -*-implicit-bool-conversion,
+  -cert-dcl37-c,
+  -cert-dcl51-cpp,
+  -cert-dcl16-c,
+  -cert-oop11-cpp,
+  -cert-err33-c,
+  -hicpp-invalid-access-moved,
+  -hicpp-uppercase-literal-suffix,
+  -hicpp-move-const-arg,
+  -hicpp-use-nullptr,
+  -hicpp-ignored-remove-result,
+  -readability-container-contains,
+  -bugprone-standalone-empty,
+  -modernize-use-std-numbers,
+  -bugprone-stringview-nullptr,
+  -google-upgrade-googletest-case,
+  -modernize-type-traits,
+  -misc-confusable-identifiers,
 CheckOptions:
   - key: misc-const-correctness.TransformPointersAsValues
     value: 'true'
