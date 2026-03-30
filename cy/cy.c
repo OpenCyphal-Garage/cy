@@ -5083,7 +5083,7 @@ cy_resolved_t cy_name_resolve(const cy_str_t name,
                                                 home,
                                                 dest_size,
                                                 dest);
-    if (res.len > CY_TOPIC_NAME_MAX) {
+    if ((res.len == 0) || (res.len > CY_TOPIC_NAME_MAX)) {
         return (cy_resolved_t){ .name = str_invalid, .pin = UINT16_MAX };
     }
     // Pinned topic names cannot be patterns.

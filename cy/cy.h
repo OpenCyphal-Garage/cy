@@ -679,6 +679,8 @@ cy_str_t cy_name_join(const cy_str_t left, const cy_str_t right, const size_t de
 ///
 ///     `foo bar\nbaz`  -- spaces and non-printable characters are not allowed.
 ///     `foo/*/bar#123` -- patterns cannot be pinned.
+///     ``              -- empty name is not allowed.
+///     `#1234`         -- name is empty after the pin expression is stripped, not allowed.
 ///     (long string)   -- final name cannot exceed CY_TOPIC_NAME_MAX regardless of dest_size.
 ///
 /// The dest points to a buffer at least dest_size bytes long. On failure, the output string has length SIZE_MAX

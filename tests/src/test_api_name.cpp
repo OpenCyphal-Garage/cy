@@ -368,30 +368,10 @@ void test_name_resolve_bare_pin()
     // Bare pins: "#N" with empty prefix. The scan finds '#' at pos 0, prefix is empty (len=0).
     std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
     cy_resolved_t                           r{};
-
-    // #0 -> name="" (empty), pin=0
+    // #0 -> name="" (empty), invalid
     r = cy_name_resolve(cy_str("#0"), cy_str(""), cy_str(""), buf.size(), buf.data());
-    TEST_ASSERT_NOT_NULL(r.name.str);
-    TEST_ASSERT_EQUAL_size_t(0, r.name.len);
-    TEST_ASSERT_EQUAL_UINT16(0, r.pin);
-
-    // #1 -> name="" (empty), pin=1
-    r = cy_name_resolve(cy_str("#1"), cy_str(""), cy_str(""), buf.size(), buf.data());
-    TEST_ASSERT_NOT_NULL(r.name.str);
-    TEST_ASSERT_EQUAL_size_t(0, r.name.len);
-    TEST_ASSERT_EQUAL_UINT16(1, r.pin);
-
-    // #123 -> name="" (empty), pin=123
-    r = cy_name_resolve(cy_str("#123"), cy_str(""), cy_str(""), buf.size(), buf.data());
-    TEST_ASSERT_NOT_NULL(r.name.str);
-    TEST_ASSERT_EQUAL_size_t(0, r.name.len);
-    TEST_ASSERT_EQUAL_UINT16(123, r.pin);
-
-    // #8191 -> name="" (empty), pin=8191 (max)
-    r = cy_name_resolve(cy_str("#8191"), cy_str(""), cy_str(""), buf.size(), buf.data());
-    TEST_ASSERT_NOT_NULL(r.name.str);
-    TEST_ASSERT_EQUAL_size_t(0, r.name.len);
-    TEST_ASSERT_EQUAL_UINT16(8191, r.pin);
+    TEST_ASSERT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, r.name.len);
 }
 
 void test_name_resolve_bare_pin_with_namespace()
@@ -640,10 +620,10 @@ void test_name_resolve_valid_printable_chars()
     TEST_ASSERT_NOT_NULL(r.name.str);
     TEST_ASSERT_EQUAL_size_t(1, r.name.len);
 
-    r = cy_name_resolve(cy_str("~"), cy_str(""), cy_str(""), buf.size(), buf.data()); // 126 -- highest valid
+    r = cy_name_resolve(cy_str("/~"), cy_str(""), cy_str(""), buf.size(), buf.data()); // 126 -- highest valid
     TEST_ASSERT_NOT_NULL(r.name.str);
-    // '~' alone is homeful -> expands with empty home -> empty result
-    TEST_ASSERT_EQUAL_size_t(0, r.name.len);
+    TEST_ASSERT_EQUAL_size_t(1, r.name.len);
+    TEST_ASSERT_EQUAL_STRING_LEN("~", r.name.str, r.name.len);
 
     r = cy_name_resolve(cy_str("Z"), cy_str(""), cy_str(""), buf.size(), buf.data()); // 90
     TEST_ASSERT_NOT_NULL(r.name.str);
@@ -696,6 +676,38 @@ void test_name_resolve_rejects_pattern_with_pin()
     TEST_ASSERT_NULL(r.name.str);
 }
 
+void test_name_resolve_rejects_empty_name()
+{
+    std::array<char, CY_TOPIC_NAME_MAX + 100> buf{};
+    const cy_resolved_t r = cy_name_resolve(cy_str(""), cy_str(""), cy_str(""), buf.size(), buf.data());
+    TEST_ASSERT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, r.name.len);
+}
+
+void test_name_resolve_rejects_empty_normalized_name()
+{
+    std::array<char, CY_TOPIC_NAME_MAX + 100> buf{};
+    const cy_resolved_t r = cy_name_resolve(cy_str("/"), cy_str(""), cy_str(""), buf.size(), buf.data());
+    TEST_ASSERT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, r.name.len);
+}
+
+void test_name_resolve_rejects_empty_pinned_name()
+{
+    std::array<char, CY_TOPIC_NAME_MAX + 100> buf{};
+    const cy_resolved_t r = cy_name_resolve(cy_str("#1234"), cy_str(""), cy_str(""), buf.size(), buf.data());
+    TEST_ASSERT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, r.name.len);
+}
+
+void test_name_resolve_rejects_empty_normalized_pinned_name()
+{
+    std::array<char, CY_TOPIC_NAME_MAX + 100> buf{};
+    const cy_resolved_t r = cy_name_resolve(cy_str("/#1234"), cy_str(""), cy_str(""), buf.size(), buf.data());
+    TEST_ASSERT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, r.name.len);
+}
+
 void test_name_resolve_rejects_name_exceeding_max_length()
 {
     // Docstring: (long string) -- final name cannot exceed CY_TOPIC_NAME_MAX.
@@ -714,11 +726,11 @@ void test_name_resolve_rejects_name_exceeding_max_length()
 
 void test_name_resolve_separator_only()
 {
-    // "/" is absolute, normalizes to empty.
+    // "/" is absolute, normalizes to empty, which is invalid.
     std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
     const cy_resolved_t r = cy_name_resolve(cy_str("/"), cy_str("ns"), cy_str("me"), buf.size(), buf.data());
-    TEST_ASSERT_NOT_NULL(r.name.str);
-    TEST_ASSERT_EQUAL_size_t(0, r.name.len);
+    TEST_ASSERT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, r.name.len);
 }
 
 void test_name_resolve_tilde_only()
@@ -735,11 +747,11 @@ void test_name_resolve_tilde_only()
 
 void test_name_resolve_tilde_with_empty_home()
 {
-    // "~" with empty home -> "" (empty)
+    // "~" with empty home -> "" (empty), which is invalid.
     std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
     const cy_resolved_t r = cy_name_resolve(cy_str("~"), cy_str("ns"), cy_str(""), buf.size(), buf.data());
-    TEST_ASSERT_NOT_NULL(r.name.str);
-    TEST_ASSERT_EQUAL_size_t(0, r.name.len);
+    TEST_ASSERT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, r.name.len);
 }
 
 void test_name_resolve_homeful_with_slashes()
@@ -800,12 +812,11 @@ void test_name_resolve_homeful_bare_pin()
 
 void test_name_resolve_absolute_bare_pin()
 {
-    // "/#123" — pin stripped to "/" (pin=123), absolute path normalizes to "" (empty).
+    // "/#123" — pin stripped to "/" (pin=123), absolute path normalizes to "" (empty), which is invalid.
     std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
     const cy_resolved_t r = cy_name_resolve(cy_str("/#123"), cy_str("ns"), cy_str("me"), buf.size(), buf.data());
-    TEST_ASSERT_NOT_NULL(r.name.str);
-    TEST_ASSERT_EQUAL_size_t(0, r.name.len);
-    TEST_ASSERT_EQUAL_UINT16(123, r.pin);
+    TEST_ASSERT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, r.name.len);
 }
 
 void test_name_resolve_homeful_trailing_sep()
@@ -844,10 +855,11 @@ void test_name_resolve_empty_name_with_namespace()
 
 void test_name_resolve_empty_name_empty_ns()
 {
-    // Empty name + empty namespace = empty resolved name.
+    // Empty name + empty namespace = empty resolved name, which is invalid.
     std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
     const cy_resolved_t r = cy_name_resolve(cy_str(""), cy_str(""), cy_str(""), buf.size(), buf.data());
-    TEST_ASSERT_EQUAL_size_t(0, r.name.len);
+    TEST_ASSERT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, r.name.len);
 }
 
 void test_name_resolve_pin_stripped_before_length_check()
@@ -1026,6 +1038,10 @@ int main()
     // cy_name_resolve -- docstring negative examples
     RUN_TEST(test_name_resolve_rejects_space_and_nonprintable);
     RUN_TEST(test_name_resolve_rejects_pattern_with_pin);
+    RUN_TEST(test_name_resolve_rejects_empty_name);
+    RUN_TEST(test_name_resolve_rejects_empty_normalized_name);
+    RUN_TEST(test_name_resolve_rejects_empty_pinned_name);
+    RUN_TEST(test_name_resolve_rejects_empty_normalized_pinned_name);
     RUN_TEST(test_name_resolve_rejects_name_exceeding_max_length);
 
     // cy_name_resolve -- edge cases
