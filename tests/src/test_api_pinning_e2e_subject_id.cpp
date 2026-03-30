@@ -269,7 +269,7 @@ void test_pinning_does_not_affect_identity()
     TEST_ASSERT_EQUAL_INT(
       CY_OK, e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), UINT64_C(0xB004)));
 
-    cy_publisher_t* const pub = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("e2e/sid/ident/topic#0abc"));
+    cy_publisher_t* const pub = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("e2e/sid/ident/topic#100"));
     TEST_ASSERT_NOT_NULL(pub);
 
     const cy_topic_t* const topic = cy_publisher_topic(pub);
@@ -283,14 +283,11 @@ void test_pinning_does_not_affect_identity()
 
     // cy_topic_name() should return the stored name without the pin suffix.
     const cy_str_t name = cy_topic_name(topic);
-    TEST_ASSERT_EQUAL_size_t(18U, name.len); // "e2e/sid/ident/topic" = 19 chars... wait
-    // "e2e/sid/ident/topic" is 19 characters.
     TEST_ASSERT_EQUAL_size_t(19U, name.len);
     TEST_ASSERT_EQUAL_STRING_LEN("e2e/sid/ident/topic", name.str, name.len);
 
     // Attempting to create a second publisher on the SAME logical topic (different pin) should reuse the same topic.
-    cy_publisher_t* const pub2 =
-      cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("e2e/sid/ident/topic#0def"));
+    cy_publisher_t* const pub2 = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("e2e/sid/ident/topic#200"));
     TEST_ASSERT_NOT_NULL(pub2);
     TEST_ASSERT_EQUAL_UINT64(cy_topic_hash(topic), cy_topic_hash(cy_publisher_topic(pub2)));
 
