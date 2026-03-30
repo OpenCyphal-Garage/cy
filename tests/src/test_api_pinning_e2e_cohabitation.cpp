@@ -1,0 +1,432 @@
+// E2E tests for pinned topic cohabitation, inconsistent-pin convergence, and gossip name invariants.
+
+#include <cy_platform.h>
+#include <rapidhash.h>
+#include <unity.h>
+#include "e2e_sim_net.hpp"
+#include "e2e_scenario_utils.hpp"
+#include "e2e_test_utils.hpp"
+#include "message.h"
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <optional>
+#include <string>
+#include <vector>
+
+namespace {
+
+constexpr cy_us_t      step_us          = 1'000;
+constexpr cy_us_t      publish_deadline = 200'000;
+constexpr cy_us_t      converge_time    = 2'000'000;
+constexpr cy_us_t      delivery_time    = 400'000;
+constexpr std::uint8_t header_gossip    = 8U;
+constexpr std::size_t  header_bytes     = 24U;
+
+using e2e::arrival_capture_t;
+using e2e::count_by_publisher;
+using e2e::on_arrival_capture;
+
+void publish_one(cy_publisher_t* const pub,
+                 const std::uint32_t   publisher_id,
+                 const std::uint64_t   seq,
+                 const cy_us_t         now)
+{
+    const auto       payload = e2e::app_payload_pack(publisher_id, seq);
+    const cy_bytes_t msg     = { .size = payload.size(), .data = payload.data(), .next = nullptr };
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_publish(pub, now + publish_deadline, msg));
+}
+
+cy_future_t* make_sub(cy_t* const cy, const char* const name, arrival_capture_t& capture)
+{
+    cy_future_t* const sub = cy_subscribe(cy, cy_str(name), 64U);
+    TEST_ASSERT_NOT_NULL(sub);
+    cy_user_context_t ctx = CY_USER_CONTEXT_EMPTY;
+    ctx.ptr[0]            = &capture;
+    cy_future_context_set(sub, ctx);
+    cy_future_callback_set(sub, on_arrival_capture);
+    return sub;
+}
+
+std::optional<std::uint32_t> last_subject_id_for_hash(const std::vector<e2e::frame_capture_t>& captures,
+                                                      const std::uint64_t                      topic_hash)
+{
+    for (std::size_t i = captures.size(); i > 0U; i--) {
+        const e2e::frame_capture_t& cap = captures.at(i - 1U);
+        if (cap.frame.has_topic_hash && (cap.frame.topic_hash == topic_hash) && (cap.frame.header_type <= 1U)) {
+            return cap.frame.subject_id;
+        }
+    }
+    return std::nullopt;
+}
+
+void cleanup_all(e2e::sim_net_t&                     net,
+                 cy_us_t&                            now,
+                 const std::vector<cy_future_t*>&    subs,
+                 const std::vector<cy_publisher_t*>& pubs)
+{
+    for (cy_future_t* const sub : subs) {
+        if (sub != nullptr) {
+            cy_future_destroy(sub);
+        }
+    }
+    e2e::drive_for_all(net, now, 80'000, step_us);
+    for (cy_publisher_t* const pub : pubs) {
+        if (pub != nullptr) {
+            cy_unadvertise(pub);
+        }
+    }
+    e2e::drive_for_all(net, now, 80'000, step_us);
+    e2e::drain_queue_all(net, now, step_us, 80'000U);
+    e2e::assert_quiescent(net);
+    e2e::sim_net_deinit(net);
+    e2e::assert_all_node_heaps_clean(net);
+    e2e::assert_no_live_messages();
+}
+
+// ---------------------------------------------------------------------------
+// Test 1: 3-node cohabitation. Two topics pinned to the same subject-ID,
+// published by different nodes, received without misdelivery.
+// ---------------------------------------------------------------------------
+void test_multinode_cohabitation_no_misdelivery()
+{
+    e2e::sim_net_config_t cfg{};
+    cfg.node_count       = 3U;
+    cfg.random_seed_base = UINT64_C(0xC001);
+
+    e2e::sim_net_t net{};
+    TEST_ASSERT_EQUAL_INT(CY_OK, e2e::sim_net_init_ex(net, cfg));
+
+    // Node 0 publishes alpha#100, subscribes to beta.
+    cy_publisher_t* const pub_alpha = cy_advertise(e2e::sim_net_cy(net, 0U), cy_str("alpha#100"));
+    TEST_ASSERT_NOT_NULL(pub_alpha);
+    arrival_capture_t  cap_n0_beta{};
+    cy_future_t* const sub_n0_beta = make_sub(e2e::sim_net_cy(net, 0U), "beta", cap_n0_beta);
+
+    // Node 1 publishes beta#100, subscribes to alpha.
+    cy_publisher_t* const pub_beta = cy_advertise(e2e::sim_net_cy(net, 1U), cy_str("beta#100"));
+    TEST_ASSERT_NOT_NULL(pub_beta);
+    arrival_capture_t  cap_n1_alpha{};
+    cy_future_t* const sub_n1_alpha = make_sub(e2e::sim_net_cy(net, 1U), "alpha", cap_n1_alpha);
+
+    // Node 2 subscribes to both.
+    arrival_capture_t  cap_n2_alpha{};
+    arrival_capture_t  cap_n2_beta{};
+    cy_future_t* const sub_n2_alpha = make_sub(e2e::sim_net_cy(net, 2U), "alpha", cap_n2_alpha);
+    cy_future_t* const sub_n2_beta  = make_sub(e2e::sim_net_cy(net, 2U), "beta", cap_n2_beta);
+
+    cy_us_t now = 0;
+    e2e::drive_for_all(net, now, converge_time, step_us);
+
+    constexpr std::uint32_t alpha_pub_id = 8001U;
+    constexpr std::uint32_t beta_pub_id  = 8002U;
+    for (std::uint64_t seq = 1U; seq <= 16U; seq++) {
+        e2e::set_now_all(net, now);
+        publish_one(pub_alpha, alpha_pub_id, seq, now);
+        publish_one(pub_beta, beta_pub_id, seq, now);
+        TEST_ASSERT_EQUAL_INT(CY_OK, e2e::drive_round_all(net, now));
+        now += 10'000;
+    }
+    e2e::drive_for_all(net, now, delivery_time, step_us);
+
+    // Node 0's beta subscriber: only beta messages.
+    TEST_ASSERT_EQUAL_size_t(0U, cap_n0_beta.malformed);
+    TEST_ASSERT_TRUE(count_by_publisher(cap_n0_beta, beta_pub_id) > 0U);
+    TEST_ASSERT_EQUAL_size_t(0U, count_by_publisher(cap_n0_beta, alpha_pub_id));
+
+    // Node 1's alpha subscriber: only alpha messages.
+    TEST_ASSERT_EQUAL_size_t(0U, cap_n1_alpha.malformed);
+    TEST_ASSERT_TRUE(count_by_publisher(cap_n1_alpha, alpha_pub_id) > 0U);
+    TEST_ASSERT_EQUAL_size_t(0U, count_by_publisher(cap_n1_alpha, beta_pub_id));
+
+    // Node 2's alpha subscriber: only alpha messages.
+    TEST_ASSERT_EQUAL_size_t(0U, cap_n2_alpha.malformed);
+    TEST_ASSERT_TRUE(count_by_publisher(cap_n2_alpha, alpha_pub_id) > 0U);
+    TEST_ASSERT_EQUAL_size_t(0U, count_by_publisher(cap_n2_alpha, beta_pub_id));
+
+    // Node 2's beta subscriber: only beta messages.
+    TEST_ASSERT_EQUAL_size_t(0U, cap_n2_beta.malformed);
+    TEST_ASSERT_TRUE(count_by_publisher(cap_n2_beta, beta_pub_id) > 0U);
+    TEST_ASSERT_EQUAL_size_t(0U, count_by_publisher(cap_n2_beta, alpha_pub_id));
+
+    // On-wire subject-ID for both topics is 100.
+    const auto& caps      = e2e::sim_net_captures(net);
+    const auto  hash_a    = cy_topic_hash(cy_publisher_topic(pub_alpha));
+    const auto  hash_b    = cy_topic_hash(cy_publisher_topic(pub_beta));
+    const auto  sid_alpha = last_subject_id_for_hash(caps, hash_a);
+    const auto  sid_beta  = last_subject_id_for_hash(caps, hash_b);
+    TEST_ASSERT_TRUE(sid_alpha.has_value());
+    TEST_ASSERT_TRUE(sid_beta.has_value());
+    TEST_ASSERT_EQUAL_UINT32(100U, *sid_alpha);
+    TEST_ASSERT_EQUAL_UINT32(100U, *sid_beta);
+
+    cleanup_all(net, now, { sub_n0_beta, sub_n1_alpha, sub_n2_alpha, sub_n2_beta }, { pub_alpha, pub_beta });
+}
+
+// ---------------------------------------------------------------------------
+// Test 2: 3-node cohabitation with three topics all sharing one pin.
+// Each node publishes one topic and subscribes to all three.
+// ---------------------------------------------------------------------------
+void test_multinode_cohabitation_with_three_topics()
+{
+    e2e::sim_net_config_t cfg{};
+    cfg.node_count       = 3U;
+    cfg.random_seed_base = UINT64_C(0xC002);
+
+    e2e::sim_net_t net{};
+    TEST_ASSERT_EQUAL_INT(CY_OK, e2e::sim_net_init_ex(net, cfg));
+
+    constexpr std::array<const char*, 3>   topic_names = { "topic_x#200", "topic_y#200", "topic_z#200" };
+    constexpr std::array<const char*, 3>   sub_names   = { "topic_x", "topic_y", "topic_z" };
+    constexpr std::array<std::uint32_t, 3> pub_ids     = { 9001U, 9002U, 9003U };
+
+    // Each node publishes one topic.
+    std::array<cy_publisher_t*, 3> pubs{};
+    for (std::size_t i = 0U; i < 3U; i++) {
+        pubs.at(i) = cy_advertise(e2e::sim_net_cy(net, i), cy_str(topic_names.at(i)));
+        TEST_ASSERT_NOT_NULL(pubs.at(i));
+    }
+
+    // Each node subscribes to the two topics it does NOT publish.
+    // Node i publishes topic i, subscribes to the other two.
+    // caps[node][j] = capture for the j-th subscription of that node, where j maps to the other topics.
+    std::array<std::array<arrival_capture_t, 2>, 3> caps{};
+    std::vector<cy_future_t*>                       all_subs;
+    for (std::size_t node = 0U; node < 3U; node++) {
+        std::size_t sub_idx = 0U;
+        for (std::size_t topic = 0U; topic < 3U; topic++) {
+            if (topic == node) {
+                continue; // skip own topic -- sim_net doesn't loopback
+            }
+            cy_future_t* const sub =
+              make_sub(e2e::sim_net_cy(net, node), sub_names.at(topic), caps.at(node).at(sub_idx));
+            all_subs.push_back(sub);
+            sub_idx++;
+        }
+    }
+
+    cy_us_t now = 0;
+    e2e::drive_for_all(net, now, converge_time, step_us);
+
+    for (std::uint64_t seq = 1U; seq <= 12U; seq++) {
+        e2e::set_now_all(net, now);
+        for (std::size_t i = 0U; i < 3U; i++) {
+            publish_one(pubs.at(i), pub_ids.at(i), seq, now);
+        }
+        TEST_ASSERT_EQUAL_INT(CY_OK, e2e::drive_round_all(net, now));
+        now += 10'000;
+    }
+    e2e::drive_for_all(net, now, delivery_time, step_us);
+
+    // Each subscription receives only the correct topic's publisher.
+    for (std::size_t node = 0U; node < 3U; node++) {
+        std::size_t sub_idx = 0U;
+        for (std::size_t topic = 0U; topic < 3U; topic++) {
+            if (topic == node) {
+                continue;
+            }
+            const arrival_capture_t& cap = caps.at(node).at(sub_idx);
+            TEST_ASSERT_EQUAL_size_t(0U, cap.malformed);
+            // Must receive messages from the publisher of this topic.
+            TEST_ASSERT_TRUE(count_by_publisher(cap, pub_ids.at(topic)) > 0U);
+            // Must NOT receive messages from the other two publishers.
+            for (std::size_t other = 0U; other < 3U; other++) {
+                if (other != topic) {
+                    TEST_ASSERT_EQUAL_size_t(0U, count_by_publisher(cap, pub_ids.at(other)));
+                }
+            }
+            sub_idx++;
+        }
+    }
+
+    // On-wire subject-ID for all three topics is 200.
+    const auto& frame_caps = e2e::sim_net_captures(net);
+    for (std::size_t i = 0U; i < 3U; i++) {
+        const auto hash = cy_topic_hash(cy_publisher_topic(pubs.at(i)));
+        const auto sid  = last_subject_id_for_hash(frame_caps, hash);
+        TEST_ASSERT_TRUE(sid.has_value());
+        TEST_ASSERT_EQUAL_UINT32(200U, *sid);
+    }
+
+    const std::vector<cy_publisher_t*> pub_vec(pubs.begin(), pubs.end());
+    cleanup_all(net, now, all_subs, pub_vec);
+}
+
+// ---------------------------------------------------------------------------
+// Test 3: Inconsistent pin convergence. Per README:
+// "Given foo/bar (non-pinned), foo/bar#1234, and foo/bar#123,
+//  the network will converge to foo/bar#123."
+// ---------------------------------------------------------------------------
+void test_inconsistent_pin_convergence_to_lowest()
+{
+    e2e::sim_net_config_t cfg{};
+    cfg.node_count       = 3U;
+    cfg.random_seed_base = UINT64_C(0xC003);
+
+    e2e::sim_net_t net{};
+    TEST_ASSERT_EQUAL_INT(CY_OK, e2e::sim_net_init_ex(net, cfg));
+
+    // Node 0: unpinned. Node 1: pin 1234. Node 2: pin 123 (lowest, should win).
+    cy_publisher_t* const pub_0 = cy_advertise(e2e::sim_net_cy(net, 0U), cy_str("conv/topic"));
+    cy_publisher_t* const pub_1 = cy_advertise(e2e::sim_net_cy(net, 1U), cy_str("conv/topic#1234"));
+    cy_publisher_t* const pub_2 = cy_advertise(e2e::sim_net_cy(net, 2U), cy_str("conv/topic#123"));
+    TEST_ASSERT_NOT_NULL(pub_0);
+    TEST_ASSERT_NOT_NULL(pub_1);
+    TEST_ASSERT_NOT_NULL(pub_2);
+
+    // Each node subscribes.
+    std::array<arrival_capture_t, 3> caps{};
+    std::vector<cy_future_t*>        subs(3U, nullptr);
+    for (std::size_t i = 0U; i < 3U; i++) {
+        subs.at(i) = make_sub(e2e::sim_net_cy(net, i), "conv/topic", caps.at(i));
+    }
+
+    // Drive a long convergence period so gossip resolves the inconsistency.
+    cy_us_t now = 0;
+    e2e::drive_for_all(net, now, 3'000'000, step_us);
+
+    // Publish from each node.
+    constexpr std::array<std::uint32_t, 3> pub_ids = { 5501U, 5502U, 5503U };
+    for (std::uint64_t seq = 1U; seq <= 20U; seq++) {
+        e2e::set_now_all(net, now);
+        for (std::size_t i = 0U; i < 3U; i++) {
+            publish_one((i == 0U) ? pub_0 : ((i == 1U) ? pub_1 : pub_2), pub_ids.at(i), seq, now);
+        }
+        TEST_ASSERT_EQUAL_INT(CY_OK, e2e::drive_round_all(net, now));
+        now += 10'000;
+    }
+    e2e::drive_for_all(net, now, delivery_time, step_us);
+
+    // Each node receives from the other two publishers (sim_net doesn't loopback).
+    for (std::size_t node = 0U; node < 3U; node++) {
+        TEST_ASSERT_EQUAL_size_t(0U, caps.at(node).malformed);
+        for (std::size_t src = 0U; src < 3U; src++) {
+            if (src == node) {
+                continue;
+            }
+            TEST_ASSERT_TRUE(count_by_publisher(caps.at(node), pub_ids.at(src)) > 0U);
+        }
+    }
+
+    // All message frames must use subject-ID 123 (lowest pin wins).
+    const auto& frame_caps = e2e::sim_net_captures(net);
+    const auto  topic_hash = cy_topic_hash(cy_publisher_topic(pub_0));
+    const auto  sid        = last_subject_id_for_hash(frame_caps, topic_hash);
+    TEST_ASSERT_TRUE(sid.has_value());
+    TEST_ASSERT_EQUAL_UINT32(123U, *sid);
+
+    cleanup_all(net, now, subs, { pub_0, pub_1, pub_2 });
+}
+
+// ---------------------------------------------------------------------------
+// Test 4: Every gossip frame has a normalized name (no '#', no '//', no
+// leading/trailing '/') and hash == rapidhash(gossiped_name).
+// ---------------------------------------------------------------------------
+void test_gossip_names_normalized_and_hash_consistent()
+{
+    e2e::sim_net_config_t cfg{};
+    cfg.node_count       = 2U;
+    cfg.random_seed_base = UINT64_C(0xC004);
+
+    e2e::sim_net_t net{};
+    TEST_ASSERT_EQUAL_INT(CY_OK, e2e::sim_net_init_ex(net, cfg));
+
+    // Create topics that exercise normalization and pin stripping.
+    cy_publisher_t* const pub_basic  = cy_advertise(e2e::sim_net_cy(net, 0U), cy_str("norm/basic"));
+    cy_publisher_t* const pub_slash  = cy_advertise(e2e::sim_net_cy(net, 0U), cy_str("norm/slashy//double"));
+    cy_publisher_t* const pub_pinned = cy_advertise(e2e::sim_net_cy(net, 0U), cy_str("norm/pinned#500"));
+    TEST_ASSERT_NOT_NULL(pub_basic);
+    TEST_ASSERT_NOT_NULL(pub_slash);
+    TEST_ASSERT_NOT_NULL(pub_pinned);
+
+    // Subscribe on node 1 so that gossip flows.
+    arrival_capture_t  cap_basic{};
+    arrival_capture_t  cap_slash{};
+    arrival_capture_t  cap_pinned{};
+    cy_future_t* const sub_basic  = make_sub(e2e::sim_net_cy(net, 1U), "norm/basic", cap_basic);
+    cy_future_t* const sub_slash  = make_sub(e2e::sim_net_cy(net, 1U), "norm/slashy/double", cap_slash);
+    cy_future_t* const sub_pinned = make_sub(e2e::sim_net_cy(net, 1U), "norm/pinned", cap_pinned);
+
+    cy_us_t now = 0;
+    e2e::drive_for(net, now, converge_time, step_us);
+
+    // Scan all captured frames for gossip invariants.
+    const auto& caps             = e2e::sim_net_captures(net);
+    std::size_t gossip_count     = 0U;
+    std::size_t gossip_with_name = 0U;
+    for (const auto& cap : caps) {
+        if (cap.frame.header_type != header_gossip) {
+            continue;
+        }
+        gossip_count++;
+        if (cap.frame.wire.size() < header_bytes) {
+            continue;
+        }
+        const std::uint8_t name_len = cap.frame.wire.at(header_bytes - 1U);
+        if (name_len == 0U) {
+            continue;
+        }
+        if (cap.frame.wire.size() < header_bytes + name_len) {
+            continue; // truncated frame, shouldn't happen
+        }
+        gossip_with_name++;
+
+        // Extract name bytes.
+        const std::string name(cap.frame.wire.begin() + static_cast<std::ptrdiff_t>(header_bytes),
+                               cap.frame.wire.begin() + static_cast<std::ptrdiff_t>(header_bytes + name_len));
+
+        // Extract hash from wire[8..15] (little-endian u64).
+        std::uint64_t wire_hash = 0U;
+        for (std::size_t b = 0U; b < 8U; b++) {
+            wire_hash |= static_cast<std::uint64_t>(cap.frame.wire.at(8U + b)) << (b * 8U);
+        }
+
+        // Invariant 1: hash == rapidhash(name).
+        const std::uint64_t computed_hash = rapidhash(name.data(), name.size());
+        TEST_ASSERT_EQUAL_UINT64(computed_hash, wire_hash);
+
+        // Invariant 2: no pin expression ('#') in gossiped name.
+        TEST_ASSERT_EQUAL_size_t(std::string::npos, name.find('#'));
+
+        // Invariant 3: no double separator.
+        TEST_ASSERT_EQUAL_size_t(std::string::npos, name.find("//"));
+
+        // Invariant 4: no leading or trailing separator.
+        TEST_ASSERT_TRUE(name.front() != '/');
+        TEST_ASSERT_TRUE(name.back() != '/');
+    }
+
+    // Sanity: we must have seen a reasonable number of gossip frames with names.
+    TEST_ASSERT_TRUE(gossip_count > 0U);
+    TEST_ASSERT_TRUE(gossip_with_name > 0U);
+
+    e2e::cleanup_case(net,
+                      now,
+                      {},
+                      { sub_basic, sub_slash, sub_pinned },
+                      { pub_basic, pub_slash, pub_pinned },
+                      step_us,
+                      100'000,
+                      100'000U);
+}
+
+} // namespace
+
+extern "C" void setUp()
+{
+    TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_live_count());
+    cy_test_message_reset_counters();
+}
+
+extern "C" void tearDown() { TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_live_count()); }
+
+int main()
+{
+    UNITY_BEGIN();
+    RUN_TEST(test_multinode_cohabitation_no_misdelivery);
+    RUN_TEST(test_multinode_cohabitation_with_three_topics);
+    RUN_TEST(test_inconsistent_pin_convergence_to_lowest);
+    RUN_TEST(test_gossip_names_normalized_and_hash_consistent);
+    return UNITY_END();
+}
