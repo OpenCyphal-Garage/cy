@@ -2124,7 +2124,7 @@ cy_publisher_t* cy_advertise_client(cy_t* const cy, const cy_str_t name, const s
     if (resolved.name.len > CY_TOPIC_NAME_MAX) {
         return NULL;
     }
-    if (!cy_name_is_verbatim(resolved.name)) {
+    if (!resolved.verbatim) {
         return NULL; // Wildcard publishers are not defined.
     }
     cy_publisher_t* const pub = mem_alloc_zero(cy, sizeof(*pub));
@@ -3650,7 +3650,7 @@ static cy_err_t ensure_subscriber_root(cy_t* const cy, const cy_resolved_t resol
 
     // Insert the new root into the indexes.
     root->index_name = node;
-    if (!cy_name_is_verbatim(resolved.name)) {
+    if (!resolved.verbatim) {
         root->index_pattern = wkv_set(&cy->subscribers_by_pattern, resolved.name);
         if (root->index_pattern == NULL) {
             wkv_del(&cy->subscribers_by_name, node);
@@ -3685,7 +3685,7 @@ static subscriber_t* subscribe(cy_t* const cy, const cy_str_t name, const subscr
     if (resolved.name.len > CY_TOPIC_NAME_MAX) {
         return NULL;
     }
-    if ((resolved.pin != UINT16_MAX) && !cy_name_is_verbatim(resolved.name)) {
+    if ((resolved.pin != UINT16_MAX) && !resolved.verbatim) {
         return NULL; // Pin expression in a pattern subscription makes no sense.
     }
     name_buf[resolved.name.len] = 0; // this is not needed for the logic but helps with tracing (if enabled)
@@ -3708,7 +3708,7 @@ static subscriber_t* subscribe(cy_t* const cy, const cy_str_t name, const subscr
         subscriber_destroy(sub);
         return NULL;
     }
-    sub->verbatim = cy_name_is_verbatim(resolved.name); // Cache once, is useful.
+    sub->verbatim = resolved.verbatim; // Cache once, is useful.
     // liveness monitoring is disabled by default
     CY_TRACE(cy,
              "✨'%.*s' extent_pure=%zu rwin=%jd",
@@ -4437,10 +4437,7 @@ void cy_async_error_handler_set(cy_t* const cy, const cy_async_error_handler_t h
 cy_str_t cy_home(const cy_t* const cy) { return (cy != NULL) ? cy->home : str_invalid; }
 cy_str_t cy_namespace(const cy_t* const cy) { return (cy != NULL) ? cy->ns : str_invalid; }
 
-cy_err_t cy_home_set(cy_t* const cy, const cy_str_t home)
-{
-    return (!cy_name_is_homeful(home)) ? name_assign(cy, &cy->home, home) : CY_ERR_ARGUMENT;
-}
+cy_err_t cy_home_set(cy_t* const cy, const cy_str_t home) { return name_assign(cy, &cy->home, home); }
 cy_err_t cy_namespace_set(cy_t* const cy, const cy_str_t name_space) { return name_assign(cy, &cy->ns, name_space); }
 
 // Returns next deadline or INT64_MAX.
@@ -4497,19 +4494,10 @@ cy_us_t cy_now(const cy_t* const cy)
 
 cy_us_t cy_uptime(const cy_t* const cy) { return cy_now(cy) - cy->ts_started; }
 
-cy_resolved_t cy_resolve(const cy_t* const cy, const cy_str_t expr, const size_t dest_size, char* dest)
+cy_resolved_t cy_resolve(const cy_t* const cy, const cy_str_t name, const size_t dest_size, char* const dest)
 {
-    const uint16_t pin        = cy_name_pin(expr);
-    cy_str_t       to_resolve = expr;
-    if (pin != UINT16_MAX) {
-        to_resolve.len -= cy_name_pin_expr_len; // Strip "#XXXX" before name resolution.
-    }
-    const cy_str_t name = cy_name_resolve(to_resolve, cy_namespace(cy), cy_home(cy), dest_size, dest);
-    if (name.len <= CY_TOPIC_NAME_MAX) {
-        // TODO: remapping!
-        (void)0;
-    }
-    return (cy_resolved_t){ .name = name, .pin = pin };
+    // TODO: remapping!
+    return cy_name_resolve(name, cy_namespace(cy), cy_home(cy), dest_size, dest);
 }
 
 cy_topic_t* cy_topic_find_by_name(const cy_t* const cy, const cy_str_t name)
@@ -4525,7 +4513,6 @@ cy_topic_t* cy_topic_find_by_hash(const cy_t* const cy, const uint64_t hash)
     assert(cy != NULL);
     cy_topic_t* const topic = (cy_topic_t*)cavl2_find(cy->topics_by_hash, &hash, &cavl_comp_topic_hash);
     assert((topic == NULL) || (topic->hash == hash));
-    assert((topic == NULL) || cy_name_is_verbatim(cy_topic_name(topic))); // topic names can be only verbatim
     return topic;
 }
 
@@ -4899,44 +4886,45 @@ bad_message:
 //                                                      NAMES
 // =====================================================================================================================
 
-const char   cy_name_sep          = '/';
-const char   cy_name_home         = '~';
-const char   cy_name_one          = '*';
-const char   cy_name_any          = '>';
-const char   cy_name_pin_prefix   = '#';
-const size_t cy_name_pin_expr_len = 5;
+const char cy_name_sep        = '/';
+const char cy_name_home       = '~';
+const char cy_name_one        = '*';
+const char cy_name_any        = '>';
+const char cy_name_pin_prefix = '#';
 
-// Accepts printable ASCII in range [40, 126]. Rejects SPACE (32) and ASCII 33-39 (! " # $ % & ').
-// The number sign '#' is valid only in topic pin expressions, which are stripped before normalization.
-static bool is_valid_char(const char c) { return (c >= 40) && (c <= 126); }
+// Accepts all printable ASCII chars except SPACE.
+static bool is_valid_char(const char c) { return (c >= 33) && (c <= 126); }
 
-uint16_t cy_name_pin(const cy_str_t name)
+// Parses and strips the valid pin expression at the end, if any. Returns the shortened string.
+// out_pin is set to the pin value, or UINT16_MAX if no valid pin expression is found.
+// Example: `foo#123` => `foo`, out_pin=123
+static cy_str_t name_consume_pin_suffix(const cy_str_t name, uint16_t* const out_pin)
 {
-    if (name.len < cy_name_pin_expr_len) {
-        return UINT16_MAX;
-    }
-    const char* const digits = name.str + name.len - 4;
-    if (*(digits - 1) != cy_name_pin_prefix) {
-        return UINT16_MAX;
-    }
-    uint16_t pin = 0;
-    for (size_t i = 0; i < 4; i++) {
-        const unsigned char ch = (unsigned char)digits[i];
-        uint16_t            d  = 0;
-        if ((ch >= '0') && (ch <= '9')) {
-            d = (uint16_t)(unsigned)(ch - '0');
-        } else if ((ch >= 'a') && (ch <= 'f')) {
-            d = (uint16_t)(ch - 'a' + 10U);
-        } else {
-            return UINT16_MAX;
+    *out_pin                 = UINT16_MAX;
+    const unsigned char* ch  = (const unsigned char*)(name.str + name.len);
+    uint16_t             pin = 0;
+    for (size_t i = 0; i < name.len; i++) {
+        ch--;
+        if ((*ch == cy_name_pin_prefix) && (i > 0)) {
+            *out_pin = pin;
+            return (cy_str_t){ .len = name.len - i - 1, .str = name.str };
         }
-        pin = (uint16_t)((unsigned)(pin << 4U) | d);
+        if ((*ch == '0') && (pin == 0)) {
+            break; // Leading zeros are currently not allowed.
+        }
+        if ((*ch >= '0') && (*ch <= '9')) {
+            pin = (uint16_t)((unsigned)(pin << 4U) | (unsigned)(*ch - '0'));
+        } else {
+            break;
+        }
+        if ((pin > CY_SUBJECT_ID_PINNED_MAX)) {
+            break;
+        }
     }
-    return (pin <= CY_SUBJECT_ID_PINNED_MAX) ? pin : UINT16_MAX;
+    return name;
 }
 
-// Normalizes the name and copies it into a heap-allocated storage.
-// On OOM failure, the original is left unchanged.
+// Normalizes the name and copies it into a heap-allocated storage. On OOM, the original is left unchanged.
 static cy_err_t name_assign(const cy_t* const cy, cy_str_t* const assignee, const cy_str_t name)
 {
     assert(assignee != NULL);
@@ -4960,29 +4948,7 @@ static cy_err_t name_assign(const cy_t* const cy, cy_str_t* const assignee, cons
     return CY_ERR_ARGUMENT;
 }
 
-bool cy_name_is_valid(const cy_str_t name)
-{
-    if ((name.len == 0) || (name.len > CY_TOPIC_NAME_MAX) || (name.str == NULL)) {
-        return false;
-    }
-    // If a pin expression is present, validate only the prefix (the pin expression itself is already validated).
-    const uint16_t pin       = cy_name_pin(name);
-    const size_t   check_len = (pin != UINT16_MAX) ? (name.len - cy_name_pin_expr_len) : name.len;
-    if ((pin != UINT16_MAX) && (check_len == 0)) {
-        return false; // Bare pins (empty prefix) are not allowed.
-    }
-    for (size_t i = 0; i < check_len; ++i) {
-        if (!is_valid_char(name.str[i])) {
-            return false;
-        }
-    }
-    if ((pin != UINT16_MAX) && !cy_name_is_verbatim(name)) {
-        return false; // Pin expression in a pattern makes no sense.
-    }
-    return true;
-}
-
-bool cy_name_is_verbatim(const cy_str_t name)
+static bool name_is_verbatim(const cy_str_t name)
 {
     wkv_t kv;
     wkv_init(&kv, &wkv_realloc);
@@ -4991,12 +4957,12 @@ bool cy_name_is_verbatim(const cy_str_t name)
     return !wkv_has_substitution_tokens(&kv, name);
 }
 
-bool cy_name_is_homeful(const cy_str_t name)
+static bool name_is_homeful(const cy_str_t name)
 {
     return (name.len >= 1) && (name.str[0] == cy_name_home) && ((name.len == 1) || (name.str[1] == cy_name_sep));
 }
 
-bool cy_name_is_absolute(const cy_str_t name) { return (name.len >= 1) && (name.str[0] == cy_name_sep); }
+static bool name_is_absolute(const cy_str_t name) { return (name.len >= 1) && (name.str[0] == cy_name_sep); }
 
 // Writes the normalized and validated version of `name` into `dest`, which must be at least `dest_size` bytes long.
 // Normalization at least removes duplicate, leading, and trailing name separators.
@@ -5035,6 +5001,20 @@ static cy_str_t name_normalize(const size_t in_size, const char* in, const size_
     return (cy_str_t){ .len = (size_t)(out - dest), .str = dest };
 }
 
+static cy_str_t name_expand_home(cy_str_t name, const cy_str_t home, const size_t dest_size, char* const dest)
+{
+    if (dest == NULL) {
+        return str_invalid;
+    }
+    if (!name_is_homeful(name)) {
+        return name_normalize(name.len, name.str, dest_size, dest);
+    }
+    assert(name.len >= 1);
+    name.len -= 1U;
+    name.str += 1;
+    return cy_name_join(home, name, dest_size, dest);
+}
+
 cy_str_t cy_name_join(const cy_str_t left, const cy_str_t right, const size_t dest_size, char* const dest)
 {
     if (dest == NULL) {
@@ -5059,40 +5039,49 @@ cy_str_t cy_name_join(const cy_str_t left, const cy_str_t right, const size_t de
     return (cy_str_t){ .len = len + right_len, .str = dest };
 }
 
-cy_str_t cy_name_expand_home(cy_str_t name, const cy_str_t home, const size_t dest_size, char* const dest)
+static cy_str_t name_resolve_construct(const cy_str_t name,
+                                       cy_str_t       name_space,
+                                       const cy_str_t home,
+                                       const size_t   dest_size,
+                                       char*          dest)
 {
     if (dest == NULL) {
         return str_invalid;
     }
-    if (!cy_name_is_homeful(name)) {
+    if (name_is_absolute(name)) {
         return name_normalize(name.len, name.str, dest_size, dest);
     }
-    assert(name.len >= 1);
-    name.len -= 1U;
-    name.str += 1;
-    return cy_name_join(home, name, dest_size, dest);
-}
-
-cy_str_t cy_name_resolve(const cy_str_t name,
-                         cy_str_t       name_space,
-                         const cy_str_t home,
-                         const size_t   dest_size,
-                         char*          dest)
-{
-    if (dest == NULL) {
-        return str_invalid;
+    if (name_is_homeful(name)) {
+        return name_expand_home(name, home, dest_size, dest);
     }
-    if (cy_name_is_absolute(name)) {
-        return name_normalize(name.len, name.str, dest_size, dest);
-    }
-    if (cy_name_is_homeful(name)) {
-        return cy_name_expand_home(name, home, dest_size, dest);
-    }
-    if (cy_name_is_homeful(name_space)) {
-        name_space = cy_name_expand_home(name_space, home, dest_size, dest);
+    if (name_is_homeful(name_space)) {
+        name_space = name_expand_home(name_space, home, dest_size, dest);
         if (name_space.len >= dest_size) {
             return str_invalid;
         }
     }
     return cy_name_join(name_space, name, dest_size, dest);
+}
+
+cy_resolved_t cy_name_resolve(const cy_str_t name,
+                              const cy_str_t name_space,
+                              const cy_str_t home,
+                              const size_t   dest_size,
+                              char* const    dest)
+{
+    uint16_t pin = UINT16_MAX;
+    // Strip the pin first to ensure the fully resolved name fits into the size limit.
+    const cy_str_t res = name_resolve_construct(name_consume_pin_suffix(name, &pin), //
+                                                name_space,
+                                                home,
+                                                dest_size,
+                                                dest);
+    if (res.len > CY_TOPIC_NAME_MAX) {
+        return (cy_resolved_t){ .name = str_invalid, .pin = UINT16_MAX };
+    }
+    return (cy_resolved_t){
+        .name     = res,
+        .pin      = pin,
+        .verbatim = name_is_verbatim(res),
+    };
 }

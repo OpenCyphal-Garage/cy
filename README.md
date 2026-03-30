@@ -356,11 +356,9 @@ Some deployments, in particular hard real-time/safety-critical ones,
 may want to avoid dependency on the CRDT consensus protocol and instead assign some of the topics to subjects manually.
 Such topics where the subject-ID is manually assigned are called *pinned topics*.
 
-A pinned topic has the desired subject-ID encoded as a hexadecimal number at the end of its name
-following a `#` character; e.g., `foo/bar#1234` is a pinned topic with subject-ID 4660.
-The pinned subject-ID must be in the range \[0, 8191\], or \[0, 0x1FFF\] in hexadecimal;
-the pin expression must have exactly 4 lowercase hexadecimal digits (five digits overall),
-from `#0000` to `#1fff` inclusive.
+A pinned topic has the desired subject-ID encoded as a decimal number at the end of its name following a `#` character;
+e.g., `foo/bar#1234` is a pinned topic with subject-ID 1234.
+Leading zeros are not allowed. The pinned subject-ID must be in the range \[0, 8191\].
 This range is never used for automatically allocated topics, so there is no risk of collision with non-pinned topics.
 
 Pinning does not affect the topic identity; as such, for topic identification purposes, only the part of the name
@@ -368,8 +366,8 @@ before the `#` of the pinning expression is significant.
 
 A topic being pinned inconsistently across the network is treated as an allocation divergence and is resolved by
 converging all to the lowest pinned subject-ID among the available ones.
-For example, given `foo/bar` (non-pinned), `foo/bar#1234`, and `foo/bar#0123`,
-the network will converge to `foo/bar#0123`.
+For example, given `foo/bar` (non-pinned), `foo/bar#1234`, and `foo/bar#123`,
+the network will converge to `foo/bar#123`.
 
 Unlike the default automatic allocation mode, manual assignments allow multiple topics to share the same subject-ID ---
 each participant of such multi-tenant subjects will filter out messages of interest upon arrival;
