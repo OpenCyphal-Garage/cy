@@ -441,6 +441,72 @@ void test_topic_cohabitation_correct_routing()
     e2e::cleanup_case(net, now, {}, { sub_alpha, sub_beta }, { pub_alpha, pub_beta }, step_us, 100'000, 100'000U);
 }
 
+// ---------------------------------------------------------------------------
+// Test: Pinned and auto-allocated topics coexist without interference.
+// A pinned topic gets its declared subject-ID (100), and an auto-allocated
+// topic gets a subject-ID above CY_SUBJECT_ID_PINNED_MAX. Both deliver
+// messages correctly to their respective subscribers.
+// ---------------------------------------------------------------------------
+void test_pinned_and_auto_coexist()
+{
+    e2e::sim_net_t net{};
+    TEST_ASSERT_EQUAL_INT(
+      CY_OK, e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), UINT64_C(0xB008)));
+
+    // Node A: one pinned topic and one auto-allocated topic.
+    cy_publisher_t* const pub_pinned =
+      cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("pinned/coexist#100"));
+    cy_publisher_t* const pub_auto = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("auto/coexist"));
+    TEST_ASSERT_NOT_NULL(pub_pinned);
+    TEST_ASSERT_NOT_NULL(pub_auto);
+
+    // Node B: subscribe to both.
+    arrival_capture_t  capture_pinned{};
+    arrival_capture_t  capture_auto{};
+    cy_future_t* const sub_pinned = make_sub(e2e::sim_net_cy(net, e2e::sim_node_b), "pinned/coexist", capture_pinned);
+    cy_future_t* const sub_auto   = make_sub(e2e::sim_net_cy(net, e2e::sim_node_b), "auto/coexist", capture_auto);
+
+    cy_us_t now = 0;
+    e2e::drive_for(net, now, converge_time, step_us);
+
+    // Publish from both topics.
+    constexpr std::uint32_t pinned_pub_id = 7101U;
+    constexpr std::uint32_t auto_pub_id   = 7102U;
+    for (std::uint64_t seq = 1U; seq <= 8U; seq++) {
+        e2e::set_now(net, now);
+        publish_one(pub_pinned, pinned_pub_id, seq, now);
+        publish_one(pub_auto, auto_pub_id, seq, now);
+        TEST_ASSERT_EQUAL_INT(CY_OK, e2e::drive_round(net, now, now));
+        now += 10'000;
+    }
+    e2e::drive_for(net, now, delivery_time, step_us);
+
+    // Verify the pinned topic gets subject-ID 100.
+    const auto& caps        = e2e::sim_net_captures(net);
+    const auto  hash_pinned = cy_topic_hash(cy_publisher_topic(pub_pinned));
+    const auto  hash_auto   = cy_topic_hash(cy_publisher_topic(pub_auto));
+    const auto  sid_pinned  = last_subject_id_for_hash(caps, hash_pinned);
+    const auto  sid_auto    = last_subject_id_for_hash(caps, hash_auto);
+
+    TEST_ASSERT_TRUE(sid_pinned.has_value());
+    TEST_ASSERT_EQUAL_UINT32(100U, *sid_pinned);
+
+    // Verify the auto-allocated topic gets a subject-ID above the pinned range.
+    TEST_ASSERT_TRUE(sid_auto.has_value());
+    TEST_ASSERT_TRUE(*sid_auto > CY_SUBJECT_ID_PINNED_MAX);
+
+    // Verify both topics deliver messages correctly to their respective subscribers.
+    TEST_ASSERT_EQUAL_size_t(0U, capture_pinned.malformed);
+    TEST_ASSERT_TRUE(count_by_publisher(capture_pinned, pinned_pub_id) > 0U);
+    TEST_ASSERT_EQUAL_size_t(0U, count_by_publisher(capture_pinned, auto_pub_id));
+
+    TEST_ASSERT_EQUAL_size_t(0U, capture_auto.malformed);
+    TEST_ASSERT_TRUE(count_by_publisher(capture_auto, auto_pub_id) > 0U);
+    TEST_ASSERT_EQUAL_size_t(0U, count_by_publisher(capture_auto, pinned_pub_id));
+
+    e2e::cleanup_case(net, now, {}, { sub_pinned, sub_auto }, { pub_pinned, pub_auto }, step_us, 100'000, 100'000U);
+}
+
 } // namespace
 
 extern "C" void setUp()
@@ -461,5 +527,6 @@ int main()
     RUN_TEST(test_bare_pinned_topics_distinct_identity);
     RUN_TEST(test_bare_pin_differs_from_prefixed_pin);
     RUN_TEST(test_topic_cohabitation_correct_routing);
+    RUN_TEST(test_pinned_and_auto_coexist);
     return UNITY_END();
 }

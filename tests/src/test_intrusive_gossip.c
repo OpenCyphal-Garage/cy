@@ -721,6 +721,133 @@ static void test_gossip_wire_name_excludes_pin_expression(void)
     fixture_deinit(&fix);
 }
 
+static void test_gossip_pinned_topic_sends_correct_lage(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    // Create a pinned explicit topic. Pin=100 means evictions = UINT32_MAX - 100.
+    const char*       topic_name = "gossip/pinned/lage";
+    const uint64_t    hash       = rapidhash(topic_name, strlen(topic_name));
+    const uint32_t    evictions  = UINT32_MAX - 100U;
+    cy_topic_t* const topic      = fixture_make_explicit_topic(&fix, topic_name, hash, evictions);
+    TEST_ASSERT_TRUE(is_pinned(topic->evictions));
+
+    // Trigger gossip via send_gossip_multicast and capture the frame.
+    fix.capture_count      = 0U;
+    fix.subject_send_count = 0U;
+    const cy_us_t  now     = 31 * MEGA;
+    const cy_err_t err     = send_gossip_multicast(topic, now, fix.cy->broad_writer);
+    TEST_ASSERT_EQUAL_INT(CY_OK, err);
+    TEST_ASSERT_TRUE(fix.capture_count > 0U);
+
+    const send_capture_t* const cap = &fix.capture[0];
+    // Verify header type is header_gossip (8).
+    TEST_ASSERT_EQUAL_UINT8(header_gossip, cap->type);
+    // Verify the lage byte (offset 3) is LAGE_PINNED (127 = 0x7F).
+    TEST_ASSERT_EQUAL_INT8(LAGE_PINNED, cap->lage);
+    TEST_ASSERT_EQUAL_UINT8(0x7FU, cap->data[3]);
+    // Verify the evictions field (offset 16, 4 bytes LE) matches topic->evictions.
+    TEST_ASSERT_EQUAL_UINT32(topic->evictions, cap->evictions);
+    TEST_ASSERT_EQUAL_UINT32(topic->evictions, deserialize_u32(&cap->data[16]));
+    // Verify the hash field (offset 8, 8 bytes LE) matches topic->hash.
+    TEST_ASSERT_EQUAL_UINT64(topic->hash, cap->hash);
+    TEST_ASSERT_EQUAL_UINT64(topic->hash, deserialize_u64(&cap->data[8]));
+
+    fixture_deinit(&fix);
+}
+
+static void test_on_gossip_known_topic_pinned_always_wins_divergence(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    // Create a pinned explicit topic. Pin=100 means evictions = UINT32_MAX - 100.
+    const char*       topic_name = "gossip/pinned/wins";
+    const uint64_t    hash       = rapidhash(topic_name, strlen(topic_name));
+    const uint32_t    evictions  = UINT32_MAX - 100U;
+    cy_topic_t* const topic      = fixture_make_explicit_topic(&fix, topic_name, hash, evictions);
+    TEST_ASSERT_TRUE(is_pinned(topic->evictions));
+
+    const cy_us_t now = 32 * MEGA;
+    unschedule_gossip(topic);
+
+    // Remote has non-pinned state: evictions=5, lage=10. Local is pinned: LAGE_PINNED=127 > 10.
+    on_gossip_known_topic(fix.cy, now, topic, 5U, 10, gossip_broadcast);
+
+    // Local wins: evictions unchanged.
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX - 100U, topic->evictions);
+    // Urgent gossip is scheduled.
+    TEST_ASSERT_TRUE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
+    TEST_ASSERT_TRUE(topic->gossip_event.handler == gossip_event_urgent);
+
+    fixture_deinit(&fix);
+}
+
+static void test_on_gossip_known_topic_pinned_min_pin_wins(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    // Create a pinned explicit topic. Pin=100 means evictions = UINT32_MAX - 100.
+    const char*       topic_name = "gossip/pinned/minpin";
+    const uint64_t    hash       = rapidhash(topic_name, strlen(topic_name));
+    const uint32_t    evictions  = UINT32_MAX - 100U;
+    cy_topic_t* const topic      = fixture_make_explicit_topic(&fix, topic_name, hash, evictions);
+    TEST_ASSERT_TRUE(is_pinned(topic->evictions));
+
+    const cy_us_t now = 33 * MEGA;
+    unschedule_gossip(topic);
+
+    // Remote is also pinned: pin=50 means evictions = UINT32_MAX - 50. Both pinned => both lage = LAGE_PINNED.
+    // Tiebreak: higher evictions wins. UINT32_MAX-50 > UINT32_MAX-100 => remote wins.
+    const uint32_t remote_evictions = UINT32_MAX - 50U;
+    on_gossip_known_topic(fix.cy, now, topic, remote_evictions, LAGE_PINNED, gossip_broadcast);
+
+    // Remote wins: local adopts remote evictions.
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX - 50U, topic->evictions);
+    // Verify subject-ID matches the new pin value.
+    TEST_ASSERT_EQUAL_UINT32(50U, topic_subject_id(topic));
+
+    fixture_deinit(&fix);
+}
+
+static void test_on_gossip_unknown_topic_pinned_not_in_index_no_collision(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    // Create a pinned explicit topic with pin=100 (subject-ID 100). Not in the subject-ID index.
+    const char*       topic_name = "gossip/pinned/nocollision";
+    const uint64_t    hash       = rapidhash(topic_name, strlen(topic_name));
+    const uint32_t    evictions  = UINT32_MAX - 100U;
+    cy_topic_t* const topic      = fixture_make_explicit_topic(&fix, topic_name, hash, evictions);
+    TEST_ASSERT_TRUE(is_pinned(topic->evictions));
+    TEST_ASSERT_EQUAL_UINT32(100U, topic_subject_id(topic));
+
+    // Verify the pinned topic is indeed NOT in the subject-ID index.
+    TEST_ASSERT_NULL(topic_find_by_subject_id(fix.cy, 100U));
+
+    const cy_us_t now = 34 * MEGA;
+    unschedule_gossip(topic);
+
+    // Construct a remote non-pinned topic whose subject-ID also maps to 100 -- impossible by design,
+    // since non-pinned subject-IDs are always > CY_SUBJECT_ID_PINNED_MAX. Instead, use a remote pinned
+    // topic with the same subject-ID (pin=100) but a different hash. on_gossip_unknown_topic computes
+    // subject_id_impl(remote_hash, remote_evictions) and then looks up topic_find_by_subject_id.
+    // Since the pinned topic is not in the index, the lookup returns NULL and nothing happens.
+    const uint64_t remote_hash      = hash + 1U;         // different topic
+    const uint32_t remote_evictions = UINT32_MAX - 100U; // same pin => same subject-ID 100
+    on_gossip_unknown_topic(fix.cy, now, remote_hash, remote_evictions, LAGE_PINNED);
+
+    // Pinned topic is unaffected.
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX - 100U, topic->evictions);
+    // No urgent gossip was scheduled from this call (gossip was unscheduled before the call).
+    TEST_ASSERT_FALSE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
+
+    fixture_deinit(&fix);
+}
+
 void setUp(void) {}
 
 void tearDown(void) {}
@@ -743,5 +870,9 @@ int main(void)
     RUN_TEST(test_on_scout_responds_via_unicast_only);
     RUN_TEST(test_on_scout_reports_async_error_on_unicast_failure);
     RUN_TEST(test_gossip_wire_name_excludes_pin_expression);
+    RUN_TEST(test_gossip_pinned_topic_sends_correct_lage);
+    RUN_TEST(test_on_gossip_known_topic_pinned_always_wins_divergence);
+    RUN_TEST(test_on_gossip_known_topic_pinned_min_pin_wins);
+    RUN_TEST(test_on_gossip_unknown_topic_pinned_not_in_index_no_collision);
     return UNITY_END();
 }

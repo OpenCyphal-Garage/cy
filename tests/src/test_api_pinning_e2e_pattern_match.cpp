@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -385,6 +386,70 @@ void test_multiple_patterns_selective_match_with_pinning()
     e2e::assert_no_live_messages();
 }
 
+// ---------------------------------------------------------------------------
+// Test 7: Implicit topic from gossip inherits remote pinned evictions.
+// Node A advertises "data/sensor#200". Node B subscribes to pattern "data/>".
+// After gossip rounds, B discovers A's pinned topic and creates an implicit
+// topic. The implicit topic on B picks up the pinned subject-ID from gossip,
+// and publishing from A delivers to B's pattern subscriber.
+// ---------------------------------------------------------------------------
+void test_implicit_topic_from_gossip_inherits_remote_evictions()
+{
+    constexpr std::uint32_t pub_id = 5040U;
+
+    e2e::sim_net_t net{};
+    TEST_ASSERT_EQUAL_INT(
+      CY_OK, e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), UINT64_C(0xA107)));
+
+    // Node A: advertise on "data/sensor#200" (pinned to subject-ID 200).
+    cy_publisher_t* const pub = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("data/sensor#200"));
+    TEST_ASSERT_NOT_NULL(pub);
+
+    // Node B: subscribe to pattern "data/>" to match the pinned topic.
+    arrival_capture_t  capture{};
+    cy_future_t* const sub = make_pattern_sub(e2e::sim_net_cy(net, e2e::sim_node_b), "data/>", capture);
+
+    // Drive gossip rounds so B discovers A's pinned topic.
+    cy_us_t now = 0;
+    e2e::drive_for(net, now, converge_time, step_us);
+
+    // Verify B creates an implicit topic for "data/sensor".
+    const cy_topic_t* const implicit_topic =
+      cy_topic_find_by_name(e2e::sim_net_cy(net, e2e::sim_node_b), cy_str("data/sensor"));
+    TEST_ASSERT_NOT_NULL(implicit_topic);
+
+    // The implicit topic on B must use the same topic hash as A's topic.
+    const std::uint64_t hash_a = cy_topic_hash(cy_publisher_topic(pub));
+    TEST_ASSERT_EQUAL_UINT64(hash_a, cy_topic_hash(implicit_topic));
+
+    // Publish from A and verify delivery to B's pattern subscriber.
+    for (std::uint64_t seq = 1U; seq <= 16U; seq++) {
+        e2e::set_now(net, now);
+        publish_best_effort(pub, pub_id, seq, now);
+        TEST_ASSERT_EQUAL_INT(CY_OK, e2e::drive_round(net, now, now));
+        now += 10'000;
+    }
+    e2e::drive_for(net, now, delivery_time, step_us);
+
+    TEST_ASSERT_EQUAL_size_t(0U, capture.malformed);
+    TEST_ASSERT_TRUE(count_by_publisher(capture, pub_id) > 0U);
+
+    // Verify the on-wire subject-ID is 200, proving B's implicit topic inherited the pinned evictions.
+    const auto&                  caps = e2e::sim_net_captures(net);
+    std::optional<std::uint32_t> observed_sid;
+    for (std::size_t i = caps.size(); i > 0U; i--) {
+        const e2e::frame_capture_t& cap = caps.at(i - 1U);
+        if (cap.frame.has_topic_hash && (cap.frame.topic_hash == hash_a) && (cap.frame.header_type <= 1U)) {
+            observed_sid = cap.frame.subject_id;
+            break;
+        }
+    }
+    TEST_ASSERT_TRUE(observed_sid.has_value());
+    TEST_ASSERT_EQUAL_UINT32(200U, *observed_sid);
+
+    e2e::cleanup_case(net, now, {}, { sub }, { pub }, step_us, 100'000, 100'000U);
+}
+
 } // namespace
 
 extern "C" void setUp()
@@ -404,5 +469,6 @@ int main()
     RUN_TEST(test_multinode_cross_pinned_pattern_delivery);
     RUN_TEST(test_pinned_topic_substitutions_correct);
     RUN_TEST(test_multiple_patterns_selective_match_with_pinning);
+    RUN_TEST(test_implicit_topic_from_gossip_inherits_remote_evictions);
     return UNITY_END();
 }

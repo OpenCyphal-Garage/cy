@@ -1,4 +1,5 @@
 #include <cy_platform.h>
+#include <rapidhash.h>
 #include <unity.h>
 #include "api_mock_platform_utils.hpp"
 #include "guarded_heap.h"
@@ -559,6 +560,71 @@ void test_api_core_cy_new_validation_and_failure_paths()
     platform_deinit(&success);
 }
 
+void test_subscriber_name_returns_pin_stripped_name()
+{
+    test_platform_t platform{};
+    platform_init(&platform);
+
+    // Subscribe to a pinned topic. Default namespace is empty, so "foo#123" resolves to "foo" with pin=123.
+    cy_future_t* const sub = cy_subscribe(platform.cy, cy_str("foo#123"), 256U);
+    TEST_ASSERT_NOT_NULL(sub);
+
+    char name_buf[CY_TOPIC_NAME_MAX + 1U] = {};
+    cy_subscriber_name(sub, name_buf);
+    TEST_ASSERT_EQUAL_STRING("foo", name_buf);
+
+    cy_future_destroy(sub);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
+    platform_deinit(&platform);
+}
+
+void test_publisher_topic_for_pinned_has_correct_hash()
+{
+    test_platform_t platform{};
+    platform_init(&platform);
+
+    // Advertise on a pinned topic. "bar#100" resolves to name "bar" with pin=100.
+    cy_publisher_t* const pub = cy_advertise(platform.cy, cy_str("bar#100"));
+    TEST_ASSERT_NOT_NULL(pub);
+
+    cy_topic_t* const topic = cy_publisher_topic(pub);
+    TEST_ASSERT_NOT_NULL(topic);
+
+    // The topic name must be the resolved name without pin suffix.
+    const cy_str_t name = cy_topic_name(topic);
+    TEST_ASSERT_EQUAL_size_t(3U, name.len);
+    TEST_ASSERT_EQUAL_MEMORY("bar", name.str, name.len);
+
+    // The topic hash must equal rapidhash of the resolved name.
+    TEST_ASSERT_EQUAL_UINT64(rapidhash("bar", 3U), cy_topic_hash(topic));
+
+    cy_unadvertise(pub);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
+    platform_deinit(&platform);
+}
+
+void test_topic_find_by_name_uses_resolved_name()
+{
+    test_platform_t platform{};
+    platform_init(&platform);
+
+    // Advertise on a pinned topic. "baz#100" resolves to name "baz" with pin=100.
+    cy_publisher_t* const pub = cy_advertise(platform.cy, cy_str("baz#100"));
+    TEST_ASSERT_NOT_NULL(pub);
+
+    // Lookup by the resolved (pin-stripped) name should succeed.
+    const cy_topic_t* const found = cy_topic_find_by_name(platform.cy, cy_str("baz"));
+    TEST_ASSERT_NOT_NULL(found);
+
+    // Lookup by the original name with pin suffix should fail because the stored name is pin-stripped.
+    const cy_topic_t* const not_found = cy_topic_find_by_name(platform.cy, cy_str("baz#100"));
+    TEST_ASSERT_NULL(not_found);
+
+    cy_unadvertise(pub);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
+    platform_deinit(&platform);
+}
+
 } // namespace
 
 extern "C" void setUp()
@@ -578,5 +644,8 @@ int main()
     RUN_TEST(test_api_core_publish_and_request_argument_guards);
     RUN_TEST(test_api_core_message_contract_and_future_callback_getter);
     RUN_TEST(test_api_core_cy_new_validation_and_failure_paths);
+    RUN_TEST(test_subscriber_name_returns_pin_stripped_name);
+    RUN_TEST(test_publisher_topic_for_pinned_has_correct_hash);
+    RUN_TEST(test_topic_find_by_name_uses_resolved_name);
     return UNITY_END();
 }

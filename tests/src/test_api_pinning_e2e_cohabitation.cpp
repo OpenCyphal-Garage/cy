@@ -320,7 +320,190 @@ void test_inconsistent_pin_convergence_to_lowest()
 }
 
 // ---------------------------------------------------------------------------
-// Test 4: Every gossip frame has a normalized name (no '#', no '//', no
+// Test 4: Cohabitation with reliable delivery.
+// Two topics pinned to the same subject-ID, published reliably.
+// Reliable futures must resolve with CY_OK and no cross-delivery.
+// ---------------------------------------------------------------------------
+void test_cohabitation_reliable_delivery()
+{
+    e2e::sim_net_t net{};
+    TEST_ASSERT_EQUAL_INT(
+      CY_OK, e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), UINT64_C(0xC005)));
+
+    // Node A publishes reliably on alpha#500 and beta#500.
+    cy_publisher_t* const pub_alpha = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("alpha#500"));
+    cy_publisher_t* const pub_beta  = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("beta#500"));
+    TEST_ASSERT_NOT_NULL(pub_alpha);
+    TEST_ASSERT_NOT_NULL(pub_beta);
+
+    // Node B subscribes to alpha and beta.
+    arrival_capture_t  cap_alpha{};
+    arrival_capture_t  cap_beta{};
+    cy_future_t* const sub_alpha = make_sub(e2e::sim_net_cy(net, e2e::sim_node_b), "alpha", cap_alpha);
+    cy_future_t* const sub_beta  = make_sub(e2e::sim_net_cy(net, e2e::sim_node_b), "beta", cap_beta);
+
+    cy_us_t now = 0;
+    e2e::drive_for(net, now, converge_time, step_us);
+
+    // Publish reliably and collect futures.
+    constexpr std::uint32_t   alpha_pub_id = 8501U;
+    constexpr std::uint32_t   beta_pub_id  = 8502U;
+    std::vector<cy_future_t*> futures;
+    for (std::uint64_t seq = 1U; seq <= 8U; seq++) {
+        e2e::set_now(net, now);
+
+        const auto         payload_a = e2e::app_payload_pack(alpha_pub_id, seq);
+        const cy_bytes_t   msg_a     = { .size = payload_a.size(), .data = payload_a.data(), .next = nullptr };
+        cy_future_t* const fut_a     = cy_publish_reliable(pub_alpha, now + publish_deadline, msg_a);
+        TEST_ASSERT_NOT_NULL(fut_a);
+        futures.push_back(fut_a);
+
+        const auto         payload_b = e2e::app_payload_pack(beta_pub_id, seq);
+        const cy_bytes_t   msg_b     = { .size = payload_b.size(), .data = payload_b.data(), .next = nullptr };
+        cy_future_t* const fut_b     = cy_publish_reliable(pub_beta, now + publish_deadline, msg_b);
+        TEST_ASSERT_NOT_NULL(fut_b);
+        futures.push_back(fut_b);
+
+        TEST_ASSERT_EQUAL_INT(CY_OK, e2e::drive_round(net, now, now));
+        now += 10'000;
+    }
+
+    // Drive rounds until all reliable futures resolve.
+    TEST_ASSERT_TRUE(e2e::wait_all_futures(net, now, futures, delivery_time, step_us));
+    e2e::drive_for(net, now, 80'000, step_us);
+
+    // All reliable futures must resolve with CY_OK.
+    for (const cy_future_t* const fut : futures) {
+        TEST_ASSERT_TRUE(cy_future_done(fut));
+        TEST_ASSERT_EQUAL_INT(CY_OK, cy_future_error(fut));
+    }
+
+    // No cross-delivery: alpha subscriber gets only alpha messages.
+    TEST_ASSERT_EQUAL_size_t(0U, cap_alpha.malformed);
+    TEST_ASSERT_TRUE(count_by_publisher(cap_alpha, alpha_pub_id) > 0U);
+    TEST_ASSERT_EQUAL_size_t(0U, count_by_publisher(cap_alpha, beta_pub_id));
+
+    // No cross-delivery: beta subscriber gets only beta messages.
+    TEST_ASSERT_EQUAL_size_t(0U, cap_beta.malformed);
+    TEST_ASSERT_TRUE(count_by_publisher(cap_beta, beta_pub_id) > 0U);
+    TEST_ASSERT_EQUAL_size_t(0U, count_by_publisher(cap_beta, alpha_pub_id));
+
+    // Verify payload content: alpha subscriber received the correct publisher_id.
+    for (const auto& s : cap_alpha.samples) {
+        TEST_ASSERT_EQUAL_UINT32(alpha_pub_id, s.publisher_id);
+    }
+    for (const auto& s : cap_beta.samples) {
+        TEST_ASSERT_EQUAL_UINT32(beta_pub_id, s.publisher_id);
+    }
+
+    // On-wire subject-ID for both topics is 500.
+    const auto& caps      = e2e::sim_net_captures(net);
+    const auto  hash_a    = cy_topic_hash(cy_publisher_topic(pub_alpha));
+    const auto  hash_b    = cy_topic_hash(cy_publisher_topic(pub_beta));
+    const auto  sid_alpha = last_subject_id_for_hash(caps, hash_a);
+    const auto  sid_beta  = last_subject_id_for_hash(caps, hash_b);
+    TEST_ASSERT_TRUE(sid_alpha.has_value());
+    TEST_ASSERT_TRUE(sid_beta.has_value());
+    TEST_ASSERT_EQUAL_UINT32(500U, *sid_alpha);
+    TEST_ASSERT_EQUAL_UINT32(500U, *sid_beta);
+
+    e2e::destroy_futures(futures);
+    cleanup_all(net, now, { sub_alpha, sub_beta }, { pub_alpha, pub_beta });
+}
+
+// ---------------------------------------------------------------------------
+// Test 5: Cohabitation with ordered subscribers.
+// Two topics pinned to the same subject-ID, received via cy_subscribe_ordered.
+// Messages must arrive in-order per-topic and no cross-contamination.
+// ---------------------------------------------------------------------------
+void test_cohabitation_ordered_subscriber()
+{
+    e2e::sim_net_t net{};
+    TEST_ASSERT_EQUAL_INT(
+      CY_OK, e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), UINT64_C(0xC006)));
+
+    // Node A publishes on ord/x#600 and ord/y#600.
+    cy_publisher_t* const pub_x = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("ord/x#600"));
+    cy_publisher_t* const pub_y = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("ord/y#600"));
+    TEST_ASSERT_NOT_NULL(pub_x);
+    TEST_ASSERT_NOT_NULL(pub_y);
+
+    // Node B subscribes to both using ordered subscribers with a reordering window.
+    constexpr cy_us_t reordering_window = 50'000;
+    arrival_capture_t cap_x{};
+    arrival_capture_t cap_y{};
+
+    cy_future_t* const sub_x =
+      cy_subscribe_ordered(e2e::sim_net_cy(net, e2e::sim_node_b), cy_str("ord/x"), 64U, reordering_window);
+    TEST_ASSERT_NOT_NULL(sub_x);
+    {
+        cy_user_context_t ctx = CY_USER_CONTEXT_EMPTY;
+        ctx.ptr[0]            = &cap_x;
+        cy_future_context_set(sub_x, ctx);
+        cy_future_callback_set(sub_x, on_arrival_capture);
+    }
+
+    cy_future_t* const sub_y =
+      cy_subscribe_ordered(e2e::sim_net_cy(net, e2e::sim_node_b), cy_str("ord/y"), 64U, reordering_window);
+    TEST_ASSERT_NOT_NULL(sub_y);
+    {
+        cy_user_context_t ctx = CY_USER_CONTEXT_EMPTY;
+        ctx.ptr[0]            = &cap_y;
+        cy_future_context_set(sub_y, ctx);
+        cy_future_callback_set(sub_y, on_arrival_capture);
+    }
+
+    cy_us_t now = 0;
+    e2e::drive_for(net, now, converge_time, step_us);
+
+    // Publish several messages on each topic with distinct sequences.
+    constexpr std::uint32_t pub_id_x = 8601U;
+    constexpr std::uint32_t pub_id_y = 8602U;
+    for (std::uint64_t seq = 1U; seq <= 16U; seq++) {
+        e2e::set_now(net, now);
+        publish_one(pub_x, pub_id_x, seq, now);
+        publish_one(pub_y, pub_id_y, seq, now);
+        TEST_ASSERT_EQUAL_INT(CY_OK, e2e::drive_round(net, now, now));
+        now += 10'000;
+    }
+    e2e::drive_for(net, now, delivery_time, step_us);
+
+    // Verify no malformed messages and no cross-contamination.
+    TEST_ASSERT_EQUAL_size_t(0U, cap_x.malformed);
+    TEST_ASSERT_EQUAL_size_t(0U, cap_y.malformed);
+    TEST_ASSERT_TRUE(count_by_publisher(cap_x, pub_id_x) > 0U);
+    TEST_ASSERT_EQUAL_size_t(0U, count_by_publisher(cap_x, pub_id_y));
+    TEST_ASSERT_TRUE(count_by_publisher(cap_y, pub_id_y) > 0U);
+    TEST_ASSERT_EQUAL_size_t(0U, count_by_publisher(cap_y, pub_id_x));
+
+    // Verify messages arrived in-order per-topic (sequence numbers non-decreasing).
+    std::uint64_t prev_seq_x = 0U;
+    for (const auto& s : cap_x.samples) {
+        TEST_ASSERT_TRUE(s.sequence >= prev_seq_x);
+        prev_seq_x = s.sequence;
+    }
+    std::uint64_t prev_seq_y = 0U;
+    for (const auto& s : cap_y.samples) {
+        TEST_ASSERT_TRUE(s.sequence >= prev_seq_y);
+        prev_seq_y = s.sequence;
+    }
+
+    // On-wire subject-ID for both topics is 600.
+    const auto& caps   = e2e::sim_net_captures(net);
+    const auto  hash_x = cy_topic_hash(cy_publisher_topic(pub_x));
+    const auto  hash_y = cy_topic_hash(cy_publisher_topic(pub_y));
+    const auto  sid_x  = last_subject_id_for_hash(caps, hash_x);
+    const auto  sid_y  = last_subject_id_for_hash(caps, hash_y);
+    TEST_ASSERT_TRUE(sid_x.has_value());
+    TEST_ASSERT_TRUE(sid_y.has_value());
+    TEST_ASSERT_EQUAL_UINT32(600U, *sid_x);
+    TEST_ASSERT_EQUAL_UINT32(600U, *sid_y);
+
+    cleanup_all(net, now, { sub_x, sub_y }, { pub_x, pub_y });
+}
+
+// ---------------------------------------------------------------------------
+// Test 6: Every gossip frame has a normalized name (no '#', no '//', no
 // leading/trailing '/') and hash == rapidhash(gossiped_name).
 // ---------------------------------------------------------------------------
 void test_gossip_names_normalized_and_hash_consistent()
@@ -427,6 +610,8 @@ int main()
     RUN_TEST(test_multinode_cohabitation_no_misdelivery);
     RUN_TEST(test_multinode_cohabitation_with_three_topics);
     RUN_TEST(test_inconsistent_pin_convergence_to_lowest);
+    RUN_TEST(test_cohabitation_reliable_delivery);
+    RUN_TEST(test_cohabitation_ordered_subscriber);
     RUN_TEST(test_gossip_names_normalized_and_hash_consistent);
     return UNITY_END();
 }

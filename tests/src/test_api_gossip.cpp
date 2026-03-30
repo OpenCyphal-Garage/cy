@@ -705,6 +705,66 @@ void test_api_unknown_topic_no_pattern_does_not_autocreate()
 
     platform_deinit(p);
 }
+
+std::uint32_t capture_u32(const send_capture_t& c, const std::size_t off)
+{
+    std::uint32_t out = 0U;
+    for (std::size_t i = 0U; i < 4U; i++) {
+        out |= static_cast<std::uint32_t>(c.data.at(off + i)) << (i * 8U);
+    }
+    return out;
+}
+
+void test_gossip_frame_for_pinned_topic_has_lage_127()
+{
+    test_platform_t p{};
+    platform_init(p);
+
+    // Create a pinned topic (pin=100) by advertising on it.
+    cy_publisher_t* const pub = cy_advertise(p.cy, cy_str("gossip/pin/test#100"));
+    TEST_ASSERT_NOT_NULL(pub);
+
+    const cy_topic_t* const topic = cy_topic_find_by_name(p.cy, cy_str("gossip/pin/test"));
+    TEST_ASSERT_NOT_NULL(topic);
+    const std::uint64_t topic_hash = cy_topic_hash(topic);
+
+    // Trigger gossip emission by spinning enough time for the initial urgent gossip.
+    p.now           = 0;
+    p.capture_count = 0U;
+    TEST_ASSERT_TRUE(spin_until_multicast_for_hash(p, topic_hash, 200'000));
+
+    // Find the gossip capture for our topic.
+    bool found = false;
+    for (std::size_t i = 0U; i < p.capture_count; i++) {
+        const send_capture_t& c = p.captures.at(i);
+        if (c.unicast || (c.size < header_bytes) || (capture_type(c) != header_gossip)) {
+            continue;
+        }
+        if (capture_u64(c, 8U) != topic_hash) {
+            continue;
+        }
+        found = true;
+
+        // Verify the lage byte at offset 3 is LAGE_PINNED (127).
+        TEST_ASSERT_EQUAL_INT8(static_cast<std::int8_t>(127), static_cast<std::int8_t>(c.data[3]));
+
+        // Verify evictions field at offset [16..19] matches UINT32_MAX - 100.
+        const std::uint32_t expected_evictions = UINT32_MAX - 100U;
+        TEST_ASSERT_EQUAL_UINT32(expected_evictions, capture_u32(c, 16U));
+
+        // Verify the name in the gossip payload is "gossip/pin/test" (pin stripped).
+        const std::size_t name_len = c.data[header_bytes - 1U];
+        TEST_ASSERT_EQUAL_size_t(15U, name_len); // strlen("gossip/pin/test")
+        TEST_ASSERT_TRUE(c.size >= header_bytes + name_len);
+        TEST_ASSERT_EQUAL_MEMORY("gossip/pin/test", &c.data[header_bytes], name_len);
+        break;
+    }
+    TEST_ASSERT_TRUE(found);
+
+    cy_unadvertise(pub);
+    platform_deinit(p);
+}
+
 } // namespace
 
 extern "C" void setUp()
@@ -732,5 +792,6 @@ int main()
     RUN_TEST(test_api_scout_match_triggers_gossip_response_and_fields_are_correct);
     RUN_TEST(test_api_scout_match_always_uses_unicast);
     RUN_TEST(test_api_unknown_topic_no_pattern_does_not_autocreate);
+    RUN_TEST(test_gossip_frame_for_pinned_topic_has_lage_127);
     return UNITY_END();
 }

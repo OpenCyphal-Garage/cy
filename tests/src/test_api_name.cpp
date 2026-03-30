@@ -956,6 +956,116 @@ void test_name_resolve_pin_on_absolute_with_redundant_seps()
 }
 
 // =====================================================================================================================
+//                                    cy_name_resolve -- pin edge cases with pinning
+// =====================================================================================================================
+
+void test_name_resolve_pin_at_name_max_boundary()
+{
+    // Name that is exactly CY_TOPIC_NAME_MAX after pin stripping should succeed.
+    std::array<char, CY_TOPIC_NAME_MAX + 20> buf{};
+    std::array<char, CY_TOPIC_NAME_MAX + 10> name_buf{};
+    std::memset(name_buf.data(), 'a', CY_TOPIC_NAME_MAX);
+    name_buf[CY_TOPIC_NAME_MAX]     = '#';
+    name_buf[CY_TOPIC_NAME_MAX + 1] = '0';
+    const cy_str_t      at_max      = { CY_TOPIC_NAME_MAX + 2, name_buf.data() };
+    const cy_resolved_t r           = cy_name_resolve(at_max, cy_str(""), cy_str(""), buf.size(), buf.data());
+    TEST_ASSERT_NOT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_size_t(CY_TOPIC_NAME_MAX, r.name.len);
+    TEST_ASSERT_EQUAL_UINT16(0, r.pin);
+    TEST_ASSERT_TRUE(r.verbatim);
+
+    // Name that is CY_TOPIC_NAME_MAX+1 after pin stripping should fail.
+    std::array<char, CY_TOPIC_NAME_MAX + 20> buf2{};
+    std::array<char, CY_TOPIC_NAME_MAX + 10> name_buf2{};
+    std::memset(name_buf2.data(), 'a', CY_TOPIC_NAME_MAX + 1);
+    name_buf2[CY_TOPIC_NAME_MAX + 1] = '#';
+    name_buf2[CY_TOPIC_NAME_MAX + 2] = '0';
+    const cy_str_t      over_max     = { CY_TOPIC_NAME_MAX + 3, name_buf2.data() };
+    const cy_resolved_t r2           = cy_name_resolve(over_max, cy_str(""), cy_str(""), buf2.size(), buf2.data());
+    TEST_ASSERT_NULL(r2.name.str);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, r2.name.len);
+}
+
+void test_name_resolve_pin_exceeding_max_is_literal()
+{
+    // Values above CY_SUBJECT_ID_PINNED_MAX (8191) are not valid pins; '#' stays literal.
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    cy_resolved_t                           r{};
+
+    // 8192 -- just above max.
+    r = cy_name_resolve(cy_str("foo#8192"), cy_str("ns"), cy_str(""), buf.size(), buf.data());
+    TEST_ASSERT_NOT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_STRING_LEN("ns/foo#8192", r.name.str, r.name.len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, r.pin);
+
+    // 65535 -- UINT16_MAX as text, still not a valid pin.
+    r = cy_name_resolve(cy_str("foo#65535"), cy_str("ns"), cy_str(""), buf.size(), buf.data());
+    TEST_ASSERT_NOT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_STRING_LEN("ns/foo#65535", r.name.str, r.name.len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, r.pin);
+
+    // 10000 -- well above max.
+    r = cy_name_resolve(cy_str("foo#10000"), cy_str("ns"), cy_str(""), buf.size(), buf.data());
+    TEST_ASSERT_NOT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_STRING_LEN("ns/foo#10000", r.name.str, r.name.len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, r.pin);
+}
+
+void test_name_resolve_pin_mid_name_not_stripped()
+{
+    // '#' not at the end of the name (followed by '/bar') is not a pin expression.
+    // The right-to-left scan hits '/' before '#' and bails out.
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    const cy_resolved_t r = cy_name_resolve(cy_str("foo#123/bar"), cy_str("ns"), cy_str(""), buf.size(), buf.data());
+    TEST_ASSERT_NOT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_STRING_LEN("ns/foo#123/bar", r.name.str, r.name.len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, r.pin);
+    TEST_ASSERT_TRUE(r.verbatim);
+}
+
+void test_name_resolve_empty_after_pin_strip_fails()
+{
+    // "#N" with no namespace: name is empty after pin stripping -> rejected.
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    cy_resolved_t                           r{};
+
+    r = cy_name_resolve(cy_str("#1234"), cy_str(""), cy_str(""), buf.size(), buf.data());
+    TEST_ASSERT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, r.name.len);
+
+    r = cy_name_resolve(cy_str("#0"), cy_str(""), cy_str(""), buf.size(), buf.data());
+    TEST_ASSERT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, r.name.len);
+}
+
+void test_name_resolve_pin_on_absolute_and_homeful()
+{
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    cy_resolved_t                           r{};
+
+    // Absolute name with pin: "/foo#100" -> strip pin -> "/foo" -> normalize -> "foo", pin=100.
+    r = cy_name_resolve(cy_str("/foo#100"), cy_str("ns"), cy_str("me"), buf.size(), buf.data());
+    TEST_ASSERT_NOT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_STRING_LEN("foo", r.name.str, r.name.len);
+    TEST_ASSERT_EQUAL_UINT16(100, r.pin);
+    TEST_ASSERT_TRUE(r.verbatim);
+
+    // Homeful name with pin: "~/bar#0" -> strip pin -> "~/bar" -> expand home -> "me/bar", pin=0.
+    r = cy_name_resolve(cy_str("~/bar#0"), cy_str("ns"), cy_str("me"), buf.size(), buf.data());
+    TEST_ASSERT_NOT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_STRING_LEN("me/bar", r.name.str, r.name.len);
+    TEST_ASSERT_EQUAL_UINT16(0, r.pin);
+    TEST_ASSERT_TRUE(r.verbatim);
+
+    // Relative name with empty namespace and home: "foo#123" -> strip pin -> "foo", pin=123.
+    r = cy_name_resolve(cy_str("foo#123"), cy_str(""), cy_str(""), buf.size(), buf.data());
+    TEST_ASSERT_NOT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_STRING_LEN("foo", r.name.str, r.name.len);
+    TEST_ASSERT_EQUAL_UINT16(123, r.pin);
+    TEST_ASSERT_TRUE(r.verbatim);
+}
+
+// =====================================================================================================================
 //                                               Constants
 // =====================================================================================================================
 
@@ -1067,6 +1177,13 @@ int main()
     RUN_TEST(test_name_resolve_pin_absolute_leading_sep_removed);
     RUN_TEST(test_name_resolve_pin_absolute_all_redundant_seps);
     RUN_TEST(test_name_resolve_pin_on_absolute_with_redundant_seps);
+
+    // cy_name_resolve -- pin edge cases with pinning
+    RUN_TEST(test_name_resolve_pin_at_name_max_boundary);
+    RUN_TEST(test_name_resolve_pin_exceeding_max_is_literal);
+    RUN_TEST(test_name_resolve_pin_mid_name_not_stripped);
+    RUN_TEST(test_name_resolve_empty_after_pin_strip_fails);
+    RUN_TEST(test_name_resolve_pin_on_absolute_and_homeful);
 
     // Constants
     RUN_TEST(test_name_constants);
