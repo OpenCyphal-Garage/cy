@@ -665,9 +665,9 @@ cy_str_t cy_name_join(const cy_str_t left, const cy_str_t right, const size_t de
 /// Examples:
 ///
 ///     NAME        NAMESPACE   HOME    RESOLVED        PINNING     VERBATIM
-///     foo/bar     ns1         me      ns1/foo/bar     −           yes
-///     ~//foo/bar  ns1         me      me/foo/bar      −           yes
-///     /foo//bar/  ns1         me      foo/bar         −           yes
+///     foo/bar     ns1         me      ns1/foo/bar     -           yes
+///     ~//foo/bar  ns1         me      me/foo/bar      -           yes
+///     /foo//bar/  ns1         me      foo/bar         -           yes
 ///     foo/bar/    ~//ns1      me      me/ns1/foo/bar  -           yes
 ///     foo#123     ns1#456     me      ns1#456/foo     123         yes
 ///     foo/#123    ns1#456     me      ns1#456/foo     123         yes

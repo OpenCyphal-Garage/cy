@@ -287,7 +287,7 @@ void on_response(cy_future_t* future)
 {
     cy_err_t error = cy_future_error(future);
     if (cy_future_done(future)) {
-        // Response is either recieved or has timed out.
+        // Response is either received or has timed out.
         switch (error) {
 
             case CY_OK:                                             // Response received successfully.
