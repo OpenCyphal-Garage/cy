@@ -153,8 +153,8 @@ The message tags must be unique across reboots to avoid misattribution; for that
 uint8  type
 void8
 uint8  incompatibility
-int8   topic_log_age    # floor(log2(topic_age)) if topic_age>0 else -1, like in the gossip message.
-uint32 evictions        # Offset 4 bytes
+int8   topic_log_age    # floor(log2(topic_age)) if topic_age>0 else -1; 127 for pinned topics.
+uint32 evictions        # For pinned topics, this is 0xFFFFFFFF-subject_id.
 uint64 topic_hash       # For subject allocation collision detection and immediate consensus updates.
 uint64 tag              # For ordering recovery and acknowledgement & response correlation. Random-init, wraparound.
 # Payload follows.

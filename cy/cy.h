@@ -633,7 +633,7 @@ cy_user_context_t* cy_topic_user_context(cy_topic_t* const topic);
 //                                                      NAMES
 // =====================================================================================================================
 
-/// Maximum name of a resolved normalized name that appears on the wire.
+/// Maximum length of a resolved normalized name that appears on the wire.
 /// Names prior to resolution and normalization may be longer (e.g., due to pinning, redundant `/` separators, etc).
 /// In CAN FD networks, normalized topic names should not exceed 48 characters to avoid multi-frame gossips.
 /// This limit is chosen rather arbitrarily, keeping in mind RTPS where the maximum is 255,
