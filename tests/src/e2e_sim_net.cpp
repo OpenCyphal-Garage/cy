@@ -395,16 +395,19 @@ extern "C" cy_subject_writer_t* sim_subject_writer_new(cy_platform_t* const plat
       static_cast<sim_subject_writer_t*>(guarded_heap_alloc(&self->core_heap, sizeof(sim_subject_writer_t)));
     if (out != nullptr) {
         out->base.subject_id = subject_id;
-        assert(self->active_writer_subjects.count(subject_id) == 0U);
-        self->active_writer_subjects.insert(subject_id);
+        const auto ins       = self->active_writer_subjects.insert(subject_id);
+        assert(ins.second);
+        (void)ins;
     }
     return (out != nullptr) ? &out->base : nullptr;
 }
 
 extern "C" void sim_subject_writer_destroy(cy_platform_t* const platform, cy_subject_writer_t* const writer)
 {
-    sim_node_t* const self = node_from(platform);
-    assert(self->active_writer_subjects.erase(writer->subject_id) == 1U);
+    sim_node_t* const self   = node_from(platform);
+    const auto        erased = self->active_writer_subjects.erase(writer->subject_id);
+    assert(erased == 1U);
+    (void)erased;
     guarded_heap_free(&self->core_heap, writer);
 }
 
@@ -447,8 +450,9 @@ extern "C" cy_subject_reader_t* sim_subject_reader_new(cy_platform_t* const plat
         out->extent          = extent;
         out->next            = self->readers;
         self->readers        = out;
-        assert(self->active_reader_subjects.count(subject_id) == 0U);
-        self->active_reader_subjects.insert(subject_id);
+        const auto ins       = self->active_reader_subjects.insert(subject_id);
+        assert(ins.second);
+        (void)ins;
     }
     return (out != nullptr) ? &out->base : nullptr;
 }
@@ -457,8 +461,8 @@ extern "C" void sim_subject_reader_extent_set(cy_platform_t* const       platfor
                                               cy_subject_reader_t* const reader,
                                               const std::size_t          extent)
 {
-    sim_node_t* const self = node_from(platform);
-    assert(self->active_reader_subjects.count(reader->subject_id) == 1U);
+    (void)platform;
+    assert(node_from(platform)->active_reader_subjects.count(reader->subject_id) == 1U);
     auto* const r =
       reinterpret_cast<sim_subject_reader_t*>(reader); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
     r->extent = extent;
@@ -466,8 +470,10 @@ extern "C" void sim_subject_reader_extent_set(cy_platform_t* const       platfor
 
 extern "C" void sim_subject_reader_destroy(cy_platform_t* const platform, cy_subject_reader_t* const reader)
 {
-    sim_node_t* const self = node_from(platform);
-    assert(self->active_reader_subjects.erase(reader->subject_id) == 1U);
+    sim_node_t* const self   = node_from(platform);
+    const auto        erased = self->active_reader_subjects.erase(reader->subject_id);
+    assert(erased == 1U);
+    (void)erased;
     auto* const ptr =
       reinterpret_cast<sim_subject_reader_t*>(reader); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
     sim_subject_reader_t** p = &self->readers;
