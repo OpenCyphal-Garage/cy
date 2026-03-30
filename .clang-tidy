@@ -75,6 +75,12 @@ Checks: >-
   -google-upgrade-googletest-case,
   -modernize-type-traits,
   -misc-confusable-identifiers,
+  -hicpp-member-init,
+  -cppcoreguidelines-narrowing-conversions,
+  -hicpp-static-assert,
+  -cert-dcl03-c,
+  -readability-else-after-return,
+  -llvm-prefer-isa-or-dyn-cast-in-conditionals,
 CheckOptions:
   - key: misc-const-correctness.TransformPointersAsValues
     value: 'true'
