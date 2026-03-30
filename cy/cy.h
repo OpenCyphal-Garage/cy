@@ -675,6 +675,12 @@ cy_str_t cy_name_join(const cy_str_t left, const cy_str_t right, const size_t de
 ///     ~/*/foo/    ns1         me      me/*/foo        -           no
 ///     /~/*/foo/   ns1         me      ~/*/foo         -           no
 ///
+/// Examples of invalid names leading to resolution failure:
+///
+///     `foo bar\nbaz`  -- spaces and non-printable characters are not allowed.
+///     `foo/*/bar#123` -- patterns cannot be pinned.
+///     (long string)   -- final name cannot exceed CY_TOPIC_NAME_MAX regardless of dest_size.
+///
 /// The dest points to a buffer at least dest_size bytes long. On failure, the output string has length SIZE_MAX
 /// and NULL data pointer. The destination is not NUL-terminated.
 ///

@@ -300,10 +300,11 @@ void test_api_core_home_namespace_contracts()
     TEST_ASSERT_EQUAL_size_t(9U, home.len);
     TEST_ASSERT_EQUAL_MEMORY("home/node", home.str, home.len);
 
-    TEST_ASSERT_EQUAL_INT(CY_ERR_ARGUMENT, cy_home_set(platform.cy, cy_str("~/bad")));
+    // Homeful home values are accepted (no circularity check; the caller is responsible).
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_home_set(platform.cy, cy_str("~/bad")));
     home = cy_home(platform.cy);
-    TEST_ASSERT_EQUAL_size_t(9U, home.len);
-    TEST_ASSERT_EQUAL_MEMORY("home/node", home.str, home.len);
+    TEST_ASSERT_EQUAL_size_t(5U, home.len);
+    TEST_ASSERT_EQUAL_MEMORY("~/bad", home.str, home.len);
 
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_namespace_set(platform.cy, cy_str("ns//a")));
     ns = cy_namespace(platform.cy);

@@ -1,14 +1,14 @@
 // Verify pinning subject-ID assignment, range boundaries, identity, and auto-allocation isolation.
 //
 // Contracts under test:
-//  - A pinned topic has the desired subject-ID encoded as hex after '#'.
+//  - A pinned topic has the desired subject-ID encoded as decimal after '#'.
 //  - Pinned subject-IDs are in [0, 8191] (0x1FFF).
 //  - This range is never used for automatically allocated topics.
 //  - Pinning does not affect topic identity; only the name before '#' matters.
-//  - Bare pinned topics: '#1234' identity is tied to the pinned subject.
-//  - '#1234' and '#0123' are distinct topics.
+//  - Prefixed pinned topics with different names are distinct even if they share a subject-ID.
 
 #include <cy_platform.h>
+#include <rapidhash.h>
 #include <unity.h>
 #include "e2e_sim_net.hpp"
 #include "e2e_scenario_utils.hpp"
@@ -20,7 +20,6 @@
 #include <cstdint>
 #include <cstring>
 #include <optional>
-#include <set>
 #include <vector>
 
 namespace {
@@ -97,19 +96,6 @@ std::optional<std::uint32_t> last_subject_id_for_hash(const std::vector<e2e::fra
     return std::nullopt;
 }
 
-// Collect all distinct subject-IDs for message frames matching a topic hash.
-std::set<std::uint32_t> all_subject_ids_for_hash(const std::vector<e2e::frame_capture_t>& captures,
-                                                 const std::uint64_t                      topic_hash)
-{
-    std::set<std::uint32_t> result{};
-    for (const e2e::frame_capture_t& cap : captures) {
-        if (cap.frame.has_topic_hash && (cap.frame.topic_hash == topic_hash) && (cap.frame.header_type <= 1U)) {
-            result.insert(cap.frame.subject_id);
-        }
-    }
-    return result;
-}
-
 cy_future_t* make_sub(cy_t* const cy, const char* const name, arrival_capture_t& capture)
 {
     cy_future_t* const sub = cy_subscribe(cy, cy_str(name), 64U);
@@ -124,7 +110,7 @@ cy_future_t* make_sub(cy_t* const cy, const char* const name, arrival_capture_t&
 // ---------------------------------------------------------------------------
 // Test: Pinned topic gets the exact subject-ID encoded in its name.
 // ---------------------------------------------------------------------------
-void test_pinned_subject_id_matches_hex_suffix()
+void test_pinned_subject_id_matches_decimal_suffix()
 {
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(
@@ -161,7 +147,7 @@ void test_pinned_subject_id_matches_hex_suffix()
 }
 
 // ---------------------------------------------------------------------------
-// Test: Pin boundary values: 0x0000, 0x0001, 0x1fff are all valid pinned subject-IDs.
+// Test: Pin boundary values: 0, 1, 8191 are all valid pinned subject-IDs.
 // ---------------------------------------------------------------------------
 void test_pinned_subject_id_boundary_values()
 {
@@ -172,13 +158,11 @@ void test_pinned_subject_id_boundary_values()
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK, e2e::sim_net_init_ex(net, cfg));
 
-    // Three pinned topics at the boundary values of the pinned range.
-    cy_publisher_t* const pub_min =
-      cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("e2e/sid/bound/min#0000"));
-    cy_publisher_t* const pub_one =
-      cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("e2e/sid/bound/one#0001"));
+    // Three pinned topics at the boundary values of the pinned range [0, 8191].
+    cy_publisher_t* const pub_min = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("e2e/sid/bound/min#0"));
+    cy_publisher_t* const pub_one = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("e2e/sid/bound/one#1"));
     cy_publisher_t* const pub_max =
-      cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("e2e/sid/bound/max#1fff"));
+      cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("e2e/sid/bound/max#8191"));
     TEST_ASSERT_NOT_NULL(pub_min);
     TEST_ASSERT_NOT_NULL(pub_one);
     TEST_ASSERT_NOT_NULL(pub_max);
@@ -324,8 +308,9 @@ void test_pinning_does_not_affect_identity()
 }
 
 // ---------------------------------------------------------------------------
-// Test: Bare pinned topics ('#1234') are valid and their identity is the pin value.
-// '#1234' and '#0123' are distinct topics.
+// Test: Prefixed pinned topics with different names are distinct topics.
+// 'pin_a#1234' and 'pin_b#123' have different hashes (rapidhash of the name prefix)
+// and different pinned subject-IDs.
 // ---------------------------------------------------------------------------
 void test_bare_pinned_topics_distinct_identity()
 {
@@ -333,25 +318,25 @@ void test_bare_pinned_topics_distinct_identity()
     TEST_ASSERT_EQUAL_INT(
       CY_OK, e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), UINT64_C(0xB005)));
 
-    cy_publisher_t* const pub_a = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("#1234"));
-    cy_publisher_t* const pub_b = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("#0123"));
+    cy_publisher_t* const pub_a = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("pin_a#1234"));
+    cy_publisher_t* const pub_b = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("pin_b#123"));
     TEST_ASSERT_NOT_NULL(pub_a);
     TEST_ASSERT_NOT_NULL(pub_b);
 
-    // Bare pins with different values must have different hashes (they are distinct topics).
+    // Different name prefixes produce different hashes (they are distinct topics).
     const std::uint64_t hash_a = cy_topic_hash(cy_publisher_topic(pub_a));
     const std::uint64_t hash_b = cy_topic_hash(cy_publisher_topic(pub_b));
     TEST_ASSERT_TRUE(hash_a != hash_b);
 
-    // For bare pins, hash equals the pin value directly.
-    TEST_ASSERT_EQUAL_UINT64(UINT64_C(0x1234), hash_a);
-    TEST_ASSERT_EQUAL_UINT64(UINT64_C(0x0123), hash_b);
+    // Hash is rapidhash of the stored name (the part before '#').
+    TEST_ASSERT_EQUAL_UINT64(rapidhash("pin_a", 5U), hash_a);
+    TEST_ASSERT_EQUAL_UINT64(rapidhash("pin_b", 5U), hash_b);
 
-    // Subscribe to each bare pin on node B and verify independent delivery.
+    // Subscribe to each topic on node B and verify independent delivery.
     arrival_capture_t  capture_a{};
     arrival_capture_t  capture_b{};
-    cy_future_t* const sub_a = make_sub(e2e::sim_net_cy(net, e2e::sim_node_b), "#1234", capture_a);
-    cy_future_t* const sub_b = make_sub(e2e::sim_net_cy(net, e2e::sim_node_b), "#0123", capture_b);
+    cy_future_t* const sub_a = make_sub(e2e::sim_net_cy(net, e2e::sim_node_b), "pin_a", capture_a);
+    cy_future_t* const sub_b = make_sub(e2e::sim_net_cy(net, e2e::sim_node_b), "pin_b", capture_b);
 
     cy_us_t now = 0;
     e2e::drive_for(net, now, converge_time, step_us);
@@ -370,21 +355,21 @@ void test_bare_pinned_topics_distinct_identity()
     TEST_ASSERT_TRUE(count_by_publisher(capture_a, 6030U) > 0U);
     TEST_ASSERT_TRUE(count_by_publisher(capture_b, 6031U) > 0U);
 
-    // Verify subject-IDs match pin values.
+    // Verify subject-IDs match pin values (decimal).
     const auto& caps  = e2e::sim_net_captures(net);
     const auto  sid_a = last_subject_id_for_hash(caps, hash_a);
     const auto  sid_b = last_subject_id_for_hash(caps, hash_b);
     TEST_ASSERT_TRUE(sid_a.has_value());
     TEST_ASSERT_TRUE(sid_b.has_value());
-    TEST_ASSERT_EQUAL_UINT32(0x1234U, *sid_a);
-    TEST_ASSERT_EQUAL_UINT32(0x0123U, *sid_b);
+    TEST_ASSERT_EQUAL_UINT32(1234U, *sid_a);
+    TEST_ASSERT_EQUAL_UINT32(123U, *sid_b);
 
     e2e::cleanup_case(net, now, {}, { sub_a, sub_b }, { pub_a, pub_b }, step_us, 100'000, 100'000U);
 }
 
 // ---------------------------------------------------------------------------
-// Test: Bare pin '#1234' is a different topic from prefixed pin 'foo#1234'.
-// They share the same subject-ID but have different hashes.
+// Test: Two prefixed pins sharing the same subject-ID are different topics.
+// 'bare#2748' and 'foo#2748' both pin to subject 2748 but have different hashes.
 // ---------------------------------------------------------------------------
 void test_bare_pin_differs_from_prefixed_pin()
 {
@@ -392,22 +377,23 @@ void test_bare_pin_differs_from_prefixed_pin()
     TEST_ASSERT_EQUAL_INT(
       CY_OK, e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), UINT64_C(0xB006)));
 
-    cy_publisher_t* const pub_bare     = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("#0abc"));
-    cy_publisher_t* const pub_prefixed = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("foo#0abc"));
+    cy_publisher_t* const pub_bare     = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("bare#2748"));
+    cy_publisher_t* const pub_prefixed = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("foo#2748"));
     TEST_ASSERT_NOT_NULL(pub_bare);
     TEST_ASSERT_NOT_NULL(pub_prefixed);
 
-    // Different hashes: bare pin uses 0x0ABC as hash; prefixed uses rapidhash("foo").
+    // Different hashes: rapidhash("bare") vs rapidhash("foo").
     const std::uint64_t hash_bare     = cy_topic_hash(cy_publisher_topic(pub_bare));
     const std::uint64_t hash_prefixed = cy_topic_hash(cy_publisher_topic(pub_prefixed));
     TEST_ASSERT_TRUE(hash_bare != hash_prefixed);
-    TEST_ASSERT_EQUAL_UINT64(UINT64_C(0x0ABC), hash_bare);
+    TEST_ASSERT_EQUAL_UINT64(rapidhash("bare", 4U), hash_bare);
+    TEST_ASSERT_EQUAL_UINT64(rapidhash("foo", 3U), hash_prefixed);
 
-    // Despite different hashes, both share subject-ID 0x0ABC (multi-tenant).
+    // Despite different hashes, both share subject-ID 2748 (multi-tenant).
     // Subscribe to each and verify independent delivery.
     arrival_capture_t  capture_bare{};
     arrival_capture_t  capture_prefixed{};
-    cy_future_t* const sub_bare     = make_sub(e2e::sim_net_cy(net, e2e::sim_node_b), "#0abc", capture_bare);
+    cy_future_t* const sub_bare     = make_sub(e2e::sim_net_cy(net, e2e::sim_node_b), "bare", capture_bare);
     cy_future_t* const sub_prefixed = make_sub(e2e::sim_net_cy(net, e2e::sim_node_b), "foo", capture_prefixed);
 
     cy_us_t now = 0;
@@ -433,6 +419,71 @@ void test_bare_pin_differs_from_prefixed_pin()
     e2e::cleanup_case(net, now, {}, { sub_bare, sub_prefixed }, { pub_bare, pub_prefixed }, step_us, 100'000, 100'000U);
 }
 
+// ---------------------------------------------------------------------------
+// Test: Multiple topics sharing a pinned subject-ID are routed correctly.
+// 'alpha#100' and 'beta#100' both pin to subject 100, but subscribers for
+// each topic receive only the messages from the matching publisher.
+// ---------------------------------------------------------------------------
+void test_topic_cohabitation_correct_routing()
+{
+    e2e::sim_net_t net{};
+    TEST_ASSERT_EQUAL_INT(
+      CY_OK, e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), UINT64_C(0xB007)));
+
+    // Node A publishes on "alpha#100" (pub_id=7001) and "beta#100" (pub_id=7002).
+    // Both are pinned to the same subject-ID 100.
+    cy_publisher_t* const pub_alpha = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("alpha#100"));
+    cy_publisher_t* const pub_beta  = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("beta#100"));
+    TEST_ASSERT_NOT_NULL(pub_alpha);
+    TEST_ASSERT_NOT_NULL(pub_beta);
+
+    // Verify the two topics are distinct (different hashes) but share the same pinned subject-ID.
+    const std::uint64_t hash_alpha = cy_topic_hash(cy_publisher_topic(pub_alpha));
+    const std::uint64_t hash_beta  = cy_topic_hash(cy_publisher_topic(pub_beta));
+    TEST_ASSERT_TRUE(hash_alpha != hash_beta);
+
+    // Node B subscribes to "alpha" and "beta" separately.
+    arrival_capture_t  capture_alpha{};
+    arrival_capture_t  capture_beta{};
+    cy_future_t* const sub_alpha = make_sub(e2e::sim_net_cy(net, e2e::sim_node_b), "alpha", capture_alpha);
+    cy_future_t* const sub_beta  = make_sub(e2e::sim_net_cy(net, e2e::sim_node_b), "beta", capture_beta);
+
+    // Drive the network to convergence.
+    cy_us_t now = 0;
+    e2e::drive_for(net, now, converge_time, step_us);
+
+    // Publish messages from both topics. Multiple rounds to ensure reliable delivery.
+    for (std::uint64_t seq = 1U; seq <= 8U; seq++) {
+        e2e::set_now(net, now);
+        publish_one(pub_alpha, 7001U, seq, now);
+        publish_one(pub_beta, 7002U, seq, now);
+        TEST_ASSERT_EQUAL_INT(CY_OK, e2e::drive_round(net, now, now));
+        now += 10'000;
+    }
+    e2e::drive_for(net, now, delivery_time, step_us);
+
+    // Verify: subscriber for "alpha" only gets messages from pub_id=7001.
+    TEST_ASSERT_EQUAL_size_t(0U, capture_alpha.malformed);
+    TEST_ASSERT_TRUE(count_by_publisher(capture_alpha, 7001U) > 0U);
+    TEST_ASSERT_EQUAL_size_t(0U, count_by_publisher(capture_alpha, 7002U));
+
+    // Verify: subscriber for "beta" only gets messages from pub_id=7002.
+    TEST_ASSERT_EQUAL_size_t(0U, capture_beta.malformed);
+    TEST_ASSERT_TRUE(count_by_publisher(capture_beta, 7002U) > 0U);
+    TEST_ASSERT_EQUAL_size_t(0U, count_by_publisher(capture_beta, 7001U));
+
+    // Verify on the wire both topics used subject-ID 100.
+    const auto& caps      = e2e::sim_net_captures(net);
+    const auto  sid_alpha = last_subject_id_for_hash(caps, hash_alpha);
+    const auto  sid_beta  = last_subject_id_for_hash(caps, hash_beta);
+    TEST_ASSERT_TRUE(sid_alpha.has_value());
+    TEST_ASSERT_TRUE(sid_beta.has_value());
+    TEST_ASSERT_EQUAL_UINT32(100U, *sid_alpha);
+    TEST_ASSERT_EQUAL_UINT32(100U, *sid_beta);
+
+    e2e::cleanup_case(net, now, {}, { sub_alpha, sub_beta }, { pub_alpha, pub_beta }, step_us, 100'000, 100'000U);
+}
+
 } // namespace
 
 extern "C" void setUp()
@@ -446,11 +497,12 @@ extern "C" void tearDown() { TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_live_c
 int main()
 {
     UNITY_BEGIN();
-    RUN_TEST(test_pinned_subject_id_matches_hex_suffix);
+    RUN_TEST(test_pinned_subject_id_matches_decimal_suffix);
     RUN_TEST(test_pinned_subject_id_boundary_values);
     RUN_TEST(test_auto_allocated_never_in_pinned_range);
     RUN_TEST(test_pinning_does_not_affect_identity);
     RUN_TEST(test_bare_pinned_topics_distinct_identity);
     RUN_TEST(test_bare_pin_differs_from_prefixed_pin);
+    RUN_TEST(test_topic_cohabitation_correct_routing);
     return UNITY_END();
 }

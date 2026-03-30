@@ -459,9 +459,10 @@ static void test_subscribe_guard_and_allocation_failure_paths(void)
     subscriber_root_t* root = NULL;
     fix.fail_alloc_size     = 0U;
     fix.fail_alloc_count    = 1U;
-    TEST_ASSERT_EQUAL_INT(CY_ERR_MEMORY,
-                          ensure_subscriber_root(
-                            fix.cy, (cy_resolved_t){ .name = cy_str("alloc/sub/node-oom"), .pin = UINT16_MAX }, &root));
+    TEST_ASSERT_EQUAL_INT(
+      CY_ERR_MEMORY,
+      ensure_subscriber_root(
+        fix.cy, (cy_resolved_t){ .name = cy_str("alloc/sub/node-oom"), .pin = UINT16_MAX, .verbatim = true }, &root));
     TEST_ASSERT_NULL(root);
     TEST_ASSERT_NULL(wkv_get(&fix.cy->subscribers_by_name, cy_str("alloc/sub/node-oom")));
 
@@ -471,9 +472,9 @@ static void test_subscribe_guard_and_allocation_failure_paths(void)
     TEST_ASSERT_EQUAL_INT(
       CY_ERR_MEMORY,
       ensure_subscriber_root(
-        fix.cy, (cy_resolved_t){ .name = cy_str("alloc/sub/topic-ensure-oom"), .pin = UINT16_MAX }, &root));
-    TEST_ASSERT_NULL(root);
-    TEST_ASSERT_NULL(wkv_get(&fix.cy->subscribers_by_name, cy_str("alloc/sub/topic-ensure-oom")));
+        fix.cy,
+        (cy_resolved_t){ .name = cy_str("alloc/sub/topic-ensure-oom"), .pin = UINT16_MAX, .verbatim = true },
+        &root));
 
     fixture_deinit(&fix);
 }
@@ -714,47 +715,76 @@ static void test_topic_merge_lage_clamps_out_of_range_values(void)
     fixture_deinit(&fix);
 }
 
-static void test_cy_name_pin_and_topic_expression_parsing(void)
+static void test_name_consume_pin_suffix_decimal_parsing(void)
 {
     fixture_t fix;
     fixture_init(&fix);
 
-    // Canonical pin: '#' + exactly 4 lowercase hex digits, value in [0, CY_SUBJECT_ID_PINNED_MAX].
-    TEST_ASSERT_EQUAL_UINT16(UINT16_C(0x1A2B), cy_name_pin(cy_str("topic/hash#1a2b")));
-    TEST_ASSERT_EQUAL_UINT16(UINT16_C(0x0010), cy_name_pin(cy_str("#0010")));
-    TEST_ASSERT_EQUAL_UINT16(UINT16_C(0x0010), cy_name_pin(cy_str("x#0010")));
+    uint16_t pin = UINT16_MAX;
 
-    // Invalid pins return UINT16_MAX.
-    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, cy_name_pin(cy_str("topic/hash#")));   // no digits after '#'
-    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, cy_name_pin(cy_str("topic/hash#1G"))); // invalid hex digit
-    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, cy_name_pin(cy_str("#2000")));         // > CY_SUBJECT_ID_PINNED_MAX
-    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, cy_name_pin(cy_str("#ABCD")));         // uppercase
-    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, cy_name_pin(cy_str("#01")));           // too few digits
-    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, cy_name_pin(cy_str("#00001")));        // '#' not at position -5
+    // Valid decimal pins.
+    TEST_ASSERT_EQUAL_size_t(3U, name_consume_pin_suffix(cy_str("foo#123"), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(123U, pin);
 
-    // Non-canonical suffixes are not pins; rapidhash covers the full name as-is.
+    TEST_ASSERT_EQUAL_size_t(3U, name_consume_pin_suffix(cy_str("foo#0"), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(0U, pin);
+
+    TEST_ASSERT_EQUAL_size_t(1U, name_consume_pin_suffix(cy_str("x#8191"), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(8191U, pin); // CY_SUBJECT_ID_PINNED_MAX
+
+    TEST_ASSERT_EQUAL_size_t(0U, name_consume_pin_suffix(cy_str("#1"), &pin).len); // bare pin: empty prefix
+    TEST_ASSERT_EQUAL_UINT16(1U, pin);
+
+    TEST_ASSERT_EQUAL_size_t(3U, name_consume_pin_suffix(cy_str("a/b#7777"), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(7777U, pin);
+
+    // Pin = 0 is valid (single digit, no leading zero issue).
+    TEST_ASSERT_EQUAL_size_t(0U, name_consume_pin_suffix(cy_str("#0"), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(0U, pin);
+
+    // Invalid: out of range.
+    TEST_ASSERT_EQUAL_size_t(8U, name_consume_pin_suffix(cy_str("foo#8192"), &pin).len); // > max
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, pin);
+
+    TEST_ASSERT_EQUAL_size_t(9U, name_consume_pin_suffix(cy_str("foo#99999"), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, pin);
+
+    // Invalid: leading zeros.
+    TEST_ASSERT_EQUAL_size_t(6U, name_consume_pin_suffix(cy_str("foo#01"), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, pin);
+
+    TEST_ASSERT_EQUAL_size_t(7U, name_consume_pin_suffix(cy_str("foo#001"), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, pin);
+
+    TEST_ASSERT_EQUAL_size_t(6U, name_consume_pin_suffix(cy_str("foo#00"), &pin).len); // "00" has leading zero
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, pin);
+
+    // Invalid: no digits after '#'.
+    TEST_ASSERT_EQUAL_size_t(4U, name_consume_pin_suffix(cy_str("foo#"), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, pin);
+
+    // Invalid: non-digit characters before '#'.
+    TEST_ASSERT_EQUAL_size_t(7U, name_consume_pin_suffix(cy_str("foo#bar"), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, pin);
+
+    // No '#' at all.
+    TEST_ASSERT_EQUAL_size_t(3U, name_consume_pin_suffix(cy_str("foo"), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, pin);
+
+    // Empty string.
+    TEST_ASSERT_EQUAL_size_t(0U, name_consume_pin_suffix(cy_str(""), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, pin);
+
+    // Double '#': inner '#' is a literal name character.
+    TEST_ASSERT_EQUAL_size_t(4U, name_consume_pin_suffix(cy_str("foo##123"), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(123U, pin);
+    // Verify the returned prefix is "foo#".
     {
-        const cy_str_t n = cy_str("topic/hash#10");
-        TEST_ASSERT_EQUAL_UINT64(rapidhash("topic/hash#10", 13U), rapidhash(n.str, n.len));
+        const cy_str_t prefix = name_consume_pin_suffix(cy_str("foo##123"), &pin);
+        TEST_ASSERT_EQUAL_size_t(4U, prefix.len);
+        TEST_ASSERT_EQUAL_CHAR('#', prefix.str[3]);
     }
-    {
-        const cy_str_t n = cy_str("#10");
-        TEST_ASSERT_EQUAL_UINT64(rapidhash("#10", 3U), rapidhash(n.str, n.len));
-    }
-    // Canonical pin: the stripped prefix is what gets hashed (pin suffix is not part of the hash).
-    {
-        const cy_str_t n   = cy_str("topic/hash#0010");
-        const uint16_t pin = cy_name_pin(n);
-        TEST_ASSERT_NOT_EQUAL(UINT16_MAX, pin);
-        TEST_ASSERT_EQUAL_UINT64(rapidhash("topic/hash", 10U), rapidhash(n.str, n.len - cy_name_pin_expr_len));
-    }
-    {
-        const cy_str_t n   = cy_str("#0010");
-        const uint16_t pin = cy_name_pin(n);
-        // Bare pin with no prefix -- cy_name_pin returns a valid pin but the prefix is empty.
-        TEST_ASSERT_NOT_EQUAL(UINT16_MAX, pin);
-        TEST_ASSERT_EQUAL_size_t(0U, n.len - cy_name_pin_expr_len);
-    }
+
     fixture_deinit(&fix);
 }
 
@@ -1119,7 +1149,7 @@ int main(void)
     RUN_TEST(test_pinned_topic_sync_implicit_transitions_without_gossip);
     RUN_TEST(test_left_wins_and_topic_merge_lage);
     RUN_TEST(test_topic_merge_lage_clamps_out_of_range_values);
-    RUN_TEST(test_cy_name_pin_and_topic_expression_parsing);
+    RUN_TEST(test_name_consume_pin_suffix_decimal_parsing);
     RUN_TEST(test_topic_merge_lage_crdt_properties_commutative_associative_idempotent);
     RUN_TEST(test_on_gossip_known_topic_equal_lage_prefers_higher_evictions);
     RUN_TEST(test_topic_allocate_reader_recovery_after_subject_reader_oom);

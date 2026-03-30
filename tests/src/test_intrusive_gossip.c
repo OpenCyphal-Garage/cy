@@ -646,6 +646,58 @@ static void test_on_scout_reports_async_error_on_unicast_failure(void)
     fixture_deinit(&fix);
 }
 
+static void test_gossip_wire_name_excludes_pin_expression(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    // Create a pinned topic. Pin=100 means evictions = UINT32_MAX - 100.
+    // The name stored in the topic is "gossip/wire/name" (no pin), hash computed from that name.
+    const char*       topic_name = "gossip/wire/name";
+    const uint64_t    hash       = rapidhash(topic_name, strlen(topic_name));
+    const uint32_t    evictions  = UINT32_MAX - 100U; // pinned to subject-ID 100
+    cy_topic_t* const topic      = fixture_make_explicit_topic(&fix, topic_name, hash, evictions);
+
+    TEST_ASSERT_TRUE(is_pinned(topic->evictions));
+
+    // Trigger a gossip send via gossip_event_urgent. Reset captures first.
+    fix.capture_count           = 0U;
+    fix.subject_send_count      = 0U;
+    topic->gossip_counter       = 0;
+    topic->gossip_event.user    = topic;
+    topic->gossip_event.handler = gossip_event_urgent;
+    gossip_event_urgent(&fix.cy->olga, &topic->gossip_event, 30 * MEGA);
+
+    // Verify at least one gossip frame was captured.
+    TEST_ASSERT_TRUE(fix.capture_count > 0U);
+
+    // Examine each captured gossip frame: the name in the payload must NOT contain '#' or pin digits.
+    for (size_t i = 0U; i < fix.capture_count; i++) {
+        const send_capture_t* const cap = &fix.capture[i];
+        TEST_ASSERT_EQUAL_UINT8(header_gossip, cap->type);
+        TEST_ASSERT_TRUE(cap->size >= HEADER_BYTES);
+
+        // Extract the name length from the header (byte 23 = HEADER_BYTES - 1).
+        const uint8_t name_len = cap->data[HEADER_BYTES - 1U];
+        TEST_ASSERT_TRUE(name_len > 0U);
+        TEST_ASSERT_TRUE(HEADER_BYTES + name_len <= cap->size);
+
+        // The name bytes start right after the header.
+        const unsigned char* const name_bytes = &cap->data[HEADER_BYTES];
+
+        // Verify no '#' character is present in the wire name.
+        for (uint8_t j = 0U; j < name_len; j++) {
+            TEST_ASSERT_NOT_EQUAL_CHAR('#', (char)name_bytes[j]);
+        }
+
+        // Verify the wire name matches the expected normalized name exactly.
+        TEST_ASSERT_EQUAL_UINT8(strlen(topic_name), name_len);
+        TEST_ASSERT_EQUAL_MEMORY(topic_name, name_bytes, name_len);
+    }
+
+    fixture_deinit(&fix);
+}
+
 void setUp(void) {}
 
 void tearDown(void) {}
@@ -667,5 +719,6 @@ int main(void)
     RUN_TEST(test_gossip_event_urgent_broadcasts_and_resets_counter);
     RUN_TEST(test_on_scout_responds_via_unicast_only);
     RUN_TEST(test_on_scout_reports_async_error_on_unicast_failure);
+    RUN_TEST(test_gossip_wire_name_excludes_pin_expression);
     return UNITY_END();
 }

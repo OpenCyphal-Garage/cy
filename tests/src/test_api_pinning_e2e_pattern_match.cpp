@@ -1,5 +1,5 @@
 // Verify that pinning a topic does not affect pattern matching.
-// Pinned topics (name#hex) must be discovered and delivered by pattern subscribers (*, >)
+// Pinned topics (name#decimal) must be discovered and delivered by pattern subscribers (*, >)
 // exactly like unpinned topics.
 
 #include <cy_platform.h>
@@ -103,7 +103,7 @@ void test_pinned_topic_matches_chevron_pattern()
     TEST_ASSERT_EQUAL_INT(
       CY_OK, e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), UINT64_C(0xA101)));
 
-    cy_publisher_t* const pub = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("e2e/pin/alpha#0100"));
+    cy_publisher_t* const pub = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("e2e/pin/alpha#100"));
     TEST_ASSERT_NOT_NULL(pub);
 
     arrival_capture_t  capture{};
@@ -142,7 +142,7 @@ void test_pinned_topic_matches_star_pattern()
     TEST_ASSERT_EQUAL_INT(
       CY_OK, e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), UINT64_C(0xA102)));
 
-    cy_publisher_t* const pub = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("e2e/pin/star/alpha#0300"));
+    cy_publisher_t* const pub = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("e2e/pin/star/alpha#300"));
     TEST_ASSERT_NOT_NULL(pub);
 
     arrival_capture_t  capture{};
@@ -188,8 +188,7 @@ void test_mixed_pinned_unpinned_all_match_same_pattern()
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK, e2e::sim_net_init_ex(net, cfg));
 
-    cy_publisher_t* const pub_a =
-      cy_advertise(e2e::sim_net_cy(net, publisher_node_a), cy_str("e2e/pin/mix/alpha#0100"));
+    cy_publisher_t* const pub_a = cy_advertise(e2e::sim_net_cy(net, publisher_node_a), cy_str("e2e/pin/mix/alpha#100"));
     cy_publisher_t* const pub_b = cy_advertise(e2e::sim_net_cy(net, publisher_node_b), cy_str("e2e/pin/mix/beta"));
     TEST_ASSERT_NOT_NULL(pub_a);
     TEST_ASSERT_NOT_NULL(pub_b);
@@ -240,8 +239,8 @@ void test_multinode_cross_pinned_pattern_delivery()
     constexpr std::uint32_t pub_id_1   = 5011U;
     constexpr std::uint32_t pub_id_2   = 5012U;
 
-    static constexpr const char* topic_0 = "e2e/pin/cross/a#0400";
-    static constexpr const char* topic_1 = "e2e/pin/cross/b#0500";
+    static constexpr const char* topic_0 = "e2e/pin/cross/a#400";
+    static constexpr const char* topic_1 = "e2e/pin/cross/b#500";
     static constexpr const char* topic_2 = "e2e/pin/cross/c";
     static constexpr const char* pattern = "e2e/pin/cross/>";
 
@@ -329,7 +328,7 @@ void test_pinned_topic_substitutions_correct()
     TEST_ASSERT_EQUAL_INT(
       CY_OK, e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), UINT64_C(0xA105)));
 
-    cy_publisher_t* const pub = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("e2e/pin/subst/alpha#0100"));
+    cy_publisher_t* const pub = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("e2e/pin/subst/alpha#100"));
     TEST_ASSERT_NOT_NULL(pub);
 
     arrival_capture_t  capture{};
@@ -383,7 +382,7 @@ void test_multiple_patterns_selective_match_with_pinning()
     TEST_ASSERT_EQUAL_INT(CY_OK, e2e::sim_net_init_ex(net, cfg));
 
     // Publisher node advertises one pinned and one unpinned topic under different prefixes.
-    cy_publisher_t* const pub_a = cy_advertise(e2e::sim_net_cy(net, publisher_node), cy_str("e2e/pin/sel/a/x#0600"));
+    cy_publisher_t* const pub_a = cy_advertise(e2e::sim_net_cy(net, publisher_node), cy_str("e2e/pin/sel/a/x#600"));
     cy_publisher_t* const pub_b = cy_advertise(e2e::sim_net_cy(net, publisher_node), cy_str("e2e/pin/sel/b/y"));
     TEST_ASSERT_NOT_NULL(pub_a);
     TEST_ASSERT_NOT_NULL(pub_b);

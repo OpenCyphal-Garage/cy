@@ -994,8 +994,7 @@ struct cy_topic_t
     // from the subject-ID index tree!
     uint32_t evictions;
 
-    // hash = rapidhash(stripped_topic_name). The pin suffix (e.g., "#1234") is stripped before hashing.
-    // For bare pin names (e.g., "#04d2" with no prefix), the pin value is used directly as the hash.
+    // hash = rapidhash(resolved_name). The pin expression (e.g., "#1234") is stripped during name resolution.
     // Pinning is encoded in evictions, not in the hash. See is_pinned().
     uint64_t hash;
 
@@ -2121,11 +2120,8 @@ cy_publisher_t* cy_advertise_client(cy_t* const cy, const cy_str_t name, const s
     }
     char                name_buf[CY_TOPIC_NAME_MAX];
     const cy_resolved_t resolved = cy_resolve(cy, name, sizeof(name_buf), name_buf);
-    if (resolved.name.len > CY_TOPIC_NAME_MAX) {
-        return NULL;
-    }
-    if (!resolved.verbatim) {
-        return NULL; // Wildcard publishers are not defined.
+    if ((resolved.name.len > CY_TOPIC_NAME_MAX) || !resolved.verbatim) {
+        return NULL; // publishers require verbatim names only
     }
     cy_publisher_t* const pub = mem_alloc_zero(cy, sizeof(*pub));
     if (pub == NULL) {
@@ -3685,9 +3681,7 @@ static subscriber_t* subscribe(cy_t* const cy, const cy_str_t name, const subscr
     if (resolved.name.len > CY_TOPIC_NAME_MAX) {
         return NULL;
     }
-    if ((resolved.pin != UINT16_MAX) && !resolved.verbatim) {
-        return NULL; // Pin expression in a pattern subscription makes no sense.
-    }
+    assert((resolved.pin == UINT16_MAX) || resolved.verbatim); // enforced during name resolution
     name_buf[resolved.name.len] = 0; // this is not needed for the logic but helps with tracing (if enabled)
     subscriber_t* const sub     = future_new(cy, &subscriber_vtable, sizeof(subscriber_t));
     if (sub == NULL) {
@@ -4897,31 +4891,42 @@ static bool is_valid_char(const char c) { return (c >= 33) && (c <= 126); }
 
 // Parses and strips the valid pin expression at the end, if any. Returns the shortened string.
 // out_pin is set to the pin value, or UINT16_MAX if no valid pin expression is found.
-// Example: `foo#123` => `foo`, out_pin=123
+// Example: `foo#123` => `foo`, out_pin=123; `foo#0` => `foo`, out_pin=0; `foo#01` => unchanged (leading zero).
 static cy_str_t name_consume_pin_suffix(const cy_str_t name, uint16_t* const out_pin)
 {
-    *out_pin                 = UINT16_MAX;
-    const unsigned char* ch  = (const unsigned char*)(name.str + name.len);
-    uint16_t             pin = 0;
-    for (size_t i = 0; i < name.len; i++) {
-        ch--;
-        if ((*ch == cy_name_pin_prefix) && (i > 0)) {
-            *out_pin = pin;
-            return (cy_str_t){ .len = name.len - i - 1, .str = name.str };
-        }
-        if ((*ch == '0') && (pin == 0)) {
-            break; // Leading zeros are currently not allowed.
-        }
-        if ((*ch >= '0') && (*ch <= '9')) {
-            pin = (uint16_t)((unsigned)(pin << 4U) | (unsigned)(*ch - '0'));
-        } else {
+    *out_pin = UINT16_MAX;
+    // Scan right-to-left: find '#' preceded only by decimal digits.
+    size_t hash_pos = name.len;
+    for (size_t i = name.len; i > 0; i--) {
+        const char ch = name.str[i - 1];
+        if (ch == cy_name_pin_prefix) {
+            hash_pos = i - 1;
             break;
         }
-        if ((pin > CY_SUBJECT_ID_PINNED_MAX)) {
-            break;
+        if ((ch < '0') || (ch > '9')) {
+            return name;
         }
     }
-    return name;
+    if (hash_pos >= name.len) {
+        return name; // No '#' found.
+    }
+    const size_t n_digits = name.len - hash_pos - 1;
+    if (n_digits == 0) {
+        return name; // Bare '#' with no digits is not a pin expression.
+    }
+    if ((n_digits > 1) && (name.str[hash_pos + 1] == '0')) {
+        return name; // Leading zeros are not allowed (e.g., #01, #00).
+    }
+    // Parse decimal left-to-right.
+    uint16_t pin = 0;
+    for (size_t i = hash_pos + 1; i < name.len; i++) {
+        pin = (uint16_t)((pin * 10U) + (unsigned)(name.str[i] - '0'));
+        if (pin > CY_SUBJECT_ID_PINNED_MAX) {
+            return name; // Value exceeds the valid subject-ID range.
+        }
+    }
+    *out_pin = pin;
+    return (cy_str_t){ .len = hash_pos, .str = name.str };
 }
 
 // Normalizes the name and copies it into a heap-allocated storage. On OOM, the original is left unchanged.
@@ -5026,9 +5031,11 @@ cy_str_t cy_name_join(const cy_str_t left, const cy_str_t right, const size_t de
     }
     assert(len < dest_size);
     if (len > 0) {
+        if ((len + 1) > dest_size) {
+            return str_invalid; // No room for the separator.
+        }
         dest[len++] = cy_name_sep;
     }
-    assert(len <= dest_size);
     const size_t right_len = name_normalize(right.len, right.str, dest_size - len, &dest[len]).len;
     if (right_len > (dest_size - len)) {
         return str_invalid;
@@ -5079,9 +5086,11 @@ cy_resolved_t cy_name_resolve(const cy_str_t name,
     if (res.len > CY_TOPIC_NAME_MAX) {
         return (cy_resolved_t){ .name = str_invalid, .pin = UINT16_MAX };
     }
-    return (cy_resolved_t){
-        .name     = res,
-        .pin      = pin,
-        .verbatim = name_is_verbatim(res),
-    };
+    // Pinned topic names cannot be patterns.
+    const bool pinned   = pin <= CY_SUBJECT_ID_PINNED_MAX;
+    const bool verbatim = name_is_verbatim(res);
+    if (!verbatim && pinned) {
+        return (cy_resolved_t){ .name = str_invalid, .pin = UINT16_MAX };
+    }
+    return (cy_resolved_t){ .name = res, .pin = pin, .verbatim = verbatim };
 }
