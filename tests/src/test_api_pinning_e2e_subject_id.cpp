@@ -213,8 +213,8 @@ void test_auto_allocated_never_in_pinned_range()
         TEST_ASSERT_TRUE(*sid > CY_SUBJECT_ID_PINNED_MAX);
     }
 
-    std::vector<cy_future_t*>    sub_vec(subs.begin(), subs.end());
-    std::vector<cy_publisher_t*> pub_vec(pubs.begin(), pubs.end());
+    const std::vector<cy_future_t*>    sub_vec(subs.begin(), subs.end());
+    const std::vector<cy_publisher_t*> pub_vec(pubs.begin(), pubs.end());
     e2e::cleanup_case(net, now, {}, sub_vec, pub_vec, step_us, 100'000, 100'000U);
 }
 

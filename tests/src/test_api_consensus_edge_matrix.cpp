@@ -1,4 +1,5 @@
 #include <cy_platform.h>
+#include <rapidhash.h>
 #include <unity.h>
 #include "e2e_faults.hpp"
 #include "e2e_sim_net.hpp"
@@ -9,6 +10,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 namespace {
@@ -17,6 +19,8 @@ constexpr cy_us_t      step_us             = 1'000;
 constexpr cy_us_t      publish_deadline_us = 200'000;
 constexpr cy_us_t      expiry_timeout_us   = 600'000'000;
 constexpr std::uint8_t header_gossip       = 8U;
+constexpr const char*  colliding_topic_a   = "e2e/consensus/collide/a_0";
+constexpr const char*  colliding_topic_b   = "e2e/consensus/collide/b_19583";
 
 using e2e::arrival_capture_t;
 using e2e::count_by_publisher;
@@ -171,9 +175,9 @@ void test_api_consensus_edge_colliding_topics_discover_and_deliver_with_faults()
     constexpr std::uint32_t pub_id_a = 4201U;
     constexpr std::uint32_t pub_id_b = 4202U;
 
-    static constexpr const char* topic_a = "e2e/consensus/collide/a_0";
-    static constexpr const char* topic_b = "e2e/consensus/collide/b_19583";
-    static constexpr const char* pattern = "e2e/consensus/collide/>";
+    constexpr const char* topic_a = colliding_topic_a;
+    constexpr const char* topic_b = colliding_topic_b;
+    constexpr const char* pattern = "e2e/consensus/collide/>";
 
     e2e::fault_plan_t faults{};
     e2e::fault_plan_add_delay(
@@ -387,6 +391,13 @@ void test_api_consensus_edge_implicit_topic_expiry_large_time_jump_with_ordered_
     cleanup_case(net, now, { sub }, {});
 }
 
+void test_colliding_topics_selftest()
+{
+    constexpr auto modulus = static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit);
+    TEST_ASSERT_EQUAL_UINT64(rapidhash(colliding_topic_a, strlen(colliding_topic_a)) % modulus,
+                             rapidhash(colliding_topic_b, strlen(colliding_topic_b)) % modulus);
+}
+
 } // namespace
 
 extern "C" void setUp()
@@ -400,6 +411,7 @@ extern "C" void tearDown() { TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_live_c
 int main()
 {
     UNITY_BEGIN();
+    RUN_TEST(test_colliding_topics_selftest);
     RUN_TEST(test_api_consensus_edge_partition_heal_eventual_bidirectional_delivery);
     RUN_TEST(test_api_consensus_edge_colliding_topics_discover_and_deliver_with_faults);
     RUN_TEST(test_api_consensus_edge_implicit_topics_do_not_keep_each_other_alive);

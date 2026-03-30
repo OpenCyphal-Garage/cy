@@ -866,6 +866,15 @@ void test_api_pubsub_e2e_d12_receiver_restart_rejoin_during_migration()
     TEST_ASSERT_TRUE(res.success_futures > 0U);
 }
 
+void test_colliding_topics_selftest()
+{
+    constexpr auto modulus = static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit);
+    const auto     sid_0   = rapidhash(colliding_topics.at(0), strlen(colliding_topics.at(0))) % modulus;
+    for (std::size_t i = 1U; i < colliding_topics.size(); i++) {
+        TEST_ASSERT_EQUAL_UINT64(sid_0, rapidhash(colliding_topics.at(i), strlen(colliding_topics.at(i))) % modulus);
+    }
+}
+
 } // namespace
 
 extern "C" void setUp()
@@ -879,6 +888,7 @@ extern "C" void tearDown() { TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_live_c
 int main()
 {
     UNITY_BEGIN();
+    RUN_TEST(test_colliding_topics_selftest);
     RUN_TEST(test_api_pubsub_e2e_d01_collision_introduced_while_idle_convergence_check);
     RUN_TEST(test_api_pubsub_e2e_d02_collision_during_live_reliable_stream_no_faults);
     RUN_TEST(test_api_pubsub_e2e_d03_d02_plus_transient_data_loss);

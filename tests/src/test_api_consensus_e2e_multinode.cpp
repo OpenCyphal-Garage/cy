@@ -1,4 +1,5 @@
 #include <cy_platform.h>
+#include <rapidhash.h>
 #include <unity.h>
 #include "e2e_faults.hpp"
 #include "e2e_sim_net.hpp"
@@ -10,6 +11,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <optional>
 #include <set>
 #include <string>
@@ -877,6 +879,15 @@ void test_api_consensus_e2e_m10_deterministic_seed_replay_identical_transcript()
     }
 }
 
+void test_colliding_topics_selftest()
+{
+    constexpr auto modulus = static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit);
+    const auto     sid_0   = rapidhash(colliding_topics.at(0), strlen(colliding_topics.at(0))) % modulus;
+    for (std::size_t i = 1U; i < colliding_topics.size(); i++) {
+        TEST_ASSERT_EQUAL_UINT64(sid_0, rapidhash(colliding_topics.at(i), strlen(colliding_topics.at(i))) % modulus);
+    }
+}
+
 } // namespace
 
 extern "C" void setUp()
@@ -890,6 +901,7 @@ extern "C" void tearDown() { TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_live_c
 int main()
 {
     UNITY_BEGIN();
+    RUN_TEST(test_colliding_topics_selftest);
     RUN_TEST(test_api_consensus_e2e_m01_five_node_baseline_convergence);
     RUN_TEST(test_api_consensus_e2e_m02_split_partition_heal_eventual_delivery);
     RUN_TEST(test_api_consensus_e2e_m03_bridge_node_isolation_then_restore);

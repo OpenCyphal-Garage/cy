@@ -652,7 +652,7 @@ extern const char cy_name_pin_prefix; ///< `#` -- followed by decimal digits spe
 
 /// Joins two (potentially empty) names with cy_name_sep, normalizing both parts, such that the result is
 /// a normalized name. Either part may be empty, in which case it behaves like normalization of the other part.
-/// The output string length may exceed CY_TOPIC_SIZE_MAX if allowed by dest_size (allows for the pinning suffix).
+/// The output string length may exceed CY_TOPIC_NAME_MAX if allowed by dest_size (allows for the pinning suffix).
 /// On failure, the output string has length SIZE_MAX and NULL data pointer.
 /// The destination is not NUL-terminated.
 cy_str_t cy_name_join(const cy_str_t left, const cy_str_t right, const size_t dest_size, char* const dest);
