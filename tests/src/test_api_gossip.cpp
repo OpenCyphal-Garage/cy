@@ -1,6 +1,7 @@
 #include <cy_platform.h>
 #include <unity.h>
 #include "api_mock_platform_utils.hpp"
+#include "gossip_test_utils.hpp"
 #include "guarded_heap.h"
 #include "helpers.h"
 #include "message.h"
@@ -50,21 +51,6 @@ const test_platform_t* platform_from_const(const cy_platform_t* const platform)
     return api_test::platform_from_const<test_platform_t>(platform);
 }
 
-std::size_t flatten_fragments(const cy_bytes_t message, unsigned char* const out, const std::size_t out_size)
-{
-    std::size_t       copied = 0U;
-    const cy_bytes_t* frag   = &message;
-    while ((frag != nullptr) && (copied < out_size)) {
-        if ((frag->size > 0U) && (frag->data != nullptr)) {
-            const std::size_t n = ((out_size - copied) < frag->size) ? (out_size - copied) : frag->size;
-            std::memcpy(out + copied, frag->data, n);
-            copied += n;
-        }
-        frag = frag->next;
-    }
-    return copied;
-}
-
 void capture_send(test_platform_t* const self,
                   const bool             unicast,
                   const std::uint32_t    subject_id,
@@ -79,7 +65,7 @@ void capture_send(test_platform_t* const self,
     out.unicast         = unicast;
     out.subject_id      = subject_id;
     out.lane_id         = lane_id;
-    out.size            = flatten_fragments(message, out.data.data(), out.data.size());
+    out.size            = gossip_test::flatten_fragments(message, out.data.data(), out.data.size());
 }
 
 extern "C" cy_subject_writer_t* platform_subject_writer_new(cy_platform_t* const platform,

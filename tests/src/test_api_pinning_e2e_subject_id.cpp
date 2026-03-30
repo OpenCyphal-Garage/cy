@@ -29,43 +29,9 @@ constexpr cy_us_t publish_deadline = 200'000;
 constexpr cy_us_t converge_time    = 800'000;
 constexpr cy_us_t delivery_time    = 400'000;
 
-struct arrival_sample_t final
-{
-    std::uint32_t publisher_id{ 0U };
-    std::uint64_t sequence{ 0U };
-    std::uint64_t topic_hash{ 0U };
-};
-
-struct arrival_capture_t final
-{
-    std::vector<arrival_sample_t> samples{};
-    std::size_t                   malformed{ 0U };
-};
-
-extern "C" void on_arrival_capture(cy_future_t* const sub)
-{
-    const cy_arrival_t arrival = cy_arrival_move(sub);
-    if (arrival.message.content == nullptr) {
-        return;
-    }
-    auto* const capture = static_cast<arrival_capture_t*>(cy_future_context(sub).ptr[0]);
-    TEST_ASSERT_NOT_NULL(capture);
-
-    std::array<unsigned char, 32> bytes{};
-    const std::size_t             size = cy_message_read(arrival.message.content, 0U, bytes.size(), bytes.data());
-    e2e::app_payload_t            payload{};
-    if (!e2e::app_payload_unpack(bytes.data(), size, payload)) {
-        capture->malformed++;
-        cy_message_refcount_dec(arrival.message.content);
-        return;
-    }
-    capture->samples.push_back(arrival_sample_t{
-      .publisher_id = payload.publisher_id,
-      .sequence     = payload.sequence,
-      .topic_hash   = arrival.breadcrumb.topic_hash,
-    });
-    cy_message_refcount_dec(arrival.message.content);
-}
+using e2e::arrival_capture_t;
+using e2e::count_by_publisher;
+using e2e::on_arrival_capture;
 
 void publish_one(cy_publisher_t* const pub,
                  const std::uint32_t   publisher_id,
@@ -75,12 +41,6 @@ void publish_one(cy_publisher_t* const pub,
     const auto       payload = e2e::app_payload_pack(publisher_id, seq);
     const cy_bytes_t msg     = { .size = payload.size(), .data = payload.data(), .next = nullptr };
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_publish(pub, now + publish_deadline, msg));
-}
-
-std::size_t count_by_publisher(const arrival_capture_t& capture, const std::uint32_t publisher_id)
-{
-    return static_cast<std::size_t>(std::ranges::count_if(
-      capture.samples, [publisher_id](const arrival_sample_t& s) { return s.publisher_id == publisher_id; }));
 }
 
 // Find the last observed subject-ID for a given topic hash among message frames (header types 0 and 1).
@@ -137,7 +97,7 @@ void test_pinned_subject_id_matches_decimal_suffix()
 
     const auto sid = last_subject_id_for_hash(e2e::sim_net_captures(net), hash);
     TEST_ASSERT_TRUE(sid.has_value());
-    TEST_ASSERT_EQUAL_UINT32(0x1234U, *sid);
+    TEST_ASSERT_EQUAL_UINT32(1234U, *sid);
 
     // Verify delivery worked.
     TEST_ASSERT_EQUAL_size_t(0U, capture.malformed);

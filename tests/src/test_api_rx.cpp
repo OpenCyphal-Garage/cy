@@ -149,7 +149,7 @@ extern "C" void platform_on_async_error(cy_t* const         cy,
     TEST_FAIL_MESSAGE("Unexpected async error callback invocation");
 }
 
-extern "C" void on_arrival_capture(cy_future_t* const sub)
+extern "C" void on_arrival_capture_rx(cy_future_t* const sub)
 {
     const cy_arrival_t arrival = cy_arrival_move(sub);
     if (arrival.message.content == nullptr) {
@@ -467,7 +467,7 @@ void test_api_inline_msg_unicast_skips_subject_consistency_check()
     cy_user_context_t context = CY_USER_CONTEXT_EMPTY;
     context.ptr[0]            = &capture;
     cy_future_context_set(sub, context);
-    cy_future_callback_set(sub, on_arrival_capture);
+    cy_future_callback_set(sub, on_arrival_capture_rx);
 
     const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("rx/inline/unicast/consistency"));
     TEST_ASSERT_NOT_NULL(topic);
@@ -539,7 +539,7 @@ void test_api_reliable_duplicate_acked_once_to_application()
     cy_user_context_t context = CY_USER_CONTEXT_EMPTY;
     context.ptr[0]            = &capture;
     cy_future_context_set(sub, context);
-    cy_future_callback_set(sub, on_arrival_capture);
+    cy_future_callback_set(sub, on_arrival_capture_rx);
 
     const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("rx/dup"));
     TEST_ASSERT_NOT_NULL(topic);
@@ -574,7 +574,7 @@ void test_api_ordered_subscriber_timeout_flush()
     cy_user_context_t context = CY_USER_CONTEXT_EMPTY;
     context.ptr[0]            = &capture;
     cy_future_context_set(sub, context);
-    cy_future_callback_set(sub, on_arrival_capture);
+    cy_future_callback_set(sub, on_arrival_capture_rx);
 
     const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("rx/ord"));
     TEST_ASSERT_NOT_NULL(topic);

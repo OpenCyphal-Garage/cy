@@ -1,5 +1,6 @@
 #include <cy_platform.h>
 #include <unity.h>
+#include "gossip_test_utils.hpp"
 #include "guarded_heap.h"
 #include "helpers.h"
 #include "message.h"
@@ -87,20 +88,7 @@ const sim_node_t* node_from_const(const cy_platform_t* const platform)
     return reinterpret_cast<const sim_node_t*>(platform); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
 }
 
-std::size_t flatten_fragments(const cy_bytes_t message, unsigned char* const out, const std::size_t out_size)
-{
-    std::size_t       copied = 0U;
-    const cy_bytes_t* frag   = &message;
-    while ((frag != nullptr) && (copied < out_size)) {
-        if ((frag->size > 0U) && (frag->data != nullptr)) {
-            const std::size_t n = ((out_size - copied) < frag->size) ? (out_size - copied) : frag->size;
-            std::memcpy(out + copied, frag->data, n);
-            copied += n;
-        }
-        frag = frag->next;
-    }
-    return copied;
-}
+using gossip_test::flatten_fragments;
 
 std::uint64_t read_u64(const unsigned char* const data, const std::size_t offset)
 {

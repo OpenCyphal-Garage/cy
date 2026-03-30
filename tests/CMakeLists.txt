@@ -235,3 +235,7 @@ cy_gen_test_arch_matrix(test_api_pinning_e2e_pattern_match 11 "CY_CONFIG_TRACE=1
         src/test_api_pinning_e2e_pattern_match.cpp
         ${cy_api_e2e_common_sources}
 )
+cy_gen_test_arch_matrix(test_api_pinning_e2e_subject_id 11 "CY_CONFIG_TRACE=1"
+        src/test_api_pinning_e2e_subject_id.cpp
+        ${cy_api_e2e_common_sources}
+)

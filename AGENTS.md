@@ -14,6 +14,8 @@ When working with the CI, be aware that commits that contain `#yolo` run only th
 
 Do NOT start another build while one is still in progress. Building the full test suite with static analysis enabled may take about half an hour, wait for it to complete before starting another build. Parallelization within one build session is encouraged, use `-j$(nproc)`. You are NOT allowed to start another build UNLESS you have ascertained that ALL earlier build sessions have completed or have been explicitly terminated.
 
+When implementing nontrivial changes or refactoring, always run the full test suite with static analysis enabled afterward.
+
 ## Project structure
 
 - `cy/`: the library itself, which is transport-agnostic and platform-agnostic.

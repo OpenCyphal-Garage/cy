@@ -2,6 +2,7 @@
 #include "message.h"
 #include <array>
 #include <cassert>
+#include <cstdint>
 #include <unity.h>
 
 namespace e2e {
@@ -75,6 +76,31 @@ void assert_node_heap_clean(const sim_net_t& net, const std::size_t node_index)
 }
 
 } // namespace
+
+extern "C" void on_arrival_capture(cy_future_t* const sub)
+{
+    const cy_arrival_t arrival = cy_arrival_move(sub);
+    if (arrival.message.content == nullptr) {
+        return;
+    }
+    auto* const capture = static_cast<arrival_capture_t*>(cy_future_context(sub).ptr[0]);
+    TEST_ASSERT_NOT_NULL(capture);
+
+    std::array<unsigned char, 32> bytes{};
+    const std::size_t             size = cy_message_read(arrival.message.content, 0U, bytes.size(), bytes.data());
+    app_payload_t                 payload{};
+    if (!app_payload_unpack(bytes.data(), size, payload)) {
+        capture->malformed++;
+        cy_message_refcount_dec(arrival.message.content);
+        return;
+    }
+    capture->samples.push_back(arrival_sample_t{
+      .publisher_id = payload.publisher_id,
+      .sequence     = payload.sequence,
+      .topic_hash   = arrival.breadcrumb.topic_hash,
+    });
+    cy_message_refcount_dec(arrival.message.content);
+}
 
 std::array<unsigned char, 12> app_payload_pack(const std::uint32_t publisher_id, const std::uint64_t sequence)
 {

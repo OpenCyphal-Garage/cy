@@ -5,11 +5,9 @@
 #include "e2e_scenario_utils.hpp"
 #include "e2e_test_utils.hpp"
 #include "message.h"
-#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <ranges>
 #include <vector>
 
 namespace {
@@ -18,41 +16,9 @@ constexpr cy_us_t step_us                    = 1'000;
 constexpr cy_us_t publish_deadline_us        = 250'000;
 constexpr cy_us_t topic_discovery_timeout_us = 8'000'000;
 
-struct arrival_sample_t final
-{
-    std::uint32_t publisher_id{ 0U };
-    std::uint64_t sequence{ 0U };
-};
-
-struct arrival_capture_t final
-{
-    std::vector<arrival_sample_t> samples{};
-    std::size_t                   malformed{ 0U };
-};
-
-extern "C" void on_arrival_capture(cy_future_t* const sub)
-{
-    const cy_arrival_t arrival = cy_arrival_move(sub);
-    if (arrival.message.content == nullptr) {
-        return;
-    }
-
-    auto* const capture = static_cast<arrival_capture_t*>(cy_future_context(sub).ptr[0]);
-    TEST_ASSERT_NOT_NULL(capture);
-
-    std::array<unsigned char, 32> bytes{};
-    const std::size_t             size = cy_message_read(arrival.message.content, 0U, bytes.size(), bytes.data());
-
-    e2e::app_payload_t payload{};
-    if (!e2e::app_payload_unpack(bytes.data(), size, payload)) {
-        capture->malformed++;
-        cy_message_refcount_dec(arrival.message.content);
-        return;
-    }
-
-    capture->samples.push_back(arrival_sample_t{ .publisher_id = payload.publisher_id, .sequence = payload.sequence });
-    cy_message_refcount_dec(arrival.message.content);
-}
+using e2e::arrival_capture_t;
+using e2e::count_by_publisher;
+using e2e::on_arrival_capture;
 
 void cleanup_case(e2e::sim_net_t&                     net,
                   cy_us_t&                            now,
@@ -91,13 +57,6 @@ bool wait_until_topics_known(e2e::sim_net_t& net,
         now += step_us;
     }
     return false;
-}
-
-std::size_t count_by_publisher(const arrival_capture_t& capture, const std::uint32_t publisher_id)
-{
-    const auto count = std::ranges::count_if(
-      capture.samples, [publisher_id](const arrival_sample_t& sample) { return sample.publisher_id == publisher_id; });
-    return static_cast<std::size_t>(count);
 }
 
 // Pre-computed colliding topic name pairs: for each seed index, two topics whose rapidhash values

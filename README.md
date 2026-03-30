@@ -382,8 +382,7 @@ A topic name may not be empty, therefore `#1234` is invalid because the part bef
 
 Cyphal v1.1 is wire-compatible with Cyphal/CAN v1.0.
 
-To join a Cyphal/CAN v1.0 subject, use pinned topics like `can_temp#1234`,
-where `1234` is the desired subject-ID. The name prefix before `#` is required and identifies the topic.
+To join a Cyphal/CAN v1.0 subject, use pinned topics like `1234#1234`, where 1234 is the desired subject-ID.
 
 Cyphal v1.1 has no RPC in the same way as Cyphal/CAN v1.0 does; instead, it uses pub/sub for everything, including
 request/response interactions. Thus, to use RPC in a legacy CAN network, a low-level CAN transport access is required.

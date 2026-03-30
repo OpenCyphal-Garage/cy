@@ -221,7 +221,7 @@ void destroy_all_handles(e2e::sim_net_t& net, handles_t& handles, const std::siz
     }
 }
 
-extern "C" void on_arrival_capture(cy_future_t* const sub)
+extern "C" void on_arrival_capture_ordered(cy_future_t* const sub)
 {
     const cy_arrival_t arrival = cy_arrival_move(sub);
     if (arrival.message.content == nullptr) {
@@ -291,7 +291,7 @@ void create_topic_handles(e2e::sim_net_t&   net,
     cy_user_context_t user_ctx = CY_USER_CONTEXT_EMPTY;
     user_ctx.ptr[0]            = &ctx;
     cy_future_context_set(sub, user_ctx);
-    cy_future_callback_set(sub, on_arrival_capture);
+    cy_future_callback_set(sub, on_arrival_capture_ordered);
 }
 
 std::optional<std::uint64_t> publish_best_effort(handles_t&        handles,
