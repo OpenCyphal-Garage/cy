@@ -818,6 +818,192 @@ void test_name_resolve_pin_absolute_all_redundant_seps()
 }
 
 // =====================================================================================================================
+//                                 cy_name_resolve -- docstring negative examples
+// =====================================================================================================================
+
+void test_name_resolve_rejects_space_and_nonprintable()
+{
+    // Docstring: `foo bar\nbaz` -- spaces and non-printable characters are not allowed.
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    cy_resolved_t                           r{};
+
+    const std::array<char, 12> with_space = { 'f', 'o', 'o', ' ', 'b', 'a', 'r', '\n', 'b', 'a', 'z', '\0' };
+    r = cy_name_resolve(cy_str(with_space.data()), cy_str(""), cy_str(""), buf.size(), buf.data());
+    TEST_ASSERT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, r.name.len);
+}
+
+void test_name_resolve_rejects_pattern_with_pin()
+{
+    // Docstring: `foo/*/bar#123` -- patterns cannot be pinned.
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    cy_resolved_t                           r{};
+
+    r = cy_name_resolve(cy_str("foo/*/bar#123"), cy_str(""), cy_str(""), buf.size(), buf.data());
+    TEST_ASSERT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, r.name.len);
+
+    // Also with '>' wildcard.
+    r = cy_name_resolve(cy_str("foo/>#123"), cy_str(""), cy_str(""), buf.size(), buf.data());
+    TEST_ASSERT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, r.name.len);
+
+    // Namespace-derived pattern + pin on the name is also invalid.
+    r = cy_name_resolve(cy_str("*#100"), cy_str(""), cy_str(""), buf.size(), buf.data());
+    TEST_ASSERT_NULL(r.name.str);
+}
+
+void test_name_resolve_rejects_name_exceeding_max_length()
+{
+    // Docstring: (long string) -- final name cannot exceed CY_TOPIC_NAME_MAX.
+    std::array<char, CY_TOPIC_NAME_MAX + 100> buf{};
+    std::array<char, CY_TOPIC_NAME_MAX + 1>   long_name{};
+    long_name.fill('a');
+    const cy_str_t      name = { .len = long_name.size(), .str = long_name.data() };
+    const cy_resolved_t r    = cy_name_resolve(name, cy_str(""), cy_str(""), buf.size(), buf.data());
+    TEST_ASSERT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, r.name.len);
+}
+
+// =====================================================================================================================
+//                              cy_name_resolve -- additional branch coverage
+// =====================================================================================================================
+
+void test_name_resolve_pin_single_digit_one()
+{
+    // Single-digit pin: no leading zero concern.
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    const cy_resolved_t r = cy_name_resolve(cy_str("foo#1"), cy_str(""), cy_str(""), buf.size(), buf.data());
+    TEST_ASSERT_NOT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_STRING_LEN("foo", r.name.str, r.name.len);
+    TEST_ASSERT_EQUAL_UINT16(1, r.pin);
+    TEST_ASSERT_TRUE(r.verbatim);
+}
+
+void test_name_resolve_pin_multidigit_no_leading_zero()
+{
+    // 4-digit pin at exact max.
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    const cy_resolved_t r = cy_name_resolve(cy_str("x#8191"), cy_str(""), cy_str(""), buf.size(), buf.data());
+    TEST_ASSERT_NOT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_STRING_LEN("x", r.name.str, r.name.len);
+    TEST_ASSERT_EQUAL_UINT16(8191, r.pin);
+}
+
+void test_name_resolve_homeful_name_with_pin()
+{
+    // Home expansion + pin.
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    const cy_resolved_t r = cy_name_resolve(cy_str("~/foo#123"), cy_str(""), cy_str("me"), buf.size(), buf.data());
+    TEST_ASSERT_NOT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_STRING_LEN("me/foo", r.name.str, r.name.len);
+    TEST_ASSERT_EQUAL_UINT16(123, r.pin);
+    TEST_ASSERT_TRUE(r.verbatim);
+}
+
+void test_name_resolve_absolute_name_with_pin()
+{
+    // Absolute path + pin.
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    const cy_resolved_t r = cy_name_resolve(cy_str("/foo/bar#42"), cy_str("ns"), cy_str("me"), buf.size(), buf.data());
+    TEST_ASSERT_NOT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_STRING_LEN("foo/bar", r.name.str, r.name.len);
+    TEST_ASSERT_EQUAL_UINT16(42, r.pin);
+    TEST_ASSERT_TRUE(r.verbatim);
+}
+
+void test_name_resolve_pin_leading_zero_two_digits()
+{
+    // "#00" has leading zero -> not a pin, '#' stays in name.
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    const cy_resolved_t r = cy_name_resolve(cy_str("foo#00"), cy_str(""), cy_str(""), buf.size(), buf.data());
+    TEST_ASSERT_NOT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_STRING_LEN("foo#00", r.name.str, r.name.len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, r.pin);
+}
+
+void test_name_resolve_empty_name_empty_ns()
+{
+    // Empty name + empty namespace = empty resolved name → resolution failure (len 0 > CY_TOPIC_NAME_MAX is false,
+    // but 0-length result should still be valid if the normalize succeeded).
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    const cy_resolved_t r = cy_name_resolve(cy_str(""), cy_str(""), cy_str(""), buf.size(), buf.data());
+    // Empty name after normalization: len=0, str=buf.data() (not NULL).
+    TEST_ASSERT_EQUAL_size_t(0, r.name.len);
+}
+
+void test_name_resolve_only_pin_no_prefix()
+{
+    // "#123" -- pin consumed, prefix is empty, namespace is empty → resolved name is empty (len=0).
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    const cy_resolved_t r = cy_name_resolve(cy_str("#123"), cy_str(""), cy_str(""), buf.size(), buf.data());
+    TEST_ASSERT_EQUAL_size_t(0, r.name.len);
+    TEST_ASSERT_EQUAL_UINT16(123, r.pin);
+}
+
+void test_name_resolve_only_pin_with_namespace()
+{
+    // "#123" with namespace → prefix empty, namespace prepended: "ns".
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    const cy_resolved_t r = cy_name_resolve(cy_str("#123"), cy_str("ns"), cy_str(""), buf.size(), buf.data());
+    TEST_ASSERT_NOT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_STRING_LEN("ns", r.name.str, r.name.len);
+    TEST_ASSERT_EQUAL_UINT16(123, r.pin);
+}
+
+void test_name_resolve_pin_five_digits_out_of_range()
+{
+    // 5-digit number exceeding max.
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    const cy_resolved_t r = cy_name_resolve(cy_str("foo#99999"), cy_str(""), cy_str(""), buf.size(), buf.data());
+    TEST_ASSERT_NOT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_STRING_LEN("foo#99999", r.name.str, r.name.len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, r.pin);
+}
+
+void test_name_resolve_pin_boundary_just_over()
+{
+    // 8192 = CY_SUBJECT_ID_PINNED_MAX + 1 → out of range.
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    const cy_resolved_t r = cy_name_resolve(cy_str("foo#8192"), cy_str(""), cy_str(""), buf.size(), buf.data());
+    TEST_ASSERT_NOT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_STRING_LEN("foo#8192", r.name.str, r.name.len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, r.pin);
+}
+
+void test_name_resolve_pin_on_absolute_with_redundant_seps()
+{
+    // "/foo//bar//#42" → pin 42, normalize "//foo//bar//" → "foo/bar".
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    const cy_resolved_t                     r =
+      cy_name_resolve(cy_str("//foo//bar//#42"), cy_str("ns"), cy_str("me"), buf.size(), buf.data());
+    TEST_ASSERT_NOT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_STRING_LEN("foo/bar", r.name.str, r.name.len);
+    TEST_ASSERT_EQUAL_UINT16(42, r.pin);
+}
+
+void test_name_resolve_hash_in_namespace_preserved()
+{
+    // '#' in the namespace is a literal character (namespaces don't have pins stripped).
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    const cy_resolved_t r = cy_name_resolve(cy_str("foo"), cy_str("ns#456"), cy_str(""), buf.size(), buf.data());
+    TEST_ASSERT_NOT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_STRING_LEN("ns#456/foo", r.name.str, r.name.len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, r.pin);
+}
+
+void test_name_resolve_verbatim_pin_accepted()
+{
+    // A verbatim name with a pin is accepted (pin is valid for verbatim).
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    const cy_resolved_t r = cy_name_resolve(cy_str("foo/bar#0"), cy_str(""), cy_str(""), buf.size(), buf.data());
+    TEST_ASSERT_NOT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_STRING_LEN("foo/bar", r.name.str, r.name.len);
+    TEST_ASSERT_EQUAL_UINT16(0, r.pin);
+    TEST_ASSERT_TRUE(r.verbatim);
+}
+
+// =====================================================================================================================
 //                                               Constants
 // =====================================================================================================================
 
@@ -914,6 +1100,26 @@ int main()
     RUN_TEST(test_name_resolve_pin_with_path_segment);
     RUN_TEST(test_name_resolve_pin_absolute_leading_sep_removed);
     RUN_TEST(test_name_resolve_pin_absolute_all_redundant_seps);
+
+    // cy_name_resolve -- docstring negative examples
+    RUN_TEST(test_name_resolve_rejects_space_and_nonprintable);
+    RUN_TEST(test_name_resolve_rejects_pattern_with_pin);
+    RUN_TEST(test_name_resolve_rejects_name_exceeding_max_length);
+
+    // cy_name_resolve -- additional branch coverage
+    RUN_TEST(test_name_resolve_pin_single_digit_one);
+    RUN_TEST(test_name_resolve_pin_multidigit_no_leading_zero);
+    RUN_TEST(test_name_resolve_homeful_name_with_pin);
+    RUN_TEST(test_name_resolve_absolute_name_with_pin);
+    RUN_TEST(test_name_resolve_pin_leading_zero_two_digits);
+    RUN_TEST(test_name_resolve_empty_name_empty_ns);
+    RUN_TEST(test_name_resolve_only_pin_no_prefix);
+    RUN_TEST(test_name_resolve_only_pin_with_namespace);
+    RUN_TEST(test_name_resolve_pin_five_digits_out_of_range);
+    RUN_TEST(test_name_resolve_pin_boundary_just_over);
+    RUN_TEST(test_name_resolve_pin_on_absolute_with_redundant_seps);
+    RUN_TEST(test_name_resolve_hash_in_namespace_preserved);
+    RUN_TEST(test_name_resolve_verbatim_pin_accepted);
 
     // Constants
     RUN_TEST(test_name_constants);
