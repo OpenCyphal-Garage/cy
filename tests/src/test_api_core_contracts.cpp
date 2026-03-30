@@ -569,9 +569,9 @@ void test_subscriber_name_returns_pin_stripped_name()
     cy_future_t* const sub = cy_subscribe(platform.cy, cy_str("foo#123"), 256U);
     TEST_ASSERT_NOT_NULL(sub);
 
-    char name_buf[CY_TOPIC_NAME_MAX + 1U] = {};
-    cy_subscriber_name(sub, name_buf);
-    TEST_ASSERT_EQUAL_STRING("foo", name_buf);
+    std::array<char, CY_TOPIC_NAME_MAX + 1U> name_buf{};
+    cy_subscriber_name(sub, name_buf.data());
+    TEST_ASSERT_EQUAL_STRING("foo", name_buf.data());
 
     cy_future_destroy(sub);
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
