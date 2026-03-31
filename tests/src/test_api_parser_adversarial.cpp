@@ -1,4 +1,5 @@
 #include <cy_platform.h>
+#include <rapidhash.h>
 #include <unity.h>
 #include "api_mock_platform_utils.hpp"
 #include "guarded_heap.h"
@@ -318,170 +319,103 @@ void test_api_parser_adversarial_mutation_corpus()
 }
 
 // =====================================================================================================================
-// Pinned evictions/lage mismatch rejection tests.
-// The parser rejects frames where is_pinned(evictions) != (lage == LAGE_PINNED) via silent drop (no async error).
-// EVICTIONS_PINNED_MIN = UINT32_MAX - CY_SUBJECT_ID_PINNED_MAX = 0xFFFFE000, LAGE_PINNED = 127.
+// Pinned states are represented solely by evictions. Any in-range transmitted age must be accepted as-is.
 // =====================================================================================================================
 
-constexpr std::uint32_t evictions_pinned_min = UINT32_MAX - CY_SUBJECT_ID_PINNED_MAX;
-constexpr std::int8_t   lage_pinned          = 127;
+constexpr std::uint32_t evictions_pinned = UINT32_MAX - 7U;
+constexpr std::int8_t   lage_max         = 35;
 
-void test_adversarial_gossip_pinned_evictions_lage_mismatch()
+void test_adversarial_gossip_pinned_evictions_accept_in_range_lages()
 {
     test_platform_t platform{};
     platform_init(&platform);
 
-    const cy_lane_t lane = { .id = 0xDEAD, .ctx = { { 0 } }, .prio = cy_prio_nominal };
+    const cy_lane_t    lane    = { .id = 0xDEAD, .ctx = { { 0 } }, .prio = cy_prio_nominal };
+    cy_future_t* const pattern = cy_subscribe(platform.cy, cy_str("test/pin/>"), 64U);
+    TEST_ASSERT_NOT_NULL(pattern);
 
-    // Helper: build a gossip frame with given evictions and lage, valid name.
-    auto make_gossip = [](const std::uint32_t evictions, const std::int8_t lage) -> std::vector<unsigned char> {
+    auto make_gossip = [](const std::uint64_t hash,
+                          const std::uint32_t evictions,
+                          const std::int8_t   lage,
+                          const cy_str_t      name) -> std::vector<unsigned char> {
         std::vector<unsigned char> wire(256U, 0U);
-        const std::size_t          size = make_gossip_header(
-          wire.data(), wire.size(), 0U, lage, UINT64_C(0xAAAABBBBCCCCDDDD), evictions, cy_str("test/pin"));
+        const std::size_t          size = make_gossip_header(wire.data(), wire.size(), 0U, lage, hash, evictions, name);
         TEST_ASSERT_TRUE(size > 0U);
         wire.resize(size);
         return wire;
     };
 
-    // --- Cases that MUST be silently dropped (mismatch) ---
+    static const std::array<std::int8_t, 4> accepted_lages = { -1, 0, 5, lage_max };
+    static const std::array<const char*, 4> names          = {
+        "test/pin/minus-one",
+        "test/pin/zero",
+        "test/pin/five",
+        "test/pin/max",
+    };
 
-    // (a) Pinned evictions (EVICTIONS_PINNED_MIN), non-pinned lage (5).
-    {
-        const std::size_t errors_before = g_async_error_count;
-        const auto        wire          = make_gossip(evictions_pinned_min, 5);
-        dispatch_raw(&platform, wire, lane, nullptr, 1000);
+    for (std::size_t i = 0U; i < accepted_lages.size(); i++) {
+        const char* const   name          = names.at(i);
+        const cy_str_t      wire_name     = cy_str(name);
+        const std::uint64_t hash          = rapidhash(name, std::strlen(name));
+        const std::size_t   errors_before = g_async_error_count;
+        const auto          wire          = make_gossip(hash, evictions_pinned, accepted_lages.at(i), wire_name);
+        dispatch_raw(&platform, wire, lane, nullptr, static_cast<cy_us_t>(1000) + static_cast<cy_us_t>(i));
         TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_live_count());
         TEST_ASSERT_EQUAL_size_t(errors_before, g_async_error_count);
-    }
-    // (b) Pinned evictions (UINT32_MAX), non-pinned lage (0).
-    {
-        const std::size_t errors_before = g_async_error_count;
-        const auto        wire          = make_gossip(UINT32_MAX, 0);
-        dispatch_raw(&platform, wire, lane, nullptr, 1001);
-        TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_live_count());
-        TEST_ASSERT_EQUAL_size_t(errors_before, g_async_error_count);
-    }
-    // (c) Non-pinned evictions (0), pinned lage (LAGE_PINNED).
-    {
-        const std::size_t errors_before = g_async_error_count;
-        const auto        wire          = make_gossip(0U, lage_pinned);
-        dispatch_raw(&platform, wire, lane, nullptr, 1002);
-        TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_live_count());
-        TEST_ASSERT_EQUAL_size_t(errors_before, g_async_error_count);
-    }
-    // (d) Non-pinned evictions (100), pinned lage (LAGE_PINNED).
-    {
-        const std::size_t errors_before = g_async_error_count;
-        const auto        wire          = make_gossip(100U, lage_pinned);
-        dispatch_raw(&platform, wire, lane, nullptr, 1003);
-        TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_live_count());
-        TEST_ASSERT_EQUAL_size_t(errors_before, g_async_error_count);
+        TEST_ASSERT_NOT_NULL(cy_topic_find_by_hash(platform.cy, hash));
     }
 
-    // --- Valid combinations that must NOT be rejected by the mismatch check ---
-    // They may fail later (e.g. unknown topic) but they must pass the pinned consistency check.
-
-    // (e) Both pinned: evictions=EVICTIONS_PINNED_MIN, lage=LAGE_PINNED.
-    //     This passes the mismatch check; the frame will be processed further (unknown topic path).
-    {
-        const std::size_t errors_before = g_async_error_count;
-        const auto        wire          = make_gossip(evictions_pinned_min, lage_pinned);
-        dispatch_raw(&platform, wire, lane, nullptr, 1004);
-        TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_live_count());
-        // No new async errors from the mismatch check itself.
-        TEST_ASSERT_EQUAL_size_t(errors_before, g_async_error_count);
-    }
-    // (f) Both non-pinned: evictions=0, lage=5.
-    {
-        const std::size_t errors_before = g_async_error_count;
-        const auto        wire          = make_gossip(0U, 5);
-        dispatch_raw(&platform, wire, lane, nullptr, 1005);
-        TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_live_count());
-        TEST_ASSERT_EQUAL_size_t(errors_before, g_async_error_count);
-    }
-
+    cy_future_destroy(pattern);
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
     platform_deinit(&platform);
 }
 
-void test_adversarial_inline_crdt_pinned_mismatch()
+void test_adversarial_inline_crdt_pinned_accept_in_range_lages()
 {
     test_platform_t platform{};
     platform_init(&platform);
 
-    const cy_lane_t lane = { .id = 0xBEEF, .ctx = { { 0 } }, .prio = cy_prio_nominal };
+    const cy_lane_t    lane = { .id = 0xBEEF, .ctx = { { 0 } }, .prio = cy_prio_nominal };
+    cy_future_t* const sub  = cy_subscribe(platform.cy, cy_str("test/inline#7"), 64U);
+    TEST_ASSERT_NOT_NULL(sub);
+    const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("test/inline"));
+    TEST_ASSERT_NOT_NULL(topic);
+    const cy_subject_reader_t reader = { .subject_id = 7U, .extent = 0U };
 
-    // Helper: build a message frame (header_msg_be=0 or header_msg_rel=1) with given evictions and lage.
-    // Layout: [0]=type, [1]=reserved, [2]=incompatibility, [3]=lage, [4..7]=evictions(LE32),
-    //         [8..15]=hash(LE64), [16..23]=tag(LE64).
-    auto make_msg =
-      [](const std::uint8_t type, const std::uint32_t evictions, const std::int8_t lage) -> std::vector<unsigned char> {
-        std::vector<unsigned char> wire(header_bytes, 0U);
-        make_message_header(wire.data(), type, UINT64_C(0x1122334455667788), UINT64_C(0xAAAABBBBCCCCDDDD));
-        wire[3] = static_cast<unsigned char>(lage);
-        // Overwrite evictions at bytes [4..7] LE32.
-        wire[4] = static_cast<unsigned char>((evictions >> 0U) & 0xFFU);
-        wire[5] = static_cast<unsigned char>((evictions >> 8U) & 0xFFU);
-        wire[6] = static_cast<unsigned char>((evictions >> 16U) & 0xFFU);
-        wire[7] = static_cast<unsigned char>((evictions >> 24U) & 0xFFU);
+    auto make_msg = [topic](const std::uint8_t  type,
+                            const std::uint64_t tag,
+                            const std::int8_t   lage,
+                            const unsigned char payload) -> std::vector<unsigned char> {
+        std::vector<unsigned char> wire(header_bytes + 1U, 0U);
+        make_message_header(wire.data(), type, tag, cy_topic_hash(topic));
+        wire[3]            = static_cast<unsigned char>(lage);
+        wire[4]            = static_cast<unsigned char>((evictions_pinned >> 0U) & 0xFFU);
+        wire[5]            = static_cast<unsigned char>((evictions_pinned >> 8U) & 0xFFU);
+        wire[6]            = static_cast<unsigned char>((evictions_pinned >> 16U) & 0xFFU);
+        wire[7]            = static_cast<unsigned char>((evictions_pinned >> 24U) & 0xFFU);
+        wire[header_bytes] = payload;
         return wire;
     };
 
-    // --- Cases that MUST be silently dropped (mismatch) ---
+    static const std::array<std::int8_t, 4>  accepted_lages = { -1, 0, 5, lage_max };
+    static const std::array<std::uint8_t, 4> types          = { 0U, 1U, 0U, 1U };
 
-    // (a) header_msg_be with pinned evictions + non-pinned lage.
-    {
+    for (std::size_t i = 0U; i < accepted_lages.size(); i++) {
         const std::size_t errors_before = g_async_error_count;
-        const auto        wire          = make_msg(0U, evictions_pinned_min, 5);
-        dispatch_raw(&platform, wire, lane, nullptr, 2000);
-        TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_live_count());
-        TEST_ASSERT_EQUAL_size_t(errors_before, g_async_error_count);
-    }
-    // (b) header_msg_rel with non-pinned evictions + pinned lage.
-    {
-        const std::size_t errors_before = g_async_error_count;
-        const auto        wire          = make_msg(1U, 100U, lage_pinned);
-        dispatch_raw(&platform, wire, lane, nullptr, 2001);
-        TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_live_count());
-        TEST_ASSERT_EQUAL_size_t(errors_before, g_async_error_count);
-    }
-    // (c) header_msg_be with pinned evictions (UINT32_MAX) + non-pinned lage (0).
-    {
-        const std::size_t errors_before = g_async_error_count;
-        const auto        wire          = make_msg(0U, UINT32_MAX, 0);
-        dispatch_raw(&platform, wire, lane, nullptr, 2002);
-        TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_live_count());
-        TEST_ASSERT_EQUAL_size_t(errors_before, g_async_error_count);
-    }
-    // (d) header_msg_rel with non-pinned evictions (0) + pinned lage.
-    {
-        const std::size_t errors_before = g_async_error_count;
-        const auto        wire          = make_msg(1U, 0U, lage_pinned);
-        dispatch_raw(&platform, wire, lane, nullptr, 2003);
-        TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_live_count());
+        const auto        wire          = make_msg(
+          types.at(i), UINT64_C(0x1122334455667700) + i, accepted_lages.at(i), static_cast<unsigned char>(0x40U + i));
+        dispatch_raw(&platform, wire, lane, &reader, static_cast<cy_us_t>(2000) + static_cast<cy_us_t>(i));
+        TEST_ASSERT_TRUE(cy_future_done(sub));
+        const cy_arrival_t arrival = cy_arrival_move(sub);
+        TEST_ASSERT_NOT_NULL(arrival.message.content);
+        unsigned char first = 0U;
+        TEST_ASSERT_EQUAL_size_t(1U, cy_message_read(arrival.message.content, 0U, 1U, &first));
+        TEST_ASSERT_EQUAL_UINT8(static_cast<unsigned char>(0x40U + i), first);
+        cy_message_refcount_dec(arrival.message.content);
         TEST_ASSERT_EQUAL_size_t(errors_before, g_async_error_count);
     }
 
-    // --- Valid combination that must NOT be rejected by the mismatch check ---
-
-    // (e) header_msg_be with pinned evictions + pinned lage.
-    //     Passes mismatch check; continues into unknown-topic path.
-    {
-        const std::size_t errors_before = g_async_error_count;
-        const auto        wire          = make_msg(0U, evictions_pinned_min, lage_pinned);
-        dispatch_raw(&platform, wire, lane, nullptr, 2004);
-        TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_live_count());
-        TEST_ASSERT_EQUAL_size_t(errors_before, g_async_error_count);
-    }
-    // (f) header_msg_rel with non-pinned evictions + non-pinned lage.
-    {
-        const std::size_t errors_before = g_async_error_count;
-        const auto        wire          = make_msg(1U, 0U, 5);
-        dispatch_raw(&platform, wire, lane, nullptr, 2005);
-        TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_live_count());
-        TEST_ASSERT_EQUAL_size_t(errors_before, g_async_error_count);
-    }
-
+    cy_future_destroy(sub);
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
     platform_deinit(&platform);
 }
@@ -500,7 +434,7 @@ int main()
 {
     UNITY_BEGIN();
     RUN_TEST(test_api_parser_adversarial_mutation_corpus);
-    RUN_TEST(test_adversarial_gossip_pinned_evictions_lage_mismatch);
-    RUN_TEST(test_adversarial_inline_crdt_pinned_mismatch);
+    RUN_TEST(test_adversarial_gossip_pinned_evictions_accept_in_range_lages);
+    RUN_TEST(test_adversarial_inline_crdt_pinned_accept_in_range_lages);
     return UNITY_END();
 }

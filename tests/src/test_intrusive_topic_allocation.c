@@ -740,11 +740,34 @@ static void test_topic_merge_lage_clamps_out_of_range_values(void)
 
     mine->ts_origin = now;
     topic_merge_lage(mine, now, LAGE_MAX + 10);
-    TEST_ASSERT_EQUAL_INT64((int64_t)(now - (pow2us(LAGE_MAX) * MEGA)), (int64_t)mine->ts_origin);
+    TEST_ASSERT_EQUAL_INT64((int64_t)(now - lage_to_us(LAGE_MAX)), (int64_t)mine->ts_origin);
 
     mine->ts_origin = now;
     topic_merge_lage(mine, now, LAGE_MIN - 10);
     TEST_ASSERT_EQUAL_INT64((int64_t)now, (int64_t)mine->ts_origin);
+    fixture_deinit(&fix);
+}
+
+static void test_topic_new_reconstructs_lage_in_microseconds(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+    fix.now = lage_to_us(LAGE_MAX) + (10 * MEGA);
+
+    cy_topic_t* const newborn =
+      fixture_make_topic(&fix, "alloc/topic-new/newborn", UINT64_C(0x1000000000000191), 0U, LAGE_MIN);
+    TEST_ASSERT_EQUAL_INT64((int64_t)fix.now, (int64_t)newborn->ts_origin);
+
+    cy_topic_t* const age_1s = fixture_make_topic(&fix, "alloc/topic-new/1s", UINT64_C(0x1000000000000192), 0U, 0);
+    TEST_ASSERT_EQUAL_INT64((int64_t)(fix.now - lage_to_us(0)), (int64_t)age_1s->ts_origin);
+
+    cy_topic_t* const age_2s = fixture_make_topic(&fix, "alloc/topic-new/2s", UINT64_C(0x1000000000000193), 0U, 1);
+    TEST_ASSERT_EQUAL_INT64((int64_t)(fix.now - lage_to_us(1)), (int64_t)age_2s->ts_origin);
+
+    cy_topic_t* const age_max =
+      fixture_make_topic(&fix, "alloc/topic-new/max", UINT64_C(0x1000000000000194), 0U, LAGE_MAX);
+    TEST_ASSERT_EQUAL_INT64((int64_t)(fix.now - lage_to_us(LAGE_MAX)), (int64_t)age_max->ts_origin);
+
     fixture_deinit(&fix);
 }
 
@@ -898,7 +921,7 @@ static void test_topic_merge_lage_crdt_properties_commutative_associative_idempo
     fixture_t fix;
     fixture_init(&fix);
     const cy_us_t now      = 300 * MEGA;
-    const cy_us_t baseline = now - (pow2us(1) * MEGA);
+    const cy_us_t baseline = now - lage_to_us(1);
 
     cy_topic_t* const c1 = fixture_make_topic(&fix, "alloc/crdt/comm/a", UINT64_C(0x1000000000001110), 0U, LAGE_MIN);
     cy_topic_t* const c2 = fixture_make_topic(&fix, "alloc/crdt/comm/b", UINT64_C(0x1000000000001120), 0U, LAGE_MIN);
@@ -1401,25 +1424,25 @@ static void assert_local_pin_sequence_via_topic_ensure(fixture_t* const fix, con
     }
 }
 
-static void test_topic_ensure_sticky_local_pin_matrix(void)
+static void test_topic_ensure_existing_local_topic_keeps_allocation_matrix(void)
 {
     fixture_t fix;
     fixture_init(&fix);
 
     static const local_pin_case_t cases[] = {
-        { .canonical_name = "ensure/sticky/nonpinned-then-pinned",
+        { .canonical_name = "ensure/existing/nonpinned-then-pinned",
           .first_pin      = UINT16_MAX,
           .second_pin     = 42U,
-          .expected_pin   = 42U },
-        { .canonical_name = "ensure/sticky/higher-then-lower",
+          .expected_pin   = UINT16_MAX },
+        { .canonical_name = "ensure/existing/higher-then-lower",
           .first_pin      = 123U,
           .second_pin     = 42U,
-          .expected_pin   = 42U },
-        { .canonical_name = "ensure/sticky/pinned-then-nonpinned",
+          .expected_pin   = 123U },
+        { .canonical_name = "ensure/existing/pinned-then-nonpinned",
           .first_pin      = 42U,
           .second_pin     = UINT16_MAX,
           .expected_pin   = 42U },
-        { .canonical_name = "ensure/sticky/lower-then-higher",
+        { .canonical_name = "ensure/existing/lower-then-higher",
           .first_pin      = 42U,
           .second_pin     = 123U,
           .expected_pin   = 42U },
@@ -1459,25 +1482,25 @@ static void assert_local_pin_sequence_via_existing_subscriber_root(fixture_t* co
     destroy_detached_verbatim_root(fix->cy, root);
 }
 
-static void test_ensure_subscriber_root_verbatim_sticky_local_pin_matrix(void)
+static void test_ensure_subscriber_root_verbatim_existing_local_topic_keeps_allocation_matrix(void)
 {
     fixture_t fix;
     fixture_init(&fix);
 
     static const local_pin_case_t cases[] = {
-        { .canonical_name = "ensure/root/sticky/nonpinned-then-pinned",
+        { .canonical_name = "ensure/root/existing/nonpinned-then-pinned",
           .first_pin      = UINT16_MAX,
           .second_pin     = 42U,
-          .expected_pin   = 42U },
-        { .canonical_name = "ensure/root/sticky/higher-then-lower",
+          .expected_pin   = UINT16_MAX },
+        { .canonical_name = "ensure/root/existing/higher-then-lower",
           .first_pin      = 123U,
           .second_pin     = 42U,
-          .expected_pin   = 42U },
-        { .canonical_name = "ensure/root/sticky/pinned-then-nonpinned",
+          .expected_pin   = 123U },
+        { .canonical_name = "ensure/root/existing/pinned-then-nonpinned",
           .first_pin      = 42U,
           .second_pin     = UINT16_MAX,
           .expected_pin   = 42U },
-        { .canonical_name = "ensure/root/sticky/lower-then-higher",
+        { .canonical_name = "ensure/root/existing/lower-then-higher",
           .first_pin      = 42U,
           .second_pin     = 123U,
           .expected_pin   = 42U },
@@ -1490,25 +1513,43 @@ static void test_ensure_subscriber_root_verbatim_sticky_local_pin_matrix(void)
     fixture_deinit(&fix);
 }
 
-static void test_pinned_topic_lage_always_127(void)
+static void test_topic_new_accepts_pinned_max_age_without_overflow(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+    fix.now = lage_to_us(LAGE_MAX) + (11 * MEGA);
+
+    cy_topic_t* const topic =
+      fixture_make_topic(&fix, "pinned/topic-new/max", UINT64_C(0x2000000000003FFF), UINT32_MAX - 42U, LAGE_MAX);
+
+    TEST_ASSERT_TRUE(is_pinned(topic->evictions));
+    TEST_ASSERT_EQUAL_INT64((int64_t)(fix.now - lage_to_us(LAGE_MAX)), (int64_t)topic->ts_origin);
+    TEST_ASSERT_EQUAL_INT(LAGE_MAX, topic_lage(topic, fix.now));
+
+    fixture_deinit(&fix);
+}
+
+static void test_pinned_topic_lage_tracks_ts_origin(void)
 {
     fixture_t fix;
     fixture_init(&fix);
 
     cy_topic_t* const pinned_topic =
-      fixture_make_topic(&fix, "pinned/lage/always", UINT64_C(0x2000000000004001), EVICTIONS_PINNED_MIN, LAGE_MIN);
-
-    // Lage is LAGE_PINNED regardless of the current time.
-    TEST_ASSERT_EQUAL_INT(LAGE_PINNED, topic_lage(pinned_topic, 0));
-    TEST_ASSERT_EQUAL_INT(LAGE_PINNED, topic_lage(pinned_topic, 1 * MEGA));
-    TEST_ASSERT_EQUAL_INT(LAGE_PINNED, topic_lage(pinned_topic, 1000 * MEGA));
-
-    // A non-pinned topic with old ts_origin should lose to the pinned one.
+      fixture_make_topic(&fix, "pinned/lage/tracks", UINT64_C(0x2000000000004001), EVICTIONS_PINNED_MIN, LAGE_MIN);
     cy_topic_t* const nonpinned =
       fixture_make_topic(&fix, "pinned/lage/nonpinned", UINT64_C(0x2000000000004002), 0U, LAGE_MIN);
-    const cy_us_t now    = 1000 * MEGA;
-    nonpinned->ts_origin = 1; // very old
-    TEST_ASSERT_TRUE(left_wins(pinned_topic, now, topic_lage(nonpinned, now), nonpinned->hash));
+
+    TEST_ASSERT_EQUAL_INT(0, topic_lage(pinned_topic, 1 * MEGA));
+    TEST_ASSERT_EQUAL_INT(1, topic_lage(pinned_topic, 2 * MEGA));
+    TEST_ASSERT_EQUAL_INT(3, topic_lage(pinned_topic, 8 * MEGA));
+    TEST_ASSERT_EQUAL_INT(topic_lage(nonpinned, 1 * MEGA), topic_lage(pinned_topic, 1 * MEGA));
+    TEST_ASSERT_EQUAL_INT(topic_lage(nonpinned, 2 * MEGA), topic_lage(pinned_topic, 2 * MEGA));
+    TEST_ASSERT_EQUAL_INT(topic_lage(nonpinned, 8 * MEGA), topic_lage(pinned_topic, 8 * MEGA));
+
+    const cy_us_t now       = 8 * MEGA;
+    pinned_topic->ts_origin = now - (1 * MEGA); // lage=0
+    nonpinned->ts_origin    = now - (8 * MEGA); // lage=3
+    TEST_ASSERT_FALSE(left_wins(pinned_topic, now, topic_lage(nonpinned, now), nonpinned->hash));
 
     fixture_deinit(&fix);
 }
@@ -1775,6 +1816,7 @@ int main(void)
     RUN_TEST(test_pinned_topic_sync_implicit_transitions_without_gossip);
     RUN_TEST(test_left_wins_and_topic_merge_lage);
     RUN_TEST(test_topic_merge_lage_clamps_out_of_range_values);
+    RUN_TEST(test_topic_new_reconstructs_lage_in_microseconds);
     RUN_TEST(test_name_consume_pin_suffix_decimal_parsing);
     RUN_TEST(test_name_consume_pin_suffix_uint16_overflow_regression);
     RUN_TEST(test_topic_merge_lage_crdt_properties_commutative_associative_idempotent);
@@ -1795,9 +1837,10 @@ int main(void)
     RUN_TEST(test_pinned_topic_writer_registry_refcount);
     RUN_TEST(test_pinned_topic_reader_registry_extent_growth);
     RUN_TEST(test_topic_ensure_sets_evictions_from_pin);
-    RUN_TEST(test_topic_ensure_sticky_local_pin_matrix);
-    RUN_TEST(test_ensure_subscriber_root_verbatim_sticky_local_pin_matrix);
-    RUN_TEST(test_pinned_topic_lage_always_127);
+    RUN_TEST(test_topic_ensure_existing_local_topic_keeps_allocation_matrix);
+    RUN_TEST(test_ensure_subscriber_root_verbatim_existing_local_topic_keeps_allocation_matrix);
+    RUN_TEST(test_topic_new_accepts_pinned_max_age_without_overflow);
+    RUN_TEST(test_pinned_topic_lage_tracks_ts_origin);
     RUN_TEST(test_topic_allocate_pinned_skips_collision);
     RUN_TEST(test_topic_destroy_pinned_cleanup);
     RUN_TEST(test_auto_pin_on_eviction_overflow);

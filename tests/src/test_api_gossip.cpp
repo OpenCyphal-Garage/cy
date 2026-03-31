@@ -16,6 +16,7 @@ namespace {
 constexpr std::uint8_t header_msg_be = 0U;
 constexpr std::uint8_t header_gossip = 8U;
 constexpr std::size_t  header_bytes  = 24U;
+constexpr std::int8_t  lage_max      = 35;
 
 struct send_capture_t
 {
@@ -270,6 +271,15 @@ std::uint64_t capture_u64(const send_capture_t& c, const std::size_t off)
     std::uint64_t out = 0U;
     for (std::size_t i = 0U; i < 8U; i++) {
         out |= static_cast<std::uint64_t>(c.data.at(off + i)) << (i * 8U);
+    }
+    return out;
+}
+
+std::uint32_t capture_u32(const send_capture_t& c, const std::size_t off)
+{
+    std::uint32_t out = 0U;
+    for (std::size_t i = 0U; i < 4U; i++) {
+        out |= static_cast<std::uint32_t>(c.data.at(off + i)) << (i * 8U);
     }
     return out;
 }
@@ -554,18 +564,42 @@ void test_api_gossip_parser_rejects_gossip_incompatibility_u32()
     platform_deinit(p);
 }
 
-void test_api_gossip_parser_rejects_pinned_evictions_lage_mismatch()
+void test_api_gossip_parser_accepts_pinned_evictions_with_in_range_lage()
 {
     test_platform_t p{};
     platform_init(p);
     cy_test_message_reset_counters();
     const cy_lane_t lane = { .id = 22U, .ctx = { { 0 } }, .prio = cy_prio_nominal };
 
-    // Pinned evictions (>= 0xFFFFE000) with non-pinned lage (0) should be rejected.
-    dispatch_gossip(
-      p, lane, nullptr, 1U, 0, UINT64_C(0x1000000000000055), UINT32_C(0xFFFFE000), "api/gossip/pinned/reject", 105);
-    TEST_ASSERT_EQUAL_size_t(0U, p.unicast_send_count);
-    TEST_ASSERT_NULL(cy_topic_find_by_hash(p.cy, UINT64_C(0x1000000000000055)));
+    cy_future_t* const pattern = cy_subscribe(p.cy, cy_str("api/gossip/pinned/accept/>"), 128U);
+    TEST_ASSERT_NOT_NULL(pattern);
+
+    static const std::array<std::int8_t, 4> accepted_lages = { -1, 0, 5, lage_max };
+    static const std::array<const char*, 4> names          = {
+        "api/gossip/pinned/accept/minus-one",
+        "api/gossip/pinned/accept/zero",
+        "api/gossip/pinned/accept/five",
+        "api/gossip/pinned/accept/max",
+    };
+    constexpr std::uint32_t pinned_evictions = UINT32_MAX - 23U;
+
+    for (std::size_t i = 0; i < accepted_lages.size(); i++) {
+        p.now = (static_cast<cy_us_t>(100U) + static_cast<cy_us_t>(i)) * static_cast<cy_us_t>(1000U) *
+                static_cast<cy_us_t>(1000U);
+        const char* const   name  = names.at(i);
+        const std::uint64_t hash  = rapidhash(name, std::strlen(name));
+        const std::size_t   start = p.capture_count;
+        dispatch_gossip(p, lane, nullptr, 1U, accepted_lages.at(i), hash, pinned_evictions, name, p.now);
+
+        const cy_topic_t* const topic = cy_topic_find_by_hash(p.cy, hash);
+        TEST_ASSERT_NOT_NULL(topic);
+        TEST_ASSERT_EQUAL_size_t(std::strlen(name), cy_topic_name(topic).len);
+        TEST_ASSERT_EQUAL_MEMORY(name, cy_topic_name(topic).str, cy_topic_name(topic).len);
+        (void)start;
+    }
+
+    cy_future_destroy(pattern);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(p.cy));
     platform_deinit(p);
 }
 
@@ -725,16 +759,7 @@ void test_api_unknown_topic_no_pattern_does_not_autocreate()
     platform_deinit(p);
 }
 
-std::uint32_t capture_u32(const send_capture_t& c, const std::size_t off)
-{
-    std::uint32_t out = 0U;
-    for (std::size_t i = 0U; i < 4U; i++) {
-        out |= static_cast<std::uint32_t>(c.data.at(off + i)) << (i * 8U);
-    }
-    return out;
-}
-
-void test_gossip_frame_for_pinned_topic_has_lage_127()
+void test_gossip_frame_for_pinned_topic_has_measured_lage()
 {
     test_platform_t p{};
     platform_init(p);
@@ -747,8 +772,8 @@ void test_gossip_frame_for_pinned_topic_has_lage_127()
     TEST_ASSERT_NOT_NULL(topic);
     const std::uint64_t topic_hash = cy_topic_hash(topic);
 
-    // Trigger gossip emission by spinning enough time for the initial urgent gossip.
-    p.now           = 0;
+    // Trigger gossip emission once the topic has aged for 8 seconds.
+    p.now           = static_cast<cy_us_t>(8U) * static_cast<cy_us_t>(1000U) * static_cast<cy_us_t>(1000U);
     p.capture_count = 0U;
     TEST_ASSERT_TRUE(spin_until_multicast_for_hash(p, topic_hash, 200'000));
 
@@ -764,8 +789,8 @@ void test_gossip_frame_for_pinned_topic_has_lage_127()
         }
         found = true;
 
-        // Verify the lage byte at offset 3 is LAGE_PINNED (127).
-        TEST_ASSERT_EQUAL_INT8(static_cast<std::int8_t>(127), static_cast<std::int8_t>(c.data[3]));
+        // Verify the lage byte at offset 3 carries the ordinary measured log-age.
+        TEST_ASSERT_EQUAL_INT8(3, static_cast<std::int8_t>(c.data[3]));
 
         // Verify evictions field at offset [16..19] matches UINT32_MAX - 100.
         const std::uint32_t expected_evictions = UINT32_MAX - 100U;
@@ -784,7 +809,7 @@ void test_gossip_frame_for_pinned_topic_has_lage_127()
     platform_deinit(p);
 }
 
-void test_api_gossip_discovered_implicit_topic_can_be_pinned_by_local_advertise()
+void test_api_gossip_discovered_implicit_topic_keeps_allocation_after_local_pin_advertise()
 {
     test_platform_t p{};
     platform_init(p);
@@ -814,8 +839,7 @@ void test_api_gossip_discovered_implicit_topic_can_be_pinned_by_local_advertise(
     TEST_ASSERT_TRUE(spin_until_multicast_for_hash(p, topic_hash, 200'000));
     const send_capture_t* const cap = last_broadcast_gossip_for_hash_since(p, start, topic_hash);
     TEST_ASSERT_NOT_NULL(cap);
-    TEST_ASSERT_EQUAL_INT8(static_cast<std::int8_t>(127), static_cast<std::int8_t>(cap->data[3]));
-    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX - 42U, capture_u32(*cap, 16U));
+    TEST_ASSERT_EQUAL_UINT32(0U, capture_u32(*cap, 16U));
 
     cy_unadvertise(pub);
     cy_future_destroy(pattern);
@@ -823,7 +847,7 @@ void test_api_gossip_discovered_implicit_topic_can_be_pinned_by_local_advertise(
     platform_deinit(p);
 }
 
-void test_api_gossip_discovered_implicit_topic_can_be_pinned_by_local_subscribe()
+void test_api_gossip_discovered_implicit_topic_keeps_allocation_after_local_pin_subscribe()
 {
     test_platform_t p{};
     platform_init(p);
@@ -853,8 +877,7 @@ void test_api_gossip_discovered_implicit_topic_can_be_pinned_by_local_subscribe(
     TEST_ASSERT_TRUE(spin_until_multicast_for_hash(p, topic_hash, 200'000));
     const send_capture_t* const cap = last_broadcast_gossip_for_hash_since(p, start, topic_hash);
     TEST_ASSERT_NOT_NULL(cap);
-    TEST_ASSERT_EQUAL_INT8(static_cast<std::int8_t>(127), static_cast<std::int8_t>(cap->data[3]));
-    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX - 42U, capture_u32(*cap, 16U));
+    TEST_ASSERT_EQUAL_UINT32(0U, capture_u32(*cap, 16U));
 
     cy_future_destroy(sub);
     cy_future_destroy(pattern);
@@ -882,15 +905,15 @@ int main()
     RUN_TEST(test_api_gossip_parser_rejects_incompatibility_invalid_lage_and_short_header);
     RUN_TEST(test_api_gossip_parser_rejects_payload_truncated_and_overlong_name_length);
     RUN_TEST(test_api_gossip_parser_rejects_gossip_incompatibility_u32);
-    RUN_TEST(test_api_gossip_parser_rejects_pinned_evictions_lage_mismatch);
+    RUN_TEST(test_api_gossip_parser_accepts_pinned_evictions_with_in_range_lage);
     RUN_TEST(test_api_scout_parser_rejects_empty_and_truncated_pattern);
     RUN_TEST(test_api_gossip_invalid_frame_has_no_side_effects);
     RUN_TEST(test_api_message_with_reader_above_sid_max_treated_as_nonmulticast);
     RUN_TEST(test_api_scout_match_triggers_gossip_response_and_fields_are_correct);
     RUN_TEST(test_api_scout_match_always_uses_unicast);
     RUN_TEST(test_api_unknown_topic_no_pattern_does_not_autocreate);
-    RUN_TEST(test_gossip_frame_for_pinned_topic_has_lage_127);
-    RUN_TEST(test_api_gossip_discovered_implicit_topic_can_be_pinned_by_local_advertise);
-    RUN_TEST(test_api_gossip_discovered_implicit_topic_can_be_pinned_by_local_subscribe);
+    RUN_TEST(test_gossip_frame_for_pinned_topic_has_measured_lage);
+    RUN_TEST(test_api_gossip_discovered_implicit_topic_keeps_allocation_after_local_pin_advertise);
+    RUN_TEST(test_api_gossip_discovered_implicit_topic_keeps_allocation_after_local_pin_subscribe);
     return UNITY_END();
 }

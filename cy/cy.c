@@ -63,9 +63,6 @@ struct cy_tree_t
 // For reference, 2**35 seconds is a little over one millennium.
 #define LAGE_MAX 35
 
-// Log-age value used by pinned topics. Pinned topics are maximally old so they always win age-based arbitration.
-#define LAGE_PINNED 127
-
 // Eviction counter threshold for pinned topics. A topic is pinned when evictions >= EVICTIONS_PINNED_MIN.
 // The pinned subject-ID is (UINT32_MAX-evictions), in [0, CY_SUBJECT_ID_PINNED_MAX].
 // Normal eviction counters never approach this range in practice (would take ~136 years of continuous churn at 1 Hz).
@@ -222,16 +219,15 @@ static byte_t clz64(const uint64_t x)
 // Returns -1 if the argument is zero to allow contiguous comparison.
 static int_fast8_t log2_floor(const uint64_t x) { return (int_fast8_t)(63 - (int_fast8_t)clz64(x)); }
 
-// The inverse of log2_floor() with the same special case: exp=-1 returns 0.
-static cy_us_t pow2us(const int_fast8_t exp)
+// Convert log2(seconds) into microseconds. Inputs are clamped to the valid wire/storage range [LAGE_MIN, LAGE_MAX].
+// Negative values are treated as zero to allow contiguous comparison, mirroring log2_floor().
+static cy_us_t lage_to_us(const int_fast8_t lage)
 {
-    if (exp < 0) {
+    if (lage < 0) {
         return 0;
     }
-    if (exp > 62) {
-        return INT64_MAX;
-    }
-    return 1LL << (uint_fast8_t)exp; // NOLINT(*-signed-bitwise)
+    const uint_fast8_t clamped = (uint_fast8_t)((lage > LAGE_MAX) ? LAGE_MAX : lage);
+    return (INT64_C(1) << clamped) * MEGA; // NOLINT(*-signed-bitwise)
 }
 
 // The limits are inclusive. Returns min unless min < max.
@@ -925,8 +921,7 @@ static void reader_grow_extent(cy_t* const cy, reader_t* const r, const size_t n
 //     2. winner has smaller hash.
 // - on divergence (same hash, different subject-ID):
 //     1. winner is older;
-//     2. winner has seen more evictions (pinned topics have very high evictions, so they always win;
-//        among pinned topics, smaller pin value = higher evictions, giving min-wins CRDT on pin).
+//     2. winner has seen more evictions.
 // When a topic is reallocated, it retains its current age.
 // Conflict resolution may result in a temporary jitter if it happens to occur near log2(age) integer boundary.
 struct cy_topic_t
@@ -1196,18 +1191,13 @@ static bool is_pinned(const uint32_t evictions) { return evictions >= EVICTIONS_
 
 static int_fast8_t topic_lage(const cy_topic_t* const topic, const cy_us_t now)
 {
-    if (is_pinned(topic->evictions)) {
-        return LAGE_PINNED; // Pinned topics are maximally old; local repinning changes age via evictions alone.
-    }
     return log2_floor((uint64_t)later(0, (now - topic->ts_origin) / MEGA));
 }
 
-// CRDT merge operator on the topic log-age for remote gossip. Local pub/sub creation must not touch ts_origin:
-// local pinning changes topic_lage() through evictions, whereas ts_origin tracks when the topic was first observed.
+// CRDT merge operator on the topic log-age. Shift ts_origin into the past if needed.
 static void topic_merge_lage(cy_topic_t* const topic, const cy_us_t now, int_fast8_t r_lage)
 {
-    r_lage           = (int_fast8_t)((r_lage < LAGE_MIN) ? LAGE_MIN : ((r_lage > LAGE_MAX) ? LAGE_MAX : r_lage));
-    topic->ts_origin = sooner(topic->ts_origin, now - (pow2us(r_lage) * MEGA));
+    topic->ts_origin = sooner(topic->ts_origin, now - lage_to_us(r_lage));
 }
 
 // This comparator is only applicable on subject-ID allocation conflicts. As such, hashes must be different.
@@ -1554,7 +1544,7 @@ static cy_err_t topic_new(cy_t* const        cy,
     topic->hash      = hash;
 
     const cy_us_t now  = cy_now(cy);
-    topic->ts_origin   = now - (pow2us(lage) * MEGA);
+    topic->ts_origin   = now - lage_to_us(lage);
     topic->ts_animated = now;
     topic->couplings   = NULL;
 
@@ -1641,24 +1631,17 @@ fail:
     return err;
 }
 
-// Local verbatim requests may tighten the pinning of an existing topic. Sticky semantics mean that the strongest
-// local pin seen so far wins for the lifetime of the topic object, so we only ever raise the eviction counter.
-// We intentionally do not merge lage here: topic_lage() derives pinned age from evictions, while ts_origin must keep
-// describing when the topic itself was first observed rather than when another local handle was attached.
 static cy_err_t topic_ensure(cy_t* const cy, cy_topic_t** const out_topic, const cy_resolved_t resolved)
 {
-    cy_topic_t* const topic  = cy_topic_find_by_name(cy, resolved.name);
-    const uint32_t evictions = (resolved.pin <= CY_SUBJECT_ID_PINNED_MAX) ? (UINT32_MAX - (uint32_t)resolved.pin) : 0U;
+    cy_topic_t* const topic = cy_topic_find_by_name(cy, resolved.name);
     if (topic != NULL) {
-        if (evictions > topic->evictions) {
-            topic_allocate(topic, evictions, cy_now(cy)); // need to tighten up pinning: all pins converge to smallest
-        }
         if (out_topic != NULL) {
             *out_topic = topic;
         }
         return CY_OK;
     }
-    const uint64_t hash = rapidhash(resolved.name.str, resolved.name.len);
+    const uint64_t hash      = rapidhash(resolved.name.str, resolved.name.len);
+    const uint32_t evictions = (resolved.pin <= CY_SUBJECT_ID_PINNED_MAX) ? (UINT32_MAX - (uint32_t)resolved.pin) : 0U;
     return topic_new(cy, out_topic, resolved.name, hash, evictions, LAGE_MIN);
 }
 
@@ -3589,14 +3572,8 @@ static cy_err_t ensure_subscriber_root(cy_t* const cy, const cy_resolved_t resol
     if (node->value != NULL) {
         subscriber_root_t* const root = (subscriber_root_t*)node->value;
         *out_root                     = root;
-        if (resolved.verbatim) {
-            // Existing verbatim subscriptions still participate in sticky local pin convergence on the shared topic.
-            const cy_err_t err = topic_ensure(cy, NULL, resolved);
-            if (err != CY_OK) {
-                return err;
-            }
-        } else if (root->needs_scouting) {
-            assert(resolved.pin == UINT16_MAX); // patterns cannot be pinned
+        if (root->needs_scouting) {
+            assert((resolved.pin == UINT16_MAX) && !resolved.verbatim); // can't pin patterns; can only scout patterns
             const cy_err_t err   = do_send_scout(cy, cy_now(cy), resolved.name);
             root->needs_scouting = err != CY_OK;
             ON_ASYNC_ERROR_IF(cy, NULL, err);
@@ -4648,17 +4625,13 @@ void cy_on_message(cy_platform_t* const  platform,
         case header_msg_rel: {
             const byte_t incompatibility = header[2];
             const int8_t lage            = (int8_t)header[3];
-            if ((incompatibility != 0) || (lage < LAGE_MIN) || ((lage > LAGE_MAX) && (lage != LAGE_PINNED))) {
+            if ((incompatibility != 0) || (lage < LAGE_MIN) || (lage > LAGE_MAX)) {
                 goto bad_message;
             }
-            const uint32_t evictions = deserialize_u32(&header[4]);
-            const uint64_t hash      = deserialize_u64(&header[8]);
-            if (is_pinned(evictions) != (lage == LAGE_PINNED)) {
-                CY_TRACE(cy, "🫣 Inline CRDT gossip: pinned evictions/lage mismatch");
-                goto bad_message;
-            }
-            cy_topic_t* const topic    = cy_topic_find_by_hash(cy, hash);
-            const bool        reliable = type == header_msg_rel;
+            const uint32_t    evictions = deserialize_u32(&header[4]);
+            const uint64_t    hash      = deserialize_u64(&header[8]);
+            cy_topic_t* const topic     = cy_topic_find_by_hash(cy, hash);
+            const bool        reliable  = type == header_msg_rel;
             if (multicast &&
                 (topic_subject_id_impl(hash, evictions, cy->platform->subject_id_modulus) != *subject_id)) {
                 CY_TRACE(cy, "🫣 Inline CRDT gossip inconsistent with chosen subject, suspect publisher malfunction");
@@ -4812,11 +4785,7 @@ void cy_on_message(cy_platform_t* const  platform,
                 (cy_message_read(message.content, 0, name.len, (byte_t*)name_buf) != name.len)) {
                 goto bad_message;
             }
-            if ((lage < LAGE_MIN) || ((lage > LAGE_MAX) && (lage != LAGE_PINNED))) {
-                goto bad_message;
-            }
-            if (is_pinned(evictions) != (lage == LAGE_PINNED)) {
-                CY_TRACE(cy, "🫣 CRDT gossip: pinned evictions/lage mismatch");
+            if ((lage < LAGE_MIN) || (lage > LAGE_MAX)) {
                 goto bad_message;
             }
             const gossip_scope_t scope = unicast ? gossip_unicast : (broadcast ? gossip_broadcast : gossip_sharded);

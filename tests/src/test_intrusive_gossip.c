@@ -721,7 +721,7 @@ static void test_gossip_wire_name_excludes_pin_expression(void)
     fixture_deinit(&fix);
 }
 
-static void test_gossip_pinned_topic_sends_correct_lage(void)
+static void test_gossip_pinned_topic_sends_measured_lage(void)
 {
     fixture_t fix;
     fixture_init(&fix);
@@ -744,9 +744,9 @@ static void test_gossip_pinned_topic_sends_correct_lage(void)
     const send_capture_t* const cap = &fix.capture[0];
     // Verify header type is header_gossip (8).
     TEST_ASSERT_EQUAL_UINT8(header_gossip, cap->type);
-    // Verify the lage byte (offset 3) is LAGE_PINNED (127 = 0x7F).
-    TEST_ASSERT_EQUAL_INT8(LAGE_PINNED, cap->lage);
-    TEST_ASSERT_EQUAL_UINT8(0x7FU, cap->data[3]);
+    // Pinned topics emit the ordinary measured log-age like any other topic.
+    TEST_ASSERT_EQUAL_INT8(topic_lage(topic, now), cap->lage);
+    TEST_ASSERT_EQUAL_UINT8(0x04U, cap->data[3]); // floor(log2(31 s)) = 4
     // Verify the evictions field (offset 16, 4 bytes LE) matches topic->evictions.
     TEST_ASSERT_EQUAL_UINT32(topic->evictions, cap->evictions);
     TEST_ASSERT_EQUAL_UINT32(topic->evictions, deserialize_u32(&cap->data[16]));
@@ -757,7 +757,7 @@ static void test_gossip_pinned_topic_sends_correct_lage(void)
     fixture_deinit(&fix);
 }
 
-static void test_on_gossip_known_topic_pinned_always_wins_divergence(void)
+static void test_on_gossip_known_topic_pinned_can_lose_divergence_to_older_state(void)
 {
     fixture_t fix;
     fixture_init(&fix);
@@ -770,21 +770,44 @@ static void test_on_gossip_known_topic_pinned_always_wins_divergence(void)
     TEST_ASSERT_TRUE(is_pinned(topic->evictions));
 
     const cy_us_t now = 32 * MEGA;
+    topic->ts_origin  = now - (1 * MEGA); // lage=0
     unschedule_gossip(topic);
 
-    // Remote has non-pinned state: evictions=5, lage=10. Local is pinned: LAGE_PINNED=127 > 10.
+    // Remote has an older non-pinned state. Pinning alone must not make the younger local state win.
     on_gossip_known_topic(fix.cy, now, topic, 5U, 10, gossip_broadcast);
 
-    // Local wins: evictions unchanged.
-    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX - 100U, topic->evictions);
-    // Urgent gossip is scheduled.
+    TEST_ASSERT_EQUAL_UINT32(5U, topic->evictions);
+    TEST_ASSERT_FALSE(is_pinned(topic->evictions));
+
+    fixture_deinit(&fix);
+}
+
+static void test_on_gossip_known_topic_remote_pinned_low_wire_age_does_not_win(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+    fix.now = lage_to_us(10) + (20 * MEGA);
+
+    const char*       topic_name = "gossip/pinned/no-normalize/known";
+    const uint64_t    hash       = rapidhash(topic_name, strlen(topic_name));
+    cy_topic_t* const topic      = fixture_make_explicit_topic(&fix, topic_name, hash, 0U);
+    TEST_ASSERT_FALSE(is_pinned(topic->evictions));
+
+    topic->ts_origin = fix.now - lage_to_us(10);
+    unschedule_gossip(topic);
+
+    const uint32_t remote_evictions = UINT32_MAX - 25U;
+    on_gossip_known_topic(fix.cy, fix.now, topic, remote_evictions, 0, gossip_broadcast);
+
+    TEST_ASSERT_EQUAL_UINT32(0U, topic->evictions);
+    TEST_ASSERT_FALSE(is_pinned(topic->evictions));
     TEST_ASSERT_TRUE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
     TEST_ASSERT_TRUE(topic->gossip_event.handler == gossip_event_urgent);
 
     fixture_deinit(&fix);
 }
 
-static void test_on_gossip_known_topic_pinned_min_pin_wins(void)
+static void test_on_gossip_known_topic_equal_lage_higher_evictions_win(void)
 {
     fixture_t fix;
     fixture_init(&fix);
@@ -797,12 +820,13 @@ static void test_on_gossip_known_topic_pinned_min_pin_wins(void)
     TEST_ASSERT_TRUE(is_pinned(topic->evictions));
 
     const cy_us_t now = 33 * MEGA;
+    topic->ts_origin  = now - (1 * MEGA); // lage=0
     unschedule_gossip(topic);
 
-    // Remote is also pinned: pin=50 means evictions = UINT32_MAX - 50. Both pinned => both lage = LAGE_PINNED.
-    // Tiebreak: higher evictions wins. UINT32_MAX-50 > UINT32_MAX-100 => remote wins.
+    // Remote is also pinned: pin=50 means evictions = UINT32_MAX - 50.
+    // Equal log-age falls through to the ordinary higher-evictions tiebreak.
     const uint32_t remote_evictions = UINT32_MAX - 50U;
-    on_gossip_known_topic(fix.cy, now, topic, remote_evictions, LAGE_PINNED, gossip_broadcast);
+    on_gossip_known_topic(fix.cy, now, topic, remote_evictions, 0, gossip_broadcast);
 
     // Remote wins: local adopts remote evictions.
     TEST_ASSERT_EQUAL_UINT32(UINT32_MAX - 50U, topic->evictions);
@@ -838,13 +862,38 @@ static void test_on_gossip_unknown_topic_pinned_not_in_index_no_collision(void)
     // Since the pinned topic is not in the index, the lookup returns NULL and nothing happens.
     const uint64_t remote_hash      = hash + 1U;         // different topic
     const uint32_t remote_evictions = UINT32_MAX - 100U; // same pin => same subject-ID 100
-    on_gossip_unknown_topic(fix.cy, now, remote_hash, remote_evictions, LAGE_PINNED);
+    on_gossip_unknown_topic(fix.cy, now, remote_hash, remote_evictions, 0);
 
     // Pinned topic is unaffected.
     TEST_ASSERT_EQUAL_UINT32(UINT32_MAX - 100U, topic->evictions);
     // No urgent gossip was scheduled from this call (gossip was unscheduled before the call).
     TEST_ASSERT_FALSE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
 
+    fixture_deinit(&fix);
+}
+
+static void test_topic_subscribe_if_matching_pinned_low_wire_age_preserves_age(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+    fix.now = 21 * MEGA;
+
+    cy_future_t* const sub = cy_subscribe(fix.cy, cy_str("gossip/pinned/auto/*"), 64U);
+    TEST_ASSERT_NOT_NULL(sub);
+
+    const cy_str_t name      = cy_str("gossip/pinned/auto/topic");
+    const uint64_t hash      = rapidhash(name.str, name.len);
+    const uint32_t evictions = UINT32_MAX - 25U;
+    cy_topic_t*    topic     = topic_subscribe_if_matching(fix.cy, name, hash, evictions, 0);
+    TEST_ASSERT_NOT_NULL(topic);
+    TEST_ASSERT_TRUE(is_pinned(topic->evictions));
+    TEST_ASSERT_EQUAL_UINT32(evictions, topic->evictions);
+    TEST_ASSERT_EQUAL_INT(0, topic_lage(topic, fix.now));
+    TEST_ASSERT_EQUAL_INT64((int64_t)(fix.now - lage_to_us(0)), (int64_t)topic->ts_origin);
+    TEST_ASSERT_NULL(topic_find_by_subject_id(fix.cy, topic_subject_id(topic)));
+
+    cy_future_destroy(sub);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(fix.cy));
     fixture_deinit(&fix);
 }
 
@@ -911,10 +960,12 @@ int main(void)
     RUN_TEST(test_on_scout_responds_via_unicast_only);
     RUN_TEST(test_on_scout_reports_async_error_on_unicast_failure);
     RUN_TEST(test_gossip_wire_name_excludes_pin_expression);
-    RUN_TEST(test_gossip_pinned_topic_sends_correct_lage);
-    RUN_TEST(test_on_gossip_known_topic_pinned_always_wins_divergence);
-    RUN_TEST(test_on_gossip_known_topic_pinned_min_pin_wins);
+    RUN_TEST(test_gossip_pinned_topic_sends_measured_lage);
+    RUN_TEST(test_on_gossip_known_topic_pinned_can_lose_divergence_to_older_state);
+    RUN_TEST(test_on_gossip_known_topic_remote_pinned_low_wire_age_does_not_win);
+    RUN_TEST(test_on_gossip_known_topic_equal_lage_higher_evictions_win);
     RUN_TEST(test_on_gossip_unknown_topic_pinned_not_in_index_no_collision);
+    RUN_TEST(test_topic_subscribe_if_matching_pinned_low_wire_age_preserves_age);
     RUN_TEST(test_subscriber_pattern_index_lifecycle_with_scout_failure);
     return UNITY_END();
 }

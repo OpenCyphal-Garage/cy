@@ -373,7 +373,11 @@ void run_local_pin_case(const local_pin_case_t& tc)
 
     const std::uint32_t subject_id = probe_topic_subject_id(platform, tc.canonical_name, pubs.at(2U));
     TEST_ASSERT_TRUE(cy_publisher_topic(pubs.at(2U)) == topic);
-    TEST_ASSERT_EQUAL_UINT32(tc.expected_pin, subject_id);
+    if (tc.expected_pin == UINT16_MAX) {
+        TEST_ASSERT_TRUE(subject_id > CY_SUBJECT_ID_PINNED_MAX);
+    } else {
+        TEST_ASSERT_EQUAL_UINT32(tc.expected_pin, subject_id);
+    }
 
     for (cy_publisher_t*& pub : pubs) {
         if (pub != nullptr) {
@@ -750,31 +754,31 @@ void test_topic_find_by_name_uses_resolved_name()
     platform_deinit(&platform);
 }
 
-void test_api_core_local_pinning_sticky_subscriber_matrix()
+void test_api_core_existing_local_topic_keeps_allocation_subscriber_matrix()
 {
     static const std::array<local_pin_case_t, 4U> cases = {
-        local_pin_case_t{ .canonical_name = "core/pin/sub/nonpinned-then-pinned",
-                          .first_name     = "core/pin/sub/nonpinned-then-pinned",
+        local_pin_case_t{ .canonical_name = "core/pin/sub/existing-nonpinned-then-pinned",
+                          .first_name     = "core/pin/sub/existing-nonpinned-then-pinned",
                           .first_op       = local_op_t::subscribe,
-                          .second_name    = "core/pin/sub/nonpinned-then-pinned#42",
+                          .second_name    = "core/pin/sub/existing-nonpinned-then-pinned#42",
+                          .second_op      = local_op_t::subscribe,
+                          .expected_pin   = UINT16_MAX },
+        local_pin_case_t{ .canonical_name = "core/pin/sub/existing-higher-then-lower",
+                          .first_name     = "core/pin/sub/existing-higher-then-lower#123",
+                          .first_op       = local_op_t::subscribe,
+                          .second_name    = "core/pin/sub/existing-higher-then-lower#42",
+                          .second_op      = local_op_t::subscribe,
+                          .expected_pin   = 123U },
+        local_pin_case_t{ .canonical_name = "core/pin/sub/existing-pinned-then-nonpinned",
+                          .first_name     = "core/pin/sub/existing-pinned-then-nonpinned#42",
+                          .first_op       = local_op_t::subscribe,
+                          .second_name    = "core/pin/sub/existing-pinned-then-nonpinned",
                           .second_op      = local_op_t::subscribe,
                           .expected_pin   = 42U },
-        local_pin_case_t{ .canonical_name = "core/pin/sub/higher-then-lower",
-                          .first_name     = "core/pin/sub/higher-then-lower#123",
+        local_pin_case_t{ .canonical_name = "core/pin/sub/existing-lower-then-higher",
+                          .first_name     = "core/pin/sub/existing-lower-then-higher#42",
                           .first_op       = local_op_t::subscribe,
-                          .second_name    = "core/pin/sub/higher-then-lower#42",
-                          .second_op      = local_op_t::subscribe,
-                          .expected_pin   = 42U },
-        local_pin_case_t{ .canonical_name = "core/pin/sub/pinned-then-nonpinned",
-                          .first_name     = "core/pin/sub/pinned-then-nonpinned#42",
-                          .first_op       = local_op_t::subscribe,
-                          .second_name    = "core/pin/sub/pinned-then-nonpinned",
-                          .second_op      = local_op_t::subscribe,
-                          .expected_pin   = 42U },
-        local_pin_case_t{ .canonical_name = "core/pin/sub/lower-then-higher",
-                          .first_name     = "core/pin/sub/lower-then-higher#42",
-                          .first_op       = local_op_t::subscribe,
-                          .second_name    = "core/pin/sub/lower-then-higher#123",
+                          .second_name    = "core/pin/sub/existing-lower-then-higher#123",
                           .second_op      = local_op_t::subscribe,
                           .expected_pin   = 42U },
     };
@@ -784,31 +788,31 @@ void test_api_core_local_pinning_sticky_subscriber_matrix()
     }
 }
 
-void test_api_core_local_pinning_sticky_advertiser_matrix()
+void test_api_core_existing_local_topic_keeps_allocation_advertiser_matrix()
 {
     static const std::array<local_pin_case_t, 4U> cases = {
-        local_pin_case_t{ .canonical_name = "core/pin/pub/nonpinned-then-pinned",
-                          .first_name     = "core/pin/pub/nonpinned-then-pinned",
+        local_pin_case_t{ .canonical_name = "core/pin/pub/existing-nonpinned-then-pinned",
+                          .first_name     = "core/pin/pub/existing-nonpinned-then-pinned",
                           .first_op       = local_op_t::advertise,
-                          .second_name    = "core/pin/pub/nonpinned-then-pinned#42",
+                          .second_name    = "core/pin/pub/existing-nonpinned-then-pinned#42",
+                          .second_op      = local_op_t::advertise,
+                          .expected_pin   = UINT16_MAX },
+        local_pin_case_t{ .canonical_name = "core/pin/pub/existing-higher-then-lower",
+                          .first_name     = "core/pin/pub/existing-higher-then-lower#123",
+                          .first_op       = local_op_t::advertise,
+                          .second_name    = "core/pin/pub/existing-higher-then-lower#42",
+                          .second_op      = local_op_t::advertise,
+                          .expected_pin   = 123U },
+        local_pin_case_t{ .canonical_name = "core/pin/pub/existing-pinned-then-nonpinned",
+                          .first_name     = "core/pin/pub/existing-pinned-then-nonpinned#42",
+                          .first_op       = local_op_t::advertise,
+                          .second_name    = "core/pin/pub/existing-pinned-then-nonpinned",
                           .second_op      = local_op_t::advertise,
                           .expected_pin   = 42U },
-        local_pin_case_t{ .canonical_name = "core/pin/pub/higher-then-lower",
-                          .first_name     = "core/pin/pub/higher-then-lower#123",
+        local_pin_case_t{ .canonical_name = "core/pin/pub/existing-lower-then-higher",
+                          .first_name     = "core/pin/pub/existing-lower-then-higher#42",
                           .first_op       = local_op_t::advertise,
-                          .second_name    = "core/pin/pub/higher-then-lower#42",
-                          .second_op      = local_op_t::advertise,
-                          .expected_pin   = 42U },
-        local_pin_case_t{ .canonical_name = "core/pin/pub/pinned-then-nonpinned",
-                          .first_name     = "core/pin/pub/pinned-then-nonpinned#42",
-                          .first_op       = local_op_t::advertise,
-                          .second_name    = "core/pin/pub/pinned-then-nonpinned",
-                          .second_op      = local_op_t::advertise,
-                          .expected_pin   = 42U },
-        local_pin_case_t{ .canonical_name = "core/pin/pub/lower-then-higher",
-                          .first_name     = "core/pin/pub/lower-then-higher#42",
-                          .first_op       = local_op_t::advertise,
-                          .second_name    = "core/pin/pub/lower-then-higher#123",
+                          .second_name    = "core/pin/pub/existing-lower-then-higher#123",
                           .second_op      = local_op_t::advertise,
                           .expected_pin   = 42U },
     };
@@ -818,55 +822,55 @@ void test_api_core_local_pinning_sticky_advertiser_matrix()
     }
 }
 
-void test_api_core_local_pinning_sticky_mixed_matrix()
+void test_api_core_existing_local_topic_keeps_allocation_mixed_matrix()
 {
     static const std::array<local_pin_case_t, 8U> cases = {
-        local_pin_case_t{ .canonical_name = "core/pin/mixed/np-to-pin-sub-then-pub",
-                          .first_name     = "core/pin/mixed/np-to-pin-sub-then-pub",
+        local_pin_case_t{ .canonical_name = "core/pin/mixed/existing-np-to-pin-sub-then-pub",
+                          .first_name     = "core/pin/mixed/existing-np-to-pin-sub-then-pub",
                           .first_op       = local_op_t::subscribe,
-                          .second_name    = "core/pin/mixed/np-to-pin-sub-then-pub#42",
+                          .second_name    = "core/pin/mixed/existing-np-to-pin-sub-then-pub#42",
+                          .second_op      = local_op_t::advertise,
+                          .expected_pin   = UINT16_MAX },
+        local_pin_case_t{ .canonical_name = "core/pin/mixed/existing-np-to-pin-pub-then-sub",
+                          .first_name     = "core/pin/mixed/existing-np-to-pin-pub-then-sub",
+                          .first_op       = local_op_t::advertise,
+                          .second_name    = "core/pin/mixed/existing-np-to-pin-pub-then-sub#42",
+                          .second_op      = local_op_t::subscribe,
+                          .expected_pin   = UINT16_MAX },
+        local_pin_case_t{ .canonical_name = "core/pin/mixed/existing-high-to-low-sub-then-pub",
+                          .first_name     = "core/pin/mixed/existing-high-to-low-sub-then-pub#123",
+                          .first_op       = local_op_t::subscribe,
+                          .second_name    = "core/pin/mixed/existing-high-to-low-sub-then-pub#42",
+                          .second_op      = local_op_t::advertise,
+                          .expected_pin   = 123U },
+        local_pin_case_t{ .canonical_name = "core/pin/mixed/existing-high-to-low-pub-then-sub",
+                          .first_name     = "core/pin/mixed/existing-high-to-low-pub-then-sub#123",
+                          .first_op       = local_op_t::advertise,
+                          .second_name    = "core/pin/mixed/existing-high-to-low-pub-then-sub#42",
+                          .second_op      = local_op_t::subscribe,
+                          .expected_pin   = 123U },
+        local_pin_case_t{ .canonical_name = "core/pin/mixed/existing-pin-to-unpinned-sub-then-pub",
+                          .first_name     = "core/pin/mixed/existing-pin-to-unpinned-sub-then-pub#42",
+                          .first_op       = local_op_t::subscribe,
+                          .second_name    = "core/pin/mixed/existing-pin-to-unpinned-sub-then-pub",
                           .second_op      = local_op_t::advertise,
                           .expected_pin   = 42U },
-        local_pin_case_t{ .canonical_name = "core/pin/mixed/np-to-pin-pub-then-sub",
-                          .first_name     = "core/pin/mixed/np-to-pin-pub-then-sub",
+        local_pin_case_t{ .canonical_name = "core/pin/mixed/existing-pin-to-unpinned-pub-then-sub",
+                          .first_name     = "core/pin/mixed/existing-pin-to-unpinned-pub-then-sub#42",
                           .first_op       = local_op_t::advertise,
-                          .second_name    = "core/pin/mixed/np-to-pin-pub-then-sub#42",
+                          .second_name    = "core/pin/mixed/existing-pin-to-unpinned-pub-then-sub",
                           .second_op      = local_op_t::subscribe,
                           .expected_pin   = 42U },
-        local_pin_case_t{ .canonical_name = "core/pin/mixed/high-to-low-sub-then-pub",
-                          .first_name     = "core/pin/mixed/high-to-low-sub-then-pub#123",
+        local_pin_case_t{ .canonical_name = "core/pin/mixed/existing-low-to-high-sub-then-pub",
+                          .first_name     = "core/pin/mixed/existing-low-to-high-sub-then-pub#42",
                           .first_op       = local_op_t::subscribe,
-                          .second_name    = "core/pin/mixed/high-to-low-sub-then-pub#42",
+                          .second_name    = "core/pin/mixed/existing-low-to-high-sub-then-pub#123",
                           .second_op      = local_op_t::advertise,
                           .expected_pin   = 42U },
-        local_pin_case_t{ .canonical_name = "core/pin/mixed/high-to-low-pub-then-sub",
-                          .first_name     = "core/pin/mixed/high-to-low-pub-then-sub#123",
+        local_pin_case_t{ .canonical_name = "core/pin/mixed/existing-low-to-high-pub-then-sub",
+                          .first_name     = "core/pin/mixed/existing-low-to-high-pub-then-sub#42",
                           .first_op       = local_op_t::advertise,
-                          .second_name    = "core/pin/mixed/high-to-low-pub-then-sub#42",
-                          .second_op      = local_op_t::subscribe,
-                          .expected_pin   = 42U },
-        local_pin_case_t{ .canonical_name = "core/pin/mixed/pin-to-unpinned-sub-then-pub",
-                          .first_name     = "core/pin/mixed/pin-to-unpinned-sub-then-pub#42",
-                          .first_op       = local_op_t::subscribe,
-                          .second_name    = "core/pin/mixed/pin-to-unpinned-sub-then-pub",
-                          .second_op      = local_op_t::advertise,
-                          .expected_pin   = 42U },
-        local_pin_case_t{ .canonical_name = "core/pin/mixed/pin-to-unpinned-pub-then-sub",
-                          .first_name     = "core/pin/mixed/pin-to-unpinned-pub-then-sub#42",
-                          .first_op       = local_op_t::advertise,
-                          .second_name    = "core/pin/mixed/pin-to-unpinned-pub-then-sub",
-                          .second_op      = local_op_t::subscribe,
-                          .expected_pin   = 42U },
-        local_pin_case_t{ .canonical_name = "core/pin/mixed/low-to-high-sub-then-pub",
-                          .first_name     = "core/pin/mixed/low-to-high-sub-then-pub#42",
-                          .first_op       = local_op_t::subscribe,
-                          .second_name    = "core/pin/mixed/low-to-high-sub-then-pub#123",
-                          .second_op      = local_op_t::advertise,
-                          .expected_pin   = 42U },
-        local_pin_case_t{ .canonical_name = "core/pin/mixed/low-to-high-pub-then-sub",
-                          .first_name     = "core/pin/mixed/low-to-high-pub-then-sub#42",
-                          .first_op       = local_op_t::advertise,
-                          .second_name    = "core/pin/mixed/low-to-high-pub-then-sub#123",
+                          .second_name    = "core/pin/mixed/existing-low-to-high-pub-then-sub#123",
                           .second_op      = local_op_t::subscribe,
                           .expected_pin   = 42U },
     };
@@ -1249,22 +1253,22 @@ void test_api_core_gossip_pins_topic_with_pub_writer()
     TEST_ASSERT_NOT_NULL(topic);
     const std::uint64_t hash = cy_topic_hash(topic);
 
-    // Construct a gossip with pinned evictions (UINT32_MAX - 5) and LAGE_PINNED (127) for the same topic hash.
-    // The local topic has evictions=0 and lage < 127, so it will lose arbitration and adopt the pinned evictions.
+    // Construct a gossip with pinned evictions (UINT32_MAX - 5) and an ordinary in-range wire age.
+    // Pinnedness is carried by evictions, so the local topic must still lose arbitration and adopt the pin.
     const auto                              pinned_evictions = static_cast<std::uint32_t>(UINT32_MAX - 5U);
-    const auto                              lage_pinned      = static_cast<std::int8_t>(127);
     const cy_str_t                          topic_name       = cy_topic_name(topic);
     std::array<char, CY_TOPIC_NAME_MAX + 1> name_copy{};
     std::memcpy(name_copy.data(), topic_name.str, topic_name.len);
 
     const cy_str_t gossip_name = { .len = topic_name.len, .str = name_copy.data() };
-    dispatch_gossip_unicast(
-      &platform, hash, pinned_evictions, lage_pinned, gossip_name, UINT64_C(0xF200), platform.now);
+    dispatch_gossip_unicast(&platform, hash, pinned_evictions, 0, gossip_name, UINT64_C(0xF200), platform.now);
 
     // After the gossip, the topic should have transitioned to pinned evictions.
     // The pub_writer should have been released (lines 1445-1446).
     // Publish again -- this should lazily recreate the writer for the new (pinned) subject-ID.
+    TEST_ASSERT_EQUAL_INT(0, platform.active_writer_subjects.count(5U));
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_publish(pub, platform.now + 1000, empty));
+    TEST_ASSERT_EQUAL_INT(1, platform.active_writer_subjects.count(5U));
 
     cy_unadvertise(pub);
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
@@ -1293,9 +1297,9 @@ int main()
     RUN_TEST(test_subscriber_name_returns_pin_stripped_name);
     RUN_TEST(test_publisher_topic_for_pinned_has_correct_hash);
     RUN_TEST(test_topic_find_by_name_uses_resolved_name);
-    RUN_TEST(test_api_core_local_pinning_sticky_subscriber_matrix);
-    RUN_TEST(test_api_core_local_pinning_sticky_advertiser_matrix);
-    RUN_TEST(test_api_core_local_pinning_sticky_mixed_matrix);
+    RUN_TEST(test_api_core_existing_local_topic_keeps_allocation_subscriber_matrix);
+    RUN_TEST(test_api_core_existing_local_topic_keeps_allocation_advertiser_matrix);
+    RUN_TEST(test_api_core_existing_local_topic_keeps_allocation_mixed_matrix);
     RUN_TEST(test_api_core_advertise_client_oom);
     RUN_TEST(test_api_core_home_set_oom);
     RUN_TEST(test_api_core_do_publish_oom_subject_writer);

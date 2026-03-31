@@ -153,7 +153,7 @@ The message tags must be unique across reboots to avoid misattribution; for that
 uint8  type
 void8
 uint8  incompatibility
-int8   topic_log_age    # floor(log2(topic_age)) if topic_age>0 else -1; 127 for pinned topics.
+int8   topic_log_age    # floor(log2(topic_age)) if topic_age>0 else -1.
 uint32 evictions        # For pinned topics, this is 0xFFFFFFFF-subject_id.
 uint64 topic_hash       # For subject allocation collision detection and immediate consensus updates.
 uint64 tag              # For ordering recovery and acknowledgement & response correlation. Random-init, wraparound.
@@ -199,19 +199,16 @@ uint64 message_tag      # The tag of the published message this response pertain
 
 See the `model/` directory for the design rationale.
 
-Pinned topics are manually assigned a specific subject-ID. They differ from ordinary topics as follows:
+Pinned topics request a specific subject-ID. Their eviction counter is set to `0xFFFFFFFF - subject_id`, thus reserving the range at and above 0xFFFFE000. There are no other differences: they remain ordinary CRDT states and arbitrate against non-pinned topics the same way. Their high eviction values only matter on equal-log-age ties; they do not bypass age-based arbitration.
 
-- The log-age is set to 127 (unreachable for non-pinned topics).
-- The eviction counter is set to `0xFFFFFFFF - subject_id`, thus reserving the range at and above 0xFFFFE000.
-
-This makes CRDT handle the pinning logic without special casing: pinned topics win collisions thanks to the greater log-age (although at the moment they are limited to subject-IDs below 8192, where non-pinned topics cannot appear, but this may change in the future); pinned topics win divergence arbitration against non-pinned ones thanks to the higher eviction counter, thus resulting in a contagious spread of pinning (as intended); when the same topic is pinned to distinct subjects, the one with the smaller subject-ID wins.
+It follows that an old non-pinned topic will unpin pinned newcomers, and likewise an older pinned topic may displace a newer conflicting pin. This is consistent with the overall policy of minimal disturbance to the established network participants.
 
 There is another desirable consequence of this design. It is expected that the 32-bit eviction counter will never wrap around due to its slow increment rate, so the reserved range is unreachable. If, however, there was a pathological scenario where the eviction counter is incremented at a high rate long enough to risk overflow, the reserved range at the top would automatically arrest the growth at 0xFFFFE000, effectively pinning the topic at the subject-ID of 8191, resulting in a graceful degradation of the protocol instead of a catastrophic failure due to wraparound (which the consensus protocol is not designed to handle).
 
 ```bash
 uint8  type
 void16
-int8   topic_log_age    # floor(log2(topic_age)) if topic_age>0 else -1; 127 for pinned topics.
+int8   topic_log_age    # floor(log2(topic_age)) if topic_age>0 else -1.
 uint32 incompatibility
 uint64 topic_hash
 uint32 topic_evictions  # For pinned topics, this is 0xFFFFFFFF-subject_id.

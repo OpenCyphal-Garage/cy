@@ -349,12 +349,12 @@ That's it! See the `examples/` folder for more complete examples, and read the A
 
 ## 🥽 Advanced usage
 
-### 📍 Topic pinning to disable CRDT consensus-based allocation
+### 📍 Topic pinning to a specific subject-ID
 
 By default, the CRDT allocation protocol will ensure that each topic gets a dedicated subject-ID.
 Some deployments, in particular hard real-time/safety-critical ones,
-may want to avoid dependency on the CRDT consensus protocol and instead assign some of the topics to subjects manually.
-Such topics where the subject-ID is manually assigned are called *pinned topics*.
+may want to avoid dependency on automatic allocation and instead assign some of the topics to subjects manually.
+Such topics are called *pinned topics*.
 
 A pinned topic has the desired subject-ID encoded as a decimal number at the end of its name following a `#` character;
 e.g., `foo/bar#1234` is a pinned topic with subject-ID 1234.
@@ -364,14 +364,14 @@ This range is never used for automatically allocated topics, so there is no risk
 Pinning does not affect the topic identity; as such, for topic identification purposes, only the part of the name
 before the `#` of the pinning expression is significant.
 
-A topic being pinned inconsistently across the network is treated as an allocation divergence and is resolved by
-converging all to the lowest pinned subject-ID among the available ones.
-For example, given `foo/bar` (non-pinned), `foo/bar#1234`, and `foo/bar#123`,
-the network will converge to `foo/bar#123`.
-The same rule is applied locally as repeated verbatim advertisements/subscriptions are added on a node;
-once a lower pin is seen for a topic, that choice remains sticky for the lifetime of the local topic instance.
+A pinned topic is still an ordinary CRDT state. If the same topic is pinned inconsistently across the network, the
+conflict is resolved by the usual CRDT arbitration rules: older topic wins by log-age, and ties are broken by the
+larger eviction counter. A pinned topic does not bypass consensus or get special priority; it keeps its requested
+subject-ID only if its state wins that ordinary arbitration. The same rule is applied locally as repeated verbatim
+advertisements/subscriptions are added on a node: once a topic instance exists, later local pinning requests attach to
+it without rewriting its current allocation.
 
-Unlike the default automatic allocation mode, manual assignments allow multiple topics to share the same subject-ID ---
+Unlike the default automatic allocation mode, pinning allows multiple topics to share the same subject-ID ---
 each participant of such multi-tenant subjects will filter out messages of interest upon arrival;
 usually this is only a good idea for relatively low-rate topics.
 For example, having `foo#1234` and `bar#1234` simultaneously is valid;

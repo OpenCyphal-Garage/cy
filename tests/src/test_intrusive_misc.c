@@ -500,9 +500,13 @@ static void test_internal_helpers_branch_matrix(void)
     fixture_t fixture;
     fixture_init(&fixture);
 
-    TEST_ASSERT_EQUAL_INT64(0, pow2us(-1));
-    TEST_ASSERT_EQUAL_INT64(1, pow2us(0));
-    TEST_ASSERT_EQUAL_INT64(INT64_MAX, pow2us(63));
+    TEST_ASSERT_EQUAL_INT64(0, lage_to_us(-1));
+    TEST_ASSERT_EQUAL_INT64(0, lage_to_us(-10));
+    TEST_ASSERT_EQUAL_INT64(MEGA, lage_to_us(0));
+    TEST_ASSERT_EQUAL_INT64(2 * MEGA, lage_to_us(1));
+    TEST_ASSERT_EQUAL_INT64((INT64_C(1) << LAGE_MAX) * MEGA, lage_to_us(LAGE_MAX));
+    TEST_ASSERT_EQUAL_INT64((INT64_C(1) << LAGE_MAX) * MEGA, lage_to_us(LAGE_MAX + 1));
+    TEST_ASSERT_EQUAL_INT64((INT64_C(1) << LAGE_MAX) * MEGA, lage_to_us(43));
 
     TEST_ASSERT_EQUAL_INT64(42, random_int(&fixture.cy, 42, 42));
     const int64_t rnd = random_int(&fixture.cy, -5, 5);

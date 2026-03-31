@@ -16,6 +16,7 @@ constexpr std::uint8_t header_msg_best_effort = 0U;
 constexpr std::uint8_t header_msg_reliable    = 1U;
 constexpr std::uint8_t header_msg_ack         = 2U;
 constexpr std::size_t  header_bytes           = 24U;
+constexpr std::int8_t  lage_max               = 35;
 
 struct arrival_capture_t
 {
@@ -427,39 +428,46 @@ void test_api_inline_msg_rejects_invalid_lage()
     platform_deinit(&platform);
 }
 
-void test_api_inline_msg_rejects_pinned_evictions_lage_mismatch()
+void test_api_inline_msg_accepts_pinned_evictions_with_in_range_lage()
 {
     test_platform_t platform{};
     platform_init(&platform);
     cy_test_message_reset_counters();
 
-    self_unsub_capture_t capture{};
-    cy_future_t* const   sub = cy_subscribe(platform.cy, cy_str("v1#5"), 256U);
+    arrival_capture_t  capture{};
+    cy_future_t* const sub = cy_subscribe(platform.cy, cy_str("v1#5"), 256U);
     TEST_ASSERT_NOT_NULL(sub);
     cy_user_context_t context = CY_USER_CONTEXT_EMPTY;
     context.ptr[0]            = &capture;
     cy_future_context_set(sub, context);
-    cy_future_callback_set(sub, on_arrival_count_only);
+    cy_future_callback_set(sub, on_arrival_capture_rx);
 
     const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("v1"));
     TEST_ASSERT_NOT_NULL(topic);
     TEST_ASSERT_EQUAL_UINT64(rapidhash("v1", 2U), cy_topic_hash(topic)); // Pin stripped; name is "v1".
+    const cy_subject_reader_t reader = { .subject_id = 5U, .extent = 0 };
 
-    // Send a message with pinned evictions but non-pinned lage (mismatch should be rejected).
-    std::array<unsigned char, header_bytes + 1U> wire{};
-    make_message_header(wire.data(), header_msg_best_effort, UINT64_C(102), cy_topic_hash(topic));
-    // Set pinned evictions (UINT32_MAX - 5 = pin to subject 5) in little-endian.
-    const auto pinned_ev = static_cast<std::uint32_t>(UINT32_MAX - 5U);
-    wire[4]              = static_cast<unsigned char>(pinned_ev >> 0U);
-    wire[5]              = static_cast<unsigned char>(pinned_ev >> 8U);
-    wire[6]              = static_cast<unsigned char>(pinned_ev >> 16U);
-    wire[7]              = static_cast<unsigned char>(pinned_ev >> 24U);
-    // lage remains 0 (non-pinned), creating the mismatch.
-    wire[header_bytes]   = 0x22U;
-    const cy_lane_t lane = { .id = UINT64_C(0x902), .ctx = { { 0 } }, .prio = cy_prio_nominal };
+    const auto                              pinned_ev      = static_cast<std::uint32_t>(UINT32_MAX - 5U);
+    static const std::array<std::int8_t, 4> accepted_lages = { -1, 0, 5, lage_max };
+    const cy_lane_t                         lane = { .id = UINT64_C(0x902), .ctx = { { 0 } }, .prio = cy_prio_nominal };
 
-    dispatch_raw(&platform, wire.data(), wire.size(), lane, nullptr, 201);
-    TEST_ASSERT_EQUAL_size_t(0U, capture.count);
+    for (std::size_t i = 0; i < accepted_lages.size(); i++) {
+        std::array<unsigned char, header_bytes + 1U> wire{};
+        make_message_header(wire.data(), header_msg_best_effort, UINT64_C(102) + i, cy_topic_hash(topic));
+        wire[3]            = static_cast<unsigned char>(accepted_lages.at(i));
+        wire[4]            = static_cast<unsigned char>(pinned_ev >> 0U);
+        wire[5]            = static_cast<unsigned char>(pinned_ev >> 8U);
+        wire[6]            = static_cast<unsigned char>(pinned_ev >> 16U);
+        wire[7]            = static_cast<unsigned char>(pinned_ev >> 24U);
+        wire[header_bytes] = static_cast<unsigned char>(0x22U + i);
+
+        dispatch_raw(
+          &platform, wire.data(), wire.size(), lane, &reader, static_cast<cy_us_t>(201) + static_cast<cy_us_t>(i));
+        TEST_ASSERT_EQUAL_size_t(i + 1U, capture.count);
+        TEST_ASSERT_EQUAL_UINT64(UINT64_C(102) + i, capture.tags.at(i));
+        TEST_ASSERT_EQUAL_UINT8(static_cast<unsigned char>(0x22U + i), capture.first_payload_byte.at(i));
+    }
+
     TEST_ASSERT_EQUAL_size_t(0U, platform.unicast_count);
 
     cy_future_destroy(sub);
@@ -1263,7 +1271,7 @@ void test_api_multicast_msg_rejects_nonzero_incompatibility()
 
 void test_api_gossip_rejects_invalid_lage()
 {
-    // Deliver a gossip message with an out-of-range lage value (36, which is LAGE_MAX+1 but not LAGE_PINNED).
+    // Deliver a gossip message with out-of-range lage values; these must be rejected.
     // This covers the branch at line 4825 for the gossip path.
     test_platform_t platform{};
     platform_init(&platform);
@@ -1276,7 +1284,7 @@ void test_api_gossip_rejects_invalid_lage()
     TEST_ASSERT_NOT_NULL(topic);
     const std::uint64_t hash = cy_topic_hash(topic);
 
-    // Construct a gossip header with lage=36 (LAGE_MAX+1, invalid and not LAGE_PINNED=127).
+    // Construct a gossip header with lage=36 (LAGE_MAX+1, invalid).
     std::array<unsigned char, 256U> wire{};
     const std::size_t size = make_gossip_header(wire.data(), wire.size(), 3U, 36, hash, 0U, cy_str("rx/gossip/lage"));
     TEST_ASSERT_TRUE(size > 0U);
@@ -1592,7 +1600,7 @@ int main()
     RUN_TEST(test_api_malformed_header_drops_message);
     RUN_TEST(test_api_inline_msg_rejects_nonzero_incompatibility);
     RUN_TEST(test_api_inline_msg_rejects_invalid_lage);
-    RUN_TEST(test_api_inline_msg_rejects_pinned_evictions_lage_mismatch);
+    RUN_TEST(test_api_inline_msg_accepts_pinned_evictions_with_in_range_lage);
     RUN_TEST(test_api_inline_msg_rejects_multicast_subject_mismatch);
     RUN_TEST(test_api_inline_msg_unicast_skips_subject_consistency_check);
     RUN_TEST(test_api_inline_msg_unknown_topic_collision_path_smoke);
