@@ -1011,6 +1011,62 @@ void test_name_resolve_pin_exceeding_max_is_literal()
     TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, r.pin);
 }
 
+void test_name_resolve_pin_uint16_overflow_regression()
+{
+    // Values that would wrap uint16_t into the valid pin range [0, 8191] before the fix.
+    // After the fix, they must all be rejected: '#' stays literal in the name, pin = UINT16_MAX.
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    cy_resolved_t                           r{};
+
+    // 65536 wraps uint16 to 0.
+    r = cy_name_resolve(cy_str("foo#65536"), cy_str("ns"), cy_str(""), buf.size(), buf.data());
+    TEST_ASSERT_NOT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_STRING_LEN("ns/foo#65536", r.name.str, r.name.len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, r.pin);
+
+    // 65537 wraps uint16 to 1.
+    r = cy_name_resolve(cy_str("foo#65537"), cy_str("ns"), cy_str(""), buf.size(), buf.data());
+    TEST_ASSERT_NOT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_STRING_LEN("ns/foo#65537", r.name.str, r.name.len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, r.pin);
+
+    // 73727 wraps uint16 to 8191 = CY_SUBJECT_ID_PINNED_MAX.
+    r = cy_name_resolve(cy_str("foo#73727"), cy_str("ns"), cy_str(""), buf.size(), buf.data());
+    TEST_ASSERT_NOT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_STRING_LEN("ns/foo#73727", r.name.str, r.name.len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, r.pin);
+
+    // 70000 wraps uint16 to 4464.
+    r = cy_name_resolve(cy_str("foo#70000"), cy_str("ns"), cy_str(""), buf.size(), buf.data());
+    TEST_ASSERT_NOT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_STRING_LEN("ns/foo#70000", r.name.str, r.name.len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, r.pin);
+
+    // 131072 = 2*65536, double wrap to 0.
+    r = cy_name_resolve(cy_str("foo#131072"), cy_str("ns"), cy_str(""), buf.size(), buf.data());
+    TEST_ASSERT_NOT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_STRING_LEN("ns/foo#131072", r.name.str, r.name.len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, r.pin);
+
+    // Without namespace: overflow value stays literal.
+    r = cy_name_resolve(cy_str("foo#65536"), cy_str(""), cy_str(""), buf.size(), buf.data());
+    TEST_ASSERT_NOT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_STRING_LEN("foo#65536", r.name.str, r.name.len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, r.pin);
+
+    // Absolute name with overflow: "/foo#65536" -> normalize -> "foo#65536", no pin.
+    r = cy_name_resolve(cy_str("/foo#65536"), cy_str("ns"), cy_str("me"), buf.size(), buf.data());
+    TEST_ASSERT_NOT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_STRING_LEN("foo#65536", r.name.str, r.name.len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, r.pin);
+
+    // Homeful name with overflow: "~/foo#65536" -> expand home -> "me/foo#65536", no pin.
+    r = cy_name_resolve(cy_str("~/foo#65536"), cy_str("ns"), cy_str("me"), buf.size(), buf.data());
+    TEST_ASSERT_NOT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_STRING_LEN("me/foo#65536", r.name.str, r.name.len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, r.pin);
+}
+
 void test_name_resolve_pin_mid_name_not_stripped()
 {
     // '#' not at the end of the name (followed by '/bar') is not a pin expression.
@@ -1296,6 +1352,7 @@ int main()
     // cy_name_resolve -- pin edge cases with pinning
     RUN_TEST(test_name_resolve_pin_at_name_max_boundary);
     RUN_TEST(test_name_resolve_pin_exceeding_max_is_literal);
+    RUN_TEST(test_name_resolve_pin_uint16_overflow_regression);
     RUN_TEST(test_name_resolve_pin_mid_name_not_stripped);
     RUN_TEST(test_name_resolve_empty_after_pin_strip_fails);
     RUN_TEST(test_name_resolve_pin_on_absolute_and_homeful);

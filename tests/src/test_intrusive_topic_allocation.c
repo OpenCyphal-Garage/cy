@@ -821,6 +821,78 @@ static void test_name_consume_pin_suffix_decimal_parsing(void)
     fixture_deinit(&fix);
 }
 
+static void test_name_consume_pin_suffix_uint16_overflow_regression(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    uint16_t pin = 0;
+
+    // Values that wrap uint16_t into the valid pin range [0, 8191].
+    // Before the fix, these would be incorrectly accepted as valid pins.
+
+    // 65536 mod 65536 = 0 -- would appear as pin 0.
+    pin = 0;
+    TEST_ASSERT_EQUAL_size_t(9U, name_consume_pin_suffix(cy_str("foo#65536"), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, pin);
+
+    // 65537 mod 65536 = 1 -- would appear as pin 1.
+    pin = 0;
+    TEST_ASSERT_EQUAL_size_t(9U, name_consume_pin_suffix(cy_str("foo#65537"), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, pin);
+
+    // 73727 mod 65536 = 8191 = CY_SUBJECT_ID_PINNED_MAX -- worst case, wraps to max valid.
+    pin = 0;
+    TEST_ASSERT_EQUAL_size_t(9U, name_consume_pin_suffix(cy_str("foo#73727"), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, pin);
+
+    // 70000 mod 65536 = 4464 -- mid-range valid pin.
+    pin = 0;
+    TEST_ASSERT_EQUAL_size_t(9U, name_consume_pin_suffix(cy_str("foo#70000"), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, pin);
+
+    // 66000 mod 65536 = 464 -- low valid pin.
+    pin = 0;
+    TEST_ASSERT_EQUAL_size_t(9U, name_consume_pin_suffix(cy_str("foo#66000"), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, pin);
+
+    // 65535 = UINT16_MAX, above 8191. Does NOT wrap (fits in uint16_t), but exceeds range.
+    pin = 0;
+    TEST_ASSERT_EQUAL_size_t(9U, name_consume_pin_suffix(cy_str("foo#65535"), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, pin);
+
+    // 131072 = 2 * 65536, double wrap to 0.
+    pin = 0;
+    TEST_ASSERT_EQUAL_size_t(10U, name_consume_pin_suffix(cy_str("foo#131072"), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, pin);
+
+    // 131073 = 2 * 65536 + 1, double wrap to 1.
+    pin = 0;
+    TEST_ASSERT_EQUAL_size_t(10U, name_consume_pin_suffix(cy_str("foo#131073"), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, pin);
+
+    // Minimal prefix with overflow.
+    pin = 0;
+    TEST_ASSERT_EQUAL_size_t(7U, name_consume_pin_suffix(cy_str("x#65536"), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, pin);
+
+    // Bare hash (no prefix) with overflow value.
+    pin = 0;
+    TEST_ASSERT_EQUAL_size_t(6U, name_consume_pin_suffix(cy_str("#65536"), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, pin);
+
+    // Confirm boundary values still behave correctly after the fix.
+    pin = UINT16_MAX;
+    TEST_ASSERT_EQUAL_size_t(3U, name_consume_pin_suffix(cy_str("foo#8191"), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(8191U, pin); // CY_SUBJECT_ID_PINNED_MAX -- valid.
+
+    pin = UINT16_MAX;
+    TEST_ASSERT_EQUAL_size_t(8U, name_consume_pin_suffix(cy_str("foo#8192"), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, pin); // Just above max -- invalid.
+
+    fixture_deinit(&fix);
+}
+
 static void test_topic_merge_lage_crdt_properties_commutative_associative_idempotent(void)
 {
     fixture_t fix;
@@ -1704,6 +1776,7 @@ int main(void)
     RUN_TEST(test_left_wins_and_topic_merge_lage);
     RUN_TEST(test_topic_merge_lage_clamps_out_of_range_values);
     RUN_TEST(test_name_consume_pin_suffix_decimal_parsing);
+    RUN_TEST(test_name_consume_pin_suffix_uint16_overflow_regression);
     RUN_TEST(test_topic_merge_lage_crdt_properties_commutative_associative_idempotent);
     RUN_TEST(test_on_gossip_known_topic_equal_lage_prefers_higher_evictions);
     RUN_TEST(test_topic_allocate_reader_recovery_after_subject_reader_oom);

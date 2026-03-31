@@ -4911,14 +4911,14 @@ static cy_str_t name_consume_pin_suffix(const cy_str_t name, uint16_t* const out
         return name; // Leading zeros are not allowed (e.g., #01, #00).
     }
     // Parse decimal left-to-right.
-    uint16_t pin = 0;
+    uint32_t pin = 0;
     for (size_t i = hash_pos + 1; i < name.len; i++) {
-        pin = (uint16_t)((pin * 10U) + (unsigned)(name.str[i] - '0'));
+        pin = (uint32_t)((pin * 10U) + (unsigned)(name.str[i] - '0'));
         if (pin > CY_SUBJECT_ID_PINNED_MAX) {
             return name; // Value exceeds the valid subject-ID range.
         }
     }
-    *out_pin = pin;
+    *out_pin = (uint16_t)pin;
     return (cy_str_t){ .len = hash_pos, .str = name.str };
 }
 
@@ -5024,9 +5024,7 @@ cy_str_t cy_name_join(const cy_str_t left, const cy_str_t right, const size_t de
     }
     assert(len < dest_size);
     if (len > 0) {
-        if ((len + 1) > dest_size) {
-            return str_invalid; // No room for the separator.
-        }
+        assert((len + 1) <= dest_size); // Provably true: len > 0 ∧ len < dest_size ⇒ len + 1 ≤ dest_size.
         dest[len++] = cy_name_sep;
     }
     const size_t right_len = name_normalize(right.len, right.str, dest_size - len, &dest[len]).len;

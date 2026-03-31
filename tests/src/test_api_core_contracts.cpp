@@ -325,8 +325,8 @@ std::uint32_t only_new_subject_id(const std::set<std::uint32_t>& before, const s
 }
 
 std::uint32_t probe_topic_subject_id(const test_platform_t& platform,
-                                     const char* const     canonical_name,
-                                     cy_publisher_t*&      probe)
+                                     const char* const      canonical_name,
+                                     cy_publisher_t*&       probe)
 {
     const std::set<std::uint32_t> before = platform.active_writer_subjects;
     probe                                = cy_advertise(platform.cy, cy_str(canonical_name));
