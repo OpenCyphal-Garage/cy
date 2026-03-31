@@ -1585,23 +1585,21 @@ static cy_err_t topic_new(cy_t* const        cy,
     }
 
     // Allocate the gossip shard writer/reader from the registry. All topics gossip, including pinned ones.
-    topic->gossip_event = OLGA_EVENT_INIT;
-    {
-        const uint32_t shard_subject = topic_gossip_shard_subject_id(cy, topic->hash);
-        topic->gossip_writer         = writer_acquire(cy, shard_subject);
-        if (topic->gossip_writer == NULL) {
-            err = CY_ERR_MEMORY;
-            cavl2_remove(&cy->topics_by_hash, &topic->index_hash);
-            goto fail;
-        }
-        topic->gossip_reader = reader_acquire(cy, shard_subject, CY_AUX_SUBJECT_EXTENT);
-        if (topic->gossip_reader == NULL) {
-            writer_release(cy, topic->gossip_writer);
-            topic->gossip_writer = NULL;
-            err                  = CY_ERR_MEMORY;
-            cavl2_remove(&cy->topics_by_hash, &topic->index_hash);
-            goto fail;
-        }
+    topic->gossip_event          = OLGA_EVENT_INIT;
+    const uint32_t shard_subject = topic_gossip_shard_subject_id(cy, topic->hash);
+    topic->gossip_writer         = writer_acquire(cy, shard_subject);
+    if (topic->gossip_writer == NULL) {
+        err = CY_ERR_MEMORY;
+        cavl2_remove(&cy->topics_by_hash, &topic->index_hash);
+        goto fail;
+    }
+    topic->gossip_reader = reader_acquire(cy, shard_subject, CY_AUX_SUBJECT_EXTENT);
+    if (topic->gossip_reader == NULL) {
+        writer_release(cy, topic->gossip_writer);
+        topic->gossip_writer = NULL;
+        err                  = CY_ERR_MEMORY;
+        cavl2_remove(&cy->topics_by_hash, &topic->index_hash);
+        goto fail;
     }
 
     // Initially, all topics are considered implicit until proven otherwise. See topic_sync_implicit().
