@@ -41,6 +41,9 @@ struct cy_tree_t
 // Standard library includes come last.
 #include <assert.h>
 #include <string.h>
+#if CY_CONFIG_TRACE
+#include <stdio.h>
+#endif
 
 #if __STDC_VERSION__ < 201112L
 #define static_assert(x, ...)        typedef char _static_assert_gl(_static_assertion_, __LINE__)[(x) ? 1 : -1]
@@ -361,26 +364,6 @@ static size_t cavl_count(cy_tree_t* const root)
     }
     return count;
 }
-
-#if CY_CONFIG_TRACE
-
-// Converts `bit_width` least significant bits rounded up to the nearest nibble to hexadecimal.
-// The output string must be at least ceil(bit_width/4)+1 chars long. It will be left-zero-padded and NUL-terminated.
-static cy_str_t to_hex(uint64_t value, const size_t bit_width, char* const out)
-{
-    if (out == NULL) {
-        return str_invalid;
-    }
-    const size_t len = (bit_width + 3) / 4;
-    for (int_fast8_t i = (int_fast8_t)(len - 1U); i >= 0; --i) {
-        out[i] = "0123456789abcdef"[value & 15U];
-        value >>= 4U;
-    }
-    out[len] = '\0';
-    return (cy_str_t){ .len = len, .str = out };
-}
-
-#endif
 
 // SERIALIZATION PRIMITIVES
 
@@ -1036,20 +1019,14 @@ typedef struct
 static topic_repr_t topic_repr(const cy_topic_t* const topic)
 {
     assert(topic != NULL);
-    topic_repr_t out = { 0 };
-    char*        ptr = out.str;
-    *ptr++           = 'T';
-    ptr += to_hex(topic->hash, 64, ptr).len;
-    *ptr++ = '@';
-    *ptr++ = 'S';
-    ptr += to_hex(topic_subject_id(topic), 32, ptr).len;
-    *ptr++              = '\'';
+    topic_repr_t   out  = { 0 };
     const cy_str_t name = cy_topic_name(topic);
-    memcpy(ptr, name.str, name.len);
-    ptr += name.len;
-    *ptr++ = '\'';
-    *ptr   = '\0';
-    assert((ptr - out.str) <= (ptrdiff_t)sizeof(out.str));
+    (void)snprintf(out.str,
+                   sizeof(out.str),
+                   "T%016jx@S%08jx'%.*s'",
+                   (uintmax_t)topic->hash,
+                   (uintmax_t)topic_subject_id(topic),
+                   STRFMT_ARG(name));
     return out;
 }
 

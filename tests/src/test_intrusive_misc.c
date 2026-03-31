@@ -508,17 +508,6 @@ static void test_internal_helpers_branch_matrix(void)
     const int64_t rnd = random_int(&fixture.cy, -5, 5);
     TEST_ASSERT_TRUE((rnd >= -5) && (rnd < 5));
 
-#if CY_CONFIG_TRACE
-    char     hex_buf[17] = { 0 };
-    cy_str_t hex         = to_hex(UINT64_C(0x1A2B), 16U, hex_buf);
-    TEST_ASSERT_EQUAL_size_t(4U, hex.len);
-    TEST_ASSERT_EQUAL_MEMORY("1a2b", hex.str, hex.len);
-
-    hex = to_hex(0U, 8U, NULL);
-    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, hex.len);
-    TEST_ASSERT_NULL(hex.str);
-#endif
-
     bitmap_t bm[1] = { UINT64_C(0xFFFFFFFFFFFFFFFF) };
     bitmap_reset(NULL, 1U);
     bitmap_reset(bm, 1U);
