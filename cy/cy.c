@@ -1220,12 +1220,13 @@ static bool is_pinned(const uint32_t evictions) { return evictions >= EVICTIONS_
 static int_fast8_t topic_lage(const cy_topic_t* const topic, const cy_us_t now)
 {
     if (is_pinned(topic->evictions)) {
-        return LAGE_PINNED; // Pinned topics are maximally old; they always win age-based arbitration.
+        return LAGE_PINNED; // Pinned topics are maximally old; local repinning changes age via evictions alone.
     }
     return log2_floor((uint64_t)later(0, (now - topic->ts_origin) / MEGA));
 }
 
-// CRDT merge operator on the topic log-age. Shift ts_origin into the past if needed.
+// CRDT merge operator on the topic log-age for remote gossip. Local pub/sub creation must not touch ts_origin:
+// local pinning changes topic_lage() through evictions, whereas ts_origin tracks when the topic was first observed.
 static void topic_merge_lage(cy_topic_t* const topic, const cy_us_t now, int_fast8_t r_lage)
 {
     r_lage           = (int_fast8_t)((r_lage < LAGE_MIN) ? LAGE_MIN : ((r_lage > LAGE_MAX) ? LAGE_MAX : r_lage));
@@ -1649,7 +1650,7 @@ static cy_err_t topic_new(cy_t* const        cy,
     }
     CY_TRACE(cy, "✨ %s topic_count=%zu", topic_repr(topic).str, cavl_count(cy->topics_by_hash));
     (void)cavl_count; // Suppress unused function warning when tracing is disabled.
-    return 0;
+    return CY_OK;
 
 fail:
     if ((topic->index_name != NULL) && (topic->index_name->value == topic)) {
@@ -1663,24 +1664,29 @@ fail:
     return err;
 }
 
+// Local verbatim requests may tighten the pinning of an existing topic. Sticky semantics mean that the strongest
+// local pin seen so far wins for the lifetime of the topic object, so we only ever raise the eviction counter.
+// We intentionally do not merge lage here: topic_lage() derives pinned age from evictions, while ts_origin must keep
+// describing when the topic itself was first observed rather than when another local handle was attached.
 static cy_err_t topic_ensure(cy_t* const cy, cy_topic_t** const out_topic, const cy_resolved_t resolved)
 {
-    cy_topic_t* const topic = cy_topic_find_by_name(cy, resolved.name);
+    cy_topic_t* const topic  = cy_topic_find_by_name(cy, resolved.name);
+    const uint32_t evictions = (resolved.pin <= CY_SUBJECT_ID_PINNED_MAX) ? (UINT32_MAX - (uint32_t)resolved.pin) : 0U;
     if (topic != NULL) {
+        if (evictions > topic->evictions) {
+            topic_allocate(topic, evictions, cy_now(cy)); // need to tighten up pinning: all pins converge to smallest
+        }
         if (out_topic != NULL) {
             *out_topic = topic;
         }
-        return 0;
+        return CY_OK;
     }
-    const uint64_t hash      = rapidhash(resolved.name.str, resolved.name.len);
-    const uint32_t evictions = (resolved.pin != UINT16_MAX) ? (UINT32_MAX - (uint32_t)resolved.pin) : 0;
+    const uint64_t hash = rapidhash(resolved.name.str, resolved.name.len);
     return topic_new(cy, out_topic, resolved.name, hash, evictions, LAGE_MIN);
 }
 
-// Create a new coupling between a topic and a subscriber.
-// Allocates new memory for the coupling, which may fail.
-// Don't forget topic_ensure_subscribed() afterward if necessary.
-// The substitutions must not lose validity until the topic is destroyed.
+// Create a new coupling between a topic and a subscriber. Allocates new memory for the coupling, which may fail.
+// Don't forget topic_ensure_subscribed() afterward if necessary. The substitutions must outlive the topic.
 static cy_err_t topic_couple(cy_topic_t* const         topic,
                              subscriber_root_t* const  subr,
                              const size_t              substitution_count,
@@ -3592,11 +3598,11 @@ static void* wkv_cb_couple_new_subscription(const wkv_event_t evt)
 }
 
 // Either finds an existing subscriber root or creates a new one. NULL if OOM.
-// A subscriber root corresponds to a unique subscription name (with possible wildcards), hosting at least one
-// live subscriber.
+// A subscriber root corresponds to a unique subscription name (with possible wildcards), hosting at least 1 subscriber.
 static cy_err_t ensure_subscriber_root(cy_t* const cy, const cy_resolved_t resolved, subscriber_root_t** const out_root)
 {
     assert((cy != NULL) && (resolved.name.str != NULL) && (resolved.name.len > 0U) && (out_root != NULL));
+    assert((resolved.pin == UINT16_MAX) || resolved.verbatim); // enforced during name resolution
 
     // Find or allocate a tree node. If exists, return as-is.
     wkv_node_t* const node = wkv_set(&cy->subscribers_by_name, resolved.name);
@@ -3606,7 +3612,14 @@ static cy_err_t ensure_subscriber_root(cy_t* const cy, const cy_resolved_t resol
     if (node->value != NULL) {
         subscriber_root_t* const root = (subscriber_root_t*)node->value;
         *out_root                     = root;
-        if (root->needs_scouting) {
+        if (resolved.verbatim) {
+            // Existing verbatim subscriptions still participate in sticky local pin convergence on the shared topic.
+            const cy_err_t err = topic_ensure(cy, NULL, resolved);
+            if (err != CY_OK) {
+                return err;
+            }
+        } else if (root->needs_scouting) {
+            assert(resolved.pin == UINT16_MAX); // patterns cannot be pinned
             const cy_err_t err   = do_send_scout(cy, cy_now(cy), resolved.name);
             root->needs_scouting = err != CY_OK;
             ON_ASYNC_ERROR_IF(cy, NULL, err);

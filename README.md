@@ -368,6 +368,8 @@ A topic being pinned inconsistently across the network is treated as an allocati
 converging all to the lowest pinned subject-ID among the available ones.
 For example, given `foo/bar` (non-pinned), `foo/bar#1234`, and `foo/bar#123`,
 the network will converge to `foo/bar#123`.
+The same rule is applied locally as repeated verbatim advertisements/subscriptions are added on a node;
+once a lower pin is seen for a topic, that choice remains sticky for the lifetime of the local topic instance.
 
 Unlike the default automatic allocation mode, manual assignments allow multiple topics to share the same subject-ID ---
 each participant of such multi-tenant subjects will filter out messages of interest upon arrival;

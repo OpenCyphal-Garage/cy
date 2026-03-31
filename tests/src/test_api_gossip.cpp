@@ -1,4 +1,5 @@
 #include <cy_platform.h>
+#include <rapidhash.h>
 #include <unity.h>
 #include "api_mock_platform_utils.hpp"
 #include "gossip_test_utils.hpp"
@@ -315,6 +316,24 @@ bool spin_until_multicast_for_hash(test_platform_t&    platform,
         platform.now += step;
     }
     return false;
+}
+
+const send_capture_t* last_broadcast_gossip_for_hash_since(const test_platform_t& platform,
+                                                           const std::size_t      capture_start_index,
+                                                           const std::uint64_t    topic_hash)
+{
+    const send_capture_t* out   = nullptr;
+    const std::size_t     start = std::min(capture_start_index, platform.capture_count);
+    for (std::size_t i = start; i < platform.capture_count; i++) {
+        const send_capture_t& cap = platform.captures.at(i);
+        if (cap.unicast || (cap.size < header_bytes) || (capture_type(cap) != header_gossip)) {
+            continue;
+        }
+        if (capture_u64(cap, 8U) == topic_hash) {
+            out = &cap;
+        }
+    }
+    return out;
 }
 
 void test_api_collision_win_triggers_urgent_multicast()
@@ -765,6 +784,84 @@ void test_gossip_frame_for_pinned_topic_has_lage_127()
     platform_deinit(p);
 }
 
+void test_api_gossip_discovered_implicit_topic_can_be_pinned_by_local_advertise()
+{
+    test_platform_t p{};
+    platform_init(p);
+
+    cy_future_t* const pattern = cy_subscribe(p.cy, cy_str("api/gossip/local-pin/adv/*"), 128U);
+    TEST_ASSERT_NOT_NULL(pattern);
+
+    static const char* const topic_name = "api/gossip/local-pin/adv/topic";
+    const std::uint64_t      topic_hash = rapidhash(topic_name, std::strlen(topic_name));
+    const cy_lane_t          lane       = { .id = 205U, .ctx = { { 0 } }, .prio = cy_prio_nominal };
+
+    dispatch_gossip(p, lane, nullptr, 4U, 0, topic_hash, 0U, topic_name, p.now);
+    const cy_topic_t* const discovered = cy_topic_find_by_name(p.cy, cy_str(topic_name));
+    TEST_ASSERT_NOT_NULL(discovered);
+
+    const std::size_t initial_start = p.capture_count;
+    TEST_ASSERT_TRUE(spin_until_multicast_for_hash(p, topic_hash, 50'000));
+    const send_capture_t* const initial = last_broadcast_gossip_for_hash_since(p, initial_start, topic_hash);
+    TEST_ASSERT_NOT_NULL(initial);
+    TEST_ASSERT_EQUAL_UINT32(0U, capture_u32(*initial, 16U));
+
+    cy_publisher_t* const pub = cy_advertise(p.cy, cy_str("api/gossip/local-pin/adv/topic#42"));
+    TEST_ASSERT_NOT_NULL(pub);
+    TEST_ASSERT_TRUE(cy_publisher_topic(pub) == discovered);
+
+    const std::size_t start = p.capture_count;
+    TEST_ASSERT_TRUE(spin_until_multicast_for_hash(p, topic_hash, 200'000));
+    const send_capture_t* const cap = last_broadcast_gossip_for_hash_since(p, start, topic_hash);
+    TEST_ASSERT_NOT_NULL(cap);
+    TEST_ASSERT_EQUAL_INT8(static_cast<std::int8_t>(127), static_cast<std::int8_t>(cap->data[3]));
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX - 42U, capture_u32(*cap, 16U));
+
+    cy_unadvertise(pub);
+    cy_future_destroy(pattern);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(p.cy));
+    platform_deinit(p);
+}
+
+void test_api_gossip_discovered_implicit_topic_can_be_pinned_by_local_subscribe()
+{
+    test_platform_t p{};
+    platform_init(p);
+
+    cy_future_t* const pattern = cy_subscribe(p.cy, cy_str("api/gossip/local-pin/sub/*"), 128U);
+    TEST_ASSERT_NOT_NULL(pattern);
+
+    static const char* const topic_name = "api/gossip/local-pin/sub/topic";
+    const std::uint64_t      topic_hash = rapidhash(topic_name, std::strlen(topic_name));
+    const cy_lane_t          lane       = { .id = 206U, .ctx = { { 0 } }, .prio = cy_prio_nominal };
+
+    dispatch_gossip(p, lane, nullptr, 4U, 0, topic_hash, 0U, topic_name, p.now);
+    const cy_topic_t* const discovered = cy_topic_find_by_name(p.cy, cy_str(topic_name));
+    TEST_ASSERT_NOT_NULL(discovered);
+
+    const std::size_t initial_start = p.capture_count;
+    TEST_ASSERT_TRUE(spin_until_multicast_for_hash(p, topic_hash, 50'000));
+    const send_capture_t* const initial = last_broadcast_gossip_for_hash_since(p, initial_start, topic_hash);
+    TEST_ASSERT_NOT_NULL(initial);
+    TEST_ASSERT_EQUAL_UINT32(0U, capture_u32(*initial, 16U));
+
+    cy_future_t* const sub = cy_subscribe(p.cy, cy_str("api/gossip/local-pin/sub/topic#42"), 128U);
+    TEST_ASSERT_NOT_NULL(sub);
+    TEST_ASSERT_TRUE(cy_topic_find_by_name(p.cy, cy_str(topic_name)) == discovered);
+
+    const std::size_t start = p.capture_count;
+    TEST_ASSERT_TRUE(spin_until_multicast_for_hash(p, topic_hash, 200'000));
+    const send_capture_t* const cap = last_broadcast_gossip_for_hash_since(p, start, topic_hash);
+    TEST_ASSERT_NOT_NULL(cap);
+    TEST_ASSERT_EQUAL_INT8(static_cast<std::int8_t>(127), static_cast<std::int8_t>(cap->data[3]));
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX - 42U, capture_u32(*cap, 16U));
+
+    cy_future_destroy(sub);
+    cy_future_destroy(pattern);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(p.cy));
+    platform_deinit(p);
+}
+
 } // namespace
 
 extern "C" void setUp()
@@ -793,5 +890,7 @@ int main()
     RUN_TEST(test_api_scout_match_always_uses_unicast);
     RUN_TEST(test_api_unknown_topic_no_pattern_does_not_autocreate);
     RUN_TEST(test_gossip_frame_for_pinned_topic_has_lage_127);
+    RUN_TEST(test_api_gossip_discovered_implicit_topic_can_be_pinned_by_local_advertise);
+    RUN_TEST(test_api_gossip_discovered_implicit_topic_can_be_pinned_by_local_subscribe);
     return UNITY_END();
 }

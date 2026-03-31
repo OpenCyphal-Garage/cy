@@ -25,6 +25,22 @@ struct callback_capture_t
     cy_err_t    last_error{ CY_OK };
 };
 
+enum class local_op_t
+{
+    subscribe,
+    advertise,
+};
+
+struct local_pin_case_t
+{
+    const char*   canonical_name{ nullptr };
+    const char*   first_name{ nullptr };
+    local_op_t    first_op{ local_op_t::subscribe };
+    const char*   second_name{ nullptr };
+    local_op_t    second_op{ local_op_t::subscribe };
+    std::uint16_t expected_pin{ 0U };
+};
+
 struct test_platform_t final
 {
     cy_platform_t        platform{};
@@ -294,6 +310,87 @@ void dispatch_gossip_unicast(test_platform_t* const self,
     cy_on_message(&self->platform, lane, nullptr, mts);
 }
 
+std::uint32_t only_new_subject_id(const std::set<std::uint32_t>& before, const std::set<std::uint32_t>& after)
+{
+    std::uint32_t out   = 0U;
+    std::size_t   count = 0U;
+    for (const std::uint32_t subject_id : after) {
+        if (!before.contains(subject_id)) {
+            out = subject_id;
+            count++;
+        }
+    }
+    TEST_ASSERT_EQUAL_size_t(1U, count);
+    return out;
+}
+
+std::uint32_t probe_topic_subject_id(test_platform_t&  platform,
+                                     const char* const canonical_name,
+                                     cy_publisher_t*&  probe)
+{
+    const std::set<std::uint32_t> before = platform.active_writer_subjects;
+    probe                                = cy_advertise(platform.cy, cy_str(canonical_name));
+    TEST_ASSERT_NOT_NULL(probe);
+    TEST_ASSERT_NOT_NULL(cy_publisher_topic(probe));
+
+    const cy_bytes_t empty = { .size = 0U, .data = nullptr, .next = nullptr };
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_publish(probe, platform.now + 1000, empty));
+    return only_new_subject_id(before, platform.active_writer_subjects);
+}
+
+void run_local_pin_case(const local_pin_case_t& tc)
+{
+    test_platform_t platform{};
+    platform_init(&platform);
+
+    std::array<cy_future_t*, 2U>    subs{};
+    std::array<cy_publisher_t*, 3U> pubs{};
+
+    const auto perform = [&](const local_op_t op, const char* const name, const std::size_t slot) -> const cy_topic_t* {
+        if (op == local_op_t::subscribe) {
+            subs.at(slot) = cy_subscribe(platform.cy, cy_str(name), 128U);
+            TEST_ASSERT_NOT_NULL(subs.at(slot));
+            const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str(tc.canonical_name));
+            TEST_ASSERT_NOT_NULL(topic);
+            return topic;
+        }
+        pubs.at(slot) = cy_advertise(platform.cy, cy_str(name));
+        TEST_ASSERT_NOT_NULL(pubs.at(slot));
+        const cy_topic_t* const topic = cy_publisher_topic(pubs.at(slot));
+        TEST_ASSERT_NOT_NULL(topic);
+        return topic;
+    };
+
+    const cy_topic_t* const topic = perform(tc.first_op, tc.first_name, 0U);
+    TEST_ASSERT_TRUE(topic == cy_topic_find_by_name(platform.cy, cy_str(tc.canonical_name)));
+    const cy_str_t canonical = cy_topic_name(topic);
+    TEST_ASSERT_EQUAL_size_t(std::strlen(tc.canonical_name), canonical.len);
+    TEST_ASSERT_EQUAL_MEMORY(tc.canonical_name, canonical.str, canonical.len);
+
+    const cy_topic_t* const same = perform(tc.second_op, tc.second_name, 1U);
+    TEST_ASSERT_TRUE(same == topic);
+    TEST_ASSERT_TRUE(topic == cy_topic_find_by_name(platform.cy, cy_str(tc.canonical_name)));
+
+    const std::uint32_t subject_id = probe_topic_subject_id(platform, tc.canonical_name, pubs.at(2U));
+    TEST_ASSERT_TRUE(cy_publisher_topic(pubs.at(2U)) == topic);
+    TEST_ASSERT_EQUAL_UINT32(tc.expected_pin, subject_id);
+
+    for (cy_publisher_t*& pub : pubs) {
+        if (pub != nullptr) {
+            cy_unadvertise(pub);
+            pub = nullptr;
+        }
+    }
+    for (cy_future_t*& sub : subs) {
+        if (sub != nullptr) {
+            cy_future_destroy(sub);
+            sub = nullptr;
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
+    platform_deinit(&platform);
+}
+
 void test_api_core_time_and_spin_contracts()
 {
     test_platform_t platform{};
@@ -396,7 +493,7 @@ void test_api_core_priority_ack_and_topic_metadata()
 
     cy_user_context_t* const ctx = cy_topic_user_context(topic);
     TEST_ASSERT_NOT_NULL(ctx);
-    for (void* const ptr : ctx->ptr) {
+    for (const void* const ptr : ctx->ptr) {
         TEST_ASSERT_NULL(ptr);
     }
     int marker  = 0;
@@ -615,7 +712,7 @@ void test_publisher_topic_for_pinned_has_correct_hash()
     cy_publisher_t* const pub = cy_advertise(platform.cy, cy_str("bar#100"));
     TEST_ASSERT_NOT_NULL(pub);
 
-    cy_topic_t* const topic = cy_publisher_topic(pub);
+    const cy_topic_t* const topic = cy_publisher_topic(pub);
     TEST_ASSERT_NOT_NULL(topic);
 
     // The topic name must be the resolved name without pin suffix.
@@ -653,6 +750,132 @@ void test_topic_find_by_name_uses_resolved_name()
     platform_deinit(&platform);
 }
 
+void test_api_core_local_pinning_sticky_subscriber_matrix()
+{
+    static const std::array<local_pin_case_t, 4U> cases = {
+        local_pin_case_t{ .canonical_name = "core/pin/sub/nonpinned-then-pinned",
+                          .first_name     = "core/pin/sub/nonpinned-then-pinned",
+                          .first_op       = local_op_t::subscribe,
+                          .second_name    = "core/pin/sub/nonpinned-then-pinned#42",
+                          .second_op      = local_op_t::subscribe,
+                          .expected_pin   = 42U },
+        local_pin_case_t{ .canonical_name = "core/pin/sub/higher-then-lower",
+                          .first_name     = "core/pin/sub/higher-then-lower#123",
+                          .first_op       = local_op_t::subscribe,
+                          .second_name    = "core/pin/sub/higher-then-lower#42",
+                          .second_op      = local_op_t::subscribe,
+                          .expected_pin   = 42U },
+        local_pin_case_t{ .canonical_name = "core/pin/sub/pinned-then-nonpinned",
+                          .first_name     = "core/pin/sub/pinned-then-nonpinned#42",
+                          .first_op       = local_op_t::subscribe,
+                          .second_name    = "core/pin/sub/pinned-then-nonpinned",
+                          .second_op      = local_op_t::subscribe,
+                          .expected_pin   = 42U },
+        local_pin_case_t{ .canonical_name = "core/pin/sub/lower-then-higher",
+                          .first_name     = "core/pin/sub/lower-then-higher#42",
+                          .first_op       = local_op_t::subscribe,
+                          .second_name    = "core/pin/sub/lower-then-higher#123",
+                          .second_op      = local_op_t::subscribe,
+                          .expected_pin   = 42U },
+    };
+
+    for (const local_pin_case_t& tc : cases) {
+        run_local_pin_case(tc);
+    }
+}
+
+void test_api_core_local_pinning_sticky_advertiser_matrix()
+{
+    static const std::array<local_pin_case_t, 4U> cases = {
+        local_pin_case_t{ .canonical_name = "core/pin/pub/nonpinned-then-pinned",
+                          .first_name     = "core/pin/pub/nonpinned-then-pinned",
+                          .first_op       = local_op_t::advertise,
+                          .second_name    = "core/pin/pub/nonpinned-then-pinned#42",
+                          .second_op      = local_op_t::advertise,
+                          .expected_pin   = 42U },
+        local_pin_case_t{ .canonical_name = "core/pin/pub/higher-then-lower",
+                          .first_name     = "core/pin/pub/higher-then-lower#123",
+                          .first_op       = local_op_t::advertise,
+                          .second_name    = "core/pin/pub/higher-then-lower#42",
+                          .second_op      = local_op_t::advertise,
+                          .expected_pin   = 42U },
+        local_pin_case_t{ .canonical_name = "core/pin/pub/pinned-then-nonpinned",
+                          .first_name     = "core/pin/pub/pinned-then-nonpinned#42",
+                          .first_op       = local_op_t::advertise,
+                          .second_name    = "core/pin/pub/pinned-then-nonpinned",
+                          .second_op      = local_op_t::advertise,
+                          .expected_pin   = 42U },
+        local_pin_case_t{ .canonical_name = "core/pin/pub/lower-then-higher",
+                          .first_name     = "core/pin/pub/lower-then-higher#42",
+                          .first_op       = local_op_t::advertise,
+                          .second_name    = "core/pin/pub/lower-then-higher#123",
+                          .second_op      = local_op_t::advertise,
+                          .expected_pin   = 42U },
+    };
+
+    for (const local_pin_case_t& tc : cases) {
+        run_local_pin_case(tc);
+    }
+}
+
+void test_api_core_local_pinning_sticky_mixed_matrix()
+{
+    static const std::array<local_pin_case_t, 8U> cases = {
+        local_pin_case_t{ .canonical_name = "core/pin/mixed/np-to-pin-sub-then-pub",
+                          .first_name     = "core/pin/mixed/np-to-pin-sub-then-pub",
+                          .first_op       = local_op_t::subscribe,
+                          .second_name    = "core/pin/mixed/np-to-pin-sub-then-pub#42",
+                          .second_op      = local_op_t::advertise,
+                          .expected_pin   = 42U },
+        local_pin_case_t{ .canonical_name = "core/pin/mixed/np-to-pin-pub-then-sub",
+                          .first_name     = "core/pin/mixed/np-to-pin-pub-then-sub",
+                          .first_op       = local_op_t::advertise,
+                          .second_name    = "core/pin/mixed/np-to-pin-pub-then-sub#42",
+                          .second_op      = local_op_t::subscribe,
+                          .expected_pin   = 42U },
+        local_pin_case_t{ .canonical_name = "core/pin/mixed/high-to-low-sub-then-pub",
+                          .first_name     = "core/pin/mixed/high-to-low-sub-then-pub#123",
+                          .first_op       = local_op_t::subscribe,
+                          .second_name    = "core/pin/mixed/high-to-low-sub-then-pub#42",
+                          .second_op      = local_op_t::advertise,
+                          .expected_pin   = 42U },
+        local_pin_case_t{ .canonical_name = "core/pin/mixed/high-to-low-pub-then-sub",
+                          .first_name     = "core/pin/mixed/high-to-low-pub-then-sub#123",
+                          .first_op       = local_op_t::advertise,
+                          .second_name    = "core/pin/mixed/high-to-low-pub-then-sub#42",
+                          .second_op      = local_op_t::subscribe,
+                          .expected_pin   = 42U },
+        local_pin_case_t{ .canonical_name = "core/pin/mixed/pin-to-unpinned-sub-then-pub",
+                          .first_name     = "core/pin/mixed/pin-to-unpinned-sub-then-pub#42",
+                          .first_op       = local_op_t::subscribe,
+                          .second_name    = "core/pin/mixed/pin-to-unpinned-sub-then-pub",
+                          .second_op      = local_op_t::advertise,
+                          .expected_pin   = 42U },
+        local_pin_case_t{ .canonical_name = "core/pin/mixed/pin-to-unpinned-pub-then-sub",
+                          .first_name     = "core/pin/mixed/pin-to-unpinned-pub-then-sub#42",
+                          .first_op       = local_op_t::advertise,
+                          .second_name    = "core/pin/mixed/pin-to-unpinned-pub-then-sub",
+                          .second_op      = local_op_t::subscribe,
+                          .expected_pin   = 42U },
+        local_pin_case_t{ .canonical_name = "core/pin/mixed/low-to-high-sub-then-pub",
+                          .first_name     = "core/pin/mixed/low-to-high-sub-then-pub#42",
+                          .first_op       = local_op_t::subscribe,
+                          .second_name    = "core/pin/mixed/low-to-high-sub-then-pub#123",
+                          .second_op      = local_op_t::advertise,
+                          .expected_pin   = 42U },
+        local_pin_case_t{ .canonical_name = "core/pin/mixed/low-to-high-pub-then-sub",
+                          .first_name     = "core/pin/mixed/low-to-high-pub-then-sub#42",
+                          .first_op       = local_op_t::advertise,
+                          .second_name    = "core/pin/mixed/low-to-high-pub-then-sub#123",
+                          .second_op      = local_op_t::subscribe,
+                          .expected_pin   = 42U },
+    };
+
+    for (const local_pin_case_t& tc : cases) {
+        run_local_pin_case(tc);
+    }
+}
+
 void test_api_core_advertise_client_oom()
 {
     // When the allocator fails during cy_advertise_client, the function should return NULL.
@@ -662,9 +885,9 @@ void test_api_core_advertise_client_oom()
 
     // Let allocations succeed up to and including the publisher struct, then fail all subsequent.
     // cy_advertise_client does: 1) alloc publisher, 2) topic_ensure (many allocs). We want #1 to succeed, #2 to fail.
-    platform.alloc_counter       = 0U;
-    platform.fail_after_n_allocs = 1U; // succeed for 1 alloc (publisher), then fail
-    cy_publisher_t* const pub    = cy_advertise_client(platform.cy, cy_str("oom/client/topic"), 64U);
+    platform.alloc_counter          = 0U;
+    platform.fail_after_n_allocs    = 1U; // succeed for 1 alloc (publisher), then fail
+    const cy_publisher_t* const pub = cy_advertise_client(platform.cy, cy_str("oom/client/topic"), 64U);
     TEST_ASSERT_NULL(pub);
     platform.fail_after_n_allocs = SIZE_MAX; // re-enable
 
@@ -1070,6 +1293,9 @@ int main()
     RUN_TEST(test_subscriber_name_returns_pin_stripped_name);
     RUN_TEST(test_publisher_topic_for_pinned_has_correct_hash);
     RUN_TEST(test_topic_find_by_name_uses_resolved_name);
+    RUN_TEST(test_api_core_local_pinning_sticky_subscriber_matrix);
+    RUN_TEST(test_api_core_local_pinning_sticky_advertiser_matrix);
+    RUN_TEST(test_api_core_local_pinning_sticky_mixed_matrix);
     RUN_TEST(test_api_core_advertise_client_oom);
     RUN_TEST(test_api_core_home_set_oom);
     RUN_TEST(test_api_core_do_publish_oom_subject_writer);

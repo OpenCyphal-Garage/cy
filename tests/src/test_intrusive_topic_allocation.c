@@ -26,6 +26,14 @@ typedef struct
     subject_tracker_t active_writers;
 } fixture_t;
 
+typedef struct
+{
+    const char* canonical_name;
+    uint16_t    first_pin;
+    uint16_t    second_pin;
+    uint16_t    expected_pin;
+} local_pin_case_t;
+
 static fixture_t* fixture_from(cy_platform_t* const platform) { return (fixture_t*)platform; }
 
 static cy_us_t fixture_now(cy_platform_t* const platform) { return fixture_from(platform)->now; }
@@ -1282,6 +1290,134 @@ static void test_topic_ensure_sets_evictions_from_pin(void)
     fixture_deinit(&fix);
 }
 
+static uint32_t local_pin_case_evictions(const uint16_t pin)
+{
+    return (pin != UINT16_MAX) ? (UINT32_MAX - (uint32_t)pin) : 0U;
+}
+
+static void destroy_detached_verbatim_root(cy_t* const cy, subscriber_root_t* const root)
+{
+    TEST_ASSERT_NOT_NULL(root);
+    TEST_ASSERT_NULL(root->head);
+    TEST_ASSERT_NULL(root->index_pattern);
+    if (root->index_name != NULL) {
+        wkv_del(&cy->subscribers_by_name, root->index_name);
+        root->index_name = NULL;
+    }
+    mem_free(cy, root);
+}
+
+static void assert_local_pin_sequence_via_topic_ensure(fixture_t* const fix, const local_pin_case_t tc)
+{
+    const cy_resolved_t first = { .name = cy_str(tc.canonical_name), .pin = tc.first_pin, .verbatim = true };
+    cy_topic_t*         topic = NULL;
+    TEST_ASSERT_EQUAL_INT(CY_OK, topic_ensure(fix->cy, &topic, first));
+    TEST_ASSERT_NOT_NULL(topic);
+    TEST_ASSERT_TRUE(topic == cy_topic_find_by_name(fix->cy, first.name));
+
+    const cy_resolved_t second = { .name = cy_str(tc.canonical_name), .pin = tc.second_pin, .verbatim = true };
+    cy_topic_t*         same   = NULL;
+    TEST_ASSERT_EQUAL_INT(CY_OK, topic_ensure(fix->cy, &same, second));
+    TEST_ASSERT_TRUE(same == topic);
+
+    TEST_ASSERT_EQUAL_UINT32(local_pin_case_evictions(tc.expected_pin), topic->evictions);
+    if (tc.expected_pin != UINT16_MAX) {
+        TEST_ASSERT_TRUE(is_pinned(topic->evictions));
+        TEST_ASSERT_EQUAL_UINT32(tc.expected_pin, topic_subject_id(topic));
+    } else {
+        TEST_ASSERT_FALSE(is_pinned(topic->evictions));
+    }
+}
+
+static void test_topic_ensure_sticky_local_pin_matrix(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    static const local_pin_case_t cases[] = {
+        { .canonical_name = "ensure/sticky/nonpinned-then-pinned",
+          .first_pin      = UINT16_MAX,
+          .second_pin     = 42U,
+          .expected_pin   = 42U },
+        { .canonical_name = "ensure/sticky/higher-then-lower",
+          .first_pin      = 123U,
+          .second_pin     = 42U,
+          .expected_pin   = 42U },
+        { .canonical_name = "ensure/sticky/pinned-then-nonpinned",
+          .first_pin      = 42U,
+          .second_pin     = UINT16_MAX,
+          .expected_pin   = 42U },
+        { .canonical_name = "ensure/sticky/lower-then-higher",
+          .first_pin      = 42U,
+          .second_pin     = 123U,
+          .expected_pin   = 42U },
+    };
+
+    for (size_t i = 0U; i < (sizeof(cases) / sizeof(cases[0])); i++) {
+        assert_local_pin_sequence_via_topic_ensure(&fix, cases[i]);
+    }
+
+    fixture_deinit(&fix);
+}
+
+static void assert_local_pin_sequence_via_existing_subscriber_root(fixture_t* const fix, const local_pin_case_t tc)
+{
+    const cy_resolved_t first = { .name = cy_str(tc.canonical_name), .pin = tc.first_pin, .verbatim = true };
+    subscriber_root_t*  root  = NULL;
+    TEST_ASSERT_EQUAL_INT(CY_OK, ensure_subscriber_root(fix->cy, first, &root));
+    TEST_ASSERT_NOT_NULL(root);
+    TEST_ASSERT_NULL(root->index_pattern);
+    cy_topic_t* const topic = cy_topic_find_by_name(fix->cy, first.name);
+    TEST_ASSERT_NOT_NULL(topic);
+
+    const cy_resolved_t second = { .name = cy_str(tc.canonical_name), .pin = tc.second_pin, .verbatim = true };
+    subscriber_root_t*  same   = NULL;
+    TEST_ASSERT_EQUAL_INT(CY_OK, ensure_subscriber_root(fix->cy, second, &same));
+    TEST_ASSERT_TRUE(same == root);
+    TEST_ASSERT_TRUE(topic == cy_topic_find_by_name(fix->cy, second.name));
+    TEST_ASSERT_NULL(topic->couplings);
+
+    TEST_ASSERT_EQUAL_UINT32(local_pin_case_evictions(tc.expected_pin), topic->evictions);
+    if (tc.expected_pin != UINT16_MAX) {
+        TEST_ASSERT_TRUE(is_pinned(topic->evictions));
+        TEST_ASSERT_EQUAL_UINT32(tc.expected_pin, topic_subject_id(topic));
+    } else {
+        TEST_ASSERT_FALSE(is_pinned(topic->evictions));
+    }
+    destroy_detached_verbatim_root(fix->cy, root);
+}
+
+static void test_ensure_subscriber_root_verbatim_sticky_local_pin_matrix(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    static const local_pin_case_t cases[] = {
+        { .canonical_name = "ensure/root/sticky/nonpinned-then-pinned",
+          .first_pin      = UINT16_MAX,
+          .second_pin     = 42U,
+          .expected_pin   = 42U },
+        { .canonical_name = "ensure/root/sticky/higher-then-lower",
+          .first_pin      = 123U,
+          .second_pin     = 42U,
+          .expected_pin   = 42U },
+        { .canonical_name = "ensure/root/sticky/pinned-then-nonpinned",
+          .first_pin      = 42U,
+          .second_pin     = UINT16_MAX,
+          .expected_pin   = 42U },
+        { .canonical_name = "ensure/root/sticky/lower-then-higher",
+          .first_pin      = 42U,
+          .second_pin     = 123U,
+          .expected_pin   = 42U },
+    };
+
+    for (size_t i = 0U; i < (sizeof(cases) / sizeof(cases[0])); i++) {
+        assert_local_pin_sequence_via_existing_subscriber_root(&fix, cases[i]);
+    }
+
+    fixture_deinit(&fix);
+}
+
 static void test_pinned_topic_lage_always_127(void)
 {
     fixture_t fix;
@@ -1586,6 +1722,8 @@ int main(void)
     RUN_TEST(test_pinned_topic_writer_registry_refcount);
     RUN_TEST(test_pinned_topic_reader_registry_extent_growth);
     RUN_TEST(test_topic_ensure_sets_evictions_from_pin);
+    RUN_TEST(test_topic_ensure_sticky_local_pin_matrix);
+    RUN_TEST(test_ensure_subscriber_root_verbatim_sticky_local_pin_matrix);
     RUN_TEST(test_pinned_topic_lage_always_127);
     RUN_TEST(test_topic_allocate_pinned_skips_collision);
     RUN_TEST(test_topic_destroy_pinned_cleanup);
