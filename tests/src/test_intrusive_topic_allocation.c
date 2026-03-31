@@ -1028,7 +1028,7 @@ static void test_topic_sync_subject_writer_reports_oom(void)
     fixture_deinit(&fix);
 }
 
-static void test_topic_allocate_destroys_existing_pub_writer_on_victory(void)
+static void test_topic_allocate_destroys_existing_pub_writer_without_displacement(void)
 {
     fixture_t fix;
     fixture_init(&fix);
@@ -1115,13 +1115,21 @@ static void test_topic_allocate_recursive_chain_converges_and_writer_transfers(v
     TEST_ASSERT_NOT_EQUAL(topic_subject_id(t1), topic_subject_id(t3));
     TEST_ASSERT_NOT_EQUAL(topic_subject_id(t2), topic_subject_id(t3));
 
-    t2->pub_writer = writer_acquire(t2->cy, topic_subject_id(t2));
+    t2->pub_writer                        = writer_acquire(t2->cy, topic_subject_id(t2));
+    writer_t* const transferred           = t2->pub_writer;
+    const uint32_t  winning_sid           = topic_subject_id(t2);
+    const size_t    destroyed_before      = fix.subject_writer_destroy_count;
+    const size_t    active_writers_before = fix.active_writers.count;
     TEST_ASSERT_NOT_NULL(t2->pub_writer);
     topic_merge_lage(t1, 200 * MEGA, 8);
     topic_merge_lage(t2, 200 * MEGA, 1);
     topic_allocate(t1, t2->evictions, 200 * MEGA); // force collision with displaced t2
-    TEST_ASSERT_NULL(t1->pub_writer);              // writer is acquired lazily on publish, not on allocate
+    TEST_ASSERT_EQUAL_UINT32(winning_sid, topic_subject_id(t1));
+    TEST_ASSERT_TRUE(t1->pub_writer == transferred);
     TEST_ASSERT_NULL(t2->pub_writer);
+    TEST_ASSERT_EQUAL_size_t(destroyed_before, fix.subject_writer_destroy_count);
+    TEST_ASSERT_EQUAL_size_t(active_writers_before, fix.active_writers.count);
+    subject_tracker_assert_contains(&fix.active_writers, winning_sid);
     assert_subject_index_unique(fix.cy);
     fixture_deinit(&fix);
 }
@@ -1823,7 +1831,7 @@ int main(void)
     RUN_TEST(test_on_gossip_known_topic_equal_lage_prefers_higher_evictions);
     RUN_TEST(test_topic_allocate_reader_recovery_after_subject_reader_oom);
     RUN_TEST(test_topic_sync_subject_writer_reports_oom);
-    RUN_TEST(test_topic_allocate_destroys_existing_pub_writer_on_victory);
+    RUN_TEST(test_topic_allocate_destroys_existing_pub_writer_without_displacement);
     RUN_TEST(test_on_gossip_known_topic_divergence_paths);
     RUN_TEST(test_on_gossip_unknown_topic_collision_paths);
     RUN_TEST(test_topic_allocate_recursive_chain_converges_and_writer_transfers);

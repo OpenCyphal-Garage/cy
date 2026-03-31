@@ -977,8 +977,8 @@ struct cy_topic_t
     // The subject writer is created lazily when the application attempts to publish on the topic;
     // it is not destroyed until the topic is reallocated or destroyed to avoid losing transport-related states,
     // whatever they may be (e.g., the transfer-ID counter etc, depending on the transport implementation).
-    // When the topic is reallocated, the old writer is destroyed but the new one is not created until the next
-    // publication attempt.
+    // When the topic is reallocated, the old writer is destroyed unless we take over an occupied subject-ID and
+    // inherit the displaced topic's existing writer; otherwise the new writer is created on the next publication.
     uint64_t   pub_tag_baseline; // Randomly chosen once when topic created.
     uint64_t   pub_seqno;        // Grows from zero, added to the tag baseline to obtain the tag.
     size_t     pub_count;        // Number of active advertisements; counted for garbage collection.
@@ -1454,6 +1454,9 @@ static void topic_allocate(cy_topic_t* const topic, const uint32_t new_evictions
 
         if (that != NULL) {
             cavl2_remove(&cy->topics_by_subject_id, &that->index_subject_id);
+            assert(topic->pub_writer == NULL);
+            topic->pub_writer = that->pub_writer; // Preserve transport state for the winning subject, if any.
+            that->pub_writer  = NULL;
         }
 
         // Re-insert into the subject-ID index; this must succeed because we just removed the old one from the index.
@@ -1477,15 +1480,11 @@ static void topic_allocate(cy_topic_t* const topic, const uint32_t new_evictions
         schedule_gossip_urgent(topic, now);
 
         // Re-allocate the defeated topic with incremented eviction counter.
-        // Its handles are released during its own allocation cycle.
+        // Its writer, if transferred above, is cleared here so the recursive call won't destroy it.
         if (that != NULL) {
             if (that->sub_reader != NULL) {
                 reader_release(cy, that->sub_reader);
                 that->sub_reader = NULL;
-            }
-            if (that->pub_writer != NULL) {
-                writer_release(cy, that->pub_writer);
-                that->pub_writer = NULL;
             }
             topic_allocate(that, that->evictions + 1U, now);
         }

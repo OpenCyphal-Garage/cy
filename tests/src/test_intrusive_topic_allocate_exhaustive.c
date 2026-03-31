@@ -683,14 +683,21 @@ static void test_topic_allocate_displacement_transfers_writer_handle(void)
     cy_topic_t* const winner = fixture_make_topic(&fix, "alloc/transfer/winner", base, 0U, 6);
     cy_topic_t* const loser  = fixture_make_topic(&fix, "alloc/transfer/loser", base + p, 0U, 1);
 
-    loser->pub_writer = writer_acquire(loser->cy, topic_subject_id(loser));
+    loser->pub_writer                     = writer_acquire(loser->cy, topic_subject_id(loser));
+    writer_t* const transferred           = loser->pub_writer;
+    const uint32_t  winning_sid           = topic_subject_id(loser);
+    const size_t    destroyed_before      = fix.subject_writer_destroy_count;
+    const size_t    active_writers_before = fix.active_writers.count;
     TEST_ASSERT_NOT_NULL(loser->pub_writer);
 
     topic_allocate(winner, loser->evictions, fix.now);
 
-    // After displacement, writers are released (lazy re-acquisition on next publish).
-    TEST_ASSERT_NULL(winner->pub_writer);
+    TEST_ASSERT_EQUAL_UINT32(winning_sid, topic_subject_id(winner));
+    TEST_ASSERT_TRUE(winner->pub_writer == transferred);
     TEST_ASSERT_NULL(loser->pub_writer);
+    TEST_ASSERT_EQUAL_size_t(destroyed_before, fix.subject_writer_destroy_count);
+    TEST_ASSERT_EQUAL_size_t(active_writers_before, fix.active_writers.count);
+    subject_tracker_assert_contains(&fix.active_writers, winning_sid);
 
     fixture_deinit(&fix);
 }
