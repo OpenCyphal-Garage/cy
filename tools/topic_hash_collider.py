@@ -10,51 +10,24 @@ import random
 import string
 import sys
 
-from rapidhash import rapidhash
+from rapidhash import rapidhash  # The package published on PyPI is NOT COMPATIBLE with rapidhash.h! Use local version.
 
 ALPHABET = string.ascii_letters + string.digits
-PINNED_SUBJECT_ID_MAX = 2**13 - 1
-
-
-def parse_hash_override(topic_name: str) -> int | None:
-    """
-    Equivalent to parse_hash_override() in cy.c:
-    parses trailing "#"+1..16 lowercase hex digits as hash override.
-    """
-    out = 0
-    end = len(topic_name)
-    for i in range(min(len(topic_name), 17)):
-        ch = topic_name[end - (i + 1)]
-        if ch == "#":
-            return out if i > 0 else None
-        if "0" <= ch <= "9":
-            digit = ord(ch) - ord("0")
-        elif "a" <= ch <= "f":
-            digit = ord(ch) - ord("a") + 10
-        else:
-            break
-        out |= digit << (i * 4)
-    return None
+PINNED_SUBJECT_ID_MAX = 2 ** 13 - 1
 
 
 def topic_hash(topic_name: str) -> int:
-    override = parse_hash_override(topic_name)
-    if override is not None:
-        return override
+    """Pinning is not handled here."""
     return rapidhash(topic_name.encode())
 
 
 def preferred_subject_id(modulus: int, h: int) -> int:
-    """Assumes zero evictions (hence preferred)."""
-    if h <= PINNED_SUBJECT_ID_MAX:  # This is a pinned topic.
-        return h
+    """Assumes zero evictions (hence preferred). Only valid for non-pinned topics."""
     return PINNED_SUBJECT_ID_MAX + 1 + (h % modulus)
 
 
 def find_subject_id_collision(subject_id_modulus: int, topic_name: str, *, suffix_len: int) -> dict[str, int | str]:
     target_hash = topic_hash(topic_name)
-    if target_hash <= PINNED_SUBJECT_ID_MAX:
-        raise ValueError(f"Pinned topics are collision-free by design: {topic_name!r}")
     prefix = topic_name
     target_subject_id = preferred_subject_id(subject_id_modulus, target_hash)
     while True:

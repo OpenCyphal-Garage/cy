@@ -1741,6 +1741,55 @@ void test_api_rpc_e2e_r28_request_introspection_and_borrow_contract()
     cleanup_case(net, now, { request, publish }, { server_sub, subscriber }, { client });
 }
 
+void test_rpc_on_pinned_topic()
+{
+    e2e::sim_net_t net{};
+    TEST_ASSERT_EQUAL_INT(CY_OK, e2e::sim_net_init(net));
+    cy_us_t now = 0;
+
+    // Node A is the client with a pinned subject-ID.
+    static constexpr const char* topic_name = "rpc/svc#300";
+    cy_publisher_t* const        client =
+      cy_advertise_client(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str(topic_name), 128U);
+    TEST_ASSERT_NOT_NULL(client);
+    cy_ack_timeout_set(client, ack_timeout_us);
+
+    // Node B is the server subscribing to the same pinned topic.
+    server_context_t   server{};
+    cy_future_t* const server_sub = cy_subscribe(e2e::sim_net_cy(net, e2e::sim_node_b), cy_str(topic_name), 128U);
+    TEST_ASSERT_NOT_NULL(server_sub);
+    cy_user_context_t ctx = CY_USER_CONTEXT_EMPTY;
+    ctx.ptr[0]            = &server;
+    cy_future_context_set(server_sub, ctx);
+    cy_future_callback_set(server_sub, on_server_request);
+
+    // Drive rounds until topic allocation converges.
+    e2e::drive_for(net, now, 200'000, step_us);
+
+    // Node A sends a request.
+    e2e::set_now(net, now);
+    cy_future_t* const request = request_once(client, now, 1U, 1U, 200'000, 200'000);
+    TEST_ASSERT_NOT_NULL(request);
+
+    // Drive rounds until B receives the request and responds.
+    TEST_ASSERT_TRUE(wait_until_done(net, now, request, wait_timeout_us));
+    assert_request_state(request, true, CY_OK);
+    TEST_ASSERT_EQUAL_size_t(1U, server.request_count);
+    TEST_ASSERT_EQUAL_UINT8(CY_OK, server.first_respond_error);
+
+    // Verify the response was received correctly.
+    const cy_response_t response = cy_response_move(request);
+    TEST_ASSERT_NOT_NULL(response.message.content);
+    TEST_ASSERT_EQUAL_UINT64(e2e::sim_net_node_id(net, e2e::sim_node_b), response.remote_id);
+    e2e::app_payload_t payload{};
+    TEST_ASSERT_TRUE(unpack_response_payload(response, payload));
+    TEST_ASSERT_EQUAL_UINT32(server.response_publisher_id, payload.publisher_id);
+    TEST_ASSERT_EQUAL_UINT64(1U, payload.sequence);
+    cy_message_refcount_dec(response.message.content);
+
+    cleanup_case(net, now, { request }, { server_sub }, { client });
+}
+
 } // namespace
 
 extern "C" void setUp()
@@ -1787,5 +1836,6 @@ int main()
     RUN_TEST(test_api_rpc_e2e_r26_respond_reliable_retransmit_media_error_notifies_then_times_out);
     RUN_TEST(test_api_rpc_e2e_r27_respond_reliable_lag_paths);
     RUN_TEST(test_api_rpc_e2e_r28_request_introspection_and_borrow_contract);
+    RUN_TEST(test_rpc_on_pinned_topic);
     return UNITY_END();
 }

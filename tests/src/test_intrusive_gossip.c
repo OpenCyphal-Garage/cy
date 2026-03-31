@@ -42,6 +42,9 @@ typedef struct
 
     size_t         capture_count;
     send_capture_t capture[CAPTURE_CAPACITY];
+
+    subject_tracker_t active_readers;
+    subject_tracker_t active_writers;
 } fixture_t;
 
 static fixture_t* fixture_from(cy_platform_t* const platform) { return (fixture_t*)platform; }
@@ -107,13 +110,18 @@ static uint64_t fixture_random(cy_platform_t* const platform)
 
 static cy_subject_writer_t* fixture_subject_writer_new(cy_platform_t* const platform, const uint32_t subject_id)
 {
-    fixture_t* const self = fixture_from(platform);
-    return intrusive_subject_writer_new(&self->heap, subject_id);
+    fixture_t* const           self = fixture_from(platform);
+    cy_subject_writer_t* const w    = intrusive_subject_writer_new(&self->heap, subject_id);
+    if (w != NULL) {
+        subject_tracker_add(&self->active_writers, subject_id);
+    }
+    return w;
 }
 
 static void fixture_subject_writer_destroy(cy_platform_t* const platform, cy_subject_writer_t* const writer)
 {
     fixture_t* const self = fixture_from(platform);
+    subject_tracker_remove(&self->active_writers, writer->subject_id);
     intrusive_subject_writer_destroy(&self->heap, writer);
 }
 
@@ -135,13 +143,27 @@ static cy_subject_reader_t* fixture_subject_reader_new(cy_platform_t* const plat
                                                        const uint32_t       subject_id,
                                                        const size_t         extent)
 {
+    fixture_t* const           self = fixture_from(platform);
+    cy_subject_reader_t* const r    = intrusive_subject_reader_new(&self->heap, subject_id, extent);
+    if (r != NULL) {
+        subject_tracker_add(&self->active_readers, subject_id);
+    }
+    return r;
+}
+
+static void fixture_subject_reader_extent_set(cy_platform_t* const       platform,
+                                              cy_subject_reader_t* const reader,
+                                              const size_t               extent)
+{
     fixture_t* const self = fixture_from(platform);
-    return intrusive_subject_reader_new(&self->heap, subject_id, extent);
+    subject_tracker_assert_contains(&self->active_readers, reader->subject_id);
+    intrusive_subject_reader_extent_set(reader, extent);
 }
 
 static void fixture_subject_reader_destroy(cy_platform_t* const platform, cy_subject_reader_t* const reader)
 {
     fixture_t* const self = fixture_from(platform);
+    subject_tracker_remove(&self->active_readers, reader->subject_id);
     intrusive_subject_reader_destroy(&self->heap, reader);
 }
 
@@ -183,21 +205,22 @@ static void fixture_init(fixture_t* const self)
 {
     memset(self, 0, sizeof(*self));
     guarded_heap_init(&self->heap, UINT64_C(0x0F0E0D0C0B0A0908));
-    self->platform.vtable               = &self->vtable;
-    self->platform.subject_id_modulus   = (uint32_t)CY_SUBJECT_ID_MODULUS_17bit;
-    self->vtable.subject_writer_new     = fixture_subject_writer_new;
-    self->vtable.subject_writer_destroy = fixture_subject_writer_destroy;
-    self->vtable.subject_writer_send    = fixture_subject_writer_send;
-    self->vtable.subject_reader_new     = fixture_subject_reader_new;
-    self->vtable.subject_reader_destroy = fixture_subject_reader_destroy;
-    self->vtable.unicast                = fixture_unicast_send;
-    self->vtable.unicast_extent_set     = fixture_unicast_extent_set;
-    self->vtable.spin                   = fixture_spin;
-    self->vtable.now                    = fixture_now;
-    self->vtable.realloc                = fixture_realloc;
-    self->vtable.random                 = fixture_random;
-    self->rand_state                    = UINT64_C(0x123456789ABCDEF0);
-    self->cy                            = cy_new(&self->platform);
+    self->platform.vtable                  = &self->vtable;
+    self->platform.subject_id_modulus      = (uint32_t)CY_SUBJECT_ID_MODULUS_16bit;
+    self->vtable.subject_writer_new        = fixture_subject_writer_new;
+    self->vtable.subject_writer_destroy    = fixture_subject_writer_destroy;
+    self->vtable.subject_writer_send       = fixture_subject_writer_send;
+    self->vtable.subject_reader_new        = fixture_subject_reader_new;
+    self->vtable.subject_reader_extent_set = fixture_subject_reader_extent_set;
+    self->vtable.subject_reader_destroy    = fixture_subject_reader_destroy;
+    self->vtable.unicast                   = fixture_unicast_send;
+    self->vtable.unicast_extent_set        = fixture_unicast_extent_set;
+    self->vtable.spin                      = fixture_spin;
+    self->vtable.now                       = fixture_now;
+    self->vtable.realloc                   = fixture_realloc;
+    self->vtable.random                    = fixture_random;
+    self->rand_state                       = UINT64_C(0x123456789ABCDEF0);
+    self->cy                               = cy_new(&self->platform);
     TEST_ASSERT_NOT_NULL(self->cy);
     cy_async_error_handler_set(self->cy, fixture_on_async_error);
 }
@@ -646,6 +669,275 @@ static void test_on_scout_reports_async_error_on_unicast_failure(void)
     fixture_deinit(&fix);
 }
 
+static void test_gossip_wire_name_excludes_pin_expression(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    // Create a pinned topic. Pin=100 means evictions = UINT32_MAX - 100.
+    // The name stored in the topic is "gossip/wire/name" (no pin), hash computed from that name.
+    const char*       topic_name = "gossip/wire/name";
+    const uint64_t    hash       = rapidhash(topic_name, strlen(topic_name));
+    const uint32_t    evictions  = UINT32_MAX - 100U; // pinned to subject-ID 100
+    cy_topic_t* const topic      = fixture_make_explicit_topic(&fix, topic_name, hash, evictions);
+
+    TEST_ASSERT_TRUE(is_pinned(topic->evictions));
+
+    // Trigger a gossip send via gossip_event_urgent. Reset captures first.
+    fix.capture_count           = 0U;
+    fix.subject_send_count      = 0U;
+    topic->gossip_counter       = 0;
+    topic->gossip_event.user    = topic;
+    topic->gossip_event.handler = gossip_event_urgent;
+    gossip_event_urgent(&fix.cy->olga, &topic->gossip_event, 30 * MEGA);
+
+    // Verify at least one gossip frame was captured.
+    TEST_ASSERT_TRUE(fix.capture_count > 0U);
+
+    // Examine each captured gossip frame: the name in the payload must NOT contain '#' or pin digits.
+    for (size_t i = 0U; i < fix.capture_count; i++) {
+        const send_capture_t* const cap = &fix.capture[i];
+        TEST_ASSERT_EQUAL_UINT8(header_gossip, cap->type);
+        TEST_ASSERT_TRUE(cap->size >= HEADER_BYTES);
+
+        // Extract the name length from the header (byte 23 = HEADER_BYTES - 1).
+        const uint8_t name_len = cap->data[HEADER_BYTES - 1U];
+        TEST_ASSERT_TRUE(name_len > 0U);
+        TEST_ASSERT_TRUE(HEADER_BYTES + name_len <= cap->size);
+
+        // The name bytes start right after the header.
+        const unsigned char* const name_bytes = &cap->data[HEADER_BYTES];
+
+        // Verify no '#' character is present in the wire name.
+        for (uint8_t j = 0U; j < name_len; j++) {
+            TEST_ASSERT_NOT_EQUAL_CHAR('#', (char)name_bytes[j]);
+        }
+
+        // Verify the wire name matches the expected normalized name exactly.
+        TEST_ASSERT_EQUAL_UINT8(strlen(topic_name), name_len);
+        TEST_ASSERT_EQUAL_MEMORY(topic_name, name_bytes, name_len);
+    }
+
+    fixture_deinit(&fix);
+}
+
+static void test_gossip_pinned_topic_sends_measured_lage(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    // Create a pinned explicit topic. Pin=100 means evictions = UINT32_MAX - 100.
+    const char*       topic_name = "gossip/pinned/lage";
+    const uint64_t    hash       = rapidhash(topic_name, strlen(topic_name));
+    const uint32_t    evictions  = UINT32_MAX - 100U;
+    cy_topic_t* const topic      = fixture_make_explicit_topic(&fix, topic_name, hash, evictions);
+    TEST_ASSERT_TRUE(is_pinned(topic->evictions));
+
+    // Trigger gossip via send_gossip_multicast and capture the frame.
+    fix.capture_count      = 0U;
+    fix.subject_send_count = 0U;
+    const cy_us_t  now     = 31 * MEGA;
+    const cy_err_t err     = send_gossip_multicast(topic, now, fix.cy->broad_writer);
+    TEST_ASSERT_EQUAL_INT(CY_OK, err);
+    TEST_ASSERT_TRUE(fix.capture_count > 0U);
+
+    const send_capture_t* const cap = &fix.capture[0];
+    // Verify header type is header_gossip (8).
+    TEST_ASSERT_EQUAL_UINT8(header_gossip, cap->type);
+    // Pinned topics emit the ordinary measured log-age like any other topic.
+    TEST_ASSERT_EQUAL_INT8(topic_lage(topic, now), cap->lage);
+    TEST_ASSERT_EQUAL_UINT8(0x04U, cap->data[3]); // floor(log2(31 s)) = 4
+    // Verify the evictions field (offset 16, 4 bytes LE) matches topic->evictions.
+    TEST_ASSERT_EQUAL_UINT32(topic->evictions, cap->evictions);
+    TEST_ASSERT_EQUAL_UINT32(topic->evictions, deserialize_u32(&cap->data[16]));
+    // Verify the hash field (offset 8, 8 bytes LE) matches topic->hash.
+    TEST_ASSERT_EQUAL_UINT64(topic->hash, cap->hash);
+    TEST_ASSERT_EQUAL_UINT64(topic->hash, deserialize_u64(&cap->data[8]));
+
+    fixture_deinit(&fix);
+}
+
+static void test_on_gossip_known_topic_pinned_can_lose_divergence_to_older_state(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    // Create a pinned explicit topic. Pin=100 means evictions = UINT32_MAX - 100.
+    const char*       topic_name = "gossip/pinned/wins";
+    const uint64_t    hash       = rapidhash(topic_name, strlen(topic_name));
+    const uint32_t    evictions  = UINT32_MAX - 100U;
+    cy_topic_t* const topic      = fixture_make_explicit_topic(&fix, topic_name, hash, evictions);
+    TEST_ASSERT_TRUE(is_pinned(topic->evictions));
+
+    const cy_us_t now = 32 * MEGA;
+    topic->ts_origin  = now - (1 * MEGA); // lage=0
+    unschedule_gossip(topic);
+
+    // Remote has an older non-pinned state. Pinning alone must not make the younger local state win.
+    on_gossip_known_topic(fix.cy, now, topic, 5U, 10, gossip_broadcast);
+
+    TEST_ASSERT_EQUAL_UINT32(5U, topic->evictions);
+    TEST_ASSERT_FALSE(is_pinned(topic->evictions));
+
+    fixture_deinit(&fix);
+}
+
+static void test_on_gossip_known_topic_remote_pinned_low_wire_age_does_not_win(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+    fix.now = lage_to_us(10) + (20 * MEGA);
+
+    const char*       topic_name = "gossip/pinned/no-normalize/known";
+    const uint64_t    hash       = rapidhash(topic_name, strlen(topic_name));
+    cy_topic_t* const topic      = fixture_make_explicit_topic(&fix, topic_name, hash, 0U);
+    TEST_ASSERT_FALSE(is_pinned(topic->evictions));
+
+    topic->ts_origin = fix.now - lage_to_us(10);
+    unschedule_gossip(topic);
+
+    const uint32_t remote_evictions = UINT32_MAX - 25U;
+    on_gossip_known_topic(fix.cy, fix.now, topic, remote_evictions, 0, gossip_broadcast);
+
+    TEST_ASSERT_EQUAL_UINT32(0U, topic->evictions);
+    TEST_ASSERT_FALSE(is_pinned(topic->evictions));
+    TEST_ASSERT_TRUE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
+    TEST_ASSERT_TRUE(topic->gossip_event.handler == gossip_event_urgent);
+
+    fixture_deinit(&fix);
+}
+
+static void test_on_gossip_known_topic_equal_lage_higher_evictions_win(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    // Create a pinned explicit topic. Pin=100 means evictions = UINT32_MAX - 100.
+    const char*       topic_name = "gossip/pinned/minpin";
+    const uint64_t    hash       = rapidhash(topic_name, strlen(topic_name));
+    const uint32_t    evictions  = UINT32_MAX - 100U;
+    cy_topic_t* const topic      = fixture_make_explicit_topic(&fix, topic_name, hash, evictions);
+    TEST_ASSERT_TRUE(is_pinned(topic->evictions));
+
+    const cy_us_t now = 33 * MEGA;
+    topic->ts_origin  = now - (1 * MEGA); // lage=0
+    unschedule_gossip(topic);
+
+    // Remote is also pinned: pin=50 means evictions = UINT32_MAX - 50.
+    // Equal log-age falls through to the ordinary higher-evictions tiebreak.
+    const uint32_t remote_evictions = UINT32_MAX - 50U;
+    on_gossip_known_topic(fix.cy, now, topic, remote_evictions, 0, gossip_broadcast);
+
+    // Remote wins: local adopts remote evictions.
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX - 50U, topic->evictions);
+    // Verify subject-ID matches the new pin value.
+    TEST_ASSERT_EQUAL_UINT32(50U, topic_subject_id(topic));
+
+    fixture_deinit(&fix);
+}
+
+static void test_on_gossip_unknown_topic_pinned_not_in_index_no_collision(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    // Create a pinned explicit topic with pin=100 (subject-ID 100). Not in the subject-ID index.
+    const char*       topic_name = "gossip/pinned/nocollision";
+    const uint64_t    hash       = rapidhash(topic_name, strlen(topic_name));
+    const uint32_t    evictions  = UINT32_MAX - 100U;
+    cy_topic_t* const topic      = fixture_make_explicit_topic(&fix, topic_name, hash, evictions);
+    TEST_ASSERT_TRUE(is_pinned(topic->evictions));
+    TEST_ASSERT_EQUAL_UINT32(100U, topic_subject_id(topic));
+
+    // Verify the pinned topic is indeed NOT in the subject-ID index.
+    TEST_ASSERT_NULL(topic_find_by_subject_id(fix.cy, 100U));
+
+    const cy_us_t now = 34 * MEGA;
+    unschedule_gossip(topic);
+
+    // Construct a remote non-pinned topic whose subject-ID also maps to 100 -- impossible by design,
+    // since non-pinned subject-IDs are always > CY_SUBJECT_ID_PINNED_MAX. Instead, use a remote pinned
+    // topic with the same subject-ID (pin=100) but a different hash. on_gossip_unknown_topic computes
+    // subject_id_impl(remote_hash, remote_evictions) and then looks up topic_find_by_subject_id.
+    // Since the pinned topic is not in the index, the lookup returns NULL and nothing happens.
+    const uint64_t remote_hash      = hash + 1U;         // different topic
+    const uint32_t remote_evictions = UINT32_MAX - 100U; // same pin => same subject-ID 100
+    on_gossip_unknown_topic(fix.cy, now, remote_hash, remote_evictions, 0);
+
+    // Pinned topic is unaffected.
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX - 100U, topic->evictions);
+    // No urgent gossip was scheduled from this call (gossip was unscheduled before the call).
+    TEST_ASSERT_FALSE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
+
+    fixture_deinit(&fix);
+}
+
+static void test_topic_subscribe_if_matching_pinned_low_wire_age_preserves_age(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+    fix.now = 21 * MEGA;
+
+    cy_future_t* const sub = cy_subscribe(fix.cy, cy_str("gossip/pinned/auto/*"), 64U);
+    TEST_ASSERT_NOT_NULL(sub);
+
+    const cy_str_t name      = cy_str("gossip/pinned/auto/topic");
+    const uint64_t hash      = rapidhash(name.str, name.len);
+    const uint32_t evictions = UINT32_MAX - 25U;
+    cy_topic_t*    topic     = topic_subscribe_if_matching(fix.cy, name, hash, evictions, 0);
+    TEST_ASSERT_NOT_NULL(topic);
+    TEST_ASSERT_TRUE(is_pinned(topic->evictions));
+    TEST_ASSERT_EQUAL_UINT32(evictions, topic->evictions);
+    TEST_ASSERT_EQUAL_INT(0, topic_lage(topic, fix.now));
+    TEST_ASSERT_EQUAL_INT64((int64_t)(fix.now - lage_to_us(0)), (int64_t)topic->ts_origin);
+    TEST_ASSERT_NULL(topic_find_by_subject_id(fix.cy, topic_subject_id(topic)));
+
+    cy_future_destroy(sub);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(fix.cy));
+    fixture_deinit(&fix);
+}
+
+// Validate subscriber pattern index lifecycle through the gossip/subscriber infrastructure.
+// When a pattern subscriber is created (even if scouting fails), the pattern index must be
+// populated, and when the subscriber is destroyed, the pattern index must be cleaned up.
+// This exercises the ensure_subscriber_root pattern index paths (lines 3630-3635).
+static void test_subscriber_pattern_index_lifecycle_with_scout_failure(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    // Force scouting to fail so that needs_scouting is set on the root.
+    fix.fail_subject_send = true;
+    fix.async_error_count = 0U;
+
+    cy_future_t* const sub = cy_subscribe(fix.cy, cy_str("gossip/sub/pattern/lifecycle/*"), 64U);
+    // Subscribe succeeds even if scouting fails (scout failure is non-fatal, async error reported).
+    TEST_ASSERT_NOT_NULL(sub);
+    TEST_ASSERT_TRUE(fix.async_error_count > 0U);
+
+    // Verify the pattern is in the subscriber indexes.
+    TEST_ASSERT_FALSE(wkv_is_empty(&fix.cy->subscribers_by_pattern));
+    TEST_ASSERT_FALSE(wkv_is_empty(&fix.cy->subscribers_by_name));
+
+    // The root should have needs_scouting set because the scout failed.
+    const wkv_node_t* const node = wkv_get(&fix.cy->subscribers_by_name, cy_str("gossip/sub/pattern/lifecycle/*"));
+    TEST_ASSERT_NOT_NULL(node);
+    subscriber_root_t* const root = (subscriber_root_t*)node->value;
+    TEST_ASSERT_NOT_NULL(root);
+    TEST_ASSERT_TRUE(root->needs_scouting);
+    TEST_ASSERT_NOT_NULL(root->index_pattern);
+
+    // Clean up.
+    cy_future_destroy(sub);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(fix.cy));
+
+    // After destroy, the pattern index should be empty.
+    TEST_ASSERT_TRUE(wkv_is_empty(&fix.cy->subscribers_by_pattern));
+    TEST_ASSERT_TRUE(wkv_is_empty(&fix.cy->subscribers_by_name));
+
+    fixture_deinit(&fix);
+}
+
 void setUp(void) {}
 
 void tearDown(void) {}
@@ -667,5 +959,13 @@ int main(void)
     RUN_TEST(test_gossip_event_urgent_broadcasts_and_resets_counter);
     RUN_TEST(test_on_scout_responds_via_unicast_only);
     RUN_TEST(test_on_scout_reports_async_error_on_unicast_failure);
+    RUN_TEST(test_gossip_wire_name_excludes_pin_expression);
+    RUN_TEST(test_gossip_pinned_topic_sends_measured_lage);
+    RUN_TEST(test_on_gossip_known_topic_pinned_can_lose_divergence_to_older_state);
+    RUN_TEST(test_on_gossip_known_topic_remote_pinned_low_wire_age_does_not_win);
+    RUN_TEST(test_on_gossip_known_topic_equal_lage_higher_evictions_win);
+    RUN_TEST(test_on_gossip_unknown_topic_pinned_not_in_index_no_collision);
+    RUN_TEST(test_topic_subscribe_if_matching_pinned_low_wire_age_preserves_age);
+    RUN_TEST(test_subscriber_pattern_index_lifecycle_with_scout_failure);
     return UNITY_END();
 }

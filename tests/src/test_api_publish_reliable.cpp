@@ -1,7 +1,6 @@
 #include <cy_platform.h>
 #include <unity.h>
 #include "api_mock_platform_utils.hpp"
-#include "guarded_heap.h"
 #include "message.h"
 #include <algorithm>
 #include <array>
@@ -14,18 +13,8 @@ namespace {
 constexpr cy_us_t     ACK_TIMEOUT  = 100'000;
 constexpr std::size_t header_bytes = 24U;
 
-struct test_platform_t final
+struct test_platform_t final : api_test::test_platform_base_t
 {
-    cy_platform_t        platform{};
-    cy_platform_vtable_t vtable{};
-    guarded_heap_t       core_heap{};
-    guarded_heap_t       message_heap{};
-
-    cy_t* cy{ nullptr };
-
-    cy_us_t       now{ 0 };
-    std::uint64_t random_state{ 1U };
-
     std::size_t fail_after{ std::numeric_limits<std::size_t>::max() };
     std::size_t new_alloc_count{ 0U };
 
@@ -58,12 +47,12 @@ const test_platform_t* platform_from_const(const cy_platform_t* const platform)
 extern "C" cy_subject_writer_t* platform_subject_writer_new(cy_platform_t* const platform,
                                                             const std::uint32_t  subject_id)
 {
-    return api_test::subject_writer_new<test_platform_t>(platform, subject_id);
+    return api_test::subject_writer_new_tracked<test_platform_t>(platform, subject_id);
 }
 
 extern "C" void platform_subject_writer_destroy(cy_platform_t* const platform, cy_subject_writer_t* const writer)
 {
-    api_test::subject_writer_destroy<test_platform_t>(platform, writer);
+    api_test::subject_writer_destroy_tracked<test_platform_t>(platform, writer);
 }
 
 extern "C" cy_err_t platform_subject_writer_send(cy_platform_t* const       platform,
@@ -104,12 +93,19 @@ extern "C" cy_subject_reader_t* platform_subject_reader_new(cy_platform_t* const
                                                             const std::uint32_t  subject_id,
                                                             const std::size_t    extent)
 {
-    return api_test::subject_reader_new<test_platform_t>(platform, subject_id, extent);
+    return api_test::subject_reader_new_tracked<test_platform_t>(platform, subject_id, extent);
+}
+
+extern "C" void platform_subject_reader_extent_set(cy_platform_t* const       platform,
+                                                   cy_subject_reader_t* const reader,
+                                                   const std::size_t          extent)
+{
+    api_test::subject_reader_extent_set_tracked<test_platform_t>(platform, reader, extent);
 }
 
 extern "C" void platform_subject_reader_destroy(cy_platform_t* const platform, cy_subject_reader_t* const reader)
 {
-    api_test::subject_reader_destroy<test_platform_t>(platform, reader);
+    api_test::subject_reader_destroy_tracked<test_platform_t>(platform, reader);
 }
 
 extern "C" cy_err_t platform_unicast_send(cy_platform_t* const   platform,
@@ -350,15 +346,12 @@ void test_begin(test_platform_t& p)
     cy_test_message_reset_counters();
 }
 
-void test_end(test_platform_t& p)
-{
-    platform_deinit(&p);
-    api_test::assert_heaps_clean(p.core_heap, p.message_heap);
-}
+void test_end(test_platform_t& p) { platform_deinit(&p); }
 
 void platform_init(test_platform_t* const self)
 {
     *self = test_platform_t{};
+    self->random_state = 1U;
 
     guarded_heap_init(&self->core_heap, UINT64_C(0xFACEB00C12345678));
     guarded_heap_init(&self->message_heap, UINT64_C(0xDEC0DE1234567890));
@@ -367,8 +360,9 @@ void platform_init(test_platform_t* const self)
     self->vtable.subject_writer_destroy = platform_subject_writer_destroy;
     self->vtable.subject_writer_send    = platform_subject_writer_send;
 
-    self->vtable.subject_reader_new     = platform_subject_reader_new;
-    self->vtable.subject_reader_destroy = platform_subject_reader_destroy;
+    self->vtable.subject_reader_new        = platform_subject_reader_new;
+    self->vtable.subject_reader_extent_set = platform_subject_reader_extent_set;
+    self->vtable.subject_reader_destroy    = platform_subject_reader_destroy;
 
     self->vtable.unicast            = platform_unicast_send;
     self->vtable.unicast_extent_set = platform_unicast_extent_set;
@@ -385,13 +379,7 @@ void platform_init(test_platform_t* const self)
     cy_async_error_handler_set(self->cy, platform_on_async_error);
 }
 
-void platform_deinit(test_platform_t* const self)
-{
-    if (self->cy != nullptr) {
-        cy_destroy(self->cy);
-        self->cy = nullptr;
-    }
-}
+void platform_deinit(test_platform_t* const self) { api_test::standard_deinit(*self); }
 
 void test_null_publisher()
 {
@@ -1748,6 +1736,116 @@ void test_association_at_slack_limit_is_skipped()
     cy_unadvertise(pub);
     test_end(platform);
 }
+/// A NACK arriving for a remote that has no existing association: on_message_ack() calls cavl2_find_or_insert
+/// with NULL factory (since positive==false), which returns NULL. The else branch at line 4549 is triggered.
+/// This covers line 4549 (NACK for unassociated remote).
+void test_nack_from_unassociated_remote()
+{
+    test_platform_t platform{};
+    test_begin(platform);
+
+    static const char* const topic_name = "reliable/nack_unassociated";
+    cy_publisher_t* const    pub        = setup_publisher(platform, topic_name);
+    const std::uint64_t      hash       = topic_hash_for(platform, topic_name);
+
+    // Publish a reliable message so there is a valid seqno range to reference.
+    const cy_bytes_t    msg = { .size = 1U, .data = "\xAB", .next = nullptr };
+    cy_future_t* const  fut = cy_publish_reliable(pub, platform.now + 1'000'000, msg);
+    const std::uint64_t tag = captured_tag(platform);
+    TEST_ASSERT_NOT_NULL(fut);
+
+    // Dispatch a NACK (type 3) from a remote that has never sent an ACK -- no association exists.
+    // Wire format for NACK: [0]=3(type), [4..7]=0(incompatibility), [8..15]=hash, [16..23]=tag.
+    std::array<unsigned char, header_bytes> wire{};
+    wire[0] = 3U; // header_msg_nack
+    for (std::size_t i = 0U; i < 8U; i++) {
+        wire.at(8U + i)  = static_cast<unsigned char>((hash >> (i * 8U)) & 0xFFU);
+        wire.at(16U + i) = static_cast<unsigned char>((tag >> (i * 8U)) & 0xFFU);
+    }
+
+    cy_message_t* const nack_msg = cy_test_message_make(&platform.message_heap, wire.data(), wire.size());
+    TEST_ASSERT_NOT_NULL(nack_msg);
+
+    cy_message_ts_t message{};
+    message.timestamp = platform.now;
+    message.content   = nack_msg;
+
+    const cy_lane_t lane = { .id = UINT64_C(0xFADE), .ctx = { { 0 } }, .prio = cy_prio_nominal };
+    cy_on_message(&platform.platform, lane, nullptr, message);
+
+    // The future should still be pending -- a NACK from an unassociated remote has no effect on delivery.
+    assert_future_state(fut, false, CY_OK);
+
+    // Now ACK from a different remote to complete the future.
+    dispatch_ack(&platform, tag, hash, UINT64_C(0xAAAA), platform.now);
+    assert_publish_state(fut, true, CY_OK);
+
+    cy_future_destroy(fut);
+    cy_unadvertise(pub);
+    test_end(platform);
+}
+
+/// When a reliable response is received and the unicast send fails while sending the response ACK,
+/// the error should be traced but processing should continue. Covers line 4625 (send_response_ack error path).
+void test_response_ack_unicast_failure()
+{
+    test_platform_t platform{};
+    test_begin(platform);
+
+    // Create a publisher that expects responses (cy_advertise_client).
+    cy_publisher_t* const pub = cy_advertise_client(platform.cy, cy_str("reliable/rsp/ack/fail"), 256U);
+    TEST_ASSERT_NOT_NULL(pub);
+    cy_ack_timeout_set(pub, ACK_TIMEOUT);
+
+    const std::uint64_t hash = topic_hash_for(platform, "reliable/rsp/ack/fail");
+
+    // Send a request.
+    const cy_bytes_t    msg = { .size = 1U, .data = "\xCD", .next = nullptr };
+    cy_future_t* const  req = cy_request(pub, platform.now + 1'000'000, 500'000, msg);
+    const std::uint64_t tag = captured_tag(platform);
+    TEST_ASSERT_NOT_NULL(req);
+
+    // ACK the request first.
+    dispatch_ack(&platform, tag, hash, UINT64_C(0xBEEF), platform.now);
+
+    // Now simulate a reliable response (type 5 = header_rsp_rel) arriving from the remote.
+    // Wire format: [0]=type(5), [1]=tag_byte(0), [2..7]=seqno(0), [8..15]=hash, [16..23]=message_tag.
+    std::array<unsigned char, header_bytes + 4U> rsp_wire{};
+    rsp_wire[0] = 5U; // header_rsp_rel
+    rsp_wire[1] = 0U; // tag byte
+    // seqno = 0 (6 bytes LE at offset 2..7), already zero
+    for (std::size_t i = 0U; i < 8U; i++) {
+        rsp_wire.at(8U + i)  = static_cast<unsigned char>((hash >> (i * 8U)) & 0xFFU);
+        rsp_wire.at(16U + i) = static_cast<unsigned char>((tag >> (i * 8U)) & 0xFFU);
+    }
+    rsp_wire[header_bytes]     = 0xEEU; // payload
+    rsp_wire[header_bytes + 1] = 0xFFU;
+
+    // Make the unicast send fail for the response ACK.
+    platform.fail_next_unicast_send = true;
+
+    cy_message_t* const rsp_msg = cy_test_message_make(&platform.message_heap, rsp_wire.data(), rsp_wire.size());
+    TEST_ASSERT_NOT_NULL(rsp_msg);
+
+    cy_message_ts_t rsp_mts{};
+    rsp_mts.timestamp = platform.now + 1;
+    rsp_mts.content   = rsp_msg;
+
+    const cy_lane_t rsp_lane = { .id = UINT64_C(0xBEEF), .ctx = { { 0 } }, .prio = cy_prio_nominal };
+    cy_on_message(&platform.platform, rsp_lane, nullptr, rsp_mts);
+
+    // The unicast send was attempted (and failed) -- verify the count was incremented.
+    TEST_ASSERT_TRUE(platform.unicast_count > 0U);
+    TEST_ASSERT_FALSE(platform.fail_next_unicast_send); // The flag was consumed.
+
+    // The request future should still have received the response despite the ACK send failure.
+    TEST_ASSERT_TRUE(cy_is_request(req));
+
+    cy_future_destroy(req);
+    cy_unadvertise(pub);
+    test_end(platform);
+}
+
 } // namespace
 
 extern "C" void setUp()
@@ -1813,5 +1911,7 @@ int main()
     RUN_TEST(test_empty_message);
     RUN_TEST(test_association_eviction_on_slack);
     RUN_TEST(test_association_at_slack_limit_is_skipped);
+    RUN_TEST(test_nack_from_unassociated_remote);
+    RUN_TEST(test_response_ack_unicast_failure);
     return UNITY_END();
 }

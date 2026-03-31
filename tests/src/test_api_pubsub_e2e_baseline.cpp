@@ -19,17 +19,9 @@ constexpr cy_us_t      ordered_window   = 30'000;
 constexpr cy_us_t      publish_deadline = 200'000;
 constexpr std::uint8_t header_rsp_be    = 4U;
 
-struct arrival_sample_t final
-{
-    std::uint32_t publisher_id{ 0U };
-    std::uint64_t app_seq{ 0U };
-};
-
-struct arrival_capture_t final
-{
-    std::vector<arrival_sample_t> samples{};
-    std::size_t                   malformed{ 0U };
-};
+using e2e::arrival_capture_t;
+using e2e::arrival_sample_t;
+using e2e::on_arrival_capture;
 
 struct response_server_capture_t final
 {
@@ -38,30 +30,6 @@ struct response_server_capture_t final
     std::uint64_t first_topic_hash{ 0U };
     cy_err_t      last_respond_error{ CY_OK };
 };
-
-extern "C" void on_arrival_capture(cy_future_t* const sub)
-{
-    const cy_arrival_t arrival = cy_arrival_move(sub);
-    if (arrival.message.content == nullptr) {
-        return;
-    }
-
-    auto* const capture = static_cast<arrival_capture_t*>(cy_future_context(sub).ptr[0]);
-    TEST_ASSERT_NOT_NULL(capture);
-
-    std::array<unsigned char, 32> bytes{};
-    const std::size_t             size = cy_message_read(arrival.message.content, 0U, bytes.size(), bytes.data());
-
-    e2e::app_payload_t payload{};
-    if (!e2e::app_payload_unpack(bytes.data(), size, payload)) {
-        capture->malformed++;
-        cy_message_refcount_dec(arrival.message.content);
-        return;
-    }
-
-    capture->samples.push_back(arrival_sample_t{ .publisher_id = payload.publisher_id, .app_seq = payload.sequence });
-    cy_message_refcount_dec(arrival.message.content);
-}
 
 extern "C" void on_arrival_respond(cy_future_t* const sub)
 {
@@ -151,7 +119,7 @@ std::vector<std::uint64_t> sequences_for(const arrival_capture_t& capture, const
     std::vector<std::uint64_t> out{};
     for (const arrival_sample_t& sample : capture.samples) {
         if (sample.publisher_id == pub_id) {
-            out.push_back(sample.app_seq);
+            out.push_back(sample.sequence);
         }
     }
     return out;
@@ -185,10 +153,10 @@ void assert_ordered_strictly_increasing(const arrival_capture_t& capture, const 
             continue;
         }
         if (has_last) {
-            TEST_ASSERT_TRUE(sample.app_seq > last);
+            TEST_ASSERT_TRUE(sample.sequence > last);
         }
         has_last = true;
-        last     = sample.app_seq;
+        last     = sample.sequence;
     }
 }
 
@@ -196,7 +164,7 @@ void test_api_pubsub_e2e_a01_best_effort_happy_unordered()
 {
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xA01U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xA01U));
     cy_us_t now = 0;
 
     cy_publisher_t* const pub = make_publisher(net, "e2e/a01/topic");
@@ -220,7 +188,7 @@ void test_api_pubsub_e2e_a02_best_effort_happy_ordered()
 {
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xA02U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xA02U));
     cy_us_t now = 0;
 
     cy_publisher_t* const pub = make_publisher(net, "e2e/a02/topic");
@@ -245,7 +213,7 @@ void test_api_pubsub_e2e_a03_reliable_happy_unordered()
 {
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xA03U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xA03U));
     cy_us_t now = 0;
 
     cy_publisher_t* const pub = make_publisher(net, "e2e/a03/topic");
@@ -274,7 +242,7 @@ void test_api_pubsub_e2e_a04_reliable_happy_ordered()
 {
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xA04U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xA04U));
     cy_us_t now = 0;
 
     cy_publisher_t* const pub = make_publisher(net, "e2e/a04/topic");
@@ -304,7 +272,7 @@ void test_api_pubsub_e2e_a05_reliable_burst_no_faults_unordered()
 {
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xA05U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xA05U));
     cy_us_t now = 0;
 
     cy_publisher_t* const pub = make_publisher(net, "e2e/a05/topic");
@@ -333,7 +301,7 @@ void test_api_pubsub_e2e_a06_reliable_burst_no_faults_ordered()
 {
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xA06U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xA06U));
     cy_us_t now = 0;
 
     cy_publisher_t* const pub = make_publisher(net, "e2e/a06/topic");
@@ -363,7 +331,7 @@ void test_api_pubsub_e2e_a07_late_subscriber_join_post_subscribe_only()
 {
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xA07U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xA07U));
     cy_us_t now = 0;
 
     cy_publisher_t* const pub = make_publisher(net, "e2e/a07/topic");
@@ -393,7 +361,7 @@ void test_api_pubsub_e2e_a08_unsubscribe_resubscribe_during_active_publishing()
 {
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xA08U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xA08U));
     cy_us_t now = 0;
 
     cy_publisher_t* const pub = make_publisher(net, "e2e/a08/topic");
@@ -437,7 +405,7 @@ void test_api_pubsub_e2e_a09_response_frame_metadata_is_parsed_per_response_head
 {
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xA09U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xA09U));
     cy_us_t now = 0;
 
     static constexpr const char* topic_name = "e2e/a09/topic";

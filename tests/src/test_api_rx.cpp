@@ -1,8 +1,8 @@
 #include <cy_platform.h>
+#include <rapidhash.h>
 #include <unity.h>
 #include "api_mock_platform_utils.hpp"
 #include "helpers.h"
-#include "guarded_heap.h"
 #include "message.h"
 #include <array>
 #include <cstddef>
@@ -14,6 +14,7 @@ constexpr std::uint8_t header_msg_best_effort = 0U;
 constexpr std::uint8_t header_msg_reliable    = 1U;
 constexpr std::uint8_t header_msg_ack         = 2U;
 constexpr std::size_t  header_bytes           = 24U;
+constexpr std::int8_t  lage_max               = 35;
 
 struct arrival_capture_t
 {
@@ -27,21 +28,16 @@ struct self_unsub_capture_t
     std::size_t count{ 0U };
 };
 
-struct test_platform_t final
+struct test_platform_t final : api_test::test_platform_base_t
 {
-    cy_platform_t        platform{};
-    cy_platform_vtable_t vtable{};
-    guarded_heap_t       core_heap{};
-    guarded_heap_t       message_heap{};
-
-    cy_t* cy{ nullptr };
-
-    cy_us_t       now{ 0 };
-    std::uint64_t random_state{ 1U };
-
     std::size_t                   unicast_count{ 0U };
     std::array<unsigned char, 16> last_unicast{};
     std::size_t                   unicast_extent{ 0U };
+
+    std::size_t fail_after_n_allocs{ SIZE_MAX };
+    std::size_t alloc_counter{ 0U };
+    std::size_t async_error_count{ 0U };
+    bool        expect_async_errors{ false };
 };
 
 test_platform_t* platform_from(cy_platform_t* const platform)
@@ -52,12 +48,12 @@ test_platform_t* platform_from(cy_platform_t* const platform)
 extern "C" cy_subject_writer_t* platform_subject_writer_new(cy_platform_t* const platform,
                                                             const std::uint32_t  subject_id)
 {
-    return api_test::subject_writer_new<test_platform_t>(platform, subject_id);
+    return api_test::subject_writer_new_tracked<test_platform_t>(platform, subject_id);
 }
 
 extern "C" void platform_subject_writer_destroy(cy_platform_t* const platform, cy_subject_writer_t* const writer)
 {
-    api_test::subject_writer_destroy<test_platform_t>(platform, writer);
+    api_test::subject_writer_destroy_tracked<test_platform_t>(platform, writer);
 }
 
 extern "C" cy_err_t platform_subject_writer_send(cy_platform_t* const       platform,
@@ -78,12 +74,19 @@ extern "C" cy_subject_reader_t* platform_subject_reader_new(cy_platform_t* const
                                                             const std::uint32_t  subject_id,
                                                             const std::size_t    extent)
 {
-    return api_test::subject_reader_new<test_platform_t>(platform, subject_id, extent);
+    return api_test::subject_reader_new_tracked<test_platform_t>(platform, subject_id, extent);
+}
+
+extern "C" void platform_subject_reader_extent_set(cy_platform_t* const       platform,
+                                                   cy_subject_reader_t* const reader,
+                                                   const std::size_t          extent)
+{
+    api_test::subject_reader_extent_set_tracked<test_platform_t>(platform, reader, extent);
 }
 
 extern "C" void platform_subject_reader_destroy(cy_platform_t* const platform, cy_subject_reader_t* const reader)
 {
-    api_test::subject_reader_destroy<test_platform_t>(platform, reader);
+    api_test::subject_reader_destroy_tracked<test_platform_t>(platform, reader);
 }
 
 extern "C" cy_err_t platform_unicast_send(cy_platform_t* const   platform,
@@ -128,6 +131,13 @@ extern "C" cy_us_t platform_now(cy_platform_t* const platform) { return platform
 
 extern "C" void* platform_realloc(cy_platform_t* const platform, void* const ptr, const std::size_t size)
 {
+    test_platform_t* const self = platform_from(platform);
+    if ((ptr == nullptr) && (size > 0U)) {
+        if (self->alloc_counter >= self->fail_after_n_allocs) {
+            return nullptr;
+        }
+        self->alloc_counter++;
+    }
     return api_test::core_heap_realloc<test_platform_t>(platform, ptr, size);
 }
 
@@ -136,6 +146,8 @@ extern "C" std::uint64_t platform_random(cy_platform_t* const platform)
     return api_test::random_lcg<test_platform_t>(platform);
 }
 
+test_platform_t* g_current_platform{ nullptr }; // NOLINT(*-non-const-global-variables)
+
 extern "C" void platform_on_async_error(cy_t* const         cy,
                                         cy_topic_t* const   topic,
                                         const cy_err_t      error,
@@ -143,12 +155,19 @@ extern "C" void platform_on_async_error(cy_t* const         cy,
 {
     (void)cy;
     (void)topic;
-    (void)error;       // Reported separately by the failing assertion below.
-    (void)line_number; // Reported separately by the failing assertion below.
-    TEST_FAIL_MESSAGE("Unexpected async error callback invocation");
+    (void)error;
+    (void)line_number;
+    if (g_current_platform != nullptr) {
+        g_current_platform->async_error_count++;
+        if (!g_current_platform->expect_async_errors) {
+            TEST_FAIL_MESSAGE("Unexpected async error callback invocation");
+        }
+    } else {
+        TEST_FAIL_MESSAGE("Unexpected async error callback invocation");
+    }
 }
 
-extern "C" void on_arrival_capture(cy_future_t* const sub)
+extern "C" void on_arrival_capture_rx(cy_future_t* const sub)
 {
     const cy_arrival_t arrival = cy_arrival_move(sub);
     if (arrival.message.content == nullptr) {
@@ -199,6 +218,7 @@ extern "C" void on_arrival_count_only(cy_future_t* const sub)
 void platform_init(test_platform_t* const self)
 {
     *self = test_platform_t{};
+    self->random_state = 1U;
 
     guarded_heap_init(&self->core_heap, UINT64_C(0xFACEB00C12345678));
     guarded_heap_init(&self->message_heap, UINT64_C(0xDEC0DE1234567890));
@@ -207,8 +227,9 @@ void platform_init(test_platform_t* const self)
     self->vtable.subject_writer_destroy = platform_subject_writer_destroy;
     self->vtable.subject_writer_send    = platform_subject_writer_send;
 
-    self->vtable.subject_reader_new     = platform_subject_reader_new;
-    self->vtable.subject_reader_destroy = platform_subject_reader_destroy;
+    self->vtable.subject_reader_new        = platform_subject_reader_new;
+    self->vtable.subject_reader_extent_set = platform_subject_reader_extent_set;
+    self->vtable.subject_reader_destroy    = platform_subject_reader_destroy;
 
     self->vtable.unicast            = platform_unicast_send;
     self->vtable.unicast_extent_set = platform_unicast_extent_set;
@@ -223,15 +244,13 @@ void platform_init(test_platform_t* const self)
     self->cy = cy_new(&self->platform);
     TEST_ASSERT_NOT_NULL(self->cy);
     cy_async_error_handler_set(self->cy, platform_on_async_error);
+    g_current_platform = self;
 }
 
 void platform_deinit(test_platform_t* const self)
 {
-    if (self->cy != nullptr) {
-        cy_destroy(self->cy);
-        self->cy = nullptr;
-    }
-    api_test::assert_heaps_clean(self->core_heap, self->message_heap);
+    api_test::standard_deinit(*self);
+    g_current_platform = nullptr;
 }
 
 void assert_message_counters(const std::size_t destroyed, const std::size_t live)
@@ -373,32 +392,46 @@ void test_api_inline_msg_rejects_invalid_lage()
     platform_deinit(&platform);
 }
 
-void test_api_inline_msg_rejects_pinned_hash_nonzero_evictions()
+void test_api_inline_msg_accepts_pinned_evictions_with_in_range_lage()
 {
     test_platform_t platform{};
     platform_init(&platform);
     cy_test_message_reset_counters();
 
-    self_unsub_capture_t capture{};
-    cy_future_t* const   sub = cy_subscribe(platform.cy, cy_str("#0005"), 256U);
+    arrival_capture_t  capture{};
+    cy_future_t* const sub = cy_subscribe(platform.cy, cy_str("v1#5"), 256U);
     TEST_ASSERT_NOT_NULL(sub);
     cy_user_context_t context = CY_USER_CONTEXT_EMPTY;
     context.ptr[0]            = &capture;
     cy_future_context_set(sub, context);
-    cy_future_callback_set(sub, on_arrival_count_only);
+    cy_future_callback_set(sub, on_arrival_capture_rx);
 
-    const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("#0005"));
+    const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("v1"));
     TEST_ASSERT_NOT_NULL(topic);
-    TEST_ASSERT_TRUE(cy_topic_hash(topic) <= CY_SUBJECT_ID_PINNED_MAX);
+    TEST_ASSERT_EQUAL_UINT64(rapidhash("v1", 2U), cy_topic_hash(topic)); // Pin stripped; name is "v1".
+    const cy_subject_reader_t reader = { .subject_id = 5U, .extent = 0 };
 
-    std::array<unsigned char, header_bytes + 1U> wire{};
-    make_message_header(wire.data(), header_msg_best_effort, UINT64_C(102), cy_topic_hash(topic));
-    wire[4]              = 1U; // evictions in little-endian u32 field [4..7]
-    wire[header_bytes]   = 0x22U;
-    const cy_lane_t lane = { .id = UINT64_C(0x902), .ctx = { { 0 } }, .prio = cy_prio_nominal };
+    const auto                              pinned_ev      = static_cast<std::uint32_t>(UINT32_MAX - 5U);
+    static const std::array<std::int8_t, 4> accepted_lages = { -1, 0, 5, lage_max };
+    const cy_lane_t                         lane = { .id = UINT64_C(0x902), .ctx = { { 0 } }, .prio = cy_prio_nominal };
 
-    dispatch_raw(&platform, wire.data(), wire.size(), lane, nullptr, 201);
-    TEST_ASSERT_EQUAL_size_t(0U, capture.count);
+    for (std::size_t i = 0; i < accepted_lages.size(); i++) {
+        std::array<unsigned char, header_bytes + 1U> wire{};
+        make_message_header(wire.data(), header_msg_best_effort, UINT64_C(102) + i, cy_topic_hash(topic));
+        wire[3]            = static_cast<unsigned char>(accepted_lages.at(i));
+        wire[4]            = static_cast<unsigned char>(pinned_ev >> 0U);
+        wire[5]            = static_cast<unsigned char>(pinned_ev >> 8U);
+        wire[6]            = static_cast<unsigned char>(pinned_ev >> 16U);
+        wire[7]            = static_cast<unsigned char>(pinned_ev >> 24U);
+        wire[header_bytes] = static_cast<unsigned char>(0x22U + i);
+
+        dispatch_raw(
+          &platform, wire.data(), wire.size(), lane, &reader, static_cast<cy_us_t>(201) + static_cast<cy_us_t>(i));
+        TEST_ASSERT_EQUAL_size_t(i + 1U, capture.count);
+        TEST_ASSERT_EQUAL_UINT64(UINT64_C(102) + i, capture.tags.at(i));
+        TEST_ASSERT_EQUAL_UINT8(static_cast<unsigned char>(0x22U + i), capture.first_payload_byte.at(i));
+    }
+
     TEST_ASSERT_EQUAL_size_t(0U, platform.unicast_count);
 
     cy_future_destroy(sub);
@@ -429,7 +462,7 @@ void test_api_inline_msg_rejects_multicast_subject_mismatch()
     const std::uint32_t       expected = compute_subject_id(hash, 0U, modulus);
     const std::uint32_t       max_sid  = CY_SUBJECT_ID_MAX(modulus);
     const std::uint32_t       mismatch = (expected < max_sid) ? (expected + 1U) : (expected - 1U);
-    const cy_subject_reader_t reader   = { .subject_id = mismatch };
+    const cy_subject_reader_t reader   = { .subject_id = mismatch, .extent = 0 };
 
     std::array<unsigned char, header_bytes + 1U> wire{};
     make_message_header(wire.data(), header_msg_best_effort, UINT64_C(103), hash);
@@ -459,7 +492,7 @@ void test_api_inline_msg_unicast_skips_subject_consistency_check()
     cy_user_context_t context = CY_USER_CONTEXT_EMPTY;
     context.ptr[0]            = &capture;
     cy_future_context_set(sub, context);
-    cy_future_callback_set(sub, on_arrival_capture);
+    cy_future_callback_set(sub, on_arrival_capture_rx);
 
     const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("rx/inline/unicast/consistency"));
     TEST_ASSERT_NOT_NULL(topic);
@@ -500,7 +533,7 @@ void test_api_inline_msg_unknown_topic_collision_path_smoke()
     const std::uint32_t modulus     = platform.platform.subject_id_modulus;
     const std::uint64_t remote_hash = cy_topic_hash(local_topic) + static_cast<std::uint64_t>(modulus);
     TEST_ASSERT_NULL(cy_topic_find_by_hash(platform.cy, remote_hash));
-    const cy_subject_reader_t reader = { .subject_id = compute_subject_id(remote_hash, 0U, modulus) };
+    const cy_subject_reader_t reader = { .subject_id = compute_subject_id(remote_hash, 0U, modulus), .extent = 0 };
 
     std::array<unsigned char, header_bytes + 1U> wire{};
     make_message_header(wire.data(), header_msg_best_effort, UINT64_C(105), remote_hash);
@@ -531,7 +564,7 @@ void test_api_reliable_duplicate_acked_once_to_application()
     cy_user_context_t context = CY_USER_CONTEXT_EMPTY;
     context.ptr[0]            = &capture;
     cy_future_context_set(sub, context);
-    cy_future_callback_set(sub, on_arrival_capture);
+    cy_future_callback_set(sub, on_arrival_capture_rx);
 
     const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("rx/dup"));
     TEST_ASSERT_NOT_NULL(topic);
@@ -566,7 +599,7 @@ void test_api_ordered_subscriber_timeout_flush()
     cy_user_context_t context = CY_USER_CONTEXT_EMPTY;
     context.ptr[0]            = &capture;
     cy_future_context_set(sub, context);
-    cy_future_callback_set(sub, on_arrival_capture);
+    cy_future_callback_set(sub, on_arrival_capture_rx);
 
     const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("rx/ord"));
     TEST_ASSERT_NOT_NULL(topic);
@@ -1159,6 +1192,362 @@ void test_api_subscriber_callback_set_after_completion_invokes_immediately()
     TEST_ASSERT_EQUAL_UINT8(CY_OK, cy_spin_once(platform.cy));
     platform_deinit(&platform);
 }
+
+void test_api_multicast_msg_rejects_nonzero_incompatibility()
+{
+    // Deliver a multicast message (subject_id provided) with a non-zero incompatibility byte.
+    // This covers the branch at line 4661 for the multicast path specifically.
+    test_platform_t platform{};
+    platform_init(&platform);
+    cy_test_message_reset_counters();
+
+    self_unsub_capture_t capture{};
+    cy_future_t* const   sub = cy_subscribe(platform.cy, cy_str("rx/multicast/incompat"), 256U);
+    TEST_ASSERT_NOT_NULL(sub);
+    cy_user_context_t context = CY_USER_CONTEXT_EMPTY;
+    context.ptr[0]            = &capture;
+    cy_future_context_set(sub, context);
+    cy_future_callback_set(sub, on_arrival_count_only);
+
+    const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("rx/multicast/incompat"));
+    TEST_ASSERT_NOT_NULL(topic);
+    const std::uint64_t       hash    = cy_topic_hash(topic);
+    const std::uint32_t       modulus = platform.platform.subject_id_modulus;
+    const std::uint32_t       subject = compute_subject_id(hash, 0U, modulus);
+    const cy_subject_reader_t reader  = { .subject_id = subject, .extent = 0 };
+
+    std::array<unsigned char, header_bytes + 1U> wire{};
+    make_message_header(wire.data(), header_msg_best_effort, UINT64_C(201), hash);
+    wire[2]              = 1U; // non-zero incompatibility
+    wire[header_bytes]   = 0xAAU;
+    const cy_lane_t lane = { .id = UINT64_C(0xB01), .ctx = { { 0 } }, .prio = cy_prio_nominal };
+
+    dispatch_raw(&platform, wire.data(), wire.size(), lane, &reader, 300);
+    TEST_ASSERT_EQUAL_size_t(0U, capture.count); // silently dropped
+    TEST_ASSERT_EQUAL_size_t(0U, platform.unicast_count);
+
+    cy_future_destroy(sub);
+    TEST_ASSERT_EQUAL_UINT8(CY_OK, cy_spin_once(platform.cy));
+    platform_deinit(&platform);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&platform.message_heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&platform.message_heap));
+}
+
+void test_api_gossip_rejects_invalid_lage()
+{
+    // Deliver a gossip message with out-of-range lage values; these must be rejected.
+    // This covers the branch at line 4825 for the gossip path.
+    test_platform_t platform{};
+    platform_init(&platform);
+    cy_test_message_reset_counters();
+
+    // Create a topic so the gossip has something to reference.
+    cy_publisher_t* const pub = cy_advertise(platform.cy, cy_str("rx/gossip/lage"));
+    TEST_ASSERT_NOT_NULL(pub);
+    const cy_topic_t* const topic = cy_publisher_topic(pub);
+    TEST_ASSERT_NOT_NULL(topic);
+    const std::uint64_t hash = cy_topic_hash(topic);
+
+    // Construct a gossip header with lage=36 (LAGE_MAX+1, invalid).
+    std::array<unsigned char, 256U> wire{};
+    const std::size_t size = make_gossip_header(wire.data(), wire.size(), 3U, 36, hash, 0U, cy_str("rx/gossip/lage"));
+    TEST_ASSERT_TRUE(size > 0U);
+    const cy_lane_t lane = { .id = UINT64_C(0xC01), .ctx = { { 0 } }, .prio = cy_prio_nominal };
+
+    dispatch_raw(&platform, wire.data(), size, lane, nullptr, 400);
+    // The gossip should be silently dropped; no crash, no state change.
+    TEST_ASSERT_EQUAL_size_t(0U, platform.unicast_count);
+
+    // Also test with lage = -2 (below LAGE_MIN = -1).
+    const std::size_t size2 = make_gossip_header(wire.data(), wire.size(), 3U, -2, hash, 0U, cy_str("rx/gossip/lage"));
+    TEST_ASSERT_TRUE(size2 > 0U);
+    dispatch_raw(&platform, wire.data(), size2, lane, nullptr, 401);
+    TEST_ASSERT_EQUAL_size_t(0U, platform.unicast_count);
+
+    cy_unadvertise(pub);
+    TEST_ASSERT_EQUAL_UINT8(CY_OK, cy_spin_once(platform.cy));
+    platform_deinit(&platform);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&platform.message_heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&platform.message_heap));
+}
+/// When a subscriber is destroyed (disposed) but a second subscriber on the same topic is still alive,
+/// a message arriving should be delivered only to the live subscriber -- the disposed one early-returns.
+/// This covers line 2959 (subscriber_notify when subscriber is disposed).
+void test_api_disposed_subscriber_skipped_on_message()
+{
+    test_platform_t platform{};
+    platform_init(&platform);
+    cy_test_message_reset_counters();
+
+    // Create two subscribers on the same topic.
+    self_unsub_capture_t capture_live{};
+    cy_future_t* const   sub_live = cy_subscribe(platform.cy, cy_str("rx/disposed/test"), 256U);
+    TEST_ASSERT_NOT_NULL(sub_live);
+    cy_user_context_t context_live = CY_USER_CONTEXT_EMPTY;
+    context_live.ptr[0]            = &capture_live;
+    cy_future_context_set(sub_live, context_live);
+    cy_future_callback_set(sub_live, on_arrival_count_only);
+
+    self_unsub_capture_t capture_doomed{};
+    cy_future_t* const   sub_doomed = cy_subscribe(platform.cy, cy_str("rx/disposed/test"), 256U);
+    TEST_ASSERT_NOT_NULL(sub_doomed);
+    cy_user_context_t context_doomed = CY_USER_CONTEXT_EMPTY;
+    context_doomed.ptr[0]            = &capture_doomed;
+    cy_future_context_set(sub_doomed, context_doomed);
+    cy_future_callback_set(sub_doomed, on_arrival_count_only);
+
+    const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("rx/disposed/test"));
+    TEST_ASSERT_NOT_NULL(topic);
+
+    // Dispose the doomed subscriber but do NOT spin yet -- it is now disposed but not yet destroyed.
+    cy_future_destroy(sub_doomed);
+
+    // Now dispatch a message. The disposed subscriber should be skipped (line 2959), the live one should get it.
+    dispatch_message(&platform, topic, header_msg_best_effort, UINT64_C(0x7001), UINT64_C(0xDE), 100, 0x77U);
+
+    TEST_ASSERT_EQUAL_size_t(1U, capture_live.count);
+    TEST_ASSERT_EQUAL_size_t(0U, capture_doomed.count); // Disposed subscriber did NOT receive the message.
+
+    // Spin to complete the deferred destruction.
+    TEST_ASSERT_EQUAL_UINT8(CY_OK, cy_spin_once(platform.cy));
+
+    cy_future_destroy(sub_live);
+    TEST_ASSERT_EQUAL_UINT8(CY_OK, cy_spin_once(platform.cy));
+
+    platform_deinit(&platform);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&platform.message_heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&platform.message_heap));
+}
+
+/// Dedup entries are garbage-collected after SESSION_LIFETIME (60 s) during cy_spin_once.
+/// This covers line 3060 (dedup_drop_stale CY_TRACE) via the spin-time GC path (line 4430).
+void test_api_dedup_gc_after_session_lifetime()
+{
+    test_platform_t platform{};
+    platform_init(&platform);
+    cy_test_message_reset_counters();
+
+    arrival_capture_t  capture{};
+    cy_future_t* const sub = cy_subscribe(platform.cy, cy_str("rx/dedup/gc"), 256U);
+    TEST_ASSERT_NOT_NULL(sub);
+    cy_user_context_t context = CY_USER_CONTEXT_EMPTY;
+    context.ptr[0]            = &capture;
+    cy_future_context_set(sub, context);
+    cy_future_callback_set(sub, on_arrival_capture_rx);
+
+    const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("rx/dedup/gc"));
+    TEST_ASSERT_NOT_NULL(topic);
+
+    // Create a dedup entry by sending a reliable message.
+    dispatch_message(&platform, topic, header_msg_reliable, UINT64_C(0x5001), UINT64_C(0xABC), 1000, 0x11U);
+    TEST_ASSERT_EQUAL_size_t(1U, capture.count);
+
+    // Advance time past SESSION_LIFETIME (60 s). The spin-time dedup GC (line 4430) runs during cy_spin_once
+    // and will call dedup_drop_stale, removing the stale entry.
+    platform.now = 1000 + 61'000'000;
+    TEST_ASSERT_EQUAL_UINT8(CY_OK, cy_spin_once(platform.cy));
+
+    cy_future_destroy(sub);
+    TEST_ASSERT_EQUAL_UINT8(CY_OK, cy_spin_once(platform.cy));
+
+    platform_deinit(&platform);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&platform.message_heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&platform.message_heap));
+}
+
+/// When an ordered subscriber is disposed while it has interned (not yet ejected) messages, the deferred destruction
+/// drops all buffered messages silently. No callback should run and the retained message must be released.
+void test_api_ordered_disposed_subscriber_drops_interned_messages()
+{
+    test_platform_t platform{};
+    platform_init(&platform);
+    cy_test_message_reset_counters();
+
+    platform.now = 100;
+    // Use a long reordering window so messages stay interned until we explicitly destroy the subscriber.
+    cy_future_t* const sub = cy_subscribe_ordered(platform.cy, cy_str("rx/ord/disposed"), 256U, 5'000'000);
+    TEST_ASSERT_NOT_NULL(sub);
+
+    arrival_capture_t capture{};
+    cy_user_context_t context = CY_USER_CONTEXT_EMPTY;
+    context.ptr[0]            = &capture;
+    cy_future_context_set(sub, context);
+    cy_future_callback_set(sub, on_arrival_capture_rx);
+
+    const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("rx/ord/disposed"));
+    TEST_ASSERT_NOT_NULL(topic);
+
+    // The first message from a new remote triggers resequencing: tag_baseline = tag - CAPACITY/2.
+    // With tag=100, baseline=92, lin_tag=8. This gets interned (not ejected) because lin_tag != last_ejected+1.
+    dispatch_message(&platform, topic, header_msg_best_effort, UINT64_C(100), UINT64_C(0xF1), 110, 0xA1U);
+    TEST_ASSERT_EQUAL_size_t(0U, capture.count); // Interned (first message triggers resequence).
+    assert_message_counters(0U, 1U);
+
+    // Dispose the subscriber while tag=100 is still interned.
+    cy_future_destroy(sub);
+    assert_message_counters(0U, 1U);
+
+    // Spin triggers subscriber_destroy, which must drop the interned message without notifying the application.
+    TEST_ASSERT_EQUAL_UINT8(CY_OK, cy_spin_once(platform.cy));
+    TEST_ASSERT_EQUAL_size_t(0U, capture.count);
+    assert_message_counters(1U, 0U);
+
+    platform_deinit(&platform);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&platform.message_heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&platform.message_heap));
+}
+
+/// When a large tag gap exceeds the reordering capacity, the reordering manager resequences (line 3308).
+/// This covers the branch at line 3307 where lin_tag > last_ejected_lin_tag + capacity after clearing interned.
+void test_api_ordered_resequencing_on_large_tag_gap()
+{
+    test_platform_t platform{};
+    platform_init(&platform);
+    cy_test_message_reset_counters();
+
+    platform.now = 100;
+    arrival_capture_t  capture{};
+    cy_future_t* const sub = cy_subscribe_ordered(platform.cy, cy_str("rx/ord/reseq"), 256U, 10);
+    TEST_ASSERT_NOT_NULL(sub);
+    cy_user_context_t context = CY_USER_CONTEXT_EMPTY;
+    context.ptr[0]            = &capture;
+    cy_future_context_set(sub, context);
+    cy_future_callback_set(sub, on_arrival_capture_rx);
+
+    const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("rx/ord/reseq"));
+    TEST_ASSERT_NOT_NULL(topic);
+
+    // First message (tag=100) triggers factory -> resequence. baseline=92, last_ejected=0, lin_tag(100)=8. Interned.
+    dispatch_message(&platform, topic, header_msg_best_effort, UINT64_C(100), UINT64_C(0xF2), 110, 0xB1U);
+    TEST_ASSERT_EQUAL_size_t(0U, capture.count); // Interned.
+
+    // Let the reordering window expire to eject the first message.
+    platform.now = 200;
+    TEST_ASSERT_EQUAL_UINT8(CY_OK, cy_spin_once(platform.cy));
+    TEST_ASSERT_EQUAL_size_t(1U, capture.count); // tag=100 ejected on timeout.
+
+    // Now last_ejected_lin_tag=8, baseline=92. Send tag=1000 which gives lin_tag=1000-92=908.
+    // 908 > 8+16=24 -> enters the while loop but interned_count=0 so loop doesn't execute.
+    // Then 908 > 8+16=24 still -> resequence (line 3307-3308).
+    dispatch_message(&platform, topic, header_msg_best_effort, UINT64_C(1000), UINT64_C(0xF2), 210, 0xB2U);
+    TEST_ASSERT_EQUAL_size_t(1U, capture.count); // Interned after resequence, not ejected yet.
+
+    // Let the reordering window expire again to eject.
+    platform.now = 500;
+    TEST_ASSERT_EQUAL_UINT8(CY_OK, cy_spin_once(platform.cy));
+    TEST_ASSERT_EQUAL_size_t(2U, capture.count); // tag=1000 ejected on timeout.
+
+    cy_future_destroy(sub);
+    TEST_ASSERT_EQUAL_UINT8(CY_OK, cy_spin_once(platform.cy));
+    TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_live_count());
+
+    platform_deinit(&platform);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&platform.message_heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&platform.message_heap));
+}
+
+/// OOM during reordering slot allocation (line 3328).
+/// When mem_alloc_zero fails for the reordering_slot_t, the message is dropped and an async error is reported.
+void test_api_ordered_reordering_slot_alloc_oom()
+{
+    test_platform_t platform{};
+    platform_init(&platform);
+    cy_test_message_reset_counters();
+    platform.expect_async_errors = true;
+
+    platform.now = 100;
+    arrival_capture_t  capture{};
+    cy_future_t* const sub = cy_subscribe_ordered(platform.cy, cy_str("rx/ord/slotoom"), 256U, 10);
+    TEST_ASSERT_NOT_NULL(sub);
+    cy_user_context_t context = CY_USER_CONTEXT_EMPTY;
+    context.ptr[0]            = &capture;
+    cy_future_context_set(sub, context);
+    cy_future_callback_set(sub, on_arrival_capture_rx);
+
+    const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("rx/ord/slotoom"));
+    TEST_ASSERT_NOT_NULL(topic);
+
+    // First message (tag=100) triggers factory -> resequence. baseline=92, last_ejected=0, lin_tag(100)=8. Interned.
+    dispatch_message(&platform, topic, header_msg_best_effort, UINT64_C(100), UINT64_C(0xF3), 110, 0xC1U);
+    TEST_ASSERT_EQUAL_size_t(0U, capture.count); // Interned.
+
+    // Let the reordering window expire to eject the first message and establish a clean state.
+    platform.now = 200;
+    TEST_ASSERT_EQUAL_UINT8(CY_OK, cy_spin_once(platform.cy));
+    TEST_ASSERT_EQUAL_size_t(1U, capture.count); // tag=100 ejected on timeout.
+
+    // Now fail all subsequent allocations and send tag=102 (lin_tag=10, needs new slot -> OOM at line 3326).
+    // last_ejected_lin_tag=8, so lin_tag=10 != 8+1=9, within capacity -> intern path -> alloc fails.
+    platform.alloc_counter       = 0U;
+    platform.fail_after_n_allocs = 0U;
+    dispatch_message(&platform, topic, header_msg_best_effort, UINT64_C(102), UINT64_C(0xF3), 210, 0xC3U);
+    TEST_ASSERT_EQUAL_size_t(1U, capture.count);       // Not delivered (OOM).
+    TEST_ASSERT_TRUE(platform.async_error_count > 0U); // Async error reported.
+    platform.fail_after_n_allocs = SIZE_MAX;           // Re-enable allocator.
+
+    // Send tag=101 (lin_tag=9 = last_ejected+1 = immediate eject).
+    dispatch_message(&platform, topic, header_msg_best_effort, UINT64_C(101), UINT64_C(0xF3), 220, 0xC2U);
+    TEST_ASSERT_EQUAL_size_t(2U, capture.count); // Ejected immediately.
+
+    cy_future_destroy(sub);
+    TEST_ASSERT_EQUAL_UINT8(CY_OK, cy_spin_once(platform.cy));
+    TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_live_count());
+
+    platform_deinit(&platform);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&platform.message_heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&platform.message_heap));
+}
+
+/// Duplicate message in the reordering interned set (line 3342).
+/// When the same out-of-order tag is delivered twice before ejection, the second is detected as duplicate.
+void test_api_ordered_reordering_duplicate_interned()
+{
+    test_platform_t platform{};
+    platform_init(&platform);
+    cy_test_message_reset_counters();
+
+    platform.now = 100;
+    arrival_capture_t  capture{};
+    cy_future_t* const sub = cy_subscribe_ordered(platform.cy, cy_str("rx/ord/dupintern"), 256U, 10);
+    TEST_ASSERT_NOT_NULL(sub);
+    cy_user_context_t context = CY_USER_CONTEXT_EMPTY;
+    context.ptr[0]            = &capture;
+    cy_future_context_set(sub, context);
+    cy_future_callback_set(sub, on_arrival_capture_rx);
+
+    const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("rx/ord/dupintern"));
+    TEST_ASSERT_NOT_NULL(topic);
+
+    // First message (tag=100) triggers factory -> resequence. baseline=92, last_ejected=0, lin_tag(100)=8. Interned.
+    dispatch_message(&platform, topic, header_msg_best_effort, UINT64_C(100), UINT64_C(0xF4), 110, 0xD1U);
+    TEST_ASSERT_EQUAL_size_t(0U, capture.count); // Interned.
+
+    // Let the reordering window expire to eject and establish state.
+    platform.now = 200;
+    TEST_ASSERT_EQUAL_UINT8(CY_OK, cy_spin_once(platform.cy));
+    TEST_ASSERT_EQUAL_size_t(1U, capture.count); // tag=100 ejected on timeout.
+
+    // Now last_ejected_lin_tag=8, baseline=92. Send tag=102 (lin_tag=10, not next expected 9). Gets interned.
+    dispatch_message(&platform, topic, header_msg_best_effort, UINT64_C(102), UINT64_C(0xF4), 210, 0xD3U);
+    TEST_ASSERT_EQUAL_size_t(1U, capture.count); // Interned.
+
+    // Send tag=102 again (duplicate in interned set, line 3340-3342).
+    dispatch_message(&platform, topic, header_msg_best_effort, UINT64_C(102), UINT64_C(0xF4), 220, 0xD3U);
+    TEST_ASSERT_EQUAL_size_t(1U, capture.count); // Duplicate dropped, no new delivery.
+
+    // Send tag=101 (lin_tag=9 = last_ejected+1) to close the gap and eject tag=101 + interned tag=102.
+    dispatch_message(&platform, topic, header_msg_best_effort, UINT64_C(101), UINT64_C(0xF4), 230, 0xD2U);
+    TEST_ASSERT_EQUAL_size_t(3U, capture.count); // tag=101 ejected + tag=102 ejected from intern.
+
+    cy_future_destroy(sub);
+    TEST_ASSERT_EQUAL_UINT8(CY_OK, cy_spin_once(platform.cy));
+    TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_live_count());
+
+    platform_deinit(&platform);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&platform.message_heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&platform.message_heap));
+}
+
 } // namespace
 
 extern "C" void setUp()
@@ -1175,7 +1564,7 @@ int main()
     RUN_TEST(test_api_malformed_header_drops_message);
     RUN_TEST(test_api_inline_msg_rejects_nonzero_incompatibility);
     RUN_TEST(test_api_inline_msg_rejects_invalid_lage);
-    RUN_TEST(test_api_inline_msg_rejects_pinned_hash_nonzero_evictions);
+    RUN_TEST(test_api_inline_msg_accepts_pinned_evictions_with_in_range_lage);
     RUN_TEST(test_api_inline_msg_rejects_multicast_subject_mismatch);
     RUN_TEST(test_api_inline_msg_unicast_skips_subject_consistency_check);
     RUN_TEST(test_api_inline_msg_unknown_topic_collision_path_smoke);
@@ -1195,5 +1584,13 @@ int main()
     RUN_TEST(test_api_subscriber_substitutions_contract);
     RUN_TEST(test_api_subscriber_liveness_error_clears_on_arrival);
     RUN_TEST(test_api_subscriber_callback_set_after_completion_invokes_immediately);
+    RUN_TEST(test_api_multicast_msg_rejects_nonzero_incompatibility);
+    RUN_TEST(test_api_gossip_rejects_invalid_lage);
+    RUN_TEST(test_api_disposed_subscriber_skipped_on_message);
+    RUN_TEST(test_api_dedup_gc_after_session_lifetime);
+    RUN_TEST(test_api_ordered_disposed_subscriber_drops_interned_messages);
+    RUN_TEST(test_api_ordered_resequencing_on_large_tag_gap);
+    RUN_TEST(test_api_ordered_reordering_slot_alloc_oom);
+    RUN_TEST(test_api_ordered_reordering_duplicate_interned);
     return UNITY_END();
 }

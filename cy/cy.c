@@ -41,6 +41,9 @@ struct cy_tree_t
 // Standard library includes come last.
 #include <assert.h>
 #include <string.h>
+#if CY_CONFIG_TRACE
+#include <stdio.h>
+#endif
 
 #if __STDC_VERSION__ < 201112L
 #define static_assert(x, ...)        typedef char _static_assert_gl(_static_assertion_, __LINE__)[(x) ? 1 : -1]
@@ -59,6 +62,12 @@ struct cy_tree_t
 // Log-age is the log2 of seconds; this ensures sane limits and avoids signed overflow in microsecond reconstruction.
 // For reference, 2**35 seconds is a little over one millennium.
 #define LAGE_MAX 35
+
+// Eviction counter threshold for pinned topics. A topic is pinned when evictions >= EVICTIONS_PINNED_MIN.
+// The pinned subject-ID is (UINT32_MAX-evictions), in [0, CY_SUBJECT_ID_PINNED_MAX].
+// Normal eviction counters never approach this range in practice (would take ~136 years of continuous churn at 1 Hz).
+// If they ever did, the topic would auto-pin to subject 8191, preventing the deadly eviction counter wraparound.
+#define EVICTIONS_PINNED_MIN (UINT32_MAX - CY_SUBJECT_ID_PINNED_MAX) // 0xFFFFE000
 
 #define GOSSIP_PERIOD_DITHER_RATIO 8
 
@@ -111,12 +120,12 @@ struct cy_t
     cy_str_t ns;
 
     // Topics are indexed in multiple ways for various lookups.
-    // Remember that pinned topics have small hash ≤8184, hence they are always on the left of the hash tree,
-    // and can be traversed quickly if needed.
+    // Pinned topics are identified by evictions >= EVICTIONS_PINNED_MIN, not by their hash.
     wkv_t      topics_by_name;       // Contains ALL topics, may be empty.
     cy_tree_t* topics_by_hash;       // ditto
-    cy_tree_t* topics_by_subject_id; // All except pinned, since they do not collide. May be empty.
-    size_t     topic_count;
+    cy_tree_t* topics_by_subject_id; // Non-pinned only. Pinned topics are excluded because
+                                     // multiple topics may share a pinned subject-ID (non-unique mapping).
+    size_t topic_count;
 
     cy_list_t list_implicit; // Most recently animated topic is at the head.
 
@@ -146,7 +155,8 @@ struct cy_t
     cy_us_t    gossip_urgent_delay_max;
     byte_t     gossip_broadcast_ratio; // Nth gossip per topic is broadcast for observability.
     uint32_t   gossip_shard_count;
-    cy_tree_t* gossip_shards; // see shard_t.
+    cy_tree_t* writers; // writer_t AVL tree. Shared between topic subjects and gossip shards.
+    cy_tree_t* readers; // reader_t AVL tree. Shared between topic subjects and gossip shards.
 
     // Slow topic iteration state. Updated every spin; when NULL, restart from scratch.
     cy_topic_t* topic_iter;
@@ -209,16 +219,15 @@ static byte_t clz64(const uint64_t x)
 // Returns -1 if the argument is zero to allow contiguous comparison.
 static int_fast8_t log2_floor(const uint64_t x) { return (int_fast8_t)(63 - (int_fast8_t)clz64(x)); }
 
-// The inverse of log2_floor() with the same special case: exp=-1 returns 0.
-static cy_us_t pow2us(const int_fast8_t exp)
+// Convert log2(seconds) into microseconds. Inputs are clamped to the valid wire/storage range [LAGE_MIN, LAGE_MAX].
+// Negative values are treated as zero to allow contiguous comparison, mirroring log2_floor().
+static cy_us_t lage_to_us(const int_fast8_t lage)
 {
-    if (exp < 0) {
+    if (lage < 0) {
         return 0;
     }
-    if (exp > 62) {
-        return INT64_MAX;
-    }
-    return 1LL << (uint_fast8_t)exp; // NOLINT(*-signed-bitwise)
+    const uint_fast8_t clamped = (uint_fast8_t)((lage > LAGE_MAX) ? LAGE_MAX : lage);
+    return (INT64_C(1) << clamped) * MEGA; // NOLINT(*-signed-bitwise)
 }
 
 // The limits are inclusive. Returns min unless min < max.
@@ -351,26 +360,6 @@ static size_t cavl_count(cy_tree_t* const root)
     }
     return count;
 }
-
-#if CY_CONFIG_TRACE
-
-// Converts `bit_width` least significant bits rounded up to the nearest nibble to hexadecimal.
-// The output string must be at least ceil(bit_width/4)+1 chars long. It will be left-zero-padded and NUL-terminated.
-static cy_str_t to_hex(uint64_t value, const size_t bit_width, char* const out)
-{
-    if (out == NULL) {
-        return str_invalid;
-    }
-    const size_t len = (bit_width + 3) / 4;
-    for (int_fast8_t i = (int_fast8_t)(len - 1U); i >= 0; --i) {
-        out[i] = "0123456789abcdef"[value & 15U];
-        value >>= 4U;
-    }
-    out[len] = '\0';
-    return (cy_str_t){ .len = len, .str = out };
-}
-
-#endif
 
 // SERIALIZATION PRIMITIVES
 
@@ -770,73 +759,150 @@ void cy_future_destroy(cy_future_t* const self)
 }
 
 // =====================================================================================================================
-//                                                  GOSSIP SHARDS
+//                                              READER/WRITER REGISTRY
 // =====================================================================================================================
 
-// A gossip shard joined by the node. Usually there is one per topic, but sometimes collisions happen;
-// to manage that, we hold the refcount to allow sharing between topics. Indexing allows quick lookup on
-// new topic creation.
+// Refcounted subject writer and reader registries shared between topic subjects and gossip shards.
+// Multiple pinned topics may share a subject-ID (non-unique mapping), requiring shared reader/writer handles.
+// Gossip shards also share entries across topics that hash to the same shard subject-ID.
+// At most one writer_t exists per subject-ID in cy->writers; at most one reader_t per subject-ID in cy->readers.
+
 typedef struct
 {
-    cy_tree_t index;    // by shard subject-ID
-    size_t    refcount; // destroyed when zero
+    cy_tree_t            index;    // AVL node, keyed by handle->subject_id.
+    size_t               refcount; // Destroyed when zero.
+    cy_subject_writer_t* handle;   // Always non-NULL while in the tree.
+} writer_t;
 
-    cy_subject_writer_t* writer;
-    cy_subject_reader_t* reader;
-} shard_t;
+typedef struct
+{
+    cy_tree_t            index;    // AVL node, keyed by handle->subject_id.
+    size_t               refcount; // Destroyed when zero.
+    cy_subject_reader_t* handle;   // Always non-NULL while in the tree. Extent stored in handle->extent.
+} reader_t;
 
 typedef struct
 {
     cy_t*    cy;
     uint32_t subject_id;
-} shard_factory_context_t;
+} writer_factory_context_t;
 
-static int32_t shard_cavl_compare(const void* const user, const cy_tree_t* const node)
+typedef struct
+{
+    cy_t*    cy;
+    uint32_t subject_id;
+    size_t   extent;
+} reader_factory_context_t;
+
+static int32_t writer_cavl_compare(const void* const user, const cy_tree_t* const node)
 {
     const uint32_t outer = *(const uint32_t*)user;
-    const uint32_t inner = ((const shard_t*)node)->writer->subject_id;
+    const uint32_t inner = ((const writer_t*)node)->handle->subject_id;
     return (outer == inner) ? 0 : ((outer > inner) ? +1 : -1);
 }
 
-// Decrements the refcount, destroys the shard if zero.
-static void shard_deref(cy_t* const cy, shard_t* const shard)
+static int32_t reader_cavl_compare(const void* const user, const cy_tree_t* const node)
 {
-    assert((shard->writer != NULL) && (shard->reader != NULL));
-    assert(shard->refcount > 0);
-    assert(cavl2_is_inserted(cy->gossip_shards, &shard->index));
-    shard->refcount--;
-    if (shard->refcount == 0) {
-        CY_TRACE(cy, "🧊🗑 S%08jx", (uintmax_t)shard->writer->subject_id);
-        cavl2_remove(&cy->gossip_shards, &shard->index);
-        cy->platform->vtable->subject_writer_destroy(cy->platform, shard->writer);
-        cy->platform->vtable->subject_reader_destroy(cy->platform, shard->reader);
-        mem_free(cy, shard);
+    const uint32_t outer = *(const uint32_t*)user;
+    const uint32_t inner = ((const reader_t*)node)->handle->subject_id;
+    return (outer == inner) ? 0 : ((outer > inner) ? +1 : -1);
+}
+
+static cy_tree_t* writer_cavl_factory(void* const user)
+{
+    writer_factory_context_t* const ctx = (writer_factory_context_t*)user;
+    cy_t* const                     cy  = ctx->cy;
+    writer_t* const                 w   = (writer_t*)mem_alloc_zero(cy, sizeof(writer_t));
+    if (w != NULL) {
+        w->refcount = 0; // The caller will increment.
+        w->handle   = cy->platform->vtable->subject_writer_new(cy->platform, ctx->subject_id);
+        if (w->handle == NULL) {
+            mem_free(cy, w);
+            return NULL;
+        }
+        w->handle->subject_id = ctx->subject_id;
+    }
+    return (cy_tree_t*)w;
+}
+
+static cy_tree_t* reader_cavl_factory(void* const user)
+{
+    reader_factory_context_t* const ctx = (reader_factory_context_t*)user;
+    cy_t* const                     cy  = ctx->cy;
+    reader_t* const                 r   = (reader_t*)mem_alloc_zero(cy, sizeof(reader_t));
+    if (r != NULL) {
+        r->refcount = 0;
+        r->handle   = cy->platform->vtable->subject_reader_new(cy->platform, ctx->subject_id, ctx->extent);
+        if (r->handle == NULL) {
+            mem_free(cy, r);
+            return NULL;
+        }
+        r->handle->subject_id = ctx->subject_id;
+        r->handle->extent     = ctx->extent; // In case the platform layer didn't set it.
+    }
+    return (cy_tree_t*)r;
+}
+
+// Find or create a writer for the given subject-ID. Returns NULL on OOM.
+static writer_t* writer_acquire(cy_t* const cy, const uint32_t subject_id)
+{
+    writer_factory_context_t fac = { .cy = cy, .subject_id = subject_id };
+    writer_t* const          w =
+      (writer_t*)cavl2_find_or_insert(&cy->writers, &subject_id, writer_cavl_compare, &fac, &writer_cavl_factory);
+    if (w != NULL) {
+        w->refcount++;
+    }
+    return w;
+}
+
+// Decrement refcount; destroy and free when it reaches zero.
+static void writer_release(cy_t* const cy, writer_t* const w)
+{
+    assert((w != NULL) && (w->handle != NULL) && (w->refcount > 0));
+    w->refcount--;
+    if (w->refcount == 0) {
+        cavl2_remove(&cy->writers, &w->index);
+        cy->platform->vtable->subject_writer_destroy(cy->platform, w->handle);
+        mem_free(cy, w);
     }
 }
 
-static cy_tree_t* shard_cavl_factory(void* const user)
+// Find or create a reader for the given subject-ID. Returns NULL on OOM.
+// If an existing reader's extent is too small, it is extended.
+static reader_t* reader_acquire(cy_t* const cy, const uint32_t subject_id, const size_t extent)
 {
-    shard_factory_context_t* const ctx   = (shard_factory_context_t*)user;
-    cy_t* const                    cy    = ctx->cy;
-    shard_t* const                 shard = (shard_t*)mem_alloc_zero(cy, sizeof(shard_t));
-    if (shard != NULL) {
-        CY_TRACE(cy, "🧊✨ S%08jx", (uintmax_t)ctx->subject_id);
-        shard->refcount = 0; // The caller will increment.
-        shard->writer   = cy->platform->vtable->subject_writer_new(cy->platform, ctx->subject_id);
-        if (shard->writer == NULL) {
-            mem_free(cy, shard);
-            return NULL;
+    reader_factory_context_t fac = { .cy = cy, .subject_id = subject_id, .extent = extent };
+    reader_t* const          r =
+      (reader_t*)cavl2_find_or_insert(&cy->readers, &subject_id, reader_cavl_compare, &fac, &reader_cavl_factory);
+    if (r != NULL) {
+        r->refcount++;
+        if (extent > r->handle->extent) { // Grow extent to accommodate the new user.
+            cy->platform->vtable->subject_reader_extent_set(cy->platform, r->handle, extent);
+            r->handle->extent = extent;
         }
-        shard->writer->subject_id = ctx->subject_id;
-        shard->reader = cy->platform->vtable->subject_reader_new(cy->platform, ctx->subject_id, CY_AUX_SUBJECT_EXTENT);
-        if (shard->reader == NULL) {
-            cy->platform->vtable->subject_writer_destroy(cy->platform, shard->writer);
-            mem_free(cy, shard);
-            return NULL;
-        }
-        shard->reader->subject_id = ctx->subject_id;
     }
-    return (cy_tree_t*)shard;
+    return r;
+}
+
+static void reader_release(cy_t* const cy, reader_t* const r)
+{
+    assert((r != NULL) && (r->handle != NULL) && (r->refcount > 0));
+    r->refcount--;
+    if (r->refcount == 0) {
+        cavl2_remove(&cy->readers, &r->index);
+        cy->platform->vtable->subject_reader_destroy(cy->platform, r->handle);
+        mem_free(cy, r);
+    }
+}
+
+// No-op if the current extent is sufficient.
+static void reader_grow_extent(cy_t* const cy, reader_t* const r, const size_t new_extent)
+{
+    assert((r != NULL) && (r->handle != NULL) && (r->refcount > 0));
+    if (new_extent > r->handle->extent) {
+        cy->platform->vtable->subject_reader_extent_set(cy->platform, r->handle, new_extent);
+        r->handle->extent = new_extent;
+    }
 }
 
 // =====================================================================================================================
@@ -851,12 +917,11 @@ static cy_tree_t* shard_cavl_factory(void* const user)
 //
 // CRDT merge rules, first rule takes precedence:
 // - on collision (same subject-ID, different hash):
-//     1. winner is pinned;
-//     2. winner is older;
-//     3. winner has smaller hash.
+//     1. winner is older;
+//     2. winner has smaller hash.
 // - on divergence (same hash, different subject-ID):
 //     1. winner is older;
-//     2. winner has seen more evictions (i.e., larger subject-ID mod max_topics).
+//     2. winner has seen more evictions.
 // When a topic is reallocated, it retains its current age.
 // Conflict resolution may result in a temporary jitter if it happens to occur near log2(age) integer boundary.
 struct cy_topic_t
@@ -871,7 +936,8 @@ struct cy_topic_t
 
     olga_event_t gossip_event;
     uint64_t     gossip_counter; // Reset on init and when CRDT needs repair.
-    shard_t*     gossip_shard;   // Refcounted, sometimes shared with other topics; NULL for pinned topics.
+    writer_t*    gossip_writer;  // Refcounted, from cy->writers. Gossip shard writer for this topic.
+    reader_t*    gossip_reader;  // Refcounted, from cy->readers. Gossip shard reader for this topic.
 
     cy_t* cy;
 
@@ -886,7 +952,8 @@ struct cy_topic_t
     // from the subject-ID index tree!
     uint32_t evictions;
 
-    // hash=rapidhash(topic_name); except for a pinned topic, hash=subject_id<=CY_SUBJECT_ID_PINNED_MAX.
+    // hash = rapidhash(resolved_name). The pin expression (e.g., "#1234") is stripped during name resolution.
+    // Pinning is encoded in evictions, not in the hash. See is_pinned().
     uint64_t hash;
 
     // Event timestamps used for state management.
@@ -910,13 +977,13 @@ struct cy_topic_t
     // The subject writer is created lazily when the application attempts to publish on the topic;
     // it is not destroyed until the topic is reallocated or destroyed to avoid losing transport-related states,
     // whatever they may be (e.g., the transfer-ID counter etc, depending on the transport implementation).
-    // When the topic is reallocated, the old writer is destroyed but the new one is not created until the next
-    // publication attempt.
-    uint64_t             pub_tag_baseline; // Randomly chosen once when topic created.
-    uint64_t             pub_seqno;        // Grows from zero, added to the tag baseline to obtain the tag.
-    size_t               pub_count;        // Number of active advertisements; counted for garbage collection.
-    cy_subject_writer_t* pub_writer;       // Initially NULL, created ad-hoc, then lives on until topic destruction.
-    cy_tree_t*           pub_futures_by_tag;
+    // When the topic is reallocated, the old writer is destroyed unless we take over an occupied subject-ID and
+    // inherit the displaced topic's existing writer; otherwise the new writer is created on the next publication.
+    uint64_t   pub_tag_baseline; // Randomly chosen once when topic created.
+    uint64_t   pub_seqno;        // Grows from zero, added to the tag baseline to obtain the tag.
+    size_t     pub_count;        // Number of active advertisements; counted for garbage collection.
+    writer_t*  pub_writer;       // Refcounted, from cy->writers. NULL until first publish (lazy).
+    cy_tree_t* pub_futures_by_tag;
 
     // Similar to publish futures but referencing request_future_t.
     cy_tree_t* request_futures_by_tag;
@@ -929,7 +996,7 @@ struct cy_topic_t
     // prompt the library to attempt recovery by creating a new reader on the next opportunity. This eager logic is
     // the opposite of the lazy treatment of subject writers.
     struct cy_topic_coupling_t* couplings;
-    cy_subject_reader_t*        sub_reader;
+    reader_t*                   sub_reader; // Refcounted, from cy->readers. NULL unless couplings exist (eager).
     cy_tree_t*                  sub_index_dedup_by_remote_id;
     cy_list_t                   sub_list_dedup_by_recency;
 
@@ -947,20 +1014,14 @@ typedef struct
 static topic_repr_t topic_repr(const cy_topic_t* const topic)
 {
     assert(topic != NULL);
-    topic_repr_t out = { 0 };
-    char*        ptr = out.str;
-    *ptr++           = 'T';
-    ptr += to_hex(topic->hash, 64, ptr).len;
-    *ptr++ = '@';
-    *ptr++ = 'S';
-    ptr += to_hex(topic_subject_id(topic), 32, ptr).len;
-    *ptr++              = '\'';
+    topic_repr_t   out  = { 0 };
     const cy_str_t name = cy_topic_name(topic);
-    memcpy(ptr, name.str, name.len);
-    ptr += name.len;
-    *ptr++ = '\'';
-    *ptr   = '\0';
-    assert((ptr - out.str) <= (ptrdiff_t)sizeof(out.str));
+    (void)snprintf(out.str,
+                   sizeof(out.str),
+                   "T%016jx@S%08jx'%.*s'",
+                   (uintmax_t)topic->hash,
+                   (uintmax_t)topic_subject_id(topic),
+                   STRFMT_ARG(name));
     return out;
 }
 
@@ -1124,6 +1185,10 @@ static int32_t cavl_comp_topic_subject_id(const void* const user, const cy_tree_
     return (outer > inner) ? +1 : -1;
 }
 
+// A topic is pinned when its eviction counter is in the reserved range [EVICTIONS_PINNED_MIN, UINT32_MAX].
+// Pinning is encoded in evictions rather than in the hash, so the hash always reflects the topic name.
+static bool is_pinned(const uint32_t evictions) { return evictions >= EVICTIONS_PINNED_MIN; }
+
 static int_fast8_t topic_lage(const cy_topic_t* const topic, const cy_us_t now)
 {
     return log2_floor((uint64_t)later(0, (now - topic->ts_origin) / MEGA));
@@ -1132,11 +1197,8 @@ static int_fast8_t topic_lage(const cy_topic_t* const topic, const cy_us_t now)
 // CRDT merge operator on the topic log-age. Shift ts_origin into the past if needed.
 static void topic_merge_lage(cy_topic_t* const topic, const cy_us_t now, int_fast8_t r_lage)
 {
-    r_lage           = (int_fast8_t)((r_lage < LAGE_MIN) ? LAGE_MIN : ((r_lage > LAGE_MAX) ? LAGE_MAX : r_lage));
-    topic->ts_origin = sooner(topic->ts_origin, now - (pow2us(r_lage) * MEGA));
+    topic->ts_origin = sooner(topic->ts_origin, now - lage_to_us(r_lage));
 }
-
-static bool is_pinned(const uint64_t hash) { return hash <= CY_SUBJECT_ID_PINNED_MAX; }
 
 // This comparator is only applicable on subject-ID allocation conflicts. As such, hashes must be different.
 static bool left_wins(const cy_topic_t* const left, const cy_us_t now, const int_fast8_t r_lage, const uint64_t r_hash)
@@ -1168,6 +1230,7 @@ static bool is_implicit(const cy_topic_t* const topic)
 }
 
 static void topic_sync_subject_reader(cy_topic_t* const topic);
+static void topic_decouple_subscriber_root(cy_topic_t* const topic, const subscriber_root_t* const root);
 
 static void unschedule_gossip(cy_topic_t* const topic);
 static void schedule_gossip_periodic(cy_topic_t* const topic, const cy_us_t now, const bool suppressed);
@@ -1209,47 +1272,21 @@ static void retire_expired_implicit_topics(cy_t* const cy, const cy_us_t now)
         assert(is_implicit(topic) && topic_validate_is_implicit(topic));
         if ((topic->ts_animated + cy->implicit_topic_timeout) < now) {
             CY_TRACE(cy, "⚰️ %s", topic_repr(topic).str);
+            // Expiration may occur while pattern subscribers are still alive, so we have to detach
+            // all couplings first to preserve subscriber invariants expected by topic_destroy().
+            while (topic->couplings != NULL) {
+                topic_decouple_subscriber_root(topic, topic->couplings->root);
+            }
             topic_destroy(topic);
         }
     }
 }
 
-// Parses the hexadecimal hash override suffix if present and valid. Example: "sensors/temperature#1a2b".
-static bool parse_hash_override(const cy_str_t s, uint64_t* const out)
-{
-    *out                  = 0;
-    const char* const end = s.str + s.len;
-    for (size_t i = 0; i < smaller(s.len, 17); i++) {
-        const unsigned char ch = (unsigned char)*(end - (i + 1));
-        if (ch == '#') {
-            return i > 0;
-        }
-        uint64_t digit = 0;
-        if ((ch >= '0') && (ch <= '9')) {
-            digit = ch - '0';
-        } else if ((ch >= 'a') && (ch <= 'f')) {
-            digit = ch - 'a' + 10U;
-        } else {
-            break;
-        }
-        *out |= digit << (i * 4U);
-    }
-    return false;
-}
-
-static uint64_t topic_hash(const cy_str_t name)
-{
-    uint64_t hash = 0;
-    if (!parse_hash_override(name, &hash)) {
-        hash = rapidhash(name.str, name.len);
-    }
-    return hash;
-}
-
 static uint32_t topic_subject_id_impl(const uint64_t hash, const uint64_t evictions, const uint32_t subject_id_modulus)
 {
-    if (is_pinned(hash)) {
-        return (uint32_t)hash;
+    if (is_pinned((uint32_t)evictions)) {
+        // Pinned: subject-ID = UINT32_MAX - evictions, in [0, CY_SUBJECT_ID_PINNED_MAX].
+        return (uint32_t)(UINT32_MAX - (uint32_t)evictions);
     }
     assert(subject_id_modulus > 0);
     assert(evictions <= UINT32_MAX); // otherwise we'd have to use long-form mul_mod algorithm
@@ -1287,26 +1324,23 @@ static cy_topic_t* topic_find_by_subject_id(const cy_t* const cy, const uint32_t
     return topic;
 }
 
-// Subject writers are created lazily and never destroyed until the topic is finalized.
-// This avoids state loss on the platform side if the application opts to publish intermittently.
+// Subject writers are created lazily via the writer registry and never released until the topic is reallocated
+// or destroyed. This avoids state loss on the platform side if the application opts to publish intermittently.
 static cy_err_t topic_sync_subject_writer(cy_topic_t* const topic)
 {
     if (topic->pub_writer == NULL) {
-        cy_t* const    cy         = topic->cy;
-        const uint32_t subject_id = topic_subject_id(topic);
-        topic->pub_writer         = cy->platform->vtable->subject_writer_new(cy->platform, subject_id);
+        topic->pub_writer = writer_acquire(topic->cy, topic_subject_id(topic));
         if (topic->pub_writer == NULL) {
             return CY_ERR_MEMORY;
         }
-        topic->pub_writer->subject_id = subject_id;
     }
     return CY_OK;
 }
 
 static size_t subscription_extent_w_overhead(const cy_topic_t* const topic);
 
-// If subscribers exist but there is no subject reader, this function will attempt to create one.
-// Similarly, if no subscribers exist but there is a subject reader, it will be destroyed.
+// If subscribers exist but there is no subject reader, this function will acquire one from the reader registry.
+// Similarly, if no subscribers exist but there is a subject reader, it will be released.
 // We cannot keep an unused reader alive because it will feed data from the network which may be disruptive.
 static void topic_sync_subject_reader(cy_topic_t* const topic)
 {
@@ -1315,7 +1349,7 @@ static void topic_sync_subject_reader(cy_topic_t* const topic)
     if ((topic->couplings != NULL) && (topic->sub_reader == NULL)) { // A subject reader is needed but missing!
         const size_t extent = subscription_extent_w_overhead(topic);
         assert(extent >= HEADER_BYTES);
-        topic->sub_reader = cy->platform->vtable->subject_reader_new(cy->platform, subject_id, extent);
+        topic->sub_reader = reader_acquire(cy, subject_id, extent);
         CY_TRACE(topic->cy,
                  "🗞️ %s S%08jx extent=%zu result=%p",
                  topic_repr(topic).str,
@@ -1324,13 +1358,11 @@ static void topic_sync_subject_reader(cy_topic_t* const topic)
                  (void*)topic->sub_reader);
         if (topic->sub_reader == NULL) {
             ON_ASYNC_ERROR(cy, topic, CY_ERR_MEMORY);
-        } else {
-            topic->sub_reader->subject_id = subject_id;
         }
     }
-    assert((topic->sub_reader == NULL) || (topic->sub_reader->subject_id == subject_id));
+    assert((topic->sub_reader == NULL) || (topic->sub_reader->handle->subject_id == subject_id));
     if ((topic->couplings == NULL) && (topic->sub_reader != NULL)) { // No longer needed.
-        cy->platform->vtable->subject_reader_destroy(cy->platform, topic->sub_reader);
+        reader_release(cy, topic->sub_reader);
         topic->sub_reader = NULL;
     }
 }
@@ -1346,9 +1378,9 @@ static void topic_sync_subject_reader(cy_topic_t* const topic)
 // The subject reader is recovered eagerly; when that fails, it will be retried on every opportunity.
 // The subject writer is recovered lazily, when the application tries to publish again.
 //
-// When one topic displaces another from a subject, the old subject reader and/or writer are reused. This may sound
-// like an unnecessary complication (it's not expensive to create/destroy them as needed), but indirectly it helps
-// us make it explicit that there shall be no more than one reader/writer on any subject.
+// The reader/writer registry ensures at most one platform handle per subject-ID via refcounting.
+// When one topic displaces another, the registry handles the transition: the winner acquires first
+// (incrementing refcount), then the loser releases (decrementing), so the platform handle survives.
 //
 // NOLINTNEXTLINE(*-no-recursion)
 static void topic_allocate(cy_topic_t* const topic, const uint32_t new_evictions, const cy_us_t now)
@@ -1369,6 +1401,23 @@ static void topic_allocate(cy_topic_t* const topic, const uint32_t new_evictions
     // We're not allowed to alter the eviction counter as long as the topic remains in the tree! So we remove it first.
     // We use _if() version because the topic is not in the index if it's new or if we're re-entering recursively.
     cavl2_remove_if(&cy->topics_by_subject_id, &topic->index_subject_id);
+
+    // Pinned topics are not inserted into the subject-ID index because multiple topics may legitimately share a pinned
+    // subject-ID. Their reader/writer are shared through the refcounted registry. No collision detection is needed.
+    if (is_pinned(new_evictions)) {
+        if (topic->sub_reader != NULL) {
+            reader_release(cy, topic->sub_reader);
+            topic->sub_reader = NULL;
+        }
+        if (topic->pub_writer != NULL) {
+            writer_release(cy, topic->pub_writer);
+            topic->pub_writer = NULL;
+        }
+        topic->evictions = new_evictions;
+        topic_sync_subject_reader(topic);
+        schedule_gossip_urgent(topic, now);
+        return;
+    }
 
     // This mirrors the formal specification of AllocateTopic(t, topics) given in Core.tla.
     // Note that it is possible that subject_id(hash,old_evictions) == subject_id(hash,new_evictions),
@@ -1392,28 +1441,22 @@ static void topic_allocate(cy_topic_t* const topic, const uint32_t new_evictions
 #endif
 
     if (victory) { // Allocation done. Every affected topic will end up here eventually.
+        // Release old handles for the subject we're leaving.
         if (topic->sub_reader != NULL) {
             assert(topic->couplings != NULL);
-            cy->platform->vtable->subject_reader_destroy(cy->platform, topic->sub_reader);
+            reader_release(cy, topic->sub_reader);
             topic->sub_reader = NULL;
         }
         if (topic->pub_writer != NULL) {
-            cy->platform->vtable->subject_writer_destroy(cy->platform, topic->pub_writer);
+            writer_release(cy, topic->pub_writer);
             topic->pub_writer = NULL;
         }
 
-        // Before creating the new subject reader/writer, check if we can transfer them from the replaced topic.
-        // We are required to ensure that we do not create more than one reader/writer per subject.
-        // This logic helps make this concern explicit and is also good for avoiding redundancies.
         if (that != NULL) {
-            assert(topic_subject_id(that) == new_sid);
             cavl2_remove(&cy->topics_by_subject_id, &that->index_subject_id);
             assert(topic->pub_writer == NULL);
-            assert(topic->sub_reader == NULL);
-            topic->pub_writer = that->pub_writer;
-            topic->sub_reader = that->sub_reader; // If we don't need it, we will destroy it later.
+            topic->pub_writer = that->pub_writer; // Preserve transport state for the winning subject, if any.
             that->pub_writer  = NULL;
-            that->sub_reader  = NULL;
         }
 
         // Re-insert into the subject-ID index; this must succeed because we just removed the old one from the index.
@@ -1428,7 +1471,8 @@ static void topic_allocate(cy_topic_t* const topic, const uint32_t new_evictions
         assert(self == topic);
         (void)self;
 
-        // The subject reader, if needed, must be created eagerly. If not needed it will be destroyed here.
+        // The subject reader, if needed, must be acquired eagerly from the registry.
+        // If 'that' still holds its handles, the registry refcount keeps the platform handle alive.
         topic_sync_subject_reader(topic);
 
         // Ensure the change is announced to the network.
@@ -1436,9 +1480,12 @@ static void topic_allocate(cy_topic_t* const topic, const uint32_t new_evictions
         schedule_gossip_urgent(topic, now);
 
         // Re-allocate the defeated topic with incremented eviction counter.
+        // Its writer, if transferred above, is cleared here so the recursive call won't destroy it.
         if (that != NULL) {
-            assert(that->pub_writer == NULL);
-            assert(that->sub_reader == NULL);
+            if (that->sub_reader != NULL) {
+                reader_release(cy, that->sub_reader);
+                that->sub_reader = NULL;
+            }
             topic_allocate(that, that->evictions + 1U, now);
         }
     } else {
@@ -1496,7 +1543,7 @@ static cy_err_t topic_new(cy_t* const        cy,
     topic->hash      = hash;
 
     const cy_us_t now  = cy_now(cy);
-    topic->ts_origin   = now - (pow2us(lage) * MEGA);
+    topic->ts_origin   = now - lage_to_us(lage);
     topic->ts_animated = now;
     topic->couplings   = NULL;
 
@@ -1536,43 +1583,38 @@ static cy_err_t topic_new(cy_t* const        cy,
         goto fail;
     }
 
-    // Allocate the gossip shard.
-    topic->gossip_event = OLGA_EVENT_INIT;
-    if (!is_pinned(topic->hash)) {
-        const uint32_t          shard_subject = topic_gossip_shard_subject_id(cy, topic->hash);
-        shard_factory_context_t shard_fac     = { .cy = cy, .subject_id = shard_subject };
-        topic->gossip_shard                   = (shard_t*)cavl2_find_or_insert(
-          &cy->gossip_shards, &shard_subject, shard_cavl_compare, &shard_fac, &shard_cavl_factory);
-        if (topic->gossip_shard == NULL) {
-            err = CY_ERR_MEMORY;
-            cavl2_remove(&cy->topics_by_hash, &topic->index_hash);
-            goto fail;
-        }
-        topic->gossip_shard->refcount++;
-        assert(topic->gossip_shard->writer->subject_id == shard_subject);
-        assert(topic->gossip_shard->reader->subject_id == shard_subject);
-    } else {
-        topic->gossip_shard = NULL;
+    // Allocate the gossip shard writer/reader from the registry. All topics gossip, including pinned ones.
+    topic->gossip_event          = OLGA_EVENT_INIT;
+    const uint32_t shard_subject = topic_gossip_shard_subject_id(cy, topic->hash);
+    topic->gossip_writer         = writer_acquire(cy, shard_subject);
+    if (topic->gossip_writer == NULL) {
+        err = CY_ERR_MEMORY;
+        cavl2_remove(&cy->topics_by_hash, &topic->index_hash);
+        goto fail;
+    }
+    topic->gossip_reader = reader_acquire(cy, shard_subject, CY_AUX_SUBJECT_EXTENT);
+    if (topic->gossip_reader == NULL) {
+        writer_release(cy, topic->gossip_writer);
+        topic->gossip_writer = NULL;
+        err                  = CY_ERR_MEMORY;
+        cavl2_remove(&cy->topics_by_hash, &topic->index_hash);
+        goto fail;
     }
 
     // Initially, all topics are considered implicit until proven otherwise. See topic_sync_implicit().
     enlist_head(&cy->list_implicit, &topic->list_implicit);
 
-    if (!is_pinned(topic->hash)) {
-        // Allocate a subject-ID for the topic and insert it into the subject index tree.
-        // Pinned topics all have canonical names, and we have already ascertained that the name is unique,
-        // meaning that another pinned topic is not occupying the same subject-ID.
-        // Remember that topics arbitrate locally the same way they do externally, meaning that adding a new local topic
-        // may displace another local one.
-        topic_allocate(topic, topic->evictions, now);
-    }
+    // Allocate a subject-ID for the topic. For pinned topics, topic_allocate handles the early return
+    // (no subject-ID index insertion since multiple pinned topics may share a subject-ID).
+    // For non-pinned topics, this may displace another local topic through collision arbitration.
+    topic_allocate(topic, topic->evictions, now);
     cy->topic_count++;
     if (out_topic != NULL) {
         *out_topic = topic;
     }
     CY_TRACE(cy, "✨ %s topic_count=%zu", topic_repr(topic).str, cavl_count(cy->topics_by_hash));
     (void)cavl_count; // Suppress unused function warning when tracing is disabled.
-    return 0;
+    return CY_OK;
 
 fail:
     if ((topic->index_name != NULL) && (topic->index_name->value == topic)) {
@@ -1586,22 +1628,22 @@ fail:
     return err;
 }
 
-static cy_err_t topic_ensure(cy_t* const cy, cy_topic_t** const out_topic, const cy_str_t resolved_name)
+static cy_err_t topic_ensure(cy_t* const cy, cy_topic_t** const out_topic, const cy_resolved_t resolved)
 {
-    cy_topic_t* const topic = cy_topic_find_by_name(cy, resolved_name);
+    cy_topic_t* const topic = cy_topic_find_by_name(cy, resolved.name);
     if (topic != NULL) {
         if (out_topic != NULL) {
             *out_topic = topic;
         }
-        return 0;
+        return CY_OK;
     }
-    return topic_new(cy, out_topic, resolved_name, topic_hash(resolved_name), 0, LAGE_MIN);
+    const uint64_t hash      = rapidhash(resolved.name.str, resolved.name.len);
+    const uint32_t evictions = (resolved.pin <= CY_SUBJECT_ID_PINNED_MAX) ? (UINT32_MAX - (uint32_t)resolved.pin) : 0U;
+    return topic_new(cy, out_topic, resolved.name, hash, evictions, LAGE_MIN);
 }
 
-// Create a new coupling between a topic and a subscriber.
-// Allocates new memory for the coupling, which may fail.
-// Don't forget topic_ensure_subscribed() afterward if necessary.
-// The substitutions must not lose validity until the topic is destroyed.
+// Create a new coupling between a topic and a subscriber. Allocates new memory for the coupling, which may fail.
+// Don't forget topic_ensure_subscribed() afterward if necessary. The substitutions must outlive the topic.
 static cy_err_t topic_couple(cy_topic_t* const         topic,
                              subscriber_root_t* const  subr,
                              const size_t              substitution_count,
@@ -1653,7 +1695,7 @@ static cy_topic_t* topic_subscribe_if_matching(cy_t* const       cy,
                                                const int_fast8_t lage)
 {
     assert((cy != NULL) && (resolved_name.str != NULL));
-    if ((resolved_name.len == 0) || (topic_hash(resolved_name) != hash)) {
+    if ((resolved_name.len == 0) || (rapidhash(resolved_name.str, resolved_name.len) != hash)) {
         return NULL; // Ensure the remote is not trying to feed us a bad name.
     }
     if (NULL == wkv_route(&cy->subscribers_by_pattern, resolved_name, NULL, wkv_cb_first)) {
@@ -1673,6 +1715,10 @@ static cy_topic_t* topic_subscribe_if_matching(cy_t* const       cy,
     // Using the resolved_name here would be deadly since it is stack-allocated.
     if (NULL != wkv_route(&cy->subscribers_by_pattern, cy_topic_name(topic), topic, wkv_cb_couple_new_topic)) {
         ON_ASYNC_ERROR(cy, topic, CY_ERR_MEMORY);
+        // Earlier callbacks may have already coupled some subscriber roots before the failing callback returns.
+        while (topic->couplings != NULL) {
+            topic_decouple_subscriber_root(topic, topic->couplings->root);
+        }
         topic_destroy(topic);
         return NULL;
     }
@@ -1725,7 +1771,6 @@ static cy_err_t send_gossip_raw(const cy_t* const          cy,
 
 static cy_err_t send_gossip_multicast(const cy_topic_t* const topic, const cy_us_t now, cy_subject_writer_t* const wrt)
 {
-    assert(!is_pinned(topic->hash));
     return send_gossip_raw(topic->cy, //
                            now,
                            topic->hash,
@@ -1755,14 +1800,13 @@ static void gossip_event_periodic(olga_t* const olga, olga_event_t* const event,
     (void)olga;
     cy_topic_t* const topic = (cy_topic_t*)event->user;
     cy_t* const       cy    = topic->cy;
-    assert(!is_pinned(topic->hash));
     topic_sync_subject_reader(topic);            // use this opportunity to repair the subscription if broken
     schedule_gossip_periodic(topic, now, false); // reschedule even if failed -- anther node might pick up
     // optional extension (may not be modeled): prefer broadcast initially.
     const bool broadcast = (topic->gossip_counter < cy->gossip_broadcast_ratio) || //
                            ((topic->gossip_counter % cy->gossip_broadcast_ratio) == 0);
     topic->gossip_counter++;
-    cy_subject_writer_t* const writer = broadcast ? cy->broad_writer : topic->gossip_shard->writer;
+    cy_subject_writer_t* const writer = broadcast ? cy->broad_writer : topic->gossip_writer->handle;
     ON_ASYNC_ERROR_IF(cy, topic, send_gossip_multicast(topic, now, writer));
 }
 
@@ -1778,9 +1822,8 @@ static void gossip_event_urgent(olga_t* const olga, olga_event_t* const event, c
 
 static void schedule_gossip_periodic(cy_topic_t* const topic, const cy_us_t now, const bool suppressed)
 {
-    const cy_t* const cy       = topic->cy;
-    const bool        eligible = !is_pinned(topic->hash) && !is_implicit(topic);
-    if (eligible) {
+    const cy_t* const cy = topic->cy;
+    if (!is_implicit(topic)) {
         const cy_us_t dither    = cy->gossip_period / GOSSIP_PERIOD_DITHER_RATIO;
         cy_us_t       delay_min = 0;
         cy_us_t       delay_max = 0;
@@ -1810,15 +1853,13 @@ static void schedule_gossip_periodic(cy_topic_t* const topic, const cy_us_t now,
 // There is only one case when an urgent gossip is not required to be broadcast, see the model.
 static void schedule_gossip_urgent(cy_topic_t* const topic, const cy_us_t now)
 {
-    const cy_t* const cy = topic->cy;
-    if (!is_pinned(topic->hash)) {
-        const bool    first = !olga_is_pending(&cy->olga, &topic->gossip_event);
-        const cy_us_t at    = now + random_int(topic->cy, 0, cy->gossip_urgent_delay_max);
-        if ((at < topic->gossip_event.deadline) || first) {
-            olga_defer(&topic->cy->olga, at, topic, gossip_event_urgent, &topic->gossip_event);
-        } else {
-            topic->gossip_event.handler = gossip_event_urgent;
-        }
+    const cy_t* const cy    = topic->cy;
+    const bool        first = !olga_is_pending(&cy->olga, &topic->gossip_event);
+    const cy_us_t     at    = now + random_int(topic->cy, 0, cy->gossip_urgent_delay_max);
+    if ((at < topic->gossip_event.deadline) || first) {
+        olga_defer(&topic->cy->olga, at, topic, gossip_event_urgent, &topic->gossip_event);
+    } else {
+        topic->gossip_event.handler = gossip_event_urgent;
     }
 }
 
@@ -2024,13 +2065,10 @@ cy_publisher_t* cy_advertise_client(cy_t* const cy, const cy_str_t name, const s
     if (cy == NULL) {
         return NULL;
     }
-    char           name_buf[CY_TOPIC_NAME_MAX];
-    const cy_str_t resolved = cy_resolve(cy, name, sizeof(name_buf), name_buf);
-    if (resolved.len > CY_TOPIC_NAME_MAX) {
-        return NULL;
-    }
-    if (!cy_name_is_verbatim(resolved)) {
-        return NULL; // Wildcard publishers are not defined.
+    char                name_buf[CY_TOPIC_NAME_MAX];
+    const cy_resolved_t resolved = cy_resolve(cy, name, sizeof(name_buf), name_buf);
+    if ((resolved.name.len > CY_TOPIC_NAME_MAX) || !resolved.verbatim) {
+        return NULL; // publishers require verbatim names only
     }
     cy_publisher_t* const pub = mem_alloc_zero(cy, sizeof(*pub));
     if (pub == NULL) {
@@ -2099,8 +2137,8 @@ static cy_err_t do_publish_impl(cy_publisher_t* const  pub,
         return err;
     }
     assert(topic->pub_writer != NULL);
-    assert(topic_subject_id(topic) == topic->pub_writer->subject_id);
-    return vt->subject_writer_send(cy->platform, topic->pub_writer, deadline, pub->priority, headed_message);
+    assert(topic_subject_id(topic) == topic->pub_writer->handle->subject_id);
+    return vt->subject_writer_send(cy->platform, topic->pub_writer->handle, deadline, pub->priority, headed_message);
 }
 
 static cy_err_t do_publish(cy_publisher_t* const pub,
@@ -3147,12 +3185,21 @@ static void reordering_on_window_expiration(olga_t* const sched, olga_event_t* c
 }
 
 // Ejects all messages in the correct order and leaves the state empty & idle.
-static void reordering_eject_all(reordering_t* const self)
+// Silent drop is to be used during teardown when we don't want to invoke the callback to avoid reentrancy issues.
+static void reordering_eject_all(reordering_t* const self, const bool silenced)
 {
     while (self->interned_count > 0) {
         reordering_slot_t* const slot =
           CAVL2_TO_OWNER(cavl2_min(self->interned_by_lin_tag), reordering_slot_t, index_lin_tag);
-        reordering_eject(self, slot);
+        assert((slot != NULL) && cavl2_is_inserted(self->interned_by_lin_tag, &slot->index_lin_tag));
+        if (!silenced) {
+            reordering_eject(self, slot);
+        } else {
+            cavl2_remove(&self->interned_by_lin_tag, &slot->index_lin_tag);
+            self->interned_count--;
+            cy_message_refcount_dec(slot->message.content);
+            mem_free(self->topic->cy, slot);
+        }
     }
     assert(self->interned_count == 0);
     assert(self->interned_by_lin_tag == NULL);
@@ -3289,12 +3336,12 @@ static bool reordering_push(reordering_t* const   self,
     assert(first_slot != NULL);
     const cy_us_t deadline = first_slot->message.timestamp + self->subscriber->params.reordering_window;
     olga_defer(&cy->olga, deadline, self, reordering_on_window_expiration, &self->timeout);
-    return true; // Interned messages WILL eventually be ejected and seen by the application.
+    return true; // Interned messages will eventually be ejected and seen by the application.
 }
 
-static void reordering_destroy(reordering_t* const self)
+static void reordering_destroy(reordering_t* const self, const bool silenced)
 {
-    reordering_eject_all(self);
+    reordering_eject_all(self, silenced);
     delist(&self->subscriber->list_reordering_by_recency, &self->list_recency);
     assert(cavl2_is_inserted(self->subscriber->index_reordering_by_remote_id, &self->index));
     cavl2_remove(&self->subscriber->index_reordering_by_remote_id, &self->index);
@@ -3309,7 +3356,7 @@ static void reordering_drop_stale(subscriber_t* const owner, const cy_us_t now)
             break;
         }
         CY_TRACE(owner->root->cy, "🧹 N%016jx topic=%016jx", (uintmax_t)rr->remote_id, (uintmax_t)rr->topic->hash);
-        reordering_destroy(rr);
+        reordering_destroy(rr, false);
     }
 }
 
@@ -3508,13 +3555,12 @@ static void* wkv_cb_couple_new_subscription(const wkv_event_t evt)
     }
 
     // Sample the old parameters before the new coupling is created to decide if we need to refresh the subject reader.
-    const size_t   extent_old = (topic->sub_reader != NULL) ? subscription_extent_w_overhead(topic) : 0;
+    const size_t   extent_old = (topic->sub_reader != NULL) ? topic->sub_reader->handle->extent : 0;
     const cy_err_t res = coupled ? CY_OK : topic_couple(topic, sub->root, evt.substitution_count, evt.substitutions);
     if (res == CY_OK) {
         if ((topic->sub_reader != NULL) && (subscription_extent_w_overhead(topic) > extent_old)) {
             CY_TRACE(cy, "🚧 %s subject reader refresh", topic_repr(topic).str);
-            cy->platform->vtable->subject_reader_destroy(cy->platform, topic->sub_reader);
-            topic->sub_reader = NULL;
+            reader_grow_extent(cy, topic->sub_reader, subscription_extent_w_overhead(topic));
         }
         topic_sync_subject_reader(topic);
     }
@@ -3522,14 +3568,14 @@ static void* wkv_cb_couple_new_subscription(const wkv_event_t evt)
 }
 
 // Either finds an existing subscriber root or creates a new one. NULL if OOM.
-// A subscriber root corresponds to a unique subscription name (with possible wildcards), hosting at least one
-// live subscriber.
-static cy_err_t ensure_subscriber_root(cy_t* const cy, const cy_str_t resolved_name, subscriber_root_t** const out_root)
+// A subscriber root corresponds to a unique subscription name (with possible wildcards), hosting at least 1 subscriber.
+static cy_err_t ensure_subscriber_root(cy_t* const cy, const cy_resolved_t resolved, subscriber_root_t** const out_root)
 {
-    assert((cy != NULL) && (resolved_name.str != NULL) && (resolved_name.len > 0U) && (out_root != NULL));
+    assert((cy != NULL) && (resolved.name.str != NULL) && (resolved.name.len > 0U) && (out_root != NULL));
+    assert((resolved.pin == UINT16_MAX) || resolved.verbatim); // enforced during name resolution
 
     // Find or allocate a tree node. If exists, return as-is.
-    wkv_node_t* const node = wkv_set(&cy->subscribers_by_name, resolved_name);
+    wkv_node_t* const node = wkv_set(&cy->subscribers_by_name, resolved.name);
     if (node == NULL) {
         return CY_ERR_MEMORY;
     }
@@ -3537,13 +3583,14 @@ static cy_err_t ensure_subscriber_root(cy_t* const cy, const cy_str_t resolved_n
         subscriber_root_t* const root = (subscriber_root_t*)node->value;
         *out_root                     = root;
         if (root->needs_scouting) {
-            const cy_err_t err   = do_send_scout(cy, cy_now(cy), resolved_name);
+            assert((resolved.pin == UINT16_MAX) && !resolved.verbatim); // can't pin patterns; can only scout patterns
+            const cy_err_t err   = do_send_scout(cy, cy_now(cy), resolved.name);
             root->needs_scouting = err != CY_OK;
             ON_ASYNC_ERROR_IF(cy, NULL, err);
         }
         return CY_OK;
     }
-    CY_TRACE(cy, "✨'%.*s'", STRFMT_ARG(resolved_name));
+    CY_TRACE(cy, "✨'%.*s'", STRFMT_ARG(resolved.name));
 
     // Otherwise, allocate a new root, if possible.
     node->value = mem_alloc_zero(cy, sizeof(subscriber_root_t));
@@ -3556,8 +3603,8 @@ static cy_err_t ensure_subscriber_root(cy_t* const cy, const cy_str_t resolved_n
 
     // Insert the new root into the indexes.
     root->index_name = node;
-    if (!cy_name_is_verbatim(resolved_name)) {
-        root->index_pattern = wkv_set(&cy->subscribers_by_pattern, resolved_name);
+    if (!resolved.verbatim) {
+        root->index_pattern = wkv_set(&cy->subscribers_by_pattern, resolved.name);
         if (root->index_pattern == NULL) {
             wkv_del(&cy->subscribers_by_name, node);
             mem_free(cy, root);
@@ -3565,15 +3612,13 @@ static cy_err_t ensure_subscriber_root(cy_t* const cy, const cy_str_t resolved_n
         }
         assert(root->index_pattern->value == NULL);
         root->index_pattern->value = root;
-        // Publish the first scout message. If it fails, we may try again later, but the loss of a scout message
-        // is not essential since the subscriber monitors gossips continuously and subscribes on match always.
-        const cy_err_t err   = do_send_scout(cy, cy_now(cy), resolved_name);
-        root->needs_scouting = err != CY_OK;
+        const cy_err_t err         = do_send_scout(cy, cy_now(cy), resolved.name);
+        root->needs_scouting       = err != CY_OK;
         ON_ASYNC_ERROR_IF(cy, NULL, err);
     } else {
         root->index_pattern  = NULL;
-        root->needs_scouting = false; // this is not a pattern subscriber
-        const cy_err_t res   = topic_ensure(cy, NULL, resolved_name);
+        root->needs_scouting = false;
+        const cy_err_t res   = topic_ensure(cy, NULL, resolved);
         if (res != CY_OK) {
             wkv_del(&cy->subscribers_by_name, node);
             mem_free(cy, root);
@@ -3588,13 +3633,14 @@ static cy_err_t ensure_subscriber_root(cy_t* const cy, const cy_str_t resolved_n
 static subscriber_t* subscribe(cy_t* const cy, const cy_str_t name, const subscriber_params_t params)
 {
     assert((cy != NULL) && (params.reordering_window >= -1));
-    char           name_buf[CY_TOPIC_NAME_MAX + 1U];
-    const cy_str_t resolved = cy_resolve(cy, name, sizeof(name_buf), name_buf);
-    if (resolved.len > CY_TOPIC_NAME_MAX) {
+    char                name_buf[CY_TOPIC_NAME_MAX + 1U];
+    const cy_resolved_t resolved = cy_resolve(cy, name, sizeof(name_buf), name_buf);
+    if (resolved.name.len > CY_TOPIC_NAME_MAX) {
         return NULL;
     }
-    name_buf[resolved.len]  = 0; // this is not needed for the logic but helps with tracing (if enabled)
-    subscriber_t* const sub = future_new(cy, &subscriber_vtable, sizeof(subscriber_t));
+    assert((resolved.pin == UINT16_MAX) || resolved.verbatim); // enforced during name resolution
+    name_buf[resolved.name.len] = 0; // this is not needed for the logic but helps with tracing (if enabled)
+    subscriber_t* const sub     = future_new(cy, &subscriber_vtable, sizeof(subscriber_t));
     if (sub == NULL) {
         return NULL;
     }
@@ -3609,15 +3655,15 @@ static subscriber_t* subscribe(cy_t* const cy, const cy_str_t name, const subscr
     assert(sub->root != NULL);
     sub->next       = sub->root->head;
     sub->root->head = sub;
-    if (NULL != wkv_match(&cy->topics_by_name, resolved, sub, wkv_cb_couple_new_subscription)) {
+    if (NULL != wkv_match(&cy->topics_by_name, resolved.name, sub, wkv_cb_couple_new_subscription)) {
         subscriber_destroy(sub);
         return NULL;
     }
-    sub->verbatim = cy_name_is_verbatim(resolved); // Cache once, is useful.
+    sub->verbatim = resolved.verbatim; // Cache once, is useful.
     // liveness monitoring is disabled by default
     CY_TRACE(cy,
              "✨'%.*s' extent_pure=%zu rwin=%jd",
-             STRFMT_ARG(resolved),
+             STRFMT_ARG(resolved.name),
              params.extent_pure,
              (intmax_t)params.reordering_window);
     return sub;
@@ -3764,6 +3810,18 @@ static void topic_decouple_subscriber_root(cy_topic_t* const topic, const subscr
             cpl = &this->next;
         }
     }
+    // Reordering states keep raw topic pointers, which are invalid once the topic is detached and later destroyed.
+    // Remove all reordering states bound to this topic under this subscriber root.
+    for (subscriber_t* sub = root->head; sub != NULL; sub = sub->next) {
+        for (reordering_t* rr = CAVL2_TO_OWNER(cavl2_min(sub->index_reordering_by_remote_id), reordering_t, index);
+             rr != NULL;) {
+            reordering_t* const next = (reordering_t*)cavl2_next_greater((cy_tree_t*)rr);
+            if (rr->topic == topic) {
+                reordering_destroy(rr, true); // silenced to prevent callback invocation and related reentrancy issues
+            }
+            rr = next;
+        }
+    }
     topic_sync_subject_reader(topic);
     topic_sync_implicit(topic); // topics are destroyed lazily to avoid premature state loss
 }
@@ -3773,20 +3831,18 @@ static void subscriber_destroy(subscriber_t* const self)
     cy_t* const              cy   = self->base.cy;
     subscriber_root_t* const root = self->root;
     assert((root != NULL) && (root->cy == cy));
+    assert(self->base.callback == NULL); // Must have been reset beforehand by the future framework.
 #if CY_CONFIG_TRACE
     char name[CY_TOPIC_NAME_MAX + 1];
     cy_subscriber_name(&self->base, name);
     CY_TRACE(cy, "🗑️ %s", name);
 #endif
 
-    // Suppress callbacks from reordering_eject() et al that may occur during finalization.
-    assert(self->base.callback == NULL); // Must have been reset beforehand by the future framework.
-
     // Drop all pending ordered messages first because the states keep pointers into topic couplings.
     while (self->index_reordering_by_remote_id != NULL) {
         reordering_t* const rr = CAVL2_TO_OWNER(cavl2_min(self->index_reordering_by_remote_id), reordering_t, index);
         assert(rr != NULL);
-        reordering_destroy(rr);
+        reordering_destroy(rr, true);
     }
     assert(self->list_reordering_by_recency.head == NULL);
     assert(self->list_reordering_by_recency.tail == NULL);
@@ -4065,13 +4121,13 @@ static void topic_destroy(cy_topic_t* const topic)
     // Ensure no gossip callback can run while we are tearing down storage it may touch.
     unschedule_gossip(topic);
 
-    // Remove subject reader/writer.
+    // Release subject reader/writer from registry.
     if (topic->sub_reader != NULL) {
-        cy->platform->vtable->subject_reader_destroy(cy->platform, topic->sub_reader);
+        reader_release(cy, topic->sub_reader);
         topic->sub_reader = NULL;
     }
     if (topic->pub_writer != NULL) {
-        cy->platform->vtable->subject_writer_destroy(cy->platform, topic->pub_writer);
+        writer_release(cy, topic->pub_writer);
         topic->pub_writer = NULL;
     }
 
@@ -4104,11 +4160,14 @@ static void topic_destroy(cy_topic_t* const topic)
         request_future_destroy(future);
     }
 
-    // Detach the gossip shards. This is NULL for pinned topics.
-    if (topic->gossip_shard != NULL) {
-        shard_t* const shard = topic->gossip_shard;
-        topic->gossip_shard  = NULL;
-        shard_deref(cy, shard);
+    // Release gossip shard reader/writer from registry.
+    if (topic->gossip_writer != NULL) {
+        writer_release(cy, topic->gossip_writer);
+        topic->gossip_writer = NULL;
+    }
+    if (topic->gossip_reader != NULL) {
+        reader_release(cy, topic->gossip_reader);
+        topic->gossip_reader = NULL;
     }
 
     // Delist and deindex.
@@ -4148,7 +4207,7 @@ static bool is_prime_u32(const uint32_t n)
 
 static bool is_valid_subject_id_modulus(const uint32_t modulus)
 {
-    return (modulus >= CY_SUBJECT_ID_MODULUS_17bit) && is_prime_u32(modulus) && (modulus % 4U == 3U);
+    return (modulus >= CY_SUBJECT_ID_MODULUS_16bit) && is_prime_u32(modulus) && (modulus % 4U == 3U);
 }
 
 static cy_us_t olga_now(olga_t* const sched) { return cy_now((cy_t*)sched->user); }
@@ -4242,6 +4301,9 @@ cy_t* cy_new(cy_platform_t* const platform)
         platform->cy = NULL;
         return NULL;
     }
+    cy->broad_reader->subject_id = broadcast_subject_id;
+    cy->broad_reader->extent     = CY_AUX_SUBJECT_EXTENT;
+
     cy->broad_writer = cy->platform->vtable->subject_writer_new(cy->platform, broadcast_subject_id);
     if (cy->broad_writer == NULL) {
         cy->platform->vtable->subject_reader_destroy(cy->platform, cy->broad_reader);
@@ -4251,7 +4313,6 @@ cy_t* cy_new(cy_platform_t* const platform)
         platform->cy = NULL;
         return NULL;
     }
-    cy->broad_reader->subject_id = broadcast_subject_id;
     cy->broad_writer->subject_id = broadcast_subject_id;
 
     cy->async_error_handler = default_async_error_handler;
@@ -4303,6 +4364,8 @@ void cy_destroy(cy_t* const cy)
         topic_destroy(topic);
     }
     assert(wkv_is_empty(&cy->topics_by_name));
+    assert(cy->writers == NULL); // All writer registry entries released by topic_destroy.
+    assert(cy->readers == NULL); // All reader registry entries released by topic_destroy.
 
     // Cleanup done, release the memory.
     mem_free(cy, (void*)cy->home.str);
@@ -4323,10 +4386,7 @@ void cy_async_error_handler_set(cy_t* const cy, const cy_async_error_handler_t h
 cy_str_t cy_home(const cy_t* const cy) { return (cy != NULL) ? cy->home : str_invalid; }
 cy_str_t cy_namespace(const cy_t* const cy) { return (cy != NULL) ? cy->ns : str_invalid; }
 
-cy_err_t cy_home_set(cy_t* const cy, const cy_str_t home)
-{
-    return (!cy_name_is_homeful(home)) ? name_assign(cy, &cy->home, home) : CY_ERR_ARGUMENT;
-}
+cy_err_t cy_home_set(cy_t* const cy, const cy_str_t home) { return name_assign(cy, &cy->home, home); }
 cy_err_t cy_namespace_set(cy_t* const cy, const cy_str_t name_space) { return name_assign(cy, &cy->ns, name_space); }
 
 // Returns next deadline or INT64_MAX.
@@ -4383,21 +4443,17 @@ cy_us_t cy_now(const cy_t* const cy)
 
 cy_us_t cy_uptime(const cy_t* const cy) { return cy_now(cy) - cy->ts_started; }
 
-cy_str_t cy_resolve(const cy_t* const cy, const cy_str_t name, const size_t dest_size, char* dest)
+cy_resolved_t cy_resolve(const cy_t* const cy, const cy_str_t name, const size_t dest_size, char* const dest)
 {
-    const cy_str_t result = cy_name_resolve(name, cy_namespace(cy), cy_home(cy), dest_size, dest);
-    if (result.len <= CY_TOPIC_NAME_MAX) {
-        // TODO: remapping!
-        (void)0;
-    }
-    return result;
+    // TODO: remapping!
+    return cy_name_resolve(name, cy_namespace(cy), cy_home(cy), dest_size, dest);
 }
 
 cy_topic_t* cy_topic_find_by_name(const cy_t* const cy, const cy_str_t name)
 {
     const wkv_node_t* const node  = wkv_get(&cy->topics_by_name, name);
     cy_topic_t* const       topic = (node != NULL) ? (cy_topic_t*)node->value : NULL;
-    assert(topic == cy_topic_find_by_hash(cy, topic_hash(name)));
+    assert(topic == cy_topic_find_by_hash(cy, rapidhash(name.str, name.len)));
     return topic;
 }
 
@@ -4406,7 +4462,6 @@ cy_topic_t* cy_topic_find_by_hash(const cy_t* const cy, const uint64_t hash)
     assert(cy != NULL);
     cy_topic_t* const topic = (cy_topic_t*)cavl2_find(cy->topics_by_hash, &hash, &cavl_comp_topic_hash);
     assert((topic == NULL) || (topic->hash == hash));
-    assert((topic == NULL) || cy_name_is_verbatim(cy_topic_name(topic))); // topic names can be only verbatim
     return topic;
 }
 
@@ -4581,14 +4636,10 @@ void cy_on_message(cy_platform_t* const  platform,
             if ((incompatibility != 0) || (lage < LAGE_MIN) || (lage > LAGE_MAX)) {
                 goto bad_message;
             }
-            const uint32_t evictions = deserialize_u32(&header[4]);
-            const uint64_t hash      = deserialize_u64(&header[8]);
-            if (is_pinned(hash) && evictions != 0) {
-                CY_TRACE(cy, "🫣 Inline CRDT gossip with nonzero evictions on a pinned subject");
-                goto bad_message;
-            }
-            cy_topic_t* const topic    = cy_topic_find_by_hash(cy, hash);
-            const bool        reliable = type == header_msg_rel;
+            const uint32_t    evictions = deserialize_u32(&header[4]);
+            const uint64_t    hash      = deserialize_u64(&header[8]);
+            cy_topic_t* const topic     = cy_topic_find_by_hash(cy, hash);
+            const bool        reliable  = type == header_msg_rel;
             if (multicast &&
                 (topic_subject_id_impl(hash, evictions, cy->platform->subject_id_modulus) != *subject_id)) {
                 CY_TRACE(cy, "🫣 Inline CRDT gossip inconsistent with chosen subject, suspect publisher malfunction");
@@ -4598,7 +4649,8 @@ void cy_on_message(cy_platform_t* const  platform,
             // Process the message if the topic is known.
             bool accepted = false;
             if (topic != NULL) {
-                assert((topic->sub_reader == NULL) || (topic_subject_id(topic) == topic->sub_reader->subject_id));
+                assert((topic->sub_reader == NULL) ||
+                       (topic_subject_id(topic) == topic->sub_reader->handle->subject_id));
                 // We have the topic, which may or may not be using the same subject-ID. If we use this subject-ID
                 // for another topic, then it constitutes both a divergence and a collision. The correct handling
                 // is to address the divergence by either moving the local topic if the gossiped state is newer,
@@ -4744,10 +4796,6 @@ void cy_on_message(cy_platform_t* const  platform,
             if ((lage < LAGE_MIN) || (lage > LAGE_MAX)) {
                 goto bad_message;
             }
-            if (is_pinned(hash) && evictions != 0) {
-                CY_TRACE(cy, "🫣 CRDT gossip with nonzero evictions on a pinned subject");
-                goto bad_message;
-            }
             const gossip_scope_t scope = unicast ? gossip_unicast : (broadcast ? gossip_broadcast : gossip_sharded);
             on_gossip(cy, message.timestamp, hash, evictions, lage, name, scope);
             break;
@@ -4779,16 +4827,65 @@ bad_message:
 //                                                      NAMES
 // =====================================================================================================================
 
-const char cy_name_sep  = '/';
-const char cy_name_home = '~';
-const char cy_name_one  = '*';
-const char cy_name_any  = '>';
+const char cy_name_sep        = '/';
+const char cy_name_home       = '~';
+const char cy_name_one        = '*';
+const char cy_name_any        = '>';
+const char cy_name_pin_prefix = '#';
 
-// Accepts all printable ASCII characters except SPACE.
+// Accepts all printable ASCII chars except SPACE.
 static bool is_valid_char(const char c) { return (c >= 33) && (c <= 126); }
 
-// Normalizes the name and copies it into a heap-allocated storage.
-// On OOM failure, the original is left unchanged.
+static bool str_valid(const cy_str_t str) { return (str.str != NULL) || (str.len == 0U); }
+
+static cy_str_t str_skip(const cy_str_t s, const size_t k)
+{
+    assert(str_valid(s) && (k <= s.len));
+    return (cy_str_t){ .len = s.len - k, .str = &s.str[k] };
+}
+
+// Parses and strips the valid pin expression at the end, if any. Returns the shortened string.
+// out_pin is set to the pin value, or UINT16_MAX if no valid pin expression is found.
+// Example: `foo#123` => `foo`, out_pin=123; `foo#0` => `foo`, out_pin=0; `foo#01` => unchanged (leading zero).
+static cy_str_t name_consume_pin_suffix(const cy_str_t name, uint16_t* const out_pin)
+{
+    assert((out_pin != NULL) && str_valid(name));
+    *out_pin = UINT16_MAX;
+    // Scan right-to-left: find '#' preceded only by decimal digits.
+    size_t hash_pos = name.len;
+    for (size_t i = name.len; i > 0; i--) {
+        const char ch = name.str[i - 1];
+        if (ch == cy_name_pin_prefix) {
+            hash_pos = i - 1;
+            break;
+        }
+        if ((ch < '0') || (ch > '9')) {
+            return name;
+        }
+    }
+    if (hash_pos >= name.len) {
+        return name; // No '#' found.
+    }
+    const size_t n_digits = name.len - hash_pos - 1;
+    if (n_digits == 0) {
+        return name; // Bare '#' with no digits is not a pin expression.
+    }
+    if ((n_digits > 1) && (name.str[hash_pos + 1] == '0')) {
+        return name; // Leading zeros are not allowed (e.g., #01, #00).
+    }
+    // Parse decimal left-to-right.
+    uint32_t pin = 0;
+    for (size_t i = hash_pos + 1; i < name.len; i++) {
+        pin = (uint32_t)((pin * 10U) + (unsigned)(name.str[i] - '0'));
+        if (pin > CY_SUBJECT_ID_PINNED_MAX) {
+            return name; // Value exceeds the valid subject-ID range.
+        }
+    }
+    *out_pin = (uint16_t)pin;
+    return (cy_str_t){ .len = hash_pos, .str = name.str };
+}
+
+// Normalizes the name and copies it into a heap-allocated storage. On OOM, the original is left unchanged.
 static cy_err_t name_assign(const cy_t* const cy, cy_str_t* const assignee, const cy_str_t name)
 {
     assert(assignee != NULL);
@@ -4812,21 +4909,7 @@ static cy_err_t name_assign(const cy_t* const cy, cy_str_t* const assignee, cons
     return CY_ERR_ARGUMENT;
 }
 
-bool cy_name_is_valid(const cy_str_t name)
-{
-    if ((name.len == 0) || (name.len > CY_TOPIC_NAME_MAX) || (name.str == NULL)) {
-        return false;
-    }
-    for (size_t i = 0; i < name.len; ++i) {
-        const char c = name.str[i];
-        if (!is_valid_char(c)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool cy_name_is_verbatim(const cy_str_t name)
+static bool name_is_verbatim(const cy_str_t name)
 {
     wkv_t kv;
     wkv_init(&kv, &wkv_realloc);
@@ -4835,108 +4918,146 @@ bool cy_name_is_verbatim(const cy_str_t name)
     return !wkv_has_substitution_tokens(&kv, name);
 }
 
-bool cy_name_is_homeful(const cy_str_t name)
+static bool name_is_homeful(const cy_str_t n)
 {
-    return (name.len >= 1) && (name.str[0] == cy_name_home) && ((name.len == 1) || (name.str[1] == cy_name_sep));
+    return (n.str != NULL) && (n.len >= 1) && (n.str[0] == cy_name_home) && ((n.len == 1) || (n.str[1] == cy_name_sep));
 }
 
-bool cy_name_is_absolute(const cy_str_t name) { return (name.len >= 1) && (name.str[0] == cy_name_sep); }
+static bool name_is_absolute(const cy_str_t n) { return (n.str != NULL) && (n.len >= 1) && (n.str[0] == cy_name_sep); }
 
-// Writes the normalized and validated version of `name` into `dest`, which must be at least `dest_size` bytes long.
-// Normalization at least removes duplicate, leading, and trailing name separators.
-// The input string length must not include NUL terminator; the output string is also not NUL-terminated.
-// In case of failure, the destination buffer may be partially written.
-static cy_str_t name_normalize(const size_t in_size, const char* in, const size_t dest_size, char* const dest)
+// Returns the length of the normalized string, or SIZE_MAX if the input contains invalid characters.
+static size_t name_normalized_len(const cy_str_t name)
 {
-    if ((in == NULL) || (dest == NULL)) {
-        return str_invalid;
-    }
-    const char* const in_end      = in + in_size;
-    char*             out         = dest;
-    const char* const out_end     = dest + dest_size;
-    bool              pending_sep = false;
-    while (in < in_end) {
-        const char c = *in++;
+    assert(str_valid(name));
+    size_t out_len     = 0U;
+    bool   pending_sep = false;
+    for (size_t i = 0; i < name.len; i++) {
+        const char c = name.str[i];
         if (!is_valid_char(c)) {
-            return str_invalid;
+            return SIZE_MAX;
         }
+        if (c == cy_name_sep) {
+            pending_sep = out_len > 0U; // skip duplicate and leading separators
+            continue;
+        }
+        if (pending_sep) {
+            pending_sep = false;
+            out_len++;
+        }
+        out_len++;
+    }
+    return out_len;
+}
+
+static void name_copy_normalized_forward(const cy_str_t name, char* const dest)
+{
+    assert(str_valid(name) && (dest != NULL));
+    char* out         = dest;
+    bool  pending_sep = false;
+    for (size_t i = 0; i < name.len; i++) {
+        const char c = name.str[i];
+        assert(is_valid_char(c));
         if (c == cy_name_sep) {
             pending_sep = out > dest; // skip duplicate and leading separators
             continue;
         }
         if (pending_sep) {
+            *out++      = cy_name_sep;
             pending_sep = false;
-            if (out < out_end) {
-                *out++ = cy_name_sep;
-            }
-        }
-        if (out >= out_end) {
-            return str_invalid;
         }
         *out++ = c;
     }
-    assert(out <= out_end);
-    return (cy_str_t){ .len = (size_t)(out - dest), .str = dest };
+}
+
+// Exact in-place normalization is supported; arbitrary partial overlap is not guaranteed.
+static cy_str_t name_normalize(const size_t in_size, const char* in, const size_t dest_size, char* const dest)
+{
+    assert(((in != NULL) || (in_size == 0U)) && (dest != NULL));
+    const cy_str_t part = { .len = in_size, .str = in };
+    const size_t   len  = name_normalized_len(part);
+    if ((len == SIZE_MAX) || (len > dest_size)) {
+        return str_invalid;
+    }
+    name_copy_normalized_forward(part, dest);
+    return (cy_str_t){ .len = len, .str = dest };
 }
 
 cy_str_t cy_name_join(const cy_str_t left, const cy_str_t right, const size_t dest_size, char* const dest)
 {
-    if (dest == NULL) {
+    if ((dest == NULL) || !str_valid(left) || !str_valid(right)) {
         return str_invalid;
     }
-    size_t len = name_normalize(left.len, left.str, dest_size, dest).len;
-    if (len >= dest_size) {
+    const size_t left_len = name_normalized_len(left);
+    if ((left_len == SIZE_MAX) || (left_len >= dest_size)) {
         return str_invalid;
     }
-    assert(len < dest_size);
-    if (len > 0) {
-        dest[len++] = cy_name_sep;
-    }
-    assert(len <= dest_size);
-    const size_t right_len = name_normalize(right.len, right.str, dest_size - len, &dest[len]).len;
-    if (right_len > (dest_size - len)) {
+    const size_t reserved  = left_len + ((left_len > 0U) ? 1U : 0U);
+    const size_t right_len = name_normalized_len(right);
+    if ((right_len == SIZE_MAX) || (right_len > (dest_size - reserved))) {
         return str_invalid;
     }
-    if ((right_len == 0) && (len > 0)) {
-        len--;
+    const size_t sep_len       = ((left_len > 0U) && (right_len > 0U)) ? 1U : 0U;
+    const size_t right_offset  = left_len + sep_len;
+    const size_t joined_length = right_offset + right_len;
+    if ((right.str == dest) && (right_len > 0U)) {
+        name_copy_normalized_forward(right, dest);
+        memmove(&dest[right_offset], dest, right_len);
     }
-    return (cy_str_t){ .len = len + right_len, .str = dest };
+    if (left_len > 0U) {
+        name_copy_normalized_forward(left, dest);
+    }
+    if (sep_len > 0U) {
+        dest[left_len] = cy_name_sep;
+    }
+    if ((right_len > 0U) && (right.str != dest)) {
+        name_copy_normalized_forward(right, &dest[right_offset]);
+    }
+    return (cy_str_t){ .len = joined_length, .str = dest };
 }
 
-cy_str_t cy_name_expand_home(cy_str_t name, const cy_str_t home, const size_t dest_size, char* const dest)
+static cy_str_t name_resolve_construct(const cy_str_t name,
+                                       cy_str_t       name_space,
+                                       const cy_str_t home,
+                                       const size_t   dest_size,
+                                       char*          dest)
 {
-    if (dest == NULL) {
-        return str_invalid;
-    }
-    if (!cy_name_is_homeful(name)) {
+    assert(str_valid(name) && str_valid(name_space) && str_valid(home) && (dest != NULL));
+    if (name_is_absolute(name)) {
         return name_normalize(name.len, name.str, dest_size, dest);
     }
-    assert(name.len >= 1);
-    name.len -= 1U;
-    name.str += 1;
-    return cy_name_join(home, name, dest_size, dest);
-}
-
-cy_str_t cy_name_resolve(const cy_str_t name,
-                         cy_str_t       name_space,
-                         const cy_str_t home,
-                         const size_t   dest_size,
-                         char*          dest)
-{
-    if (dest == NULL) {
-        return str_invalid;
+    if (name_is_homeful(name)) {
+        return cy_name_join(home, str_skip(name, 1), dest_size, dest);
     }
-    if (cy_name_is_absolute(name)) {
-        return name_normalize(name.len, name.str, dest_size, dest);
-    }
-    if (cy_name_is_homeful(name)) {
-        return cy_name_expand_home(name, home, dest_size, dest);
-    }
-    if (cy_name_is_homeful(name_space)) {
-        name_space = cy_name_expand_home(name_space, home, dest_size, dest);
-        if (name_space.len >= dest_size) {
-            return str_invalid;
-        }
+    if (name_is_homeful(name_space)) {
+        name_space = cy_name_join(home, str_skip(name_space, 1), dest_size, dest);
     }
     return cy_name_join(name_space, name, dest_size, dest);
+}
+
+cy_resolved_t cy_name_resolve(const cy_str_t name,
+                              const cy_str_t name_space,
+                              const cy_str_t home,
+                              const size_t   dest_size,
+                              char* const    dest)
+{
+    if ((dest == NULL) || !str_valid(name) || !str_valid(name_space) || !str_valid(home)) {
+        return (cy_resolved_t){ .name = str_invalid, .pin = UINT16_MAX };
+    }
+    uint16_t pin = UINT16_MAX;
+    // Strip the pin first to ensure the fully resolved name fits into the size limit.
+    const cy_str_t res = name_resolve_construct(name_consume_pin_suffix(name, &pin), //
+                                                name_space,
+                                                home,
+                                                dest_size,
+                                                dest);
+    if ((res.len == 0) || (res.len > CY_TOPIC_NAME_MAX)) {
+        return (cy_resolved_t){ .name = str_invalid, .pin = UINT16_MAX };
+    }
+    // Pinned topic names cannot be patterns.
+    const bool pinned   = pin <= CY_SUBJECT_ID_PINNED_MAX;
+    const bool verbatim = name_is_verbatim(res);
+    if (!verbatim && pinned) {
+        return (cy_resolved_t){ .name = str_invalid, .pin = UINT16_MAX };
+    }
+    return (cy_resolved_t){ .name = res, .pin = pin, .verbatim = verbatim };
 }

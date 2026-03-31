@@ -1,7 +1,6 @@
 #include <cy_platform.h>
 #include <unity.h>
 #include "api_mock_platform_utils.hpp"
-#include "guarded_heap.h"
 #include "message.h"
 #include <algorithm>
 #include <array>
@@ -12,16 +11,8 @@
 
 namespace {
 
-struct test_platform_t final
+struct test_platform_t final : api_test::test_platform_base_t
 {
-    cy_platform_t        platform{};
-    cy_platform_vtable_t vtable{};
-    guarded_heap_t       core_heap{};
-    guarded_heap_t       message_heap{};
-    cy_t*                cy{ nullptr };
-
-    cy_us_t       now{ 0 };
-    std::uint64_t random_state{ UINT64_C(0xD1CEB00BCAFEBEEF) };
 };
 
 struct future_entry_t final
@@ -35,15 +26,14 @@ test_platform_t* platform_from(cy_platform_t* const platform)
     return api_test::platform_from<test_platform_t>(platform);
 }
 
-extern "C" cy_subject_writer_t* platform_subject_writer_new(cy_platform_t* const platform,
-                                                            const std::uint32_t  subject_id)
+extern "C" cy_subject_writer_t* platform_subject_writer_new(cy_platform_t* const p, const std::uint32_t sid)
 {
-    return api_test::subject_writer_new<test_platform_t>(platform, subject_id);
+    return api_test::subject_writer_new_tracked<test_platform_t>(p, sid);
 }
 
-extern "C" void platform_subject_writer_destroy(cy_platform_t* const platform, cy_subject_writer_t* const writer)
+extern "C" void platform_subject_writer_destroy(cy_platform_t* const p, cy_subject_writer_t* const w)
 {
-    api_test::subject_writer_destroy<test_platform_t>(platform, writer);
+    api_test::subject_writer_destroy_tracked<test_platform_t>(p, w);
 }
 
 extern "C" cy_err_t platform_subject_writer_send(cy_platform_t* const       platform,
@@ -60,16 +50,21 @@ extern "C" cy_err_t platform_subject_writer_send(cy_platform_t* const       plat
     return CY_OK;
 }
 
-extern "C" cy_subject_reader_t* platform_subject_reader_new(cy_platform_t* const platform,
-                                                            const std::uint32_t  subject_id,
-                                                            const std::size_t    extent)
+extern "C" cy_subject_reader_t* platform_subject_reader_new(cy_platform_t* const p,
+                                                            const std::uint32_t  sid,
+                                                            const std::size_t    ext)
 {
-    return api_test::subject_reader_new<test_platform_t>(platform, subject_id, extent);
+    return api_test::subject_reader_new_tracked<test_platform_t>(p, sid, ext);
 }
 
-extern "C" void platform_subject_reader_destroy(cy_platform_t* const platform, cy_subject_reader_t* const reader)
+extern "C" void platform_subject_reader_extent_set(cy_platform_t* const p, cy_subject_reader_t* const r, const std::size_t e)
 {
-    api_test::subject_reader_destroy<test_platform_t>(platform, reader);
+    api_test::subject_reader_extent_set_tracked<test_platform_t>(p, r, e);
+}
+
+extern "C" void platform_subject_reader_destroy(cy_platform_t* const p, cy_subject_reader_t* const r)
+{
+    api_test::subject_reader_destroy_tracked<test_platform_t>(p, r);
 }
 
 extern "C" cy_err_t platform_unicast_send(cy_platform_t* const   platform,
@@ -112,34 +107,29 @@ extern "C" std::uint64_t platform_random(cy_platform_t* const platform)
 void platform_init(test_platform_t* const self)
 {
     *self = test_platform_t{};
+    self->random_state = UINT64_C(0xD1CEB00BCAFEBEEF);
     guarded_heap_init(&self->core_heap, UINT64_C(0xFACEB00C12345678));
     guarded_heap_init(&self->message_heap, UINT64_C(0xDEC0DE1234567890));
 
-    self->vtable.subject_writer_new     = platform_subject_writer_new;
-    self->vtable.subject_writer_destroy = platform_subject_writer_destroy;
-    self->vtable.subject_writer_send    = platform_subject_writer_send;
-    self->vtable.subject_reader_new     = platform_subject_reader_new;
-    self->vtable.subject_reader_destroy = platform_subject_reader_destroy;
-    self->vtable.unicast                = platform_unicast_send;
-    self->vtable.unicast_extent_set     = platform_unicast_extent_set;
-    self->vtable.spin                   = platform_spin;
-    self->vtable.now                    = platform_now;
-    self->vtable.realloc                = platform_realloc;
-    self->vtable.random                 = platform_random;
+    self->vtable.subject_writer_new        = platform_subject_writer_new;
+    self->vtable.subject_writer_destroy    = platform_subject_writer_destroy;
+    self->vtable.subject_writer_send       = platform_subject_writer_send;
+    self->vtable.subject_reader_new        = platform_subject_reader_new;
+    self->vtable.subject_reader_extent_set = platform_subject_reader_extent_set;
+    self->vtable.subject_reader_destroy    = platform_subject_reader_destroy;
+    self->vtable.unicast                   = platform_unicast_send;
+    self->vtable.unicast_extent_set        = platform_unicast_extent_set;
+    self->vtable.spin                      = platform_spin;
+    self->vtable.now                       = platform_now;
+    self->vtable.realloc                   = platform_realloc;
+    self->vtable.random                    = platform_random;
 
     api_test::init_platform_base(self->platform, self->vtable);
     self->cy = cy_new(&self->platform);
     TEST_ASSERT_NOT_NULL(self->cy);
 }
 
-void platform_deinit(test_platform_t* const self)
-{
-    if (self->cy != nullptr) {
-        cy_destroy(self->cy);
-        self->cy = nullptr;
-    }
-    api_test::assert_heaps_clean(self->core_heap, self->message_heap);
-}
+void platform_deinit(test_platform_t* const self) { api_test::standard_deinit(*self); }
 
 std::uint64_t rng_next(std::uint64_t& state)
 {

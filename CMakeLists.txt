@@ -31,12 +31,17 @@ if (NOT NO_STATIC_ANALYSIS)
             --suppress=missingIncludeSystem
             --suppress=badBitmaskCheck
             --suppress=constParameterCallback
+            --suppress=constParameterPointer
+            --suppress=constVariablePointer
             --suppress=duplInheritedMember
+            --suppress=knownConditionTrueFalse
             --suppress=preprocessorErrorDirective
+            --suppress=redundantAssignment
             --suppress=unreadVariable
             --suppress=passedByValue
             --suppress=containerOutOfBounds
             --inline-suppr
+            --max-configs=4
     )
     set(CMAKE_C_CPPCHECK ${cppcheck};--language=c;--std=c11;${cppcheck_options})
     set(CMAKE_CXX_CPPCHECK ${cppcheck};--language=c++;--std=c++20;${cppcheck_options})

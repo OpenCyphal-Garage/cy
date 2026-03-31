@@ -104,8 +104,11 @@ static void check_subject_id_near_uint32_max(const uint32_t modulus)
 {
     const uint64_t hash = UINT32_MAX;
     TEST_ASSERT(hash > CY_SUBJECT_ID_PINNED_MAX);
-    for (uint64_t i = 0U; i < 65536U; i++) {
-        const uint32_t evictions  = (uint32_t)(UINT32_MAX - i);
+    // Only test non-pinned eviction values (below EVICTIONS_PINNED_MIN).
+    const uint32_t limit = (uint32_t)smaller(65536U, (uint64_t)UINT32_MAX - EVICTIONS_PINNED_MIN);
+    for (uint64_t i = 0U; i < limit; i++) {
+        const uint32_t evictions = (uint32_t)(EVICTIONS_PINNED_MIN - 1U - (uint32_t)i);
+        TEST_ASSERT(!is_pinned(evictions));
         const uint32_t subject_id = topic_subject_id_impl(hash, evictions, modulus);
         TEST_ASSERT_EQUAL_UINT32(expected_subject_id_no_overflow(hash, evictions, modulus), subject_id);
         TEST_ASSERT_EQUAL_UINT32(subject_id,
@@ -121,11 +124,13 @@ static void check_subject_id_u64_wrap_semantics(const uint32_t modulus)
         UINT64_C(0xFFFFFFFFF0000000),
         UINT64_C(0xFFFFFFFF00000000),
     };
+    // Use eviction values just below the pinned threshold; large enough to still trigger uint64 overflow
+    // when squared and added to the large hashes above.
     static const uint32_t evictions[] = {
-        UINT32_MAX,
-        UINT32_MAX - 1U,
-        UINT32_MAX - 4095U,
-        UINT32_MAX - 65535U,
+        EVICTIONS_PINNED_MIN - 1U,
+        EVICTIONS_PINNED_MIN - 2U,
+        EVICTIONS_PINNED_MIN - 4096U,
+        EVICTIONS_PINNED_MIN - 65536U,
     };
 
     bool saw_overflow              = false;
@@ -148,9 +153,9 @@ static void check_subject_id_u64_wrap_semantics(const uint32_t modulus)
     TEST_ASSERT_TRUE(saw_overflow_wrap_obvious);
 }
 
-static void test_subject_id_math_modulus_17bit(void)
+static void test_subject_id_math_modulus_16bit(void)
 {
-    const uint32_t modulus = (uint32_t)CY_SUBJECT_ID_MODULUS_17bit;
+    const uint32_t modulus = (uint32_t)CY_SUBJECT_ID_MODULUS_16bit;
     check_subject_id_unique_until_half_modulus(modulus);
     check_subject_id_threshold_repeat_exhaustive(modulus);
     check_subject_id_near_uint32_max(modulus);
@@ -171,6 +176,61 @@ static void test_subject_id_wrap_semantics_modulus_32bit(void)
     check_subject_id_u64_wrap_semantics((uint32_t)CY_SUBJECT_ID_MODULUS_32bit);
 }
 
+static void test_subject_id_pinned_identity(void)
+{
+    static const uint32_t pins[]   = { 0U, 1U, 100U, 4095U, 8191U };
+    static const uint64_t hashes[] = { 0U, UINT64_MAX, UINT64_C(0xDEADBEEF), UINT64_C(0x123456789ABCDEF0) };
+    static const uint32_t moduli[] = {
+        (uint32_t)CY_SUBJECT_ID_MODULUS_16bit,
+        (uint32_t)CY_SUBJECT_ID_MODULUS_23bit,
+        (uint32_t)CY_SUBJECT_ID_MODULUS_32bit,
+    };
+    for (size_t pi = 0U; pi < (sizeof(pins) / sizeof(pins[0])); pi++) {
+        const uint32_t pin       = pins[pi];
+        const uint32_t evictions = UINT32_MAX - pin;
+        TEST_ASSERT_TRUE(is_pinned(evictions));
+        for (size_t hi = 0U; hi < (sizeof(hashes) / sizeof(hashes[0])); hi++) {
+            for (size_t mi = 0U; mi < (sizeof(moduli) / sizeof(moduli[0])); mi++) {
+                TEST_ASSERT_EQUAL_UINT32(pin, topic_subject_id_impl(hashes[hi], evictions, moduli[mi]));
+            }
+        }
+    }
+}
+
+static void test_subject_id_pinned_range_exhaustive(void)
+{
+    const uint64_t hash = UINT64_C(0xCAFEBABE);
+    TEST_ASSERT_TRUE(is_pinned(EVICTIONS_PINNED_MIN));
+    TEST_ASSERT_FALSE(is_pinned(EVICTIONS_PINNED_MIN - 1U));
+    for (uint64_t ev = EVICTIONS_PINNED_MIN; ev <= UINT32_MAX; ev++) {
+        const uint32_t evictions = (uint32_t)ev;
+        TEST_ASSERT_TRUE(is_pinned(evictions));
+        const uint32_t sid = topic_subject_id_impl(hash, evictions, (uint32_t)CY_SUBJECT_ID_MODULUS_16bit);
+        TEST_ASSERT(sid <= CY_SUBJECT_ID_PINNED_MAX);
+        TEST_ASSERT_EQUAL_UINT32(UINT32_MAX - evictions, sid);
+    }
+}
+
+static void test_subject_id_auto_never_in_pinned_range(void)
+{
+    static const uint64_t hashes[]    = { 0U, 1U, UINT32_MAX, UINT64_C(0xBAADF00D), UINT64_C(0x7FFFFFFFFFFFFFFF) };
+    static const uint32_t evictions[] = { 0U, 1U, 1000U, EVICTIONS_PINNED_MIN - 1U };
+    static const uint32_t moduli[]    = {
+        (uint32_t)CY_SUBJECT_ID_MODULUS_16bit,
+        (uint32_t)CY_SUBJECT_ID_MODULUS_23bit,
+        (uint32_t)CY_SUBJECT_ID_MODULUS_32bit,
+    };
+    for (size_t hi = 0U; hi < (sizeof(hashes) / sizeof(hashes[0])); hi++) {
+        for (size_t ei = 0U; ei < (sizeof(evictions) / sizeof(evictions[0])); ei++) {
+            TEST_ASSERT_FALSE(is_pinned(evictions[ei]));
+            for (size_t mi = 0U; mi < (sizeof(moduli) / sizeof(moduli[0])); mi++) {
+                const uint32_t sid = topic_subject_id_impl(hashes[hi], evictions[ei], moduli[mi]);
+                TEST_ASSERT(sid > CY_SUBJECT_ID_PINNED_MAX);
+            }
+        }
+    }
+}
+
 void setUp(void) {}
 
 void tearDown(void) {}
@@ -178,8 +238,11 @@ void tearDown(void) {}
 int main(void)
 {
     UNITY_BEGIN();
-    RUN_TEST(test_subject_id_math_modulus_17bit);
+    RUN_TEST(test_subject_id_math_modulus_16bit);
     RUN_TEST(test_subject_id_math_modulus_23bit);
     RUN_TEST(test_subject_id_wrap_semantics_modulus_32bit);
+    RUN_TEST(test_subject_id_pinned_identity);
+    RUN_TEST(test_subject_id_pinned_range_exhaustive);
+    RUN_TEST(test_subject_id_auto_never_in_pinned_range);
     return UNITY_END();
 }

@@ -29,7 +29,7 @@ static void dedup_fixture_init(dedup_fixture_t* const self)
     memset(self, 0, sizeof(*self));
     guarded_heap_init(&self->heap, UINT64_C(0xDED0A110C0FFEE01));
     self->platform.vtable             = &self->vtable;
-    self->platform.subject_id_modulus = (uint32_t)CY_SUBJECT_ID_MODULUS_17bit;
+    self->platform.subject_id_modulus = (uint32_t)CY_SUBJECT_ID_MODULUS_16bit;
     self->platform.cy                 = &self->cy;
     self->vtable.now                  = fixture_now;
     self->vtable.realloc              = fixture_realloc;

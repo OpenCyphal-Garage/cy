@@ -84,7 +84,7 @@ static void reorder_env_init(reorder_env_t* const self)
 
     guarded_heap_init(&self->fixture.heap, UINT64_C(0xA110CA7E5EED1234));
     self->fixture.platform.vtable             = &self->fixture.vtable;
-    self->fixture.platform.subject_id_modulus = (uint32_t)CY_SUBJECT_ID_MODULUS_17bit;
+    self->fixture.platform.subject_id_modulus = (uint32_t)CY_SUBJECT_ID_MODULUS_16bit;
     self->fixture.platform.cy                 = &self->fixture.cy;
     self->fixture.vtable.now                  = fixture_now;
     self->fixture.vtable.realloc              = fixture_realloc;
@@ -135,7 +135,7 @@ static void reorder_env_init(reorder_env_t* const self)
 
 static void reorder_env_cleanup(reorder_env_t* const self)
 {
-    reordering_eject_all(&self->rr);
+    reordering_eject_all(&self->rr, false);
     olga_cancel(&self->fixture.cy.olga, &self->rr.timeout);
     cy_message_refcount_dec(self->sub.last_arrival.message.content);
     self->sub.last_arrival.message.content = NULL;
@@ -933,6 +933,115 @@ static void test_reordering_factory_out_of_memory(void)
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&env.fixture.heap));
 }
 
+// Reordering push with a large tag gap (covers line 3308 RESEQUENCING path).
+// Send a message where lin_tag > last_ejected_lin_tag + capacity with NO interned messages.
+// This triggers a direct resequence without the stepwise forced-ejection while loop.
+// The resequenced message should be interned at lin_tag = capacity/2.
+static void test_reordering_large_tag_gap_direct_resequence(void)
+{
+    reorder_env_t env;
+    reorder_env_init(&env);
+    const uint64_t capacity = (uint64_t)REORDERING_CAPACITY;
+    const uint64_t half     = capacity / 2U;
+
+    // Establish baseline: tag=5 (lin_tag=1) is immediately ejected.
+    TEST_ASSERT_TRUE(push_message(&env, 5U, 10, 0x50U));
+    TEST_ASSERT_EQUAL_size_t(1, env.capture.count);
+    TEST_ASSERT_EQUAL_UINT64(5U, env.capture.tags[0]);
+    TEST_ASSERT_EQUAL_size_t(0, env.rr.interned_count);
+
+    // Now send a message with a massive gap (no interned messages exist).
+    // lin_tag = 100000 - 4 = 99996 >> capacity (16). The while loop at line 3292 will not fire
+    // because interned_count is 0. The condition at line 3307 is true: resequence.
+    const uint64_t far_tag = 100000U;
+    TEST_ASSERT_TRUE(push_message(&env, far_tag, 200, 0xFFU));
+    // The message should be interned after resequence, not immediately ejected.
+    TEST_ASSERT_EQUAL_size_t(1, env.capture.count); // Still only tag=5 delivered.
+    TEST_ASSERT_EQUAL_size_t(1, env.rr.interned_count);
+    // After resequence, tag_baseline = far_tag - capacity/2.
+    TEST_ASSERT_EQUAL_UINT64(far_tag - half, env.rr.tag_baseline);
+    TEST_ASSERT_EQUAL_UINT64(0U, env.rr.last_ejected_lin_tag);
+    TEST_ASSERT_TRUE(olga_is_pending(&env.fixture.cy.olga, &env.rr.timeout));
+
+    // Force eject via timeout to verify the interned message is delivered.
+    spin_to(&env, 1000);
+    TEST_ASSERT_EQUAL_size_t(2, env.capture.count);
+    TEST_ASSERT_EQUAL_UINT64(far_tag, env.capture.tags[1]);
+    TEST_ASSERT_EQUAL_size_t(0, env.rr.interned_count);
+
+    reorder_env_cleanup(&env);
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&env.fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&env.fixture.heap));
+}
+
+// Reordering push OOM during slot allocation (line 3328): variation with async error and
+// subscriber error notification. Verifies the subscriber is notified of the memory error.
+static void test_reordering_push_oom_notifies_subscriber_error(void)
+{
+    reorder_env_t env;
+    reorder_env_init(&env);
+
+    env.fixture.fail_alloc_size  = sizeof(reordering_slot_t);
+    env.fixture.fail_alloc_count = 1;
+
+    // tag=7 with baseline=4 means lin_tag=3 (interning path, needs slot allocation).
+    TEST_ASSERT_FALSE(push_message(&env, 7U, 100, 0x70U));
+    TEST_ASSERT_EQUAL_size_t(0, env.capture.count);
+    TEST_ASSERT_EQUAL_size_t(0, env.rr.interned_count);
+    // Async error must have been reported.
+    TEST_ASSERT_EQUAL_size_t(1, env.fixture.async_error_count);
+    TEST_ASSERT_EQUAL_INT(CY_ERR_MEMORY, env.fixture.last_async_error);
+    // Subscriber error must also have been reported.
+    TEST_ASSERT_EQUAL_INT(CY_ERR_MEMORY, env.sub.error);
+
+    // Recovery: subsequent in-order message should still work.
+    env.fixture.fail_alloc_count = 0;
+    TEST_ASSERT_TRUE(push_message(&env, 5U, 110, 0x50U));
+    TEST_ASSERT_EQUAL_size_t(1, env.capture.count);
+    TEST_ASSERT_EQUAL_UINT64(5U, env.capture.tags[0]);
+
+    reorder_env_cleanup(&env);
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&env.fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&env.fixture.heap));
+}
+
+// Reordering push with duplicate interned message (line 3342): second push of the same
+// out-of-order tag is a no-op. The allocated slot is freed, and the interned count stays unchanged.
+// This is a variation that also checks refcount accounting explicitly.
+static void test_reordering_duplicate_interned_slot_is_freed(void)
+{
+    reorder_env_t env;
+    reorder_env_init(&env);
+
+    // Push an out-of-order tag that gets interned.
+    TEST_ASSERT_TRUE(push_message(&env, 7U, 100, 0x70U));
+    TEST_ASSERT_EQUAL_size_t(1, env.rr.interned_count);
+    TEST_ASSERT_EQUAL_size_t(0, env.capture.count);
+    const size_t heap_frags_after_first = guarded_heap_allocated_fragments(&env.fixture.heap);
+
+    // Push the same tag again (reliable retransmit duplicate). Should be detected and dropped.
+    TEST_ASSERT_TRUE(push_message(&env, 7U, 101, 0x77U));
+    TEST_ASSERT_EQUAL_size_t(1, env.rr.interned_count); // No change.
+    TEST_ASSERT_EQUAL_size_t(0, env.capture.count);     // Nothing delivered.
+    // The duplicate slot must have been freed; heap fragment count should be the same.
+    // (The message itself was freed by push_message's cy_message_refcount_dec.)
+    TEST_ASSERT_EQUAL_size_t(heap_frags_after_first, guarded_heap_allocated_fragments(&env.fixture.heap));
+
+    // Push the gap-filler (tag=5 then 6) to flush everything.
+    TEST_ASSERT_TRUE(push_message(&env, 5U, 102, 0x50U));
+    TEST_ASSERT_EQUAL_size_t(1, env.capture.count);
+    TEST_ASSERT_EQUAL_UINT64(5U, env.capture.tags[0]);
+    TEST_ASSERT_TRUE(push_message(&env, 6U, 103, 0x60U));
+    TEST_ASSERT_EQUAL_size_t(3, env.capture.count);
+    TEST_ASSERT_EQUAL_UINT64(6U, env.capture.tags[1]);
+    TEST_ASSERT_EQUAL_UINT64(7U, env.capture.tags[2]);
+    TEST_ASSERT_EQUAL_size_t(0, env.rr.interned_count);
+
+    reorder_env_cleanup(&env);
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&env.fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&env.fixture.heap));
+}
+
 static void test_reordering_drop_stale_keeps_recent(void)
 {
     reorder_env_t env;
@@ -948,7 +1057,7 @@ static void test_reordering_drop_stale_keeps_recent(void)
     TEST_ASSERT_TRUE(olga_is_pending(&env.fixture.cy.olga, &rr->timeout));
     TEST_ASSERT_EQUAL_size_t(0, env.capture.count);
 
-    reordering_destroy(rr);
+    reordering_destroy(rr, false);
     TEST_ASSERT_NULL(env.sub.index_reordering_by_remote_id);
     TEST_ASSERT_EQUAL_size_t(1, env.capture.count);
     TEST_ASSERT_EQUAL_UINT64(8U, env.capture.tags[0]);
@@ -975,6 +1084,40 @@ static void test_reordering_drop_stale_removes_old(void)
     TEST_ASSERT_EQUAL_UINT64(8U, env.capture.tags[0]);
 
     reorder_env_cleanup(&env);
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&env.fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&env.fixture.heap));
+}
+
+static void test_topic_decouple_subscriber_root_drops_interned_messages(void)
+{
+    reorder_env_t env;
+    reorder_env_init(&env);
+
+    env.root.head = &env.sub;
+    TEST_ASSERT_EQUAL_UINT8(CY_OK, topic_couple(&env.topic, &env.root, 0U, NULL));
+    TEST_ASSERT_NOT_NULL(env.topic.couplings);
+    TEST_ASSERT_FALSE(is_implicit(&env.topic));
+
+    reordering_t* const rr = make_dynamic_reordering(&env, 42U, 8U, 0);
+    TEST_ASSERT_NOT_NULL(rr);
+    TEST_ASSERT_TRUE(push_message_rr(&env, rr, 8U, 100, 0x80U));
+    TEST_ASSERT_EQUAL_size_t(1U, rr->interned_count);
+    TEST_ASSERT_EQUAL_size_t(0U, env.capture.count);
+    assert_message_counters(0U, 1U);
+
+    topic_decouple_subscriber_root(&env.topic, &env.root);
+    TEST_ASSERT_NULL(env.topic.couplings);
+    TEST_ASSERT_TRUE(topic_validate_is_implicit(&env.topic));
+    TEST_ASSERT_TRUE(is_implicit(&env.topic));
+    TEST_ASSERT_NULL(env.sub.index_reordering_by_remote_id);
+    TEST_ASSERT_NULL(env.sub.list_reordering_by_recency.head);
+    TEST_ASSERT_NULL(env.sub.list_reordering_by_recency.tail);
+    TEST_ASSERT_NULL(env.sub.last_arrival.message.content);
+    TEST_ASSERT_EQUAL_size_t(0U, env.capture.count);
+    assert_message_counters(1U, 0U);
+
+    reorder_env_cleanup(&env);
+    assert_message_counters(1U, 0U);
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&env.fixture.heap));
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&env.fixture.heap));
 }
@@ -1013,7 +1156,11 @@ int main(void)
     RUN_TEST(test_reordering_push_out_of_memory);
     RUN_TEST(test_reordering_cavl_compare);
     RUN_TEST(test_reordering_factory_out_of_memory);
+    RUN_TEST(test_reordering_large_tag_gap_direct_resequence);
+    RUN_TEST(test_reordering_push_oom_notifies_subscriber_error);
+    RUN_TEST(test_reordering_duplicate_interned_slot_is_freed);
     RUN_TEST(test_reordering_drop_stale_keeps_recent);
     RUN_TEST(test_reordering_drop_stale_removes_old);
+    RUN_TEST(test_topic_decouple_subscriber_root_drops_interned_messages);
     return UNITY_END();
 }

@@ -4,6 +4,7 @@
 #include "guarded_heap.h"
 #include <cstddef>
 #include <cstdint>
+#include <set>
 #include <vector>
 
 namespace e2e {
@@ -71,12 +72,15 @@ struct sim_node_t final
     std::uint64_t random_state{ UINT64_C(0x1020304050607080) };
 
     sim_subject_reader_t* readers{ nullptr };
+
+    std::set<std::uint32_t> active_reader_subjects;
+    std::set<std::uint32_t> active_writer_subjects;
 };
 
 struct sim_net_config_t final
 {
     std::size_t   node_count{ sim_node_count };
-    std::uint32_t subject_id_modulus{ static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit) };
+    std::uint32_t subject_id_modulus{ static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit) };
     std::uint64_t random_seed_base{ UINT64_C(0x1020304050607080) };
 };
 
@@ -89,13 +93,13 @@ struct sim_net_t final
     std::vector<op_fault_capture_t>    op_fault_captures{};
     std::uint64_t                      next_sequence{ 0U };
     std::uint64_t                      next_operation_sequence{ 0U };
-    std::uint32_t                      subject_id_modulus{ static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit) };
+    std::uint32_t                      subject_id_modulus{ static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit) };
     const fault_plan_t*                frame_faults{ nullptr };
     const op_fault_plan_t*             op_faults{ nullptr };
 };
 
 cy_err_t sim_net_init(sim_net_t&    self,
-                      std::uint32_t subject_id_modulus = static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit),
+                      std::uint32_t subject_id_modulus = static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit),
                       std::uint64_t random_seed_base   = UINT64_C(0x1020304050607080));
 cy_err_t sim_net_init_ex(sim_net_t& self, const sim_net_config_t& config);
 void     sim_net_deinit(sim_net_t& self);

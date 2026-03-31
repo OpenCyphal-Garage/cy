@@ -6,7 +6,7 @@
 #include <stdarg.h>
 #include <string.h>
 
-void cy_trace(cy_t* const         cy, // cppcheck-suppress constParameterPointer
+void cy_trace(cy_t* const         cy,
               const char* const   file,
               const uint_fast16_t line,
               const char* const   func,

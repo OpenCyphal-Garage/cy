@@ -1,7 +1,7 @@
 #include <cy_platform.h>
+#include <rapidhash.h>
 #include <unity.h>
 #include "api_mock_platform_utils.hpp"
-#include "guarded_heap.h"
 #include "helpers.h"
 #include "message.h"
 #include <array>
@@ -14,17 +14,8 @@ namespace {
 
 constexpr std::size_t header_bytes = 24U;
 
-struct test_platform_t final
+struct test_platform_t final : api_test::test_platform_base_t
 {
-    cy_platform_t        platform{};
-    cy_platform_vtable_t vtable{};
-    guarded_heap_t       core_heap{};
-    guarded_heap_t       message_heap{};
-    cy_t*                cy{ nullptr };
-
-    cy_us_t       now{ 0 };
-    std::uint64_t random_state{ UINT64_C(0xA5A5A5A5A5A5A5A5) };
-
     std::size_t subject_send_count{ 0U };
     std::size_t unicast_send_count{ 0U };
 };
@@ -39,12 +30,12 @@ test_platform_t* platform_from(cy_platform_t* const platform)
 extern "C" cy_subject_writer_t* platform_subject_writer_new(cy_platform_t* const platform,
                                                             const std::uint32_t  subject_id)
 {
-    return api_test::subject_writer_new<test_platform_t>(platform, subject_id);
+    return api_test::subject_writer_new_tracked<test_platform_t>(platform, subject_id);
 }
 
 extern "C" void platform_subject_writer_destroy(cy_platform_t* const platform, cy_subject_writer_t* const writer)
 {
-    api_test::subject_writer_destroy<test_platform_t>(platform, writer);
+    api_test::subject_writer_destroy_tracked<test_platform_t>(platform, writer);
 }
 
 extern "C" cy_err_t platform_subject_writer_send(cy_platform_t* const       platform,
@@ -65,12 +56,19 @@ extern "C" cy_subject_reader_t* platform_subject_reader_new(cy_platform_t* const
                                                             const std::uint32_t  subject_id,
                                                             const std::size_t    extent)
 {
-    return api_test::subject_reader_new<test_platform_t>(platform, subject_id, extent);
+    return api_test::subject_reader_new_tracked<test_platform_t>(platform, subject_id, extent);
+}
+
+extern "C" void platform_subject_reader_extent_set(cy_platform_t* const       platform,
+                                                   cy_subject_reader_t* const reader,
+                                                   const std::size_t          extent)
+{
+    api_test::subject_reader_extent_set_tracked<test_platform_t>(platform, reader, extent);
 }
 
 extern "C" void platform_subject_reader_destroy(cy_platform_t* const platform, cy_subject_reader_t* const reader)
 {
-    api_test::subject_reader_destroy<test_platform_t>(platform, reader);
+    api_test::subject_reader_destroy_tracked<test_platform_t>(platform, reader);
 }
 
 extern "C" cy_err_t platform_unicast_send(cy_platform_t* const   platform,
@@ -125,21 +123,23 @@ extern "C" void on_async_error(cy_t* const         cy,
 void platform_init(test_platform_t* const self)
 {
     *self               = test_platform_t{};
+    self->random_state  = UINT64_C(0xA5A5A5A5A5A5A5A5);
     g_async_error_count = 0U;
     guarded_heap_init(&self->core_heap, UINT64_C(0xFACEB00C12345678));
     guarded_heap_init(&self->message_heap, UINT64_C(0xDEC0DE1234567890));
 
-    self->vtable.subject_writer_new     = platform_subject_writer_new;
-    self->vtable.subject_writer_destroy = platform_subject_writer_destroy;
-    self->vtable.subject_writer_send    = platform_subject_writer_send;
-    self->vtable.subject_reader_new     = platform_subject_reader_new;
-    self->vtable.subject_reader_destroy = platform_subject_reader_destroy;
-    self->vtable.unicast                = platform_unicast_send;
-    self->vtable.unicast_extent_set     = platform_unicast_extent_set;
-    self->vtable.spin                   = platform_spin;
-    self->vtable.now                    = platform_now;
-    self->vtable.realloc                = platform_realloc;
-    self->vtable.random                 = platform_random;
+    self->vtable.subject_writer_new        = platform_subject_writer_new;
+    self->vtable.subject_writer_destroy    = platform_subject_writer_destroy;
+    self->vtable.subject_writer_send       = platform_subject_writer_send;
+    self->vtable.subject_reader_new        = platform_subject_reader_new;
+    self->vtable.subject_reader_extent_set = platform_subject_reader_extent_set;
+    self->vtable.subject_reader_destroy    = platform_subject_reader_destroy;
+    self->vtable.unicast                   = platform_unicast_send;
+    self->vtable.unicast_extent_set        = platform_unicast_extent_set;
+    self->vtable.spin                      = platform_spin;
+    self->vtable.now                       = platform_now;
+    self->vtable.realloc                   = platform_realloc;
+    self->vtable.random                    = platform_random;
 
     api_test::init_platform_base(self->platform, self->vtable);
     self->cy = cy_new(&self->platform);
@@ -147,14 +147,7 @@ void platform_init(test_platform_t* const self)
     cy_async_error_handler_set(self->cy, on_async_error);
 }
 
-void platform_deinit(test_platform_t* const self)
-{
-    if (self->cy != nullptr) {
-        cy_destroy(self->cy);
-        self->cy = nullptr;
-    }
-    api_test::assert_heaps_clean(self->core_heap, self->message_heap);
-}
+void platform_deinit(test_platform_t* const self) { api_test::standard_deinit(*self); }
 
 void dispatch_raw(test_platform_t* const            self,
                   const std::vector<unsigned char>& wire,
@@ -173,8 +166,8 @@ void dispatch_raw(test_platform_t* const            self,
 
 std::uint32_t subject_id_for_hash(const std::uint64_t hash, const std::uint32_t evictions, const std::uint32_t modulus)
 {
-    if (hash <= CY_SUBJECT_ID_PINNED_MAX) {
-        return static_cast<std::uint32_t>(hash);
+    if (evictions >= (UINT32_MAX - CY_SUBJECT_ID_PINNED_MAX)) { // is_pinned(evictions)
+        return static_cast<std::uint32_t>(UINT32_MAX - evictions);
     }
     const std::uint64_t offset =
       (hash + (static_cast<std::uint64_t>(evictions) * static_cast<std::uint64_t>(evictions))) % modulus;
@@ -262,7 +255,7 @@ void test_api_parser_adversarial_mutation_corpus()
     TEST_ASSERT_TRUE(!corpus.empty());
 
     const std::uint32_t       sid        = subject_id_for_hash(topic_hash, 0U, platform.platform.subject_id_modulus);
-    const cy_subject_reader_t reader     = { .subject_id = sid };
+    const cy_subject_reader_t reader     = { .subject_id = sid, .extent = 0 };
     std::size_t               spin_count = 0U;
 
     for (std::size_t i = 0U; i < corpus.size(); i++) {
@@ -287,6 +280,108 @@ void test_api_parser_adversarial_mutation_corpus()
     platform_deinit(&platform);
 }
 
+// =====================================================================================================================
+// Pinned states are represented solely by evictions. Any in-range transmitted age must be accepted as-is.
+// =====================================================================================================================
+
+constexpr std::uint32_t evictions_pinned = UINT32_MAX - 7U;
+constexpr std::int8_t   lage_max         = 35;
+
+void test_adversarial_gossip_pinned_evictions_accept_in_range_lages()
+{
+    test_platform_t platform{};
+    platform_init(&platform);
+
+    const cy_lane_t    lane    = { .id = 0xDEAD, .ctx = { { 0 } }, .prio = cy_prio_nominal };
+    cy_future_t* const pattern = cy_subscribe(platform.cy, cy_str("test/pin/>"), 64U);
+    TEST_ASSERT_NOT_NULL(pattern);
+
+    auto make_gossip = [](const std::uint64_t hash,
+                          const std::uint32_t evictions,
+                          const std::int8_t   lage,
+                          const cy_str_t      name) -> std::vector<unsigned char> {
+        std::vector<unsigned char> wire(256U, 0U);
+        const std::size_t          size = make_gossip_header(wire.data(), wire.size(), 0U, lage, hash, evictions, name);
+        TEST_ASSERT_TRUE(size > 0U);
+        wire.resize(size);
+        return wire;
+    };
+
+    static const std::array<std::int8_t, 4> accepted_lages = { -1, 0, 5, lage_max };
+    static const std::array<const char*, 4> names          = {
+        "test/pin/minus-one",
+        "test/pin/zero",
+        "test/pin/five",
+        "test/pin/max",
+    };
+
+    for (std::size_t i = 0U; i < accepted_lages.size(); i++) {
+        const char* const   name          = names.at(i);
+        const cy_str_t      wire_name     = cy_str(name);
+        const std::uint64_t hash          = rapidhash(name, std::strlen(name));
+        const std::size_t   errors_before = g_async_error_count;
+        const auto          wire          = make_gossip(hash, evictions_pinned, accepted_lages.at(i), wire_name);
+        dispatch_raw(&platform, wire, lane, nullptr, static_cast<cy_us_t>(1000) + static_cast<cy_us_t>(i));
+        TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_live_count());
+        TEST_ASSERT_EQUAL_size_t(errors_before, g_async_error_count);
+        TEST_ASSERT_NOT_NULL(cy_topic_find_by_hash(platform.cy, hash));
+    }
+
+    cy_future_destroy(pattern);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
+    platform_deinit(&platform);
+}
+
+void test_adversarial_inline_crdt_pinned_accept_in_range_lages()
+{
+    test_platform_t platform{};
+    platform_init(&platform);
+
+    const cy_lane_t    lane = { .id = 0xBEEF, .ctx = { { 0 } }, .prio = cy_prio_nominal };
+    cy_future_t* const sub  = cy_subscribe(platform.cy, cy_str("test/inline#7"), 64U);
+    TEST_ASSERT_NOT_NULL(sub);
+    const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("test/inline"));
+    TEST_ASSERT_NOT_NULL(topic);
+    const cy_subject_reader_t reader = { .subject_id = 7U, .extent = 0U };
+
+    auto make_msg = [topic](const std::uint8_t  type,
+                            const std::uint64_t tag,
+                            const std::int8_t   lage,
+                            const unsigned char payload) -> std::vector<unsigned char> {
+        std::vector<unsigned char> wire(header_bytes + 1U, 0U);
+        make_message_header(wire.data(), type, tag, cy_topic_hash(topic));
+        wire[3]            = static_cast<unsigned char>(lage);
+        wire[4]            = static_cast<unsigned char>((evictions_pinned >> 0U) & 0xFFU);
+        wire[5]            = static_cast<unsigned char>((evictions_pinned >> 8U) & 0xFFU);
+        wire[6]            = static_cast<unsigned char>((evictions_pinned >> 16U) & 0xFFU);
+        wire[7]            = static_cast<unsigned char>((evictions_pinned >> 24U) & 0xFFU);
+        wire[header_bytes] = payload;
+        return wire;
+    };
+
+    static const std::array<std::int8_t, 4>  accepted_lages = { -1, 0, 5, lage_max };
+    static const std::array<std::uint8_t, 4> types          = { 0U, 1U, 0U, 1U };
+
+    for (std::size_t i = 0U; i < accepted_lages.size(); i++) {
+        const std::size_t errors_before = g_async_error_count;
+        const auto        wire          = make_msg(
+          types.at(i), UINT64_C(0x1122334455667700) + i, accepted_lages.at(i), static_cast<unsigned char>(0x40U + i));
+        dispatch_raw(&platform, wire, lane, &reader, static_cast<cy_us_t>(2000) + static_cast<cy_us_t>(i));
+        TEST_ASSERT_TRUE(cy_future_done(sub));
+        const cy_arrival_t arrival = cy_arrival_move(sub);
+        TEST_ASSERT_NOT_NULL(arrival.message.content);
+        unsigned char first = 0U;
+        TEST_ASSERT_EQUAL_size_t(1U, cy_message_read(arrival.message.content, 0U, 1U, &first));
+        TEST_ASSERT_EQUAL_UINT8(static_cast<unsigned char>(0x40U + i), first);
+        cy_message_refcount_dec(arrival.message.content);
+        TEST_ASSERT_EQUAL_size_t(errors_before, g_async_error_count);
+    }
+
+    cy_future_destroy(sub);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
+    platform_deinit(&platform);
+}
+
 } // namespace
 
 extern "C" void setUp()
@@ -301,5 +396,7 @@ int main()
 {
     UNITY_BEGIN();
     RUN_TEST(test_api_parser_adversarial_mutation_corpus);
+    RUN_TEST(test_adversarial_gossip_pinned_evictions_accept_in_range_lages);
+    RUN_TEST(test_adversarial_inline_crdt_pinned_accept_in_range_lages);
     return UNITY_END();
 }

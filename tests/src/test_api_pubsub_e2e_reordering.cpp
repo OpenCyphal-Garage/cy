@@ -25,41 +25,9 @@ constexpr cy_us_t ordered_window_us   = 20'000;
 constexpr cy_us_t default_deadline_us = 300'000;
 constexpr cy_us_t future_wait_us      = 900'000;
 
-struct arrival_sample_t final
-{
-    std::uint32_t publisher_id{ 0U };
-    std::uint64_t app_seq{ 0U };
-};
-
-struct arrival_capture_t final
-{
-    std::vector<arrival_sample_t> samples{};
-    std::size_t                   malformed{ 0U };
-};
-
-extern "C" void on_arrival_capture(cy_future_t* const sub)
-{
-    const cy_arrival_t arrival = cy_arrival_move(sub);
-    if (arrival.message.content == nullptr) {
-        return;
-    }
-
-    auto* const capture = static_cast<arrival_capture_t*>(cy_future_context(sub).ptr[0]);
-    TEST_ASSERT_NOT_NULL(capture);
-
-    std::array<unsigned char, 32> bytes{};
-    const std::size_t             size = cy_message_read(arrival.message.content, 0U, bytes.size(), bytes.data());
-
-    e2e::app_payload_t payload{};
-    if (!e2e::app_payload_unpack(bytes.data(), size, payload)) {
-        capture->malformed++;
-        cy_message_refcount_dec(arrival.message.content);
-        return;
-    }
-
-    capture->samples.push_back(arrival_sample_t{ .publisher_id = payload.publisher_id, .app_seq = payload.sequence });
-    cy_message_refcount_dec(arrival.message.content);
-}
+using e2e::arrival_capture_t;
+using e2e::arrival_sample_t;
+using e2e::on_arrival_capture;
 
 bool is_rel_a_to_b(const e2e::frame_info_t& frame)
 {
@@ -132,7 +100,7 @@ std::vector<std::uint64_t> sequences_for(const arrival_capture_t& capture, const
     std::vector<std::uint64_t> out{};
     for (const arrival_sample_t& sample : capture.samples) {
         if (sample.publisher_id == pub_id) {
-            out.push_back(sample.app_seq);
+            out.push_back(sample.sequence);
         }
     }
     return out;
@@ -175,10 +143,10 @@ void assert_ordered_strictly_increasing(const arrival_capture_t& capture, const 
             continue;
         }
         if (has_last) {
-            TEST_ASSERT_TRUE(sample.app_seq > last);
+            TEST_ASSERT_TRUE(sample.sequence > last);
         }
         has_last = true;
-        last     = sample.app_seq;
+        last     = sample.sequence;
     }
 }
 
@@ -198,7 +166,7 @@ void test_api_pubsub_e2e_c01_ack_loss_retransmit_duplicate_rejected_unordered()
 
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xC01U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xC01U));
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
@@ -257,7 +225,7 @@ void test_api_pubsub_e2e_c02_ack_loss_retransmit_duplicate_rejected_ordered()
 
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xC02U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xC02U));
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
@@ -340,7 +308,7 @@ void test_api_pubsub_e2e_c03_retransmit_overtakes_newer_message_unordered_unique
 
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xC03U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xC03U));
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
@@ -432,7 +400,7 @@ void test_api_pubsub_e2e_c04_retransmit_overtakes_newer_message_ordered_restored
 
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xC04U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xC04U));
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
@@ -502,7 +470,7 @@ void test_api_pubsub_e2e_c05_ordered_gap_timeout_flush()
 
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xC05U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xC05U));
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
@@ -571,7 +539,7 @@ void test_api_pubsub_e2e_c06_late_older_frame_after_timeout_rejected()
 
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xC06U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xC06U));
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
@@ -634,7 +602,7 @@ void test_api_pubsub_e2e_c07_ordered_buffer_capacity_stress_large_jump_backfill(
 
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xC07U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xC07U));
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
@@ -723,7 +691,7 @@ void test_api_pubsub_e2e_c08_high_jitter_moderate_loss_ordered_monotonicity()
 
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xC08U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xC08U));
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
@@ -800,7 +768,7 @@ void test_api_pubsub_e2e_c09_high_jitter_moderate_loss_unordered_completeness()
 
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xC09U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xC09U));
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
@@ -868,7 +836,7 @@ void test_api_pubsub_e2e_c10_reordering_window_boundary_behavior()
 
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK,
-                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_17bit), 0xC10U));
+                          e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), 0xC10U));
     e2e::sim_net_faults_set(net, &faults);
     cy_us_t now = 0;
 
