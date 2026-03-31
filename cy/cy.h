@@ -552,7 +552,6 @@ void cy_async_error_handler_set(cy_t* const cy, const cy_async_error_handler_t h
 /// See cy_name_... for name resolution details. The provided names will be validated and normalized.
 /// The home should be unique in the network; one way to ensure this is to default it to the node's unique ID.
 /// The returned strings are NUL-terminated. The lifetime is bound to the Cy instance.
-/// Mutators fail if the supplied string is invalid.
 /// The default home and namespace are empty. They should not be changed after the first topic is created.
 cy_str_t cy_home(const cy_t* const cy);
 cy_str_t cy_namespace(const cy_t* const cy);
@@ -655,6 +654,7 @@ extern const char cy_name_pin_prefix; ///< `#` -- followed by decimal digits spe
 /// The output string length may exceed CY_TOPIC_NAME_MAX if allowed by dest_size (allows for the pinning suffix).
 /// On failure, the output string has length SIZE_MAX and NULL data pointer.
 /// The destination is not NUL-terminated.
+/// Exact in-place use is supported: dest may equal left.str or right.str. Other overlap modes not supported.
 cy_str_t cy_name_join(const cy_str_t left, const cy_str_t right, const size_t dest_size, char* const dest);
 
 /// Constructs the full normalized name as exchanged over the wire prior to remapping: homeful names are expanded,
@@ -685,6 +685,7 @@ cy_str_t cy_name_join(const cy_str_t left, const cy_str_t right, const size_t de
 ///
 /// The dest points to a buffer at least dest_size bytes long. On failure, the output string has length SIZE_MAX
 /// and NULL data pointer. The destination is not NUL-terminated.
+/// Destination must not overlap with any of the input strings.
 ///
 /// TODO: add remapping set.
 cy_resolved_t cy_name_resolve(const cy_str_t name,

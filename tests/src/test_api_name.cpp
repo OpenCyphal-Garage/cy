@@ -6,6 +6,20 @@
 
 namespace {
 
+void assert_string(const cy_str_t str, const char* const expected)
+{
+    TEST_ASSERT_NOT_NULL(str.str);
+    TEST_ASSERT_EQUAL_size_t(std::strlen(expected), str.len);
+    TEST_ASSERT_EQUAL_STRING_LEN(expected, str.str, str.len);
+}
+
+void assert_resolved(const cy_resolved_t r, const char* const expected, const uint16_t pin, const bool verbatim)
+{
+    assert_string(r.name, expected);
+    TEST_ASSERT_EQUAL_UINT16(pin, r.pin);
+    TEST_ASSERT_EQUAL(verbatim, r.verbatim);
+}
+
 // =====================================================================================================================
 //                                              cy_name_join
 // =====================================================================================================================
@@ -157,6 +171,77 @@ void test_name_join_hash_char_preserved()
     const cy_str_t result = cy_name_join(cy_str("ns1#456"), cy_str("foo"), buf.size(), buf.data());
     TEST_ASSERT_EQUAL_size_t(11, result.len);
     TEST_ASSERT_EQUAL_STRING_LEN("ns1#456/foo", result.str, result.len);
+}
+
+void test_name_join_empty_null_inputs()
+{
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    const cy_str_t                          empty  = { 0U, nullptr };
+    cy_str_t                                result = cy_name_join(empty, cy_str("bar"), buf.size(), buf.data());
+    assert_string(result, "bar");
+
+    result = cy_name_join(cy_str("foo"), empty, buf.size(), buf.data());
+    assert_string(result, "foo");
+
+    result = cy_name_join(empty, empty, buf.size(), buf.data());
+    TEST_ASSERT_NOT_NULL(result.str);
+    TEST_ASSERT_EQUAL_size_t(0U, result.len);
+}
+
+void test_name_join_overlap_left_exact_alias()
+{
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    std::memcpy(buf.data(), "foo", 3U);
+    const cy_str_t left   = { 3U, buf.data() };
+    const cy_str_t result = cy_name_join(left, cy_str("bar"), buf.size(), buf.data());
+    assert_string(result, "foo/bar");
+}
+
+void test_name_join_overlap_right_exact_alias()
+{
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    std::memcpy(buf.data(), "bar", 3U);
+    const cy_str_t right  = { 3U, buf.data() };
+    const cy_str_t result = cy_name_join(cy_str("foo"), right, buf.size(), buf.data());
+    assert_string(result, "foo/bar");
+}
+
+void test_name_join_overlap_left_exact_alias_normalized()
+{
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    std::memcpy(buf.data(), "foo////", 7U);
+    const cy_str_t left   = { 7U, buf.data() };
+    const cy_str_t result = cy_name_join(left, cy_str("bar"), buf.size(), buf.data());
+    assert_string(result, "foo/bar");
+}
+
+void test_name_join_overlap_right_exact_alias_normalized()
+{
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    std::memcpy(buf.data(), "/////////a", 10U);
+    const cy_str_t right  = { 10U, buf.data() };
+    const cy_str_t result = cy_name_join(cy_str("b"), right, buf.size(), buf.data());
+    assert_string(result, "b/a");
+}
+
+void test_name_join_overlap_left_exact_alias_empty_right()
+{
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    std::memcpy(buf.data(), "foo", 3U);
+    const cy_str_t left   = { 3U, buf.data() };
+    const cy_str_t empty  = { 0U, nullptr };
+    const cy_str_t result = cy_name_join(left, empty, buf.size(), buf.data());
+    assert_string(result, "foo");
+}
+
+void test_name_join_overlap_right_exact_alias_empty_left()
+{
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    std::memcpy(buf.data(), "bar", 3U);
+    const cy_str_t empty  = { 0U, nullptr };
+    const cy_str_t right  = { 3U, buf.data() };
+    const cy_str_t result = cy_name_join(empty, right, buf.size(), buf.data());
+    assert_string(result, "bar");
 }
 
 // =====================================================================================================================
@@ -530,6 +615,40 @@ void test_name_resolve_null_dest()
     TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, r.pin);
 }
 
+void test_name_resolve_accepts_empty_null_namespace_and_home()
+{
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    const cy_str_t                          empty = { 0U, nullptr };
+    const cy_resolved_t                     r = cy_name_resolve(cy_str("foo"), empty, empty, buf.size(), buf.data());
+    assert_resolved(r, "foo", UINT16_MAX, true);
+}
+
+void test_name_resolve_rejects_malformed_name_arguments()
+{
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    const cy_str_t                          malformed = { 1U, nullptr };
+    cy_resolved_t r = cy_name_resolve(malformed, cy_str("ns"), cy_str("me"), buf.size(), buf.data());
+    TEST_ASSERT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, r.name.len);
+
+    r = cy_name_resolve(cy_str("foo"), malformed, cy_str("me"), buf.size(), buf.data());
+    TEST_ASSERT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, r.name.len);
+
+    r = cy_name_resolve(cy_str("foo"), cy_str("ns"), malformed, buf.size(), buf.data());
+    TEST_ASSERT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, r.name.len);
+}
+
+void test_name_resolve_empty_null_name_is_empty_and_invalid()
+{
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    const cy_str_t                          empty = { 0U, nullptr };
+    const cy_resolved_t                     r = cy_name_resolve(empty, cy_str(""), cy_str(""), buf.size(), buf.data());
+    TEST_ASSERT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, r.name.len);
+}
+
 void test_name_resolve_buffer_too_small()
 {
     std::array<char, 3> buf{};
@@ -548,6 +667,60 @@ void test_name_resolve_homeful_namespace_expand_fails()
     TEST_ASSERT_EQUAL_size_t(SIZE_MAX, r.name.len);
     TEST_ASSERT_NULL(r.name.str);
     TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, r.pin);
+}
+
+void test_name_resolve_absolute_ignores_invalid_namespace_and_home()
+{
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    const cy_resolved_t                     r =
+      cy_name_resolve(cy_str("/foo"), cy_str("bad ns"), cy_str("bad home"), buf.size(), buf.data());
+    assert_resolved(r, "foo", UINT16_MAX, true);
+}
+
+void test_name_resolve_homeful_name_ignores_invalid_namespace()
+{
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    const cy_resolved_t r = cy_name_resolve(cy_str("~/foo"), cy_str("bad ns"), cy_str("me"), buf.size(), buf.data());
+    assert_resolved(r, "me/foo", UINT16_MAX, true);
+}
+
+void test_name_resolve_relative_non_homeful_ignores_invalid_home()
+{
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    const cy_resolved_t r = cy_name_resolve(cy_str("foo"), cy_str("ns"), cy_str("bad home"), buf.size(), buf.data());
+    assert_resolved(r, "ns/foo", UINT16_MAX, true);
+}
+
+void test_name_resolve_relative_non_homeful_rejects_invalid_namespace()
+{
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    const cy_resolved_t r = cy_name_resolve(cy_str("foo"), cy_str("bad ns"), cy_str("me"), buf.size(), buf.data());
+    TEST_ASSERT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, r.name.len);
+}
+
+void test_name_resolve_homeful_name_rejects_invalid_home()
+{
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    const cy_resolved_t r = cy_name_resolve(cy_str("~/foo"), cy_str("ns"), cy_str("bad home"), buf.size(), buf.data());
+    TEST_ASSERT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, r.name.len);
+}
+
+void test_name_resolve_homeful_namespace_rejects_invalid_home()
+{
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    const cy_resolved_t r = cy_name_resolve(cy_str("foo"), cy_str("~/ns"), cy_str("bad home"), buf.size(), buf.data());
+    TEST_ASSERT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, r.name.len);
+}
+
+void test_name_resolve_homeful_namespace_rejects_invalid_namespace_tail()
+{
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    const cy_resolved_t r = cy_name_resolve(cy_str("foo"), cy_str("~/bad ns"), cy_str("me"), buf.size(), buf.data());
+    TEST_ASSERT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, r.name.len);
 }
 
 void test_name_resolve_exceeds_topic_name_max()
@@ -1137,9 +1310,7 @@ void test_name_join_sep_overflow_after_left()
 
 void test_name_resolve_non_homeful_passthrough()
 {
-    // Exercise the non-homeful, non-absolute name resolution path (relative names go through cy_name_join).
-    // A relative name with namespace exercises name_resolve_construct -> cy_name_join.
-    // An absolute name exercises name_resolve_construct -> name_normalize directly (no home expansion).
+    // Exercise the relative non-homeful namespace branch and the absolute branch end-to-end.
     std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
     const cy_resolved_t r = cy_name_resolve(cy_str("foo/bar"), cy_str("ns"), cy_str("me"), buf.size(), buf.data());
     TEST_ASSERT_NOT_NULL(r.name.str);
@@ -1183,7 +1354,7 @@ void test_name_join_left_one_short_of_buffer()
     TEST_ASSERT_NULL(result.str);
 }
 
-/// cy_name_resolve with NULL dest pointer -- covers the dest==NULL guard in name_resolve_construct.
+/// cy_name_resolve with NULL dest pointer -- covers the public API argument validation.
 void test_name_resolve_null_dest_ptr()
 {
     const cy_resolved_t r = cy_name_resolve(cy_str("foo"), cy_str("ns"), cy_str("me"), 100, nullptr);
@@ -1191,10 +1362,8 @@ void test_name_resolve_null_dest_ptr()
     TEST_ASSERT_NULL(r.name.str);
 }
 
-/// cy_name_resolve with a homeful namespace that is expanded via name_expand_home.
+/// cy_name_resolve with a homeful namespace.
 /// The namespace is "~", which expands to home "me". Then the name "bar" is joined: "me/bar".
-/// This covers the name_expand_home path (line 4995 for non-homeful passthrough is unreachable,
-/// but this exercises the homeful expansion path end-to-end).
 void test_name_resolve_homeful_namespace_expanded()
 {
     std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
@@ -1202,6 +1371,19 @@ void test_name_resolve_homeful_namespace_expanded()
     TEST_ASSERT_NOT_NULL(r.name.str);
     TEST_ASSERT_EQUAL_size_t(6, r.name.len);
     TEST_ASSERT_EQUAL_STRING_LEN("me/bar", r.name.str, r.name.len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, r.pin);
+    TEST_ASSERT_TRUE(r.verbatim);
+}
+
+/// cy_name_resolve with a homeful namespace and an empty relative name.
+/// This exercises the second cy_name_join() in the homeful-namespace branch with an empty right part.
+void test_name_resolve_homeful_namespace_empty_name()
+{
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    const cy_resolved_t r = cy_name_resolve(cy_str(""), cy_str("~/ns"), cy_str("me"), buf.size(), buf.data());
+    TEST_ASSERT_NOT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_size_t(5U, r.name.len);
+    TEST_ASSERT_EQUAL_STRING_LEN("me/ns", r.name.str, r.name.len);
     TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, r.pin);
     TEST_ASSERT_TRUE(r.verbatim);
 }
@@ -1274,6 +1456,13 @@ int main()
     RUN_TEST(test_name_join_null_right_str);
     RUN_TEST(test_name_join_right_buffer_overflow);
     RUN_TEST(test_name_join_hash_char_preserved);
+    RUN_TEST(test_name_join_empty_null_inputs);
+    RUN_TEST(test_name_join_overlap_left_exact_alias);
+    RUN_TEST(test_name_join_overlap_right_exact_alias);
+    RUN_TEST(test_name_join_overlap_left_exact_alias_normalized);
+    RUN_TEST(test_name_join_overlap_right_exact_alias_normalized);
+    RUN_TEST(test_name_join_overlap_left_exact_alias_empty_right);
+    RUN_TEST(test_name_join_overlap_right_exact_alias_empty_left);
     RUN_TEST(test_name_join_left_one_short_of_buffer);
     RUN_TEST(test_name_join_zero_dest_size);
     RUN_TEST(test_name_join_buffer_size_one);
@@ -1309,8 +1498,18 @@ int main()
 
     // cy_name_resolve -- error handling
     RUN_TEST(test_name_resolve_null_dest);
+    RUN_TEST(test_name_resolve_accepts_empty_null_namespace_and_home);
+    RUN_TEST(test_name_resolve_rejects_malformed_name_arguments);
+    RUN_TEST(test_name_resolve_empty_null_name_is_empty_and_invalid);
     RUN_TEST(test_name_resolve_buffer_too_small);
     RUN_TEST(test_name_resolve_homeful_namespace_expand_fails);
+    RUN_TEST(test_name_resolve_absolute_ignores_invalid_namespace_and_home);
+    RUN_TEST(test_name_resolve_homeful_name_ignores_invalid_namespace);
+    RUN_TEST(test_name_resolve_relative_non_homeful_ignores_invalid_home);
+    RUN_TEST(test_name_resolve_relative_non_homeful_rejects_invalid_namespace);
+    RUN_TEST(test_name_resolve_homeful_name_rejects_invalid_home);
+    RUN_TEST(test_name_resolve_homeful_namespace_rejects_invalid_home);
+    RUN_TEST(test_name_resolve_homeful_namespace_rejects_invalid_namespace_tail);
     RUN_TEST(test_name_resolve_exceeds_topic_name_max);
     RUN_TEST(test_name_resolve_exactly_at_topic_name_max);
     RUN_TEST(test_name_resolve_invalid_char);
@@ -1364,6 +1563,7 @@ int main()
     // Additional resolve tests
     RUN_TEST(test_name_resolve_null_dest_ptr);
     RUN_TEST(test_name_resolve_homeful_namespace_expanded);
+    RUN_TEST(test_name_resolve_homeful_namespace_empty_name);
 
     // Constants
     RUN_TEST(test_name_constants);

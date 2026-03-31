@@ -353,7 +353,7 @@ That's it! See the `examples/` folder for more complete examples, and read the A
 
 By default, the CRDT allocation protocol will ensure that each topic gets a dedicated subject-ID.
 Some deployments, in particular hard real-time/safety-critical ones,
-may want to avoid dependency on automatic allocation and instead assign some of the topics to subjects manually.
+may want to avoid dependency on automatic allocation and instead assign (some of) the topics to subjects manually.
 Such topics are called *pinned topics*.
 
 A pinned topic has the desired subject-ID encoded as a decimal number at the end of its name following a `#` character;

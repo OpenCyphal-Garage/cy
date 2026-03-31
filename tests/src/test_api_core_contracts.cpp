@@ -466,6 +466,11 @@ void test_api_core_home_namespace_contracts()
     TEST_ASSERT_EQUAL_size_t(5U, home.len);
     TEST_ASSERT_EQUAL_MEMORY("~/bad", home.str, home.len);
 
+    const cy_str_t empty = { 0U, nullptr };
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_home_set(platform.cy, empty));
+    home = cy_home(platform.cy);
+    TEST_ASSERT_EQUAL_size_t(0U, home.len);
+
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_namespace_set(platform.cy, cy_str("ns//a")));
     ns = cy_namespace(platform.cy);
     TEST_ASSERT_EQUAL_size_t(4U, ns.len);
@@ -475,6 +480,10 @@ void test_api_core_home_namespace_contracts()
     ns = cy_namespace(platform.cy);
     TEST_ASSERT_EQUAL_size_t(4U, ns.len);
     TEST_ASSERT_EQUAL_MEMORY("ns/a", ns.str, ns.len);
+
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_namespace_set(platform.cy, empty));
+    ns = cy_namespace(platform.cy);
+    TEST_ASSERT_EQUAL_size_t(0U, ns.len);
 
     TEST_ASSERT_EQUAL_INT(CY_ERR_ARGUMENT, cy_home_set(nullptr, cy_str("x")));
     TEST_ASSERT_EQUAL_INT(CY_ERR_ARGUMENT, cy_namespace_set(nullptr, cy_str("x")));

@@ -4828,11 +4828,20 @@ const char cy_name_pin_prefix = '#';
 // Accepts all printable ASCII chars except SPACE.
 static bool is_valid_char(const char c) { return (c >= 33) && (c <= 126); }
 
+static bool str_valid(const cy_str_t str) { return (str.str != NULL) || (str.len == 0U); }
+
+static cy_str_t str_skip(const cy_str_t s, const size_t k)
+{
+    assert(str_valid(s) && (k <= s.len));
+    return (cy_str_t){ .len = s.len - k, .str = &s.str[k] };
+}
+
 // Parses and strips the valid pin expression at the end, if any. Returns the shortened string.
 // out_pin is set to the pin value, or UINT16_MAX if no valid pin expression is found.
 // Example: `foo#123` => `foo`, out_pin=123; `foo#0` => `foo`, out_pin=0; `foo#01` => unchanged (leading zero).
 static cy_str_t name_consume_pin_suffix(const cy_str_t name, uint16_t* const out_pin)
 {
+    assert((out_pin != NULL) && str_valid(name));
     *out_pin = UINT16_MAX;
     // Scan right-to-left: find '#' preceded only by decimal digits.
     size_t hash_pos = name.len;
@@ -4901,86 +4910,101 @@ static bool name_is_verbatim(const cy_str_t name)
     return !wkv_has_substitution_tokens(&kv, name);
 }
 
-static bool name_is_homeful(const cy_str_t name)
+static bool name_is_homeful(const cy_str_t n)
 {
-    return (name.len >= 1) && (name.str[0] == cy_name_home) && ((name.len == 1) || (name.str[1] == cy_name_sep));
+    return (n.str != NULL) && (n.len >= 1) && (n.str[0] == cy_name_home) && ((n.len == 1) || (n.str[1] == cy_name_sep));
 }
 
-static bool name_is_absolute(const cy_str_t name) { return (name.len >= 1) && (name.str[0] == cy_name_sep); }
+static bool name_is_absolute(const cy_str_t n) { return (n.str != NULL) && (n.len >= 1) && (n.str[0] == cy_name_sep); }
 
-// Writes the normalized and validated version of `name` into `dest`, which must be at least `dest_size` bytes long.
-// Normalization at least removes duplicate, leading, and trailing name separators.
-// The input string length must not include NUL terminator; the output string is also not NUL-terminated.
-// In case of failure, the destination buffer may be partially written.
-static cy_str_t name_normalize(const size_t in_size, const char* in, const size_t dest_size, char* const dest)
+// Returns the length of the normalized string, or SIZE_MAX if the input contains invalid characters.
+static size_t name_normalized_len(const cy_str_t name)
 {
-    if ((in == NULL) || (dest == NULL)) {
-        return str_invalid;
-    }
-    const char* const in_end      = in + in_size;
-    char*             out         = dest;
-    const char* const out_end     = dest + dest_size;
-    bool              pending_sep = false;
-    while (in < in_end) {
-        const char c = *in++;
+    assert(str_valid(name));
+    size_t out_len     = 0U;
+    bool   pending_sep = false;
+    for (size_t i = 0; i < name.len; i++) {
+        const char c = name.str[i];
         if (!is_valid_char(c)) {
-            return str_invalid;
+            return SIZE_MAX;
         }
+        if (c == cy_name_sep) {
+            pending_sep = out_len > 0U; // skip duplicate and leading separators
+            continue;
+        }
+        if (pending_sep) {
+            pending_sep = false;
+            out_len++;
+        }
+        out_len++;
+    }
+    return out_len;
+}
+
+static void name_copy_normalized_forward(const cy_str_t name, char* const dest)
+{
+    assert(str_valid(name) && (dest != NULL));
+    char* out         = dest;
+    bool  pending_sep = false;
+    for (size_t i = 0; i < name.len; i++) {
+        const char c = name.str[i];
+        assert(is_valid_char(c));
         if (c == cy_name_sep) {
             pending_sep = out > dest; // skip duplicate and leading separators
             continue;
         }
         if (pending_sep) {
+            *out++      = cy_name_sep;
             pending_sep = false;
-            if (out < out_end) {
-                *out++ = cy_name_sep;
-            }
-        }
-        if (out >= out_end) {
-            return str_invalid;
         }
         *out++ = c;
     }
-    assert(out <= out_end);
-    return (cy_str_t){ .len = (size_t)(out - dest), .str = dest };
 }
 
-static cy_str_t name_expand_home(cy_str_t name, const cy_str_t home, const size_t dest_size, char* const dest)
+// Exact in-place normalization is supported; arbitrary partial overlap is not guaranteed.
+static cy_str_t name_normalize(const size_t in_size, const char* in, const size_t dest_size, char* const dest)
 {
-    if (dest == NULL) {
+    assert(((in != NULL) || (in_size == 0U)) && (dest != NULL));
+    const cy_str_t part = { .len = in_size, .str = in };
+    const size_t   len  = name_normalized_len(part);
+    if ((len == SIZE_MAX) || (len > dest_size)) {
         return str_invalid;
     }
-    if (!name_is_homeful(name)) {
-        return name_normalize(name.len, name.str, dest_size, dest);
-    }
-    assert(name.len >= 1);
-    name.len -= 1U;
-    name.str += 1;
-    return cy_name_join(home, name, dest_size, dest);
+    name_copy_normalized_forward(part, dest);
+    return (cy_str_t){ .len = len, .str = dest };
 }
 
 cy_str_t cy_name_join(const cy_str_t left, const cy_str_t right, const size_t dest_size, char* const dest)
 {
-    if (dest == NULL) {
+    if ((dest == NULL) || !str_valid(left) || !str_valid(right)) {
         return str_invalid;
     }
-    size_t len = name_normalize(left.len, left.str, dest_size, dest).len;
-    if (len >= dest_size) {
+    const size_t left_len = name_normalized_len(left);
+    if ((left_len == SIZE_MAX) || (left_len >= dest_size)) {
         return str_invalid;
     }
-    assert(len < dest_size);
-    if (len > 0) {
-        assert((len + 1) <= dest_size); // Provably true: len > 0 ∧ len < dest_size ⇒ len + 1 ≤ dest_size.
-        dest[len++] = cy_name_sep;
-    }
-    const size_t right_len = name_normalize(right.len, right.str, dest_size - len, &dest[len]).len;
-    if (right_len > (dest_size - len)) {
+    const size_t reserved  = left_len + ((left_len > 0U) ? 1U : 0U);
+    const size_t right_len = name_normalized_len(right);
+    if ((right_len == SIZE_MAX) || (right_len > (dest_size - reserved))) {
         return str_invalid;
     }
-    if ((right_len == 0) && (len > 0)) {
-        len--;
+    const size_t sep_len       = ((left_len > 0U) && (right_len > 0U)) ? 1U : 0U;
+    const size_t right_offset  = left_len + sep_len;
+    const size_t joined_length = right_offset + right_len;
+    if ((right.str == dest) && (right_len > 0U)) {
+        name_copy_normalized_forward(right, dest);
+        memmove(&dest[right_offset], dest, right_len);
     }
-    return (cy_str_t){ .len = len + right_len, .str = dest };
+    if (left_len > 0U) {
+        name_copy_normalized_forward(left, dest);
+    }
+    if (sep_len > 0U) {
+        dest[left_len] = cy_name_sep;
+    }
+    if ((right_len > 0U) && (right.str != dest)) {
+        name_copy_normalized_forward(right, &dest[right_offset]);
+    }
+    return (cy_str_t){ .len = joined_length, .str = dest };
 }
 
 static cy_str_t name_resolve_construct(const cy_str_t name,
@@ -4989,20 +5013,15 @@ static cy_str_t name_resolve_construct(const cy_str_t name,
                                        const size_t   dest_size,
                                        char*          dest)
 {
-    if (dest == NULL) {
-        return str_invalid;
-    }
+    assert(str_valid(name) && str_valid(name_space) && str_valid(home) && (dest != NULL));
     if (name_is_absolute(name)) {
         return name_normalize(name.len, name.str, dest_size, dest);
     }
     if (name_is_homeful(name)) {
-        return name_expand_home(name, home, dest_size, dest);
+        return cy_name_join(home, str_skip(name, 1), dest_size, dest);
     }
     if (name_is_homeful(name_space)) {
-        name_space = name_expand_home(name_space, home, dest_size, dest);
-        if (name_space.len >= dest_size) {
-            return str_invalid;
-        }
+        name_space = cy_name_join(home, str_skip(name_space, 1), dest_size, dest);
     }
     return cy_name_join(name_space, name, dest_size, dest);
 }
@@ -5013,6 +5032,9 @@ cy_resolved_t cy_name_resolve(const cy_str_t name,
                               const size_t   dest_size,
                               char* const    dest)
 {
+    if ((dest == NULL) || !str_valid(name) || !str_valid(name_space) || !str_valid(home)) {
+        return (cy_resolved_t){ .name = str_invalid, .pin = UINT16_MAX };
+    }
     uint16_t pin = UINT16_MAX;
     // Strip the pin first to ensure the fully resolved name fits into the size limit.
     const cy_str_t res = name_resolve_construct(name_consume_pin_suffix(name, &pin), //
