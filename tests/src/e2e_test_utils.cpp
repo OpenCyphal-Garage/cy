@@ -1,7 +1,6 @@
 #include "e2e_test_utils.hpp"
 #include "message.h"
 #include <array>
-#include <cassert>
 #include <cstdint>
 #include <unity.h>
 
@@ -68,7 +67,7 @@ void assert_no_async_errors(const sim_net_t& net) { TEST_ASSERT_EQUAL_size_t(0U,
 
 void assert_node_heap_clean(const sim_net_t& net, const std::size_t node_index)
 {
-    assert(node_index < sim_net_node_count(net));
+    TEST_ASSERT_TRUE(node_index < sim_net_node_count(net));
     TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&sim_net_core_heap(net, node_index)));
     TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&sim_net_core_heap(net, node_index)));
     TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&sim_net_message_heap(net, node_index)));

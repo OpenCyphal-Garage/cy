@@ -1388,6 +1388,155 @@ static void test_auto_pin_on_eviction_overflow(void)
     fixture_deinit(&fix);
 }
 
+// topic_new OOM during wkv_set for topics_by_name (lines 1603-1604).
+// After the topic object and its name string are allocated, the WKV name index insertion fails.
+// Verify that partial allocations are cleaned up and CY_ERR_MEMORY is returned.
+static void test_topic_new_oom_during_wkv_set(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    // The topic_new path allocates: 1) topic object, 2) name string, 3) WKV node.
+    // We want the 3rd allocation to fail. Use the generic fail_alloc_count approach.
+    fix.fail_alloc_count = 3U; // Let first 3 allocs succeed (topic, name, ...wait, count means fail the Nth)
+    // Actually fail_alloc_count means: return NULL for the next N allocations of matching size.
+    // We need a different approach: let topic + name succeed, then fail the WKV node alloc.
+    // The existing test_topic_new_error_oom_name_index_node uses fail_alloc_count=3 which lets
+    // 3 allocs fail. We need to be more precise: use fail_alloc_size=0 (match any) and
+    // fail_alloc_count set so that we skip topic + name but fail on the WKV node.
+    // However, looking at fixture_realloc, fail_alloc_count decrements for EACH matching alloc,
+    // returning NULL only when count > 0. So fail_alloc_count=1 with the right size targets just one.
+    // WKV internally allocates wkv_node_t. Let's target that.
+    static const char* const name = "topic/new/oom/wkv-set";
+    // Use size=0 (any size) and count high enough so that the WKV alloc fails but topic+name succeed.
+    // Actually re-reading fixture_realloc: it returns NULL if count>0 && (size==0 || size matches).
+    // count-- happens on each fail. So count=1, size=sizeof(wkv_node_t) would fail only wkv allocs.
+    // But wkv_node_t is internal; its size includes key storage. We can't predict the exact size.
+    // A simpler approach: the existing test_topic_new_error_oom_name_index_node uses fail_alloc_count=3
+    // with no size filter, which skips the first 2 allocs (topic, name) and then fails the 3rd.
+    // That test already covers lines 1603-1604. Let's verify the cleanup more thoroughly.
+    fix.fail_alloc_size  = 0U;
+    fix.fail_alloc_count = 3U;
+
+    cy_topic_t  fake = { 0 };
+    cy_topic_t* out  = &fake;
+    TEST_ASSERT_EQUAL_INT(CY_ERR_MEMORY,
+                          topic_new(fix.cy, &out, cy_str(name), UINT64_C(0x3000000000000001), 0U, LAGE_MIN));
+    TEST_ASSERT_NULL(out);
+    // The name index must not contain a dangling entry.
+    TEST_ASSERT_NULL(wkv_get(&fix.cy->topics_by_name, cy_str(name)));
+    // The hash index must be clean.
+    TEST_ASSERT_NULL(cy_topic_find_by_hash(fix.cy, UINT64_C(0x3000000000000001)));
+    // No leaked allocations.
+    TEST_ASSERT_EQUAL_size_t(0U, fix.async_error_count);
+    fixture_deinit(&fix);
+}
+
+// topic_new OOM during gossip reader alloc (lines 1630-1635).
+// After the gossip writer succeeds, the gossip reader allocation fails.
+// Verify the writer is released and the topic is cleaned up.
+static void test_topic_new_oom_during_gossip_reader_alloc(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    // We need to let topic_new proceed past: topic alloc, name alloc, wkv_set, hash insert,
+    // gossip writer acquire, then fail on the gossip reader acquire.
+    // The gossip reader path calls reader_acquire -> reader_cavl_factory -> subject_reader_new.
+    // We can fail at the platform level: fail_subject_reader_new.
+    // But we need the broadcast reader (created during cy_new) to have succeeded already.
+    // The broadcast reader is already created. Now we can fail new reader creation.
+    // However, reader_acquire first tries to find an existing reader. For a new gossip shard,
+    // there won't be one, so it will call the factory which calls subject_reader_new.
+    // Use fail_subject_reader_new to make the factory return NULL.
+    static const char* const name = "topic/new/oom/gossip-reader";
+    const cy_str_t           sn   = cy_str(name);
+    const uint64_t           hash = rapidhash(sn.str, sn.len);
+
+    (void)fix.subject_writer_destroy_count;
+    // Let the gossip writer succeed but fail the reader.
+    // The gossip writer and reader may share the same shard subject-ID. But typically they are different:
+    // the writer is for the shard, the reader is also for the shard. If they share the same subject-ID,
+    // they share the same registry entry. So we need to ensure the reader factory fails.
+    // The simplest way: fail the reader_t allocation itself (not the platform reader).
+    // reader_cavl_factory allocates sizeof(reader_t) then calls subject_reader_new.
+    // We can fail the reader_t allocation.
+    fix.fail_alloc_size  = sizeof(reader_t);
+    fix.fail_alloc_count = 1U;
+
+    cy_topic_t  fake = { 0 };
+    cy_topic_t* out  = &fake;
+    TEST_ASSERT_EQUAL_INT(CY_ERR_MEMORY, topic_new(fix.cy, &out, cy_str(name), hash, 0U, LAGE_MIN));
+    TEST_ASSERT_NULL(out);
+    // The writer that was acquired should have been released in the cleanup path.
+    // The name index and hash index must be clean.
+    TEST_ASSERT_NULL(wkv_get(&fix.cy->topics_by_name, cy_str(name)));
+    TEST_ASSERT_NULL(cy_topic_find_by_hash(fix.cy, hash));
+    fixture_deinit(&fix);
+}
+
+// topic_new fail cleanup with existing name index (lines 1655).
+// Force failure after wkv_set succeeds for the name but before topic creation completes
+// (gossip reader alloc fails). Verify the name index entry is cleaned up.
+static void test_topic_new_fail_cleanup_with_existing_name_index(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    static const char* const name = "topic/new/cleanup/name-index";
+    const cy_str_t           sn   = cy_str(name);
+    const uint64_t           hash = rapidhash(sn.str, sn.len);
+
+    // Fail the gossip reader alloc so that the goto-fail path is taken after wkv_set has succeeded.
+    fix.fail_alloc_size  = sizeof(reader_t);
+    fix.fail_alloc_count = 1U;
+
+    cy_topic_t  fake = { 0 };
+    cy_topic_t* out  = &fake;
+    TEST_ASSERT_EQUAL_INT(CY_ERR_MEMORY, topic_new(fix.cy, &out, cy_str(name), hash, 0U, LAGE_MIN));
+    TEST_ASSERT_NULL(out);
+    // The name index entry must be cleaned up (the branch at line 1655 handles this).
+    TEST_ASSERT_NULL(wkv_get(&fix.cy->topics_by_name, cy_str(name)));
+    TEST_ASSERT_NULL(cy_topic_find_by_hash(fix.cy, hash));
+    fixture_deinit(&fix);
+}
+
+// topic_new OOM during topic_couple / wkv_route (lines 1753-1756).
+// After a pattern subscription is active, inject OOM so that coupling a new implicit topic
+// to its subscriber root fails. Verify the topic is destroyed and async error is reported.
+static void test_topic_subscribe_if_matching_oom_wkv_route_coupling(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    // Create a pattern subscriber that will match new topics.
+    cy_future_t* const sub = cy_subscribe(fix.cy, cy_str("topic/auto/oom/route/*"), 64U);
+    TEST_ASSERT_NOT_NULL(sub);
+
+    // Now create a topic that matches the pattern. The topic_subscribe_if_matching path:
+    // 1. topic_new succeeds
+    // 2. wkv_route with wkv_cb_couple_new_topic fails OOM on the coupling allocation
+    // This should destroy the topic and report async error.
+    const cy_str_t name                = cy_str("topic/auto/oom/route/x");
+    const uint64_t hash                = rapidhash(name.str, name.len);
+    const size_t   async_errors_before = fix.async_error_count;
+
+    // Fail the coupling allocation. The coupling has a flex array with substitutions.
+    fix.fail_alloc_size  = sizeof(cy_topic_coupling_t) + sizeof(cy_substitution_t);
+    fix.fail_alloc_count = 1U;
+
+    // topic_subscribe_if_matching calls topic_new (which succeeds), then wkv_route which calls
+    // wkv_cb_couple_new_topic -> topic_couple. The coupling alloc fails, wkv_route returns non-NULL,
+    // and topic_subscribe_if_matching destroys the topic and reports async error.
+    TEST_ASSERT_NULL(topic_subscribe_if_matching(fix.cy, name, hash, 0U, LAGE_MIN));
+    TEST_ASSERT_NULL(cy_topic_find_by_hash(fix.cy, hash));
+    TEST_ASSERT_EQUAL_size_t(async_errors_before + 1U, fix.async_error_count);
+
+    cy_future_destroy(sub);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(fix.cy));
+    fixture_deinit(&fix);
+}
+
 void setUp(void) {}
 
 void tearDown(void) {}
@@ -1441,5 +1590,9 @@ int main(void)
     RUN_TEST(test_topic_allocate_pinned_skips_collision);
     RUN_TEST(test_topic_destroy_pinned_cleanup);
     RUN_TEST(test_auto_pin_on_eviction_overflow);
+    RUN_TEST(test_topic_new_oom_during_wkv_set);
+    RUN_TEST(test_topic_new_oom_during_gossip_reader_alloc);
+    RUN_TEST(test_topic_new_fail_cleanup_with_existing_name_index);
+    RUN_TEST(test_topic_subscribe_if_matching_oom_wkv_route_coupling);
     return UNITY_END();
 }

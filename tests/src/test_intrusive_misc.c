@@ -74,8 +74,8 @@ static cy_bytes_t build_source(const unsigned char* const payload,
                                const size_t* const        fragment_sizes,
                                cy_bytes_t* const          out_fragments)
 {
-    assert(fragment_count > 0U);
-    assert(out_fragments != NULL);
+    TEST_ASSERT_TRUE(fragment_count > 0U);
+    TEST_ASSERT_NOT_NULL(out_fragments);
     size_t offset = 0U;
     for (size_t i = 0U; i < fragment_count; i++) {
         const size_t frag_size = fragment_sizes[i];
@@ -534,6 +534,64 @@ static void test_internal_helpers_branch_matrix(void)
     TEST_ASSERT_FALSE(is_valid_subject_id_modulus(4U));
 }
 
+static size_t misc_extent_set_count; // NOLINT(*-non-const-global-variables)
+static size_t misc_last_extent;      // NOLINT(*-non-const-global-variables)
+
+static void misc_subject_reader_extent_set(cy_platform_t* const       platform,
+                                           cy_subject_reader_t* const reader,
+                                           const size_t               extent)
+{
+    (void)platform;
+    reader->extent = extent;
+    misc_extent_set_count++;
+    misc_last_extent = extent;
+}
+
+// reader_grow_extent with a larger extent (covers branch at line 923).
+// Tests the path where a new extent is larger than the existing handle's extent.
+static void test_reader_grow_extent_with_larger_extent(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+    fixture.vtable.subject_reader_extent_set = misc_subject_reader_extent_set;
+
+    misc_extent_set_count = 0U;
+    misc_last_extent      = 0U;
+
+    // Manually create a reader_t with a subject_reader_t handle.
+    cy_subject_reader_t handle;
+    memset(&handle, 0, sizeof(handle));
+    handle.subject_id = 42U;
+    handle.extent     = 64U;
+
+    reader_t r;
+    memset(&r, 0, sizeof(r));
+    r.handle   = &handle;
+    r.refcount = 1U;
+
+    // Call with a smaller extent: should be a no-op.
+    reader_grow_extent(&fixture.cy, &r, 32U);
+    TEST_ASSERT_EQUAL_size_t(64U, r.handle->extent);
+    TEST_ASSERT_EQUAL_size_t(0U, misc_extent_set_count);
+
+    // Call with equal extent: should be a no-op.
+    reader_grow_extent(&fixture.cy, &r, 64U);
+    TEST_ASSERT_EQUAL_size_t(64U, r.handle->extent);
+    TEST_ASSERT_EQUAL_size_t(0U, misc_extent_set_count);
+
+    // Call with a larger extent: should trigger the grow path.
+    reader_grow_extent(&fixture.cy, &r, 256U);
+    TEST_ASSERT_EQUAL_size_t(256U, r.handle->extent);
+    TEST_ASSERT_EQUAL_size_t(1U, misc_extent_set_count);
+    TEST_ASSERT_EQUAL_size_t(256U, misc_last_extent);
+
+    // Call with even larger extent: grows again.
+    reader_grow_extent(&fixture.cy, &r, 1024U);
+    TEST_ASSERT_EQUAL_size_t(1024U, r.handle->extent);
+    TEST_ASSERT_EQUAL_size_t(2U, misc_extent_set_count);
+    TEST_ASSERT_EQUAL_size_t(1024U, misc_last_extent);
+}
+
 void setUp(void) {}
 
 void tearDown(void) {}
@@ -557,5 +615,6 @@ int main(void)
     RUN_TEST(test_bitmap_shift_left_branch_matrix);
     RUN_TEST(test_bitmap_shift_right_branch_matrix);
     RUN_TEST(test_internal_helpers_branch_matrix);
+    RUN_TEST(test_reader_grow_extent_with_larger_extent);
     return UNITY_END();
 }

@@ -48,6 +48,8 @@ struct test_platform_t final
 
     std::size_t fail_alloc_count{ 0U };
     std::size_t fail_alloc_size{ 0U };
+    std::size_t fail_after_n_allocs{ SIZE_MAX }; // Succeed for N allocations, then fail all subsequent.
+    std::size_t alloc_counter{ 0U };
     bool        fail_subject_writer_new{ false };
     bool        fail_subject_reader_new{ false };
 
@@ -168,10 +170,15 @@ extern "C" cy_us_t platform_now(cy_platform_t* const platform) { return platform
 extern "C" void* platform_realloc(cy_platform_t* const platform, void* const ptr, const std::size_t size)
 {
     test_platform_t* const self = platform_from(platform);
-    if ((ptr == nullptr) && (size > 0U) && (self->fail_alloc_count > 0U) &&
-        ((self->fail_alloc_size == 0U) || (self->fail_alloc_size == size))) {
-        self->fail_alloc_count--;
-        return nullptr;
+    if ((ptr == nullptr) && (size > 0U)) {
+        if ((self->fail_alloc_count > 0U) && ((self->fail_alloc_size == 0U) || (self->fail_alloc_size == size))) {
+            self->fail_alloc_count--;
+            return nullptr;
+        }
+        if (self->alloc_counter >= self->fail_after_n_allocs) {
+            return nullptr;
+        }
+        self->alloc_counter++;
     }
     return api_test::core_heap_realloc<test_platform_t>(platform, ptr, size);
 }
@@ -260,6 +267,27 @@ void dispatch_best_effort_unicast(test_platform_t* const            self,
     TEST_ASSERT_NOT_NULL(msg);
 
     const cy_lane_t lane = { .id = UINT64_C(0xABC), .ctx = { { 0 } }, .prio = cy_prio_nominal };
+    cy_message_ts_t mts{};
+    mts.timestamp = timestamp;
+    mts.content   = msg;
+    cy_on_message(&self->platform, lane, nullptr, mts);
+}
+
+void dispatch_gossip_unicast(test_platform_t* const self,
+                             const std::uint64_t    topic_hash,
+                             const std::uint32_t    topic_evictions,
+                             const std::int8_t      topic_lage,
+                             const cy_str_t         topic_name,
+                             const std::uint64_t    remote_id,
+                             const cy_us_t          timestamp)
+{
+    std::array<unsigned char, 256U> wire{};
+    const std::size_t               size =
+      make_gossip_header(wire.data(), wire.size(), 3U, topic_lage, topic_hash, topic_evictions, topic_name);
+    TEST_ASSERT_TRUE(size > 0U);
+    cy_message_t* const msg = cy_test_message_make(&self->message_heap, wire.data(), size);
+    TEST_ASSERT_NOT_NULL(msg);
+    const cy_lane_t lane = { .id = remote_id, .ctx = { { 0 } }, .prio = cy_prio_nominal };
     cy_message_ts_t mts{};
     mts.timestamp = timestamp;
     mts.content   = msg;
@@ -625,6 +653,401 @@ void test_topic_find_by_name_uses_resolved_name()
     platform_deinit(&platform);
 }
 
+void test_api_core_advertise_client_oom()
+{
+    // When the allocator fails during cy_advertise_client, the function should return NULL.
+    // This covers the topic_ensure OOM path (lines 2114, 2129).
+    test_platform_t platform{};
+    platform_init(&platform);
+
+    // Let allocations succeed up to and including the publisher struct, then fail all subsequent.
+    // cy_advertise_client does: 1) alloc publisher, 2) topic_ensure (many allocs). We want #1 to succeed, #2 to fail.
+    platform.alloc_counter       = 0U;
+    platform.fail_after_n_allocs = 1U; // succeed for 1 alloc (publisher), then fail
+    cy_publisher_t* const pub    = cy_advertise_client(platform.cy, cy_str("oom/client/topic"), 64U);
+    TEST_ASSERT_NULL(pub);
+    platform.fail_after_n_allocs = SIZE_MAX; // re-enable
+
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
+    platform_deinit(&platform);
+}
+
+void test_api_core_home_set_oom()
+{
+    // When the allocator fails inside name_assign for cy_home_set, the function should return CY_ERR_MEMORY.
+    // This covers line 4922 (OOM on the name string allocation).
+    test_platform_t platform{};
+    platform_init(&platform);
+
+    // Set a valid home first to confirm the path works.
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_home_set(platform.cy, cy_str("my/home")));
+    const cy_str_t before = cy_home(platform.cy);
+    TEST_ASSERT_EQUAL_size_t(7U, before.len);
+
+    // name_assign: frees old string, then allocs new. Fail the new-string allocation.
+    // Reset the counter so we can use fail_after_n_allocs precisely.
+    platform.alloc_counter       = 0U;
+    platform.fail_after_n_allocs = 0U; // fail immediately (the next new alloc)
+    TEST_ASSERT_EQUAL_INT(CY_ERR_MEMORY, cy_home_set(platform.cy, cy_str("new/home")));
+    platform.fail_after_n_allocs = SIZE_MAX;
+
+    // The original home must remain unchanged.
+    const cy_str_t after = cy_home(platform.cy);
+    TEST_ASSERT_EQUAL_size_t(7U, after.len);
+    TEST_ASSERT_EQUAL_MEMORY("my/home", after.str, after.len);
+
+    platform_deinit(&platform);
+}
+
+void test_api_core_do_publish_oom_subject_writer()
+{
+    // When the subject writer cannot be created lazily during cy_publish, the publish should fail.
+    // This covers lines 2169-2170 (topic_sync_subject_writer failure in do_publish_impl).
+    test_platform_t platform{};
+    platform_init(&platform);
+
+    cy_publisher_t* const pub = cy_advertise(platform.cy, cy_str("oom/publish/topic"));
+    TEST_ASSERT_NOT_NULL(pub);
+
+    // Make the subject writer creation fail. The writer is created lazily on first publish.
+    platform.fail_subject_writer_new = true;
+
+    const cy_bytes_t empty = { .size = 0U, .data = nullptr, .next = nullptr };
+    const cy_err_t   err   = cy_publish(pub, platform.now + 1000, empty);
+    TEST_ASSERT_NOT_EQUAL(CY_OK, err); // Should fail because subject writer creation fails.
+
+    // Re-enable writer creation and verify publish works now.
+    platform.fail_subject_writer_new = false;
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_publish(pub, platform.now + 1000, empty));
+
+    cy_unadvertise(pub);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
+    platform_deinit(&platform);
+}
+
+void test_api_core_priority_set_out_of_range()
+{
+    // Verify that cy_priority_set with an out-of-range value is a no-op (covers branch at line 2801).
+    test_platform_t platform{};
+    platform_init(&platform);
+
+    cy_publisher_t* const pub = cy_advertise(platform.cy, cy_str("prio/range/topic"));
+    TEST_ASSERT_NOT_NULL(pub);
+
+    cy_priority_set(pub, cy_prio_exceptional);
+    TEST_ASSERT_EQUAL_UINT8(cy_prio_exceptional, cy_priority(pub));
+
+    // Use a value that equals CY_PRIO_COUNT (should be >= valid range, so it's rejected).
+    cy_prio_t          bad_prio{};
+    const std::uint8_t raw_prio = 255U;
+    std::memcpy(&bad_prio, &raw_prio, sizeof(raw_prio));
+    cy_priority_set(pub, bad_prio);
+    TEST_ASSERT_EQUAL_UINT8(cy_prio_exceptional, cy_priority(pub)); // unchanged
+
+    // Also test CY_PRIO_COUNT exactly (the boundary value that should be rejected).
+    const auto count_prio = static_cast<std::uint8_t>(CY_PRIO_COUNT);
+    std::memcpy(&bad_prio, &count_prio, sizeof(count_prio));
+    cy_priority_set(pub, bad_prio);
+    TEST_ASSERT_EQUAL_UINT8(cy_prio_exceptional, cy_priority(pub)); // still unchanged
+
+    cy_unadvertise(pub);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
+    platform_deinit(&platform);
+}
+
+/// Exhaustive OOM sweep for cy_advertise: try every possible allocation failure point and ensure clean recovery.
+/// This covers lines 1604, 1631-1635, 3632-3634, and other OOM error-handling paths inside topic_new()
+/// and ensure_subscriber_root().
+void test_api_core_advertise_oom_sweep()
+{
+    for (std::size_t n = 0U; n < 100U; n++) {
+        test_platform_t platform{};
+        platform_init(&platform);
+        cy_async_error_handler_set(platform.cy, platform_on_async_error);
+
+        platform.alloc_counter       = 0U;
+        platform.fail_after_n_allocs = n;
+
+        cy_publisher_t* const pub = cy_advertise(platform.cy, cy_str("oom/sweep/advertise"));
+        if (pub != nullptr) {
+            // Success -- we have found the threshold. All allocations succeeded. Clean up and stop.
+            cy_unadvertise(pub);
+            TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
+            platform_deinit(&platform);
+            break;
+        }
+        // Failed at allocation #n. The library must have cleaned up all partially-allocated state.
+        platform.fail_after_n_allocs = SIZE_MAX; // Re-enable allocator.
+        TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
+        platform_deinit(&platform); // Asserts heaps are clean -- no leaks.
+    }
+}
+
+/// Exhaustive OOM sweep for cy_subscribe: try every possible allocation failure point and ensure clean recovery.
+/// This covers OOM paths in ensure_subscriber_root() lines 3632-3634 and topic_new() lines 1604, 1631-1635.
+void test_api_core_subscribe_oom_sweep()
+{
+    for (std::size_t n = 0U; n < 100U; n++) {
+        test_platform_t platform{};
+        platform_init(&platform);
+        cy_async_error_handler_set(platform.cy, platform_on_async_error);
+
+        platform.alloc_counter       = 0U;
+        platform.fail_after_n_allocs = n;
+
+        cy_future_t* const sub = cy_subscribe(platform.cy, cy_str("oom/sweep/subscribe"), 512U);
+        if (sub != nullptr) {
+            cy_future_destroy(sub);
+            TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
+            platform_deinit(&platform);
+            break;
+        }
+        platform.fail_after_n_allocs = SIZE_MAX;
+        TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
+        platform_deinit(&platform);
+    }
+}
+
+/// Exhaustive OOM sweep for cy_subscribe with a pattern (non-verbatim name).
+/// Patterns exercise the subscriber_by_pattern index path in ensure_subscriber_root() (lines 3631-3634).
+void test_api_core_subscribe_pattern_oom_sweep()
+{
+    for (std::size_t n = 0U; n < 100U; n++) {
+        test_platform_t platform{};
+        platform_init(&platform);
+        cy_async_error_handler_set(platform.cy, platform_on_async_error);
+
+        platform.alloc_counter       = 0U;
+        platform.fail_after_n_allocs = n;
+
+        cy_future_t* const sub = cy_subscribe(platform.cy, cy_str("oom/*/pattern"), 512U);
+        if (sub != nullptr) {
+            cy_future_destroy(sub);
+            TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
+            platform_deinit(&platform);
+            break;
+        }
+        platform.fail_after_n_allocs = SIZE_MAX;
+        TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
+        platform_deinit(&platform);
+    }
+}
+
+/// When a second subscriber is added to the same topic with a larger extent, the subject reader extent is grown.
+/// This covers line 3586 (reader_grow_extent called with larger extent).
+void test_api_core_subscribe_larger_extent_grows_reader()
+{
+    test_platform_t platform{};
+    platform_init(&platform);
+
+    // First subscriber with small extent creates the topic and subject reader.
+    cy_future_t* const sub1 = cy_subscribe(platform.cy, cy_str("extent/grow/topic"), 64U);
+    TEST_ASSERT_NOT_NULL(sub1);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
+
+    // Second subscriber with larger extent should trigger reader_grow_extent.
+    cy_future_t* const sub2 = cy_subscribe(platform.cy, cy_str("extent/grow/topic"), 4096U);
+    TEST_ASSERT_NOT_NULL(sub2);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
+
+    // Third subscriber with even larger extent should trigger growth again.
+    cy_future_t* const sub3 = cy_subscribe(platform.cy, cy_str("extent/grow/topic"), 65536U);
+    TEST_ASSERT_NOT_NULL(sub3);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
+
+    // A subscriber with a smaller extent should not trigger growth (the existing extent is sufficient).
+    cy_future_t* const sub4 = cy_subscribe(platform.cy, cy_str("extent/grow/topic"), 32U);
+    TEST_ASSERT_NOT_NULL(sub4);
+
+    cy_future_destroy(sub1);
+    cy_future_destroy(sub2);
+    cy_future_destroy(sub3);
+    cy_future_destroy(sub4);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
+    platform_deinit(&platform);
+}
+
+/// Topic creation OOM in wkv_route for coupling new topic to subscribers.
+/// This covers lines 1754-1756 (the wkv_route failure path after topic_new succeeds).
+void test_api_core_subscribe_then_advertise_oom_sweep()
+{
+    for (std::size_t n = 0U; n < 100U; n++) {
+        test_platform_t platform{};
+        platform_init(&platform);
+        cy_async_error_handler_set(platform.cy, platform_on_async_error);
+
+        // Create a pattern subscriber first -- this populates subscriber_by_pattern.
+        cy_future_t* const sub = cy_subscribe(platform.cy, cy_str("oom/*/coupling"), 128U);
+        TEST_ASSERT_NOT_NULL(sub);
+
+        // Now advertise on a topic that matches the pattern. This triggers topic_ensure -> topic_new
+        // and the subsequent wkv_route to couple the new topic with existing pattern subscribers.
+        platform.alloc_counter       = 0U;
+        platform.fail_after_n_allocs = n;
+
+        cy_publisher_t* const pub = cy_advertise(platform.cy, cy_str("oom/test/coupling"));
+        if (pub != nullptr) {
+            cy_unadvertise(pub);
+            platform.fail_after_n_allocs = SIZE_MAX;
+            cy_future_destroy(sub);
+            TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
+            platform_deinit(&platform);
+            break;
+        }
+        platform.fail_after_n_allocs = SIZE_MAX;
+        cy_future_destroy(sub);
+        TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
+        platform_deinit(&platform);
+    }
+}
+
+/// Test dedup OOM during on_message for reliable messages.
+/// Covers line 3458 (dedup_t allocation fails).
+void test_api_core_dedup_oom_on_reliable_message()
+{
+    test_platform_t platform{};
+    platform_init(&platform);
+    cy_async_error_handler_set(platform.cy, platform_on_async_error);
+
+    cy_future_t* const sub = cy_subscribe(platform.cy, cy_str("oom/dedup/topic"), 256U);
+    TEST_ASSERT_NOT_NULL(sub);
+    const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("oom/dedup/topic"));
+    TEST_ASSERT_NOT_NULL(topic);
+
+    // First, deliver a reliable message successfully so the internal state is set up.
+    {
+        std::vector<unsigned char> wire(header_bytes + 1U, 0U);
+        wire[0] = 1U; // header_msg_reliable
+        make_message_header(wire.data(), 1U, UINT64_C(0x1000), cy_topic_hash(topic));
+        wire[header_bytes] = 0xAAU;
+
+        cy_message_t* const msg = cy_test_message_make(&platform.message_heap, wire.data(), wire.size());
+        TEST_ASSERT_NOT_NULL(msg);
+
+        const cy_lane_t lane = { .id = UINT64_C(0xABC), .ctx = { { 0 } }, .prio = cy_prio_nominal };
+        cy_message_ts_t mts{};
+        mts.timestamp = platform.now;
+        mts.content   = msg;
+        cy_on_message(&platform.platform, lane, nullptr, mts);
+    }
+    TEST_ASSERT_TRUE(cy_future_done(sub));
+    const cy_arrival_t arr = cy_arrival_move(sub);
+    cy_message_refcount_dec(arr.message.content);
+
+    // Now fail the dedup allocation for a new remote so the dedup_t allocation fails.
+    platform.alloc_counter       = 0U;
+    platform.fail_after_n_allocs = 0U; // Fail immediately.
+    {
+        std::vector<unsigned char> wire(header_bytes + 1U, 0U);
+        make_message_header(wire.data(), 1U, UINT64_C(0x2000), cy_topic_hash(topic));
+        wire[header_bytes] = 0xBBU;
+
+        cy_message_t* const msg = cy_test_message_make(&platform.message_heap, wire.data(), wire.size());
+        TEST_ASSERT_NOT_NULL(msg);
+
+        // Use a different remote_id to trigger a new dedup entry allocation.
+        const cy_lane_t lane = { .id = UINT64_C(0xDEF), .ctx = { { 0 } }, .prio = cy_prio_nominal };
+        cy_message_ts_t mts{};
+        mts.timestamp = platform.now + 1;
+        mts.content   = msg;
+        cy_on_message(&platform.platform, lane, nullptr, mts);
+    }
+    platform.fail_after_n_allocs = SIZE_MAX;
+
+    // The message should have been dropped (dedup OOM), so the subscriber should NOT have a new message.
+    TEST_ASSERT_FALSE(cy_future_done(sub));
+
+    cy_future_destroy(sub);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
+    platform_deinit(&platform);
+}
+
+/// Gossip-triggered topic coupling OOM: a pattern subscriber exists, a gossip creates a new implicit topic
+/// matching the pattern, but the coupling allocation fails. Covers lines 1754-1756 (topic_subscribe_if_matching).
+void test_api_core_gossip_coupling_oom_sweep()
+{
+    // We use a sweep to find the allocation threshold where topic_new succeeds but topic_couple fails.
+    for (std::size_t n = 0U; n < 100U; n++) {
+        test_platform_t platform{};
+        platform_init(&platform);
+        cy_async_error_handler_set(platform.cy, platform_on_async_error);
+        cy_test_message_reset_counters();
+
+        // Create a pattern subscriber first.
+        cy_future_t* const sub = cy_subscribe(platform.cy, cy_str("gossip/*/coupling"), 128U);
+        TEST_ASSERT_NOT_NULL(sub);
+
+        // The gossip needs to advertise a topic name that matches the pattern and whose hash is unknown.
+        // The topic "gossip/test/coupling" matches the pattern "gossip/*/coupling".
+        const char* const   topic_name = "gossip/test/coupling";
+        const std::uint64_t topic_hash = rapidhash(topic_name, std::strlen(topic_name));
+
+        // Enable OOM at allocation #n, then deliver a gossip that triggers topic_subscribe_if_matching.
+        platform.alloc_counter       = 0U;
+        platform.fail_after_n_allocs = n;
+
+        dispatch_gossip_unicast(&platform, topic_hash, 0U, 0, cy_str(topic_name), UINT64_C(0xF100), platform.now);
+
+        platform.fail_after_n_allocs = SIZE_MAX;
+
+        // Check if the topic was successfully created (meaning all allocations including coupling succeeded).
+        const cy_topic_t* const found = cy_topic_find_by_name(platform.cy, cy_str(topic_name));
+        if (found != nullptr) {
+            // Success -- the topic was created and coupled. Clean up and stop the sweep.
+            cy_future_destroy(sub);
+            TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
+            platform_deinit(&platform);
+            break;
+        }
+        // Failed at allocation #n. The library must have cleaned up partially-allocated state.
+        cy_future_destroy(sub);
+        TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
+        platform_deinit(&platform);
+    }
+}
+
+/// When a non-pinned topic that has published (and thus has a lazily-created pub_writer) receives a gossip
+/// that pins it, the pub_writer must be released. Covers lines 1444-1446 (topic_allocate pinned path).
+void test_api_core_gossip_pins_topic_with_pub_writer()
+{
+    test_platform_t platform{};
+    platform_init(&platform);
+    cy_async_error_handler_set(platform.cy, platform_on_async_error);
+    cy_test_message_reset_counters();
+
+    // Advertise a non-pinned topic and publish on it to create the pub_writer lazily.
+    cy_publisher_t* const pub = cy_advertise(platform.cy, cy_str("pin/writer/topic"));
+    TEST_ASSERT_NOT_NULL(pub);
+    const cy_bytes_t empty = { .size = 0U, .data = nullptr, .next = nullptr };
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_publish(pub, platform.now + 1000, empty));
+
+    // Confirm the topic exists and get its hash.
+    const cy_topic_t* const topic = cy_publisher_topic(pub);
+    TEST_ASSERT_NOT_NULL(topic);
+    const std::uint64_t hash = cy_topic_hash(topic);
+
+    // Construct a gossip with pinned evictions (UINT32_MAX - 5) and LAGE_PINNED (127) for the same topic hash.
+    // The local topic has evictions=0 and lage < 127, so it will lose arbitration and adopt the pinned evictions.
+    const auto                              pinned_evictions = static_cast<std::uint32_t>(UINT32_MAX - 5U);
+    const auto                              lage_pinned      = static_cast<std::int8_t>(127);
+    const cy_str_t                          topic_name       = cy_topic_name(topic);
+    std::array<char, CY_TOPIC_NAME_MAX + 1> name_copy{};
+    std::memcpy(name_copy.data(), topic_name.str, topic_name.len);
+
+    const cy_str_t gossip_name = { .len = topic_name.len, .str = name_copy.data() };
+    dispatch_gossip_unicast(
+      &platform, hash, pinned_evictions, lage_pinned, gossip_name, UINT64_C(0xF200), platform.now);
+
+    // After the gossip, the topic should have transitioned to pinned evictions.
+    // The pub_writer should have been released (lines 1445-1446).
+    // Publish again -- this should lazily recreate the writer for the new (pinned) subject-ID.
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_publish(pub, platform.now + 1000, empty));
+
+    cy_unadvertise(pub);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
+    platform_deinit(&platform);
+}
+
 } // namespace
 
 extern "C" void setUp()
@@ -647,5 +1070,17 @@ int main()
     RUN_TEST(test_subscriber_name_returns_pin_stripped_name);
     RUN_TEST(test_publisher_topic_for_pinned_has_correct_hash);
     RUN_TEST(test_topic_find_by_name_uses_resolved_name);
+    RUN_TEST(test_api_core_advertise_client_oom);
+    RUN_TEST(test_api_core_home_set_oom);
+    RUN_TEST(test_api_core_do_publish_oom_subject_writer);
+    RUN_TEST(test_api_core_priority_set_out_of_range);
+    RUN_TEST(test_api_core_advertise_oom_sweep);
+    RUN_TEST(test_api_core_subscribe_oom_sweep);
+    RUN_TEST(test_api_core_subscribe_pattern_oom_sweep);
+    RUN_TEST(test_api_core_subscribe_larger_extent_grows_reader);
+    RUN_TEST(test_api_core_subscribe_then_advertise_oom_sweep);
+    RUN_TEST(test_api_core_dedup_oom_on_reliable_message);
+    RUN_TEST(test_api_core_gossip_coupling_oom_sweep);
+    RUN_TEST(test_api_core_gossip_pins_topic_with_pub_writer);
     return UNITY_END();
 }

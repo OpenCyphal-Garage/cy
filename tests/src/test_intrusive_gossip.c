@@ -524,7 +524,7 @@ static void test_on_gossip_unknown_topic_collision_win_and_loss(void)
     const uint32_t ev_before_loss = topic->evictions;
 
     on_gossip_unknown_topic(fix.cy, now + MEGA, remote, 0U, 12);
-    TEST_ASSERT_TRUE(topic->evictions > ev_before_loss);
+    TEST_ASSERT_TRUE(topic->evictions > ev_before_loss); // cppcheck-suppress knownConditionTrueFalse
 
     fixture_deinit(&fix);
 }
@@ -848,6 +848,47 @@ static void test_on_gossip_unknown_topic_pinned_not_in_index_no_collision(void)
     fixture_deinit(&fix);
 }
 
+// Validate subscriber pattern index lifecycle through the gossip/subscriber infrastructure.
+// When a pattern subscriber is created (even if scouting fails), the pattern index must be
+// populated, and when the subscriber is destroyed, the pattern index must be cleaned up.
+// This exercises the ensure_subscriber_root pattern index paths (lines 3630-3635).
+static void test_subscriber_pattern_index_lifecycle_with_scout_failure(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    // Force scouting to fail so that needs_scouting is set on the root.
+    fix.fail_subject_send = true;
+    fix.async_error_count = 0U;
+
+    cy_future_t* const sub = cy_subscribe(fix.cy, cy_str("gossip/sub/pattern/lifecycle/*"), 64U);
+    // Subscribe succeeds even if scouting fails (scout failure is non-fatal, async error reported).
+    TEST_ASSERT_NOT_NULL(sub);
+    TEST_ASSERT_TRUE(fix.async_error_count > 0U);
+
+    // Verify the pattern is in the subscriber indexes.
+    TEST_ASSERT_FALSE(wkv_is_empty(&fix.cy->subscribers_by_pattern));
+    TEST_ASSERT_FALSE(wkv_is_empty(&fix.cy->subscribers_by_name));
+
+    // The root should have needs_scouting set because the scout failed.
+    const wkv_node_t* const node = wkv_get(&fix.cy->subscribers_by_name, cy_str("gossip/sub/pattern/lifecycle/*"));
+    TEST_ASSERT_NOT_NULL(node);
+    subscriber_root_t* const root = (subscriber_root_t*)node->value;
+    TEST_ASSERT_NOT_NULL(root);
+    TEST_ASSERT_TRUE(root->needs_scouting);
+    TEST_ASSERT_NOT_NULL(root->index_pattern);
+
+    // Clean up.
+    cy_future_destroy(sub);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(fix.cy));
+
+    // After destroy, the pattern index should be empty.
+    TEST_ASSERT_TRUE(wkv_is_empty(&fix.cy->subscribers_by_pattern));
+    TEST_ASSERT_TRUE(wkv_is_empty(&fix.cy->subscribers_by_name));
+
+    fixture_deinit(&fix);
+}
+
 void setUp(void) {}
 
 void tearDown(void) {}
@@ -874,5 +915,6 @@ int main(void)
     RUN_TEST(test_on_gossip_known_topic_pinned_always_wins_divergence);
     RUN_TEST(test_on_gossip_known_topic_pinned_min_pin_wins);
     RUN_TEST(test_on_gossip_unknown_topic_pinned_not_in_index_no_collision);
+    RUN_TEST(test_subscriber_pattern_index_lifecycle_with_scout_failure);
     return UNITY_END();
 }

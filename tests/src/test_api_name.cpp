@@ -1069,6 +1069,37 @@ void test_name_resolve_pin_on_absolute_and_homeful()
 //                                               Constants
 // =====================================================================================================================
 
+void test_name_join_sep_overflow_after_left()
+{
+    // Buffer too small to fit left + separator + right.
+    // "a" + "b" needs 3 bytes ("a/b"). Buffer of size 2 triggers the overflow check.
+    std::array<char, 2> buf{};
+    const cy_str_t      result = cy_name_join(cy_str("a"), cy_str("b"), buf.size(), buf.data());
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, result.len);
+    TEST_ASSERT_NULL(result.str);
+}
+
+void test_name_resolve_non_homeful_passthrough()
+{
+    // Exercise the non-homeful, non-absolute name resolution path (relative names go through cy_name_join).
+    // A relative name with namespace exercises name_resolve_construct -> cy_name_join.
+    // An absolute name exercises name_resolve_construct -> name_normalize directly (no home expansion).
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    const cy_resolved_t r = cy_name_resolve(cy_str("foo/bar"), cy_str("ns"), cy_str("me"), buf.size(), buf.data());
+    TEST_ASSERT_NOT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_size_t(10, r.name.len);
+    TEST_ASSERT_EQUAL_STRING_LEN("ns/foo/bar", r.name.str, r.name.len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, r.pin);
+    TEST_ASSERT_TRUE(r.verbatim);
+
+    // Also test with an absolute name that is NOT homeful -- goes through name_normalize directly.
+    const cy_resolved_t r2 = cy_name_resolve(cy_str("/abs/path"), cy_str("ns"), cy_str("me"), buf.size(), buf.data());
+    TEST_ASSERT_NOT_NULL(r2.name.str);
+    TEST_ASSERT_EQUAL_STRING_LEN("abs/path", r2.name.str, r2.name.len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, r2.pin);
+    TEST_ASSERT_TRUE(r2.verbatim);
+}
+
 void test_name_constants()
 {
     TEST_ASSERT_EQUAL_CHAR('/', cy_name_sep);
@@ -1076,6 +1107,87 @@ void test_name_constants()
     TEST_ASSERT_EQUAL_CHAR('*', cy_name_one);
     TEST_ASSERT_EQUAL_CHAR('>', cy_name_any);
     TEST_ASSERT_EQUAL_CHAR('#', cy_name_pin_prefix);
+}
+
+/// cy_name_join where left fills to exactly (dest_size - 1) characters.
+/// The separator needs one more byte; with right non-empty, the result should fit if there is room.
+/// This targets the separator overflow check in cy_name_join (line 5014).
+void test_name_join_left_one_short_of_buffer()
+{
+    // Buffer of 3, left = "ab" (normalizes to 2 = dest_size-1), right = empty.
+    // Left + empty right = "ab" (2 chars). Should succeed since right is empty, separator stripped.
+    std::array<char, 3> buf{};
+    cy_str_t            result = cy_name_join(cy_str("ab"), cy_str(""), buf.size(), buf.data());
+    TEST_ASSERT_EQUAL_size_t(2, result.len);
+    TEST_ASSERT_EQUAL_STRING_LEN("ab", result.str, result.len);
+
+    // Buffer of 3, left = "ab" (2), right = "c" (1). Total = "ab/c" = 4 > 3. Should fail.
+    result = cy_name_join(cy_str("ab"), cy_str("c"), buf.size(), buf.data());
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, result.len);
+    TEST_ASSERT_NULL(result.str);
+}
+
+/// cy_name_resolve with NULL dest pointer -- covers the dest==NULL guard in name_resolve_construct.
+void test_name_resolve_null_dest_ptr()
+{
+    const cy_resolved_t r = cy_name_resolve(cy_str("foo"), cy_str("ns"), cy_str("me"), 100, nullptr);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, r.name.len);
+    TEST_ASSERT_NULL(r.name.str);
+}
+
+/// cy_name_resolve with a homeful namespace that is expanded via name_expand_home.
+/// The namespace is "~", which expands to home "me". Then the name "bar" is joined: "me/bar".
+/// This covers the name_expand_home path (line 4995 for non-homeful passthrough is unreachable,
+/// but this exercises the homeful expansion path end-to-end).
+void test_name_resolve_homeful_namespace_expanded()
+{
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    const cy_resolved_t r = cy_name_resolve(cy_str("bar"), cy_str("~"), cy_str("me"), buf.size(), buf.data());
+    TEST_ASSERT_NOT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_size_t(6, r.name.len);
+    TEST_ASSERT_EQUAL_STRING_LEN("me/bar", r.name.str, r.name.len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, r.pin);
+    TEST_ASSERT_TRUE(r.verbatim);
+}
+
+/// cy_name_join with zero dest_size -- left is non-empty but buffer is zero-sized.
+/// name_normalize would return SIZE_MAX (invalid) because there is no room even for a single char.
+void test_name_join_zero_dest_size()
+{
+    char     dummy  = 'x';
+    cy_str_t result = cy_name_join(cy_str("a"), cy_str("b"), 0, &dummy);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, result.len);
+    TEST_ASSERT_NULL(result.str);
+
+    // Also try with empty inputs -- should produce empty result even with zero-size buffer.
+    result = cy_name_join(cy_str(""), cy_str(""), 0, &dummy);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, result.len);
+}
+
+/// cy_name_join with buffer of size 1 -- just enough for one character.
+/// name_normalize("a", dest_size=1) produces len=1, which is >= dest_size=1 in the left check, so left "a" fails.
+/// But empty left + "a" right works since the right part has dest_size=1 which can hold "a" (len=1, and 1 > 1 = false).
+void test_name_join_buffer_size_one()
+{
+    std::array<char, 1> buf{};
+    // Left="a" normalizes to len=1, 1 >= 1 = true => str_invalid.
+    cy_str_t result = cy_name_join(cy_str("a"), cy_str(""), buf.size(), buf.data());
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, result.len);
+    TEST_ASSERT_NULL(result.str);
+
+    // Empty left + "a" right: left normalizes to 0, right normalizes to 1. 1 > (1-0) = false => ok, len=1.
+    result = cy_name_join(cy_str(""), cy_str("a"), buf.size(), buf.data());
+    TEST_ASSERT_EQUAL_size_t(1, result.len);
+    TEST_ASSERT_EQUAL_STRING_LEN("a", result.str, result.len);
+
+    // Empty left + empty right: size is 0, which should succeed.
+    result = cy_name_join(cy_str(""), cy_str(""), buf.size(), buf.data());
+    TEST_ASSERT_EQUAL_size_t(0, result.len);
+
+    // Left="a" right="b": "a" fills buffer, no room for separator. Fails.
+    result = cy_name_join(cy_str("a"), cy_str("b"), buf.size(), buf.data());
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, result.len);
+    TEST_ASSERT_NULL(result.str);
 }
 
 } // namespace
@@ -1106,6 +1218,9 @@ int main()
     RUN_TEST(test_name_join_null_right_str);
     RUN_TEST(test_name_join_right_buffer_overflow);
     RUN_TEST(test_name_join_hash_char_preserved);
+    RUN_TEST(test_name_join_left_one_short_of_buffer);
+    RUN_TEST(test_name_join_zero_dest_size);
+    RUN_TEST(test_name_join_buffer_size_one);
 
     // cy_name_resolve -- docstring examples
     RUN_TEST(test_name_resolve_docstring_examples);
@@ -1184,6 +1299,14 @@ int main()
     RUN_TEST(test_name_resolve_pin_mid_name_not_stripped);
     RUN_TEST(test_name_resolve_empty_after_pin_strip_fails);
     RUN_TEST(test_name_resolve_pin_on_absolute_and_homeful);
+
+    // Buffer edge cases
+    RUN_TEST(test_name_join_sep_overflow_after_left);
+    RUN_TEST(test_name_resolve_non_homeful_passthrough);
+
+    // Additional resolve tests
+    RUN_TEST(test_name_resolve_null_dest_ptr);
+    RUN_TEST(test_name_resolve_homeful_namespace_expanded);
 
     // Constants
     RUN_TEST(test_name_constants);

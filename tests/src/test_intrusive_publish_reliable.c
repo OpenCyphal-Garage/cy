@@ -722,6 +722,127 @@ static void test_send_message_nack_success_path(void)
     TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&fixture.heap));
 }
 
+// on_message_ack NACK from unknown remote with existing associations (line 4549 trace).
+// Create a topic with an existing association, then receive a NACK from a DIFFERENT unknown remote.
+// The unknown remote should NOT create a new association (NACK never creates associations).
+static void test_on_message_nack_from_unknown_remote_with_existing_association(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+
+    cy_topic_t topic;
+    memset(&topic, 0, sizeof(topic));
+    topic.cy                = &fixture.cy;
+    topic.pub_tag_baseline  = UINT64_C(800);
+    topic.pub_seqno         = UINT64_C(5);
+    topic.assoc_slack_limit = 2U;
+
+    // Create an existing association for remote_id=100 via a positive ACK.
+    const cy_lane_t lane_known = { .id = 100U, .ctx = { { 0 } }, .prio = cy_prio_nominal };
+    on_message_ack(&fixture.cy, &topic, UINT64_C(801), 10, true, lane_known);
+    TEST_ASSERT_EQUAL_size_t(1U, topic.assoc_count);
+    TEST_ASSERT_NOT_NULL(topic.assoc_by_remote_id);
+
+    // Now receive a NACK from a DIFFERENT unknown remote (remote_id=200).
+    // The NACK should NOT create a new association because the factory is NULL for negative ACKs.
+    // This exercises the path at line 4549 where ass==NULL and !positive.
+    const cy_lane_t lane_unknown = { .id = 200U, .ctx = { { 0 } }, .prio = cy_prio_nominal };
+    on_message_ack(&fixture.cy, &topic, UINT64_C(802), 11, false, lane_unknown);
+
+    // Association count unchanged: only the known remote's association exists.
+    TEST_ASSERT_EQUAL_size_t(1U, topic.assoc_count);
+    // No async error reported (NACK from unknown is silently ignored with a trace).
+    TEST_ASSERT_EQUAL_size_t(0U, fixture.async_error_count);
+
+    forget_associations(&topic);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&fixture.heap));
+}
+
+// send_response_ack unicast failure (line 4625).
+// Call send_response_ack with a platform that returns CY_ERR_MEDIA from unicast.
+// Verify the trace path fires (no crash) and the send count is incremented.
+static void test_send_response_ack_unicast_failure(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+    fixture.unicast_send_result = CY_ERR_MEDIA;
+
+    const cy_lane_t lane = { .id = 88U, .ctx = { { 0 } }, .prio = cy_prio_nominal };
+    send_response_ack(&fixture.cy,
+                      lane,
+                      UINT64_C(0x1234), // message_tag
+                      UINT64_C(0x5678), // seqno
+                      42U,              // tag
+                      UINT64_C(0xABCD), // hash
+                      true,             // positive
+                      100);             // deadline
+
+    // The unicast was attempted.
+    TEST_ASSERT_EQUAL_size_t(1U, fixture.unicast_send_count);
+    // Verify the header was constructed correctly.
+    TEST_ASSERT_EQUAL_UINT8(header_rsp_ack, fixture.last_unicast[0]);
+    TEST_ASSERT_EQUAL_UINT8(42U, fixture.last_unicast[1]); // tag byte
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&fixture.heap));
+}
+
+// send_response_ack NACK unicast failure.
+static void test_send_response_nack_unicast_failure(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+    fixture.unicast_send_result = CY_ERR_MEDIA;
+
+    const cy_lane_t lane = { .id = 89U, .ctx = { { 0 } }, .prio = cy_prio_nominal };
+    send_response_ack(&fixture.cy,
+                      lane,
+                      UINT64_C(0x2345), // message_tag
+                      UINT64_C(0x6789), // seqno
+                      43U,              // tag
+                      UINT64_C(0xBCDE), // hash
+                      false,            // negative
+                      200);             // deadline
+
+    TEST_ASSERT_EQUAL_size_t(1U, fixture.unicast_send_count);
+    TEST_ASSERT_EQUAL_UINT8(header_rsp_nack, fixture.last_unicast[0]);
+    TEST_ASSERT_EQUAL_UINT8(43U, fixture.last_unicast[1]);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&fixture.heap));
+}
+
+// send_response_ack success path: verify the header fields are correctly serialized.
+static void test_send_response_ack_success_path(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+    fixture.unicast_send_result = CY_OK;
+
+    const cy_lane_t lane = { .id = 90U, .ctx = { { 0 } }, .prio = cy_prio_nominal };
+    send_response_ack(&fixture.cy,
+                      lane,
+                      UINT64_C(0x3456), // message_tag
+                      UINT64_C(0x789A), // seqno
+                      44U,              // tag
+                      UINT64_C(0xCDEF), // hash
+                      true,             // positive
+                      300);             // deadline
+
+    TEST_ASSERT_EQUAL_size_t(1U, fixture.unicast_send_count);
+    TEST_ASSERT_EQUAL_size_t(HEADER_BYTES, fixture.last_unicast_size);
+    TEST_ASSERT_EQUAL_UINT8(header_rsp_ack, fixture.last_unicast[0]);
+    TEST_ASSERT_EQUAL_UINT8(44U, fixture.last_unicast[1]);
+    // seqno is serialized as u48 at offset 2.
+    TEST_ASSERT_EQUAL_UINT64(UINT64_C(0x789A), deserialize_u48(&fixture.last_unicast[2]));
+    // hash at offset 8.
+    TEST_ASSERT_EQUAL_UINT64(UINT64_C(0xCDEF), deserialize_u64(&fixture.last_unicast[8]));
+    // message_tag at offset 16.
+    TEST_ASSERT_EQUAL_UINT64(UINT64_C(0x3456), deserialize_u64(&fixture.last_unicast[16]));
+    TEST_ASSERT_EQUAL_size_t(0U, fixture.async_error_count);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&fixture.heap));
+}
+
 void setUp(void) {}
 
 void tearDown(void) {}
@@ -766,5 +887,9 @@ int main(void)
     RUN_TEST(test_send_message_ack_error_path);
     RUN_TEST(test_send_message_ack_success_path);
     RUN_TEST(test_send_message_nack_success_path);
+    RUN_TEST(test_on_message_nack_from_unknown_remote_with_existing_association);
+    RUN_TEST(test_send_response_ack_unicast_failure);
+    RUN_TEST(test_send_response_nack_unicast_failure);
+    RUN_TEST(test_send_response_ack_success_path);
     return UNITY_END();
 }

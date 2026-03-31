@@ -51,47 +51,10 @@ typedef struct
     cy_err_t last_error;
 } destroy_capture_t;
 
-static uint64_t deserialize_u48_local(const byte_t in[6])
-{
-    uint64_t out = 0;
-    for (size_t i = 0U; i < 6U; i++) {
-        out |= ((uint64_t)in[i]) << (i * 8U);
-    }
-    return out;
-}
-
-static uint64_t deserialize_u64_local(const byte_t in[8])
-{
-    uint64_t out = 0;
-    for (size_t i = 0U; i < 8U; i++) {
-        out |= ((uint64_t)in[i]) << (i * 8U);
-    }
-    return out;
-}
-
-static void serialize_u32_local(byte_t out[4], const uint32_t value)
-{
-    out[0] = (byte_t)(value & 0xFFU);
-    out[1] = (byte_t)((value >> 8U) & 0xFFU);
-    out[2] = (byte_t)((value >> 16U) & 0xFFU);
-    out[3] = (byte_t)((value >> 24U) & 0xFFU);
-}
-
-static void serialize_u48_local(byte_t out[6], const uint64_t value)
-{
-    for (size_t i = 0U; i < 6U; i++) {
-        out[i] = (byte_t)((value >> (i * 8U)) & 0xFFU);
-    }
-}
-
-static void serialize_u64_local(byte_t out[8], const uint64_t value)
-{
-    for (size_t i = 0U; i < 8U; i++) {
-        out[i] = (byte_t)((value >> (i * 8U)) & 0xFFU);
-    }
-}
-
-static void gather_bytes(byte_t* const out, const size_t out_size, const cy_bytes_t message, size_t* const out_copied)
+static void flatten_fragments(byte_t* const    out,
+                              const size_t     out_size,
+                              const cy_bytes_t message,
+                              size_t* const    out_copied)
 {
     size_t copied = 0U;
     for (const cy_bytes_t* seg = &message; (seg != NULL) && (copied < out_size); seg = seg->next) {
@@ -156,7 +119,7 @@ static cy_err_t fixture_subject_writer_send(cy_platform_t* const       platform,
     fixture_t* const self = fixture_from(platform);
     self->multicast_count++;
     memset(self->last_multicast, 0, sizeof(self->last_multicast));
-    gather_bytes(self->last_multicast, sizeof(self->last_multicast), message, &self->last_multicast_size);
+    flatten_fragments(self->last_multicast, sizeof(self->last_multicast), message, &self->last_multicast_size);
     self->last_multicast_header = (self->last_multicast_size > 0U) ? (self->last_multicast[0]) : 0xFFU;
     if ((self->fail_multicast_count > 0U) && (self->last_multicast_header == self->fail_multicast_header)) {
         self->fail_multicast_count--;
@@ -203,7 +166,7 @@ static cy_err_t fixture_unicast_send(cy_platform_t* const   platform,
     fixture_t* const self = fixture_from(platform);
     self->unicast_count++;
     memset(self->last_unicast, 0, sizeof(self->last_unicast));
-    gather_bytes(self->last_unicast, sizeof(self->last_unicast), message, &self->last_unicast_size);
+    flatten_fragments(self->last_unicast, sizeof(self->last_unicast), message, &self->last_unicast_size);
     self->last_unicast_header = (self->last_unicast_size > 0U) ? (self->last_unicast[0]) : 0xFFU;
     if ((self->fail_unicast_count > 0U) && (self->last_unicast_header == self->fail_unicast_header)) {
         self->fail_unicast_count--;
@@ -355,9 +318,9 @@ static void dispatch_publish_ack(fixture_t* const self,
 {
     byte_t wire[HEADER_BYTES] = { 0 };
     wire[0]                   = header_msg_ack;
-    serialize_u32_local(&wire[4], 0U);
-    serialize_u64_local(&wire[8], topic_hash);
-    serialize_u64_local(&wire[16], message_tag);
+    (void)serialize_u32(&wire[4], 0U);
+    (void)serialize_u64(&wire[8], topic_hash);
+    (void)serialize_u64(&wire[16], message_tag);
     const cy_message_ts_t mts = make_wire_message(self, wire, sizeof(wire), ts);
     cy_on_message(&self->platform, make_lane(remote_id, cy_prio_nominal), NULL, mts);
 }
@@ -372,9 +335,9 @@ static void dispatch_subscriber_message(fixture_t* const    self,
 {
     byte_t wire[HEADER_BYTES + 1U] = { 0 };
     wire[0]                        = (byte_t)(header_type);
-    serialize_u32_local(&wire[4], 0U);
-    serialize_u64_local(&wire[8], cy_topic_hash(topic));
-    serialize_u64_local(&wire[16], tag);
+    (void)serialize_u32(&wire[4], 0U);
+    (void)serialize_u64(&wire[8], cy_topic_hash(topic));
+    (void)serialize_u64(&wire[16], tag);
     wire[HEADER_BYTES]           = payload_byte;
     const cy_message_ts_t mts    = make_wire_message(self, wire, sizeof(wire), ts);
     cy_subject_reader_t   reader = { .subject_id = topic_subject_id((cy_topic_t*)topic) };
@@ -394,9 +357,9 @@ static void dispatch_response_message(fixture_t* const    self,
     byte_t wire[HEADER_BYTES + 1U] = { 0 };
     wire[0]                        = (byte_t)(header_type);
     wire[1]                        = response_tag;
-    serialize_u48_local(&wire[2], seqno);
-    serialize_u64_local(&wire[8], topic_hash);
-    serialize_u64_local(&wire[16], message_tag);
+    (void)serialize_u48(&wire[2], seqno);
+    (void)serialize_u64(&wire[8], topic_hash);
+    (void)serialize_u64(&wire[16], message_tag);
     wire[HEADER_BYTES]        = payload_byte;
     const cy_message_ts_t mts = make_wire_message(self, wire, sizeof(wire), ts);
     cy_on_message(&self->platform, make_lane(remote_id, cy_prio_nominal), NULL, mts);
@@ -414,9 +377,9 @@ static void dispatch_response_ack(fixture_t* const self,
     byte_t wire[HEADER_BYTES] = { 0 };
     wire[0]                   = (byte_t)(header_type);
     wire[1]                   = response_tag;
-    serialize_u48_local(&wire[2], seqno);
-    serialize_u64_local(&wire[8], topic_hash);
-    serialize_u64_local(&wire[16], message_tag);
+    (void)serialize_u48(&wire[2], seqno);
+    (void)serialize_u64(&wire[8], topic_hash);
+    (void)serialize_u64(&wire[16], message_tag);
     const cy_message_ts_t mts = make_wire_message(self, wire, sizeof(wire), ts);
     cy_on_message(&self->platform, make_lane(remote_id, cy_prio_nominal), NULL, mts);
 }
@@ -431,7 +394,7 @@ static void destroy_on_notify(cy_future_t* const fut)
     capture->saw_done |= done;
     capture->saw_pending = capture->saw_pending || !done;
 
-    cy_t* const owner = fut->cy;
+    const cy_t* const owner = fut->cy;
     cy_future_destroy(fut);
     void* const churn = mem_alloc(owner, 23U);
     mem_free(owner, churn);
@@ -448,13 +411,13 @@ static void set_destroy_callback(cy_future_t* const future, destroy_capture_t* c
 static uint64_t last_outgoing_tag_multicast(const fixture_t* const self)
 {
     TEST_ASSERT_TRUE(self->last_multicast_size >= HEADER_BYTES);
-    return deserialize_u64_local(&self->last_multicast[16]);
+    return deserialize_u64(&self->last_multicast[16]);
 }
 
 static uint64_t last_outgoing_hash_multicast(const fixture_t* const self)
 {
     TEST_ASSERT_TRUE(self->last_multicast_size >= HEADER_BYTES);
-    return deserialize_u64_local(&self->last_multicast[8]);
+    return deserialize_u64(&self->last_multicast[8]);
 }
 
 static uint8_t last_outgoing_rsp_tag(const fixture_t* const self)
@@ -466,19 +429,19 @@ static uint8_t last_outgoing_rsp_tag(const fixture_t* const self)
 static uint64_t last_outgoing_rsp_seqno(const fixture_t* const self)
 {
     TEST_ASSERT_TRUE(self->last_unicast_size >= HEADER_BYTES);
-    return deserialize_u48_local(&self->last_unicast[2]);
+    return deserialize_u48(&self->last_unicast[2]);
 }
 
 static uint64_t last_outgoing_rsp_hash(const fixture_t* const self)
 {
     TEST_ASSERT_TRUE(self->last_unicast_size >= HEADER_BYTES);
-    return deserialize_u64_local(&self->last_unicast[8]);
+    return deserialize_u64(&self->last_unicast[8]);
 }
 
 static uint64_t last_outgoing_rsp_message_tag(const fixture_t* const self)
 {
     TEST_ASSERT_TRUE(self->last_unicast_size >= HEADER_BYTES);
-    return deserialize_u64_local(&self->last_unicast[16]);
+    return deserialize_u64(&self->last_unicast[16]);
 }
 
 static void test_publish_notify_ack_completion_destroy(void)
