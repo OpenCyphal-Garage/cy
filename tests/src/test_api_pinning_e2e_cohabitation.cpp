@@ -691,6 +691,112 @@ void test_gossip_names_normalized_and_hash_consistent()
                       100'000U);
 }
 
+// ---------------------------------------------------------------------------
+// Test 9: Two nodes advertise the same topic with different pins; the older
+// node's pin wins because its log-age is higher after several gossip rounds.
+// ---------------------------------------------------------------------------
+void test_conflicting_pins_older_wins()
+{
+    e2e::sim_net_t net{};
+    TEST_ASSERT_EQUAL_INT(
+      CY_OK, e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), UINT64_C(0xC009)));
+
+    // Node A advertises first with pin 100.
+    cy_publisher_t* const pub_a = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("conflict/topic#100"));
+    TEST_ASSERT_NOT_NULL(pub_a);
+
+    // Drive several rounds so A's topic ages.
+    cy_us_t now = 0;
+    e2e::drive_for(net, now, 4'000'000, step_us);
+
+    // Node B advertises the same logical topic with a different pin (200).
+    cy_publisher_t* const pub_b = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_b), cy_str("conflict/topic#200"));
+    TEST_ASSERT_NOT_NULL(pub_b);
+    TEST_ASSERT_EQUAL_UINT64(cy_topic_hash(cy_publisher_topic(pub_a)), cy_topic_hash(cy_publisher_topic(pub_b)));
+
+    // Subscribe on both nodes.
+    arrival_capture_t  cap_a{};
+    arrival_capture_t  cap_b{};
+    cy_future_t* const sub_a = make_sub(e2e::sim_net_cy(net, e2e::sim_node_a), "conflict/topic", cap_a);
+    cy_future_t* const sub_b = make_sub(e2e::sim_net_cy(net, e2e::sim_node_b), "conflict/topic", cap_b);
+
+    // Drive until convergence.
+    e2e::drive_for(net, now, converge_time, step_us);
+
+    // Publish from both nodes.
+    constexpr std::uint32_t pub_id_a = 5801U;
+    constexpr std::uint32_t pub_id_b = 5802U;
+    for (std::uint64_t seq = 1U; seq <= 12U; seq++) {
+        e2e::set_now(net, now);
+        publish_one(pub_a, pub_id_a, seq, now);
+        publish_one(pub_b, pub_id_b, seq, now);
+        TEST_ASSERT_EQUAL_INT(CY_OK, e2e::drive_round(net, now, now));
+        now += 10'000;
+    }
+    e2e::drive_for(net, now, delivery_time, step_us);
+
+    // After convergence, A's pin (100) wins because A is older.
+    const auto& frame_caps = e2e::sim_net_captures(net);
+    const auto  topic_hash = cy_topic_hash(cy_publisher_topic(pub_a));
+    TEST_ASSERT_EQUAL_UINT32(100U, require_last_subject_id_for_hash(frame_caps, topic_hash));
+
+    cleanup_all(net, now, { sub_a, sub_b }, { pub_a, pub_b });
+}
+
+// ---------------------------------------------------------------------------
+// Test 10: Pinned topic log-age advances with simulated time, so the older
+// pin wins even when the rival has a higher subject-ID value.
+// Validates that pinned topics use actual age (commit 97de4f9 removed
+// LAGE_PINNED).
+// ---------------------------------------------------------------------------
+void test_pinned_topic_lage_advances_with_time()
+{
+    e2e::sim_net_t net{};
+    TEST_ASSERT_EQUAL_INT(
+      CY_OK, e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), UINT64_C(0xC00A)));
+
+    // Node A advertises first with pin 50.
+    cy_publisher_t* const pub_a = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("lage/test#50"));
+    TEST_ASSERT_NOT_NULL(pub_a);
+
+    // Drive many rounds to age A's topic significantly (several simulated seconds).
+    cy_us_t now = 0;
+    e2e::drive_for(net, now, 6'000'000, step_us);
+
+    // Node B advertises the same logical topic with a higher pin value (99).
+    cy_publisher_t* const pub_b = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_b), cy_str("lage/test#99"));
+    TEST_ASSERT_NOT_NULL(pub_b);
+    TEST_ASSERT_EQUAL_UINT64(cy_topic_hash(cy_publisher_topic(pub_a)), cy_topic_hash(cy_publisher_topic(pub_b)));
+
+    // Subscribe on both nodes.
+    arrival_capture_t  cap_a{};
+    arrival_capture_t  cap_b{};
+    cy_future_t* const sub_a = make_sub(e2e::sim_net_cy(net, e2e::sim_node_a), "lage/test", cap_a);
+    cy_future_t* const sub_b = make_sub(e2e::sim_net_cy(net, e2e::sim_node_b), "lage/test", cap_b);
+
+    // Drive until convergence.
+    e2e::drive_for(net, now, converge_time, step_us);
+
+    // Publish from both nodes.
+    constexpr std::uint32_t pub_id_a = 5901U;
+    constexpr std::uint32_t pub_id_b = 5902U;
+    for (std::uint64_t seq = 1U; seq <= 12U; seq++) {
+        e2e::set_now(net, now);
+        publish_one(pub_a, pub_id_a, seq, now);
+        publish_one(pub_b, pub_id_b, seq, now);
+        TEST_ASSERT_EQUAL_INT(CY_OK, e2e::drive_round(net, now, now));
+        now += 10'000;
+    }
+    e2e::drive_for(net, now, delivery_time, step_us);
+
+    // A's pin (50) wins because its log-age is higher.
+    const auto& frame_caps = e2e::sim_net_captures(net);
+    const auto  topic_hash = cy_topic_hash(cy_publisher_topic(pub_a));
+    TEST_ASSERT_EQUAL_UINT32(50U, require_last_subject_id_for_hash(frame_caps, topic_hash));
+
+    cleanup_all(net, now, { sub_a, sub_b }, { pub_a, pub_b });
+}
+
 } // namespace
 
 extern "C" void setUp()
@@ -712,5 +818,7 @@ int main()
     RUN_TEST(test_cohabitation_reliable_delivery);
     RUN_TEST(test_cohabitation_ordered_subscriber);
     RUN_TEST(test_gossip_names_normalized_and_hash_consistent);
+    RUN_TEST(test_conflicting_pins_older_wins);
+    RUN_TEST(test_pinned_topic_lage_advances_with_time);
     return UNITY_END();
 }

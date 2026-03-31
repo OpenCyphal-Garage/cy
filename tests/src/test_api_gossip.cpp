@@ -3,14 +3,12 @@
 #include <unity.h>
 #include "api_mock_platform_utils.hpp"
 #include "gossip_test_utils.hpp"
-#include "guarded_heap.h"
 #include "helpers.h"
 #include "message.h"
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <set>
 
 namespace {
 constexpr std::uint8_t header_msg_be = 0U;
@@ -27,24 +25,12 @@ struct send_capture_t
     std::array<unsigned char, 256> data{};
 };
 
-struct test_platform_t final
+struct test_platform_t final : api_test::test_platform_base_t
 {
-    cy_platform_t        platform{};
-    cy_platform_vtable_t vtable{};
-    guarded_heap_t       core_heap{};
-    guarded_heap_t       message_heap{};
-
-    cy_t*         cy{ nullptr };
-    cy_us_t       now{ 0 };
-    std::uint64_t random_state{ UINT64_C(0x123456789ABCDEF0) };
-
     std::size_t                    subject_send_count{ 0U };
     std::size_t                    unicast_send_count{ 0U };
     std::size_t                    capture_count{ 0U };
     std::array<send_capture_t, 64> captures{};
-
-    std::set<std::uint32_t> active_reader_subjects;
-    std::set<std::uint32_t> active_writer_subjects;
 };
 
 test_platform_t* platform_from(cy_platform_t* const platform)
@@ -77,20 +63,12 @@ void capture_send(test_platform_t* const self,
 extern "C" cy_subject_writer_t* platform_subject_writer_new(cy_platform_t* const platform,
                                                             const std::uint32_t  subject_id)
 {
-    cy_subject_writer_t* const out = api_test::subject_writer_new<test_platform_t>(platform, subject_id);
-    if (out != nullptr) {
-        test_platform_t* const self = platform_from(platform);
-        TEST_ASSERT_EQUAL_INT(0, self->active_writer_subjects.count(subject_id));
-        self->active_writer_subjects.insert(subject_id);
-    }
-    return out;
+    return api_test::subject_writer_new_tracked<test_platform_t>(platform, subject_id);
 }
 
 extern "C" void platform_subject_writer_destroy(cy_platform_t* const platform, cy_subject_writer_t* const writer)
 {
-    test_platform_t* const self = platform_from(platform);
-    TEST_ASSERT_EQUAL_INT(1, self->active_writer_subjects.erase(writer->subject_id));
-    api_test::subject_writer_destroy<test_platform_t>(platform, writer);
+    api_test::subject_writer_destroy_tracked<test_platform_t>(platform, writer);
 }
 
 extern "C" cy_err_t platform_subject_writer_send(cy_platform_t* const       platform,
@@ -111,29 +89,19 @@ extern "C" cy_subject_reader_t* platform_subject_reader_new(cy_platform_t* const
                                                             const std::uint32_t  subject_id,
                                                             const std::size_t    extent)
 {
-    cy_subject_reader_t* const out = api_test::subject_reader_new<test_platform_t>(platform, subject_id, extent);
-    if (out != nullptr) {
-        test_platform_t* const self = platform_from(platform);
-        TEST_ASSERT_EQUAL_INT(0, self->active_reader_subjects.count(subject_id));
-        self->active_reader_subjects.insert(subject_id);
-    }
-    return out;
+    return api_test::subject_reader_new_tracked<test_platform_t>(platform, subject_id, extent);
 }
 
 extern "C" void platform_subject_reader_extent_set(cy_platform_t* const       platform,
                                                    cy_subject_reader_t* const reader,
                                                    const std::size_t          extent)
 {
-    test_platform_t* const self = platform_from(platform);
-    TEST_ASSERT_EQUAL_INT(1, self->active_reader_subjects.count(reader->subject_id));
-    api_test::subject_reader_extent_set<test_platform_t>(platform, reader, extent);
+    api_test::subject_reader_extent_set_tracked<test_platform_t>(platform, reader, extent);
 }
 
 extern "C" void platform_subject_reader_destroy(cy_platform_t* const platform, cy_subject_reader_t* const reader)
 {
-    test_platform_t* const self = platform_from(platform);
-    TEST_ASSERT_EQUAL_INT(1, self->active_reader_subjects.erase(reader->subject_id));
-    api_test::subject_reader_destroy<test_platform_t>(platform, reader);
+    api_test::subject_reader_destroy_tracked<test_platform_t>(platform, reader);
 }
 
 extern "C" cy_err_t platform_unicast_send(cy_platform_t* const   platform,
@@ -208,14 +176,7 @@ void platform_init(test_platform_t& self)
     cy_async_error_handler_set(self.cy, platform_on_async_error);
 }
 
-void platform_deinit(test_platform_t& self)
-{
-    if (self.cy != nullptr) {
-        cy_destroy(self.cy);
-        self.cy = nullptr;
-    }
-    api_test::assert_heaps_clean(self.core_heap, self.message_heap);
-}
+void platform_deinit(test_platform_t& self) { api_test::standard_deinit(self); }
 
 void dispatch_raw(test_platform_t&                      platform,
                   const std::array<unsigned char, 256>& wire,

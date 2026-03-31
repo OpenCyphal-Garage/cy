@@ -16,10 +16,11 @@ set(unity_root "${CMAKE_SOURCE_DIR}/lib/unity")
 # of files like helpers.c (76x -> 6x) and cy.c (40x -> 2x).
 # --------------------------------------------------------------------------------------------------
 
-# Get or create an object library for a set of shared sources with specific compile flags.
-# The library name is deterministic: the same (tag, flags) yields the same target.
+# Get or create an object library for a set of shared sources with specific build settings.
+# The library name is deterministic: the same (tag, compile_flags, c_standard, definitions, sources)
+# combination yields the same target.
 function(cy_get_objlib out_var tag compile_flags c_standard definitions sources)
-    string(MD5 src_hash "${sources}")
+    string(MD5 src_hash "${compile_flags}|${c_standard}|${definitions}|${sources}")
     string(SUBSTRING "${src_hash}" 0 6 src_hash_short)
     set(lib_name "_cy_shared_${tag}_${src_hash_short}")
     if (NOT TARGET ${lib_name})

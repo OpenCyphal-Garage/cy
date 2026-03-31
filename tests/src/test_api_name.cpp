@@ -1428,6 +1428,17 @@ void test_name_join_buffer_size_one()
     TEST_ASSERT_NULL(result.str);
 }
 
+void test_name_resolve_can_compat_1234_hash_1234()
+{
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    const cy_resolved_t r = cy_name_resolve(cy_str("1234#1234"), cy_str(""), cy_str(""), buf.size(), buf.data());
+    TEST_ASSERT_NOT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_size_t(4, r.name.len);
+    TEST_ASSERT_EQUAL_STRING_LEN("1234", r.name.str, r.name.len);
+    TEST_ASSERT_EQUAL_UINT16(1234, r.pin);
+    TEST_ASSERT_TRUE(r.verbatim);
+}
+
 } // namespace
 
 extern "C" void setUp() {}
@@ -1488,6 +1499,7 @@ int main()
     RUN_TEST(test_name_resolve_hash_in_namespace_preserved);
     RUN_TEST(test_name_resolve_all_digit_name_no_hash);
     RUN_TEST(test_name_resolve_trailing_hash_no_digits);
+    RUN_TEST(test_name_resolve_can_compat_1234_hash_1234);
 
     // cy_name_resolve -- verbatim
     RUN_TEST(test_name_resolve_verbatim_simple);

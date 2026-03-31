@@ -450,6 +450,61 @@ void test_implicit_topic_from_gossip_inherits_remote_evictions()
     e2e::cleanup_case(net, now, {}, { sub }, { pub }, step_us, 100'000, 100'000U);
 }
 
+// ---------------------------------------------------------------------------
+// Test 8: Pinned chevron pattern with multi-segment topic name.
+// Node A advertises "data/x/y#500", Node B subscribes to "data/>".
+// The '>' matches "x/y" producing two substitutions ("x" and "y").
+// ---------------------------------------------------------------------------
+void test_pinned_chevron_multi_segment_subs()
+{
+    constexpr std::uint32_t pub_id = 5050U;
+
+    e2e::sim_net_t net{};
+    TEST_ASSERT_EQUAL_INT(
+      CY_OK, e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), UINT64_C(0xA108)));
+
+    cy_publisher_t* const pub = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("data/x/y#500"));
+    TEST_ASSERT_NOT_NULL(pub);
+
+    arrival_capture_t  capture{};
+    cy_future_t* const sub = make_pattern_sub(e2e::sim_net_cy(net, e2e::sim_node_b), "data/>", capture);
+
+    cy_us_t now = 0;
+    e2e::drive_for(net, now, converge_time, step_us);
+
+    e2e::set_now(net, now);
+    publish_best_effort(pub, pub_id, 1U, now);
+    TEST_ASSERT_EQUAL_INT(CY_OK, e2e::drive_round(net, now, now));
+    now += 10'000;
+    e2e::drive_for(net, now, delivery_time, step_us);
+
+    // Verify delivery.
+    TEST_ASSERT_EQUAL_size_t(0U, capture.malformed);
+    TEST_ASSERT_TRUE(count_by_publisher(capture, pub_id) > 0U);
+
+    // Look up the topic on the subscriber node and verify substitutions.
+    const std::uint64_t     hash  = capture.samples.front().topic_hash;
+    const cy_topic_t* const topic = cy_topic_find_by_hash(e2e::sim_net_cy(net, e2e::sim_node_b), hash);
+    TEST_ASSERT_NOT_NULL(topic);
+
+    // The '>' should match "x/y", producing two substitutions (one per segment), both with ordinal 0.
+    const cy_substitution_set_t subs_set = cy_subscriber_substitutions(sub, topic);
+    TEST_ASSERT_EQUAL_size_t(2U, subs_set.count);
+    TEST_ASSERT_NOT_NULL(subs_set.substitutions);
+
+    // First substitution: "x" (ordinal 0).
+    TEST_ASSERT_EQUAL_size_t(0U, subs_set.substitutions[0].ordinal);
+    TEST_ASSERT_EQUAL_size_t(1U, subs_set.substitutions[0].str.len);
+    TEST_ASSERT_EQUAL_STRING_LEN("x", subs_set.substitutions[0].str.str, 1U);
+
+    // Second substitution: "y" (ordinal 0).
+    TEST_ASSERT_EQUAL_size_t(0U, subs_set.substitutions[1].ordinal);
+    TEST_ASSERT_EQUAL_size_t(1U, subs_set.substitutions[1].str.len);
+    TEST_ASSERT_EQUAL_STRING_LEN("y", subs_set.substitutions[1].str.str, 1U);
+
+    e2e::cleanup_case(net, now, {}, { sub }, { pub }, step_us, 100'000, 100'000U);
+}
+
 } // namespace
 
 extern "C" void setUp()
@@ -470,5 +525,6 @@ int main()
     RUN_TEST(test_pinned_topic_substitutions_correct);
     RUN_TEST(test_multiple_patterns_selective_match_with_pinning);
     RUN_TEST(test_implicit_topic_from_gossip_inherits_remote_evictions);
+    RUN_TEST(test_pinned_chevron_multi_segment_subs);
     return UNITY_END();
 }

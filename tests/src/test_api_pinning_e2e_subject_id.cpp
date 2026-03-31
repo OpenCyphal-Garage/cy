@@ -507,6 +507,58 @@ void test_pinned_and_auto_coexist()
     e2e::cleanup_case(net, now, {}, { sub_pinned, sub_auto }, { pub_pinned, pub_auto }, step_us, 100'000, 100'000U);
 }
 
+// ---------------------------------------------------------------------------
+// Test: CAN compatibility pattern from README: "1234#1234".
+// The topic name is "1234" and the on-wire subject-ID is 1234.
+// ---------------------------------------------------------------------------
+void test_can_compat_e2e()
+{
+    e2e::sim_net_t net{};
+    TEST_ASSERT_EQUAL_INT(
+      CY_OK, e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), UINT64_C(0xB009)));
+
+    // Node A advertises "1234#1234" (CAN compatibility pattern from README).
+    cy_publisher_t* const pub = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("1234#1234"));
+    TEST_ASSERT_NOT_NULL(pub);
+
+    // Node B subscribes to "1234" (same canonical topic).
+    arrival_capture_t  capture{};
+    cy_future_t* const sub = make_sub(e2e::sim_net_cy(net, e2e::sim_node_b), "1234", capture);
+
+    cy_us_t now = 0;
+    e2e::drive_for(net, now, converge_time, step_us);
+
+    // Publish from A.
+    constexpr std::uint32_t pub_id = 6050U;
+    for (std::uint64_t seq = 1U; seq <= 8U; seq++) {
+        e2e::set_now(net, now);
+        publish_one(pub, pub_id, seq, now);
+        TEST_ASSERT_EQUAL_INT(CY_OK, e2e::drive_round(net, now, now));
+        now += 10'000;
+    }
+    e2e::drive_for(net, now, delivery_time, step_us);
+
+    // Verify B receives the message.
+    TEST_ASSERT_EQUAL_size_t(0U, capture.malformed);
+    TEST_ASSERT_TRUE(count_by_publisher(capture, pub_id) > 0U);
+
+    // Verify the on-wire subject-ID is 1234.
+    const auto& caps = e2e::sim_net_captures(net);
+    const auto  hash = cy_topic_hash(cy_publisher_topic(pub));
+    const auto  sid  = last_subject_id_for_hash(caps, hash);
+    TEST_ASSERT_TRUE(sid.has_value());
+    TEST_ASSERT_EQUAL_UINT32(1234U, *sid);
+
+    // Verify the stored topic name is "1234" (without the pin suffix).
+    const cy_topic_t* const topic = cy_publisher_topic(pub);
+    TEST_ASSERT_NOT_NULL(topic);
+    const cy_str_t name = cy_topic_name(topic);
+    TEST_ASSERT_EQUAL_size_t(4U, name.len);
+    TEST_ASSERT_EQUAL_STRING_LEN("1234", name.str, name.len);
+
+    e2e::cleanup_case(net, now, {}, { sub }, { pub }, step_us, 100'000, 100'000U);
+}
+
 } // namespace
 
 extern "C" void setUp()
@@ -528,5 +580,6 @@ int main()
     RUN_TEST(test_bare_pin_differs_from_prefixed_pin);
     RUN_TEST(test_topic_cohabitation_correct_routing);
     RUN_TEST(test_pinned_and_auto_coexist);
+    RUN_TEST(test_can_compat_e2e);
     return UNITY_END();
 }

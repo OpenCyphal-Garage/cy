@@ -5,8 +5,24 @@
 #include "guarded_heap.h"
 #include <cstddef>
 #include <cstdint>
+#include <set>
 
 namespace api_test {
+
+/// Common base for all API test platform structs. Each test file inherits from this and adds test-specific fields.
+/// The first member must remain cy_platform_t so that platform_from<T> reinterpret_cast works correctly.
+struct test_platform_base_t
+{
+    cy_platform_t        platform{};
+    cy_platform_vtable_t vtable{};
+    guarded_heap_t       core_heap{};
+    guarded_heap_t       message_heap{};
+    cy_t*                cy{ nullptr };
+    cy_us_t              now{ 0 };
+    std::uint64_t        random_state{ UINT64_C(0x123456789ABCDEF0) };
+    std::set<std::uint32_t> active_reader_subjects;
+    std::set<std::uint32_t> active_writer_subjects;
+};
 
 struct subject_writer_t
 {
@@ -108,6 +124,72 @@ inline void assert_heaps_clean(const guarded_heap_t& core_heap, const guarded_he
     TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&core_heap));
     TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&message_heap));
     TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&message_heap));
+}
+
+// ----- Tracked subject management: allocation + active_*_subjects bookkeeping -----
+
+template <typename Platform>
+cy_subject_writer_t* subject_writer_new_tracked(cy_platform_t* const platform, const std::uint32_t subject_id)
+{
+    cy_subject_writer_t* const out = subject_writer_new<Platform>(platform, subject_id);
+    if (out != nullptr) {
+        Platform* const self = platform_from<Platform>(platform);
+        TEST_ASSERT_EQUAL_INT(0, self->active_writer_subjects.count(subject_id));
+        self->active_writer_subjects.insert(subject_id);
+    }
+    return out;
+}
+
+template <typename Platform>
+void subject_writer_destroy_tracked(cy_platform_t* const platform, cy_subject_writer_t* const writer)
+{
+    Platform* const self = platform_from<Platform>(platform);
+    TEST_ASSERT_EQUAL_INT(1, self->active_writer_subjects.erase(writer->subject_id));
+    subject_writer_destroy<Platform>(platform, writer);
+}
+
+template <typename Platform>
+cy_subject_reader_t* subject_reader_new_tracked(cy_platform_t* const platform,
+                                                const std::uint32_t  subject_id,
+                                                const std::size_t    extent)
+{
+    cy_subject_reader_t* const out = subject_reader_new<Platform>(platform, subject_id, extent);
+    if (out != nullptr) {
+        Platform* const self = platform_from<Platform>(platform);
+        TEST_ASSERT_EQUAL_INT(0, self->active_reader_subjects.count(subject_id));
+        self->active_reader_subjects.insert(subject_id);
+    }
+    return out;
+}
+
+template <typename Platform>
+void subject_reader_extent_set_tracked(cy_platform_t* const       platform,
+                                       cy_subject_reader_t* const reader,
+                                       const std::size_t          extent)
+{
+    Platform* const self = platform_from<Platform>(platform);
+    TEST_ASSERT_EQUAL_INT(1, self->active_reader_subjects.count(reader->subject_id));
+    subject_reader_extent_set<Platform>(platform, reader, extent);
+}
+
+template <typename Platform>
+void subject_reader_destroy_tracked(cy_platform_t* const platform, cy_subject_reader_t* const reader)
+{
+    Platform* const self = platform_from<Platform>(platform);
+    TEST_ASSERT_EQUAL_INT(1, self->active_reader_subjects.erase(reader->subject_id));
+    subject_reader_destroy<Platform>(platform, reader);
+}
+
+// ----- Standard teardown -----
+
+template <typename Platform>
+void standard_deinit(Platform& self)
+{
+    if (self.cy != nullptr) {
+        cy_destroy(self.cy);
+        self.cy = nullptr;
+    }
+    assert_heaps_clean(self.core_heap, self.message_heap);
 }
 
 } // namespace api_test

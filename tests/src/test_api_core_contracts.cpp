@@ -2,7 +2,6 @@
 #include <rapidhash.h>
 #include <unity.h>
 #include "api_mock_platform_utils.hpp"
-#include "guarded_heap.h"
 #include "helpers.h"
 #include "message.h"
 #include <array>
@@ -10,7 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <set>
+#include <string>
 #include <vector>
 
 namespace {
@@ -41,18 +40,8 @@ struct local_pin_case_t
     std::uint16_t expected_pin{ 0U };
 };
 
-struct test_platform_t final
+struct test_platform_t final : api_test::test_platform_base_t
 {
-    cy_platform_t        platform{};
-    cy_platform_vtable_t vtable{};
-    guarded_heap_t       core_heap{};
-    guarded_heap_t       message_heap{};
-
-    cy_t* cy{ nullptr };
-
-    cy_us_t       now{ 1000 };
-    std::uint64_t random_state{ UINT64_C(0x123456789ABCDEF0) };
-
     cy_err_t    spin_result{ CY_OK };
     std::size_t spin_call_count{ 0U };
     cy_us_t     spin_last_deadline{ 0 };
@@ -68,9 +57,6 @@ struct test_platform_t final
     std::size_t alloc_counter{ 0U };
     bool        fail_subject_writer_new{ false };
     bool        fail_subject_reader_new{ false };
-
-    std::set<std::uint32_t> active_reader_subjects;
-    std::set<std::uint32_t> active_writer_subjects;
 };
 
 test_platform_t* platform_from(cy_platform_t* const platform)
@@ -101,9 +87,7 @@ extern "C" cy_subject_writer_t* platform_subject_writer_new(cy_platform_t* const
 
 extern "C" void platform_subject_writer_destroy(cy_platform_t* const platform, cy_subject_writer_t* const writer)
 {
-    test_platform_t* const self = platform_from(platform);
-    TEST_ASSERT_EQUAL_INT(1, self->active_writer_subjects.erase(writer->subject_id));
-    api_test::subject_writer_destroy<test_platform_t>(platform, writer);
+    api_test::subject_writer_destroy_tracked<test_platform_t>(platform, writer);
 }
 
 extern "C" cy_err_t platform_subject_writer_send(cy_platform_t* const       platform,
@@ -141,16 +125,12 @@ extern "C" void platform_subject_reader_extent_set(cy_platform_t* const       pl
                                                    cy_subject_reader_t* const reader,
                                                    const std::size_t          extent)
 {
-    test_platform_t* const self = platform_from(platform);
-    TEST_ASSERT_EQUAL_INT(1, self->active_reader_subjects.count(reader->subject_id));
-    api_test::subject_reader_extent_set<test_platform_t>(platform, reader, extent);
+    api_test::subject_reader_extent_set_tracked<test_platform_t>(platform, reader, extent);
 }
 
 extern "C" void platform_subject_reader_destroy(cy_platform_t* const platform, cy_subject_reader_t* const reader)
 {
-    test_platform_t* const self = platform_from(platform);
-    TEST_ASSERT_EQUAL_INT(1, self->active_reader_subjects.erase(reader->subject_id));
-    api_test::subject_reader_destroy<test_platform_t>(platform, reader);
+    api_test::subject_reader_destroy_tracked<test_platform_t>(platform, reader);
 }
 
 extern "C" cy_err_t platform_unicast_send(cy_platform_t* const   platform,
@@ -227,6 +207,7 @@ extern "C" void on_done_capture(cy_future_t* const future)
 void platform_prepare(test_platform_t* const self)
 {
     *self = test_platform_t{};
+    self->now = 1000;
 
     guarded_heap_init(&self->core_heap, UINT64_C(0xFACEB00C12345678));
     guarded_heap_init(&self->message_heap, UINT64_C(0xDEC0DE1234567890));
@@ -259,11 +240,7 @@ void platform_init(test_platform_t* const self)
 
 void platform_deinit(test_platform_t* const self)
 {
-    if (self->cy != nullptr) {
-        cy_destroy(self->cy);
-        self->cy = nullptr;
-    }
-    api_test::assert_heaps_clean(self->core_heap, self->message_heap);
+    api_test::standard_deinit(*self);
 }
 
 void dispatch_best_effort_unicast(test_platform_t* const            self,
@@ -1284,6 +1261,132 @@ void test_api_core_gossip_pins_topic_with_pub_writer()
     platform_deinit(&platform);
 }
 
+void test_cy_resolve_uses_node_home_and_namespace()
+{
+    test_platform_t platform{};
+    platform_init(&platform);
+
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_home_set(platform.cy, cy_str("mynode")));
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_namespace_set(platform.cy, cy_str("ns")));
+
+    // Homeful name: ~ expands to the home ("mynode"), namespace is not involved.
+    {
+        char buf[256]{};
+        const cy_resolved_t r = cy_resolve(platform.cy, cy_str("~/topic"), sizeof(buf), buf);
+        TEST_ASSERT_NOT_NULL(r.name.str);
+        TEST_ASSERT_EQUAL_size_t(12U, r.name.len); // "mynode/topic"
+        TEST_ASSERT_EQUAL_MEMORY("mynode/topic", r.name.str, r.name.len);
+        TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, r.pin);
+        TEST_ASSERT_TRUE(r.verbatim);
+    }
+
+    // Relative name: namespace is prepended.
+    {
+        char buf[256]{};
+        const cy_resolved_t r = cy_resolve(platform.cy, cy_str("relative/path"), sizeof(buf), buf);
+        TEST_ASSERT_NOT_NULL(r.name.str);
+        TEST_ASSERT_EQUAL_size_t(16U, r.name.len); // "ns/relative/path"
+        TEST_ASSERT_EQUAL_MEMORY("ns/relative/path", r.name.str, r.name.len);
+        TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, r.pin);
+        TEST_ASSERT_TRUE(r.verbatim);
+    }
+
+    // Absolute name: bypass namespace and home entirely, leading separator stripped.
+    {
+        char buf[256]{};
+        const cy_resolved_t r = cy_resolve(platform.cy, cy_str("/absolute"), sizeof(buf), buf);
+        TEST_ASSERT_NOT_NULL(r.name.str);
+        TEST_ASSERT_EQUAL_size_t(8U, r.name.len); // "absolute"
+        TEST_ASSERT_EQUAL_MEMORY("absolute", r.name.str, r.name.len);
+        TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, r.pin);
+        TEST_ASSERT_TRUE(r.verbatim);
+    }
+
+    platform_deinit(&platform);
+}
+
+void test_cy_resolve_with_pin()
+{
+    test_platform_t platform{};
+    platform_init(&platform);
+
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_home_set(platform.cy, cy_str("mynode")));
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_namespace_set(platform.cy, cy_str("ns")));
+
+    // Relative name with pin: namespace prepended, pin stripped and returned separately.
+    {
+        char buf[256]{};
+        const cy_resolved_t r = cy_resolve(platform.cy, cy_str("topic#123"), sizeof(buf), buf);
+        TEST_ASSERT_NOT_NULL(r.name.str);
+        TEST_ASSERT_EQUAL_size_t(8U, r.name.len); // "ns/topic"
+        TEST_ASSERT_EQUAL_MEMORY("ns/topic", r.name.str, r.name.len);
+        TEST_ASSERT_EQUAL_UINT16(123U, r.pin);
+        TEST_ASSERT_TRUE(r.verbatim);
+    }
+
+    // Homeful name with pin: home expanded, pin stripped and returned separately.
+    {
+        char buf[256]{};
+        const cy_resolved_t r = cy_resolve(platform.cy, cy_str("~/svc#0"), sizeof(buf), buf);
+        TEST_ASSERT_NOT_NULL(r.name.str);
+        TEST_ASSERT_EQUAL_size_t(10U, r.name.len); // "mynode/svc"
+        TEST_ASSERT_EQUAL_MEMORY("mynode/svc", r.name.str, r.name.len);
+        TEST_ASSERT_EQUAL_UINT16(0U, r.pin);
+        TEST_ASSERT_TRUE(r.verbatim);
+    }
+
+    platform_deinit(&platform);
+}
+
+void test_topic_iteration_includes_pinned()
+{
+    test_platform_t platform{};
+    platform_init(&platform);
+
+    // Subscribe to "alpha" (unpinned).
+    cy_future_t* const sub_alpha = cy_subscribe(platform.cy, cy_str("alpha"), 128U);
+    TEST_ASSERT_NOT_NULL(sub_alpha);
+
+    // Subscribe to "beta#42" (pinned).
+    cy_future_t* const sub_beta = cy_subscribe(platform.cy, cy_str("beta#42"), 128U);
+    TEST_ASSERT_NOT_NULL(sub_beta);
+
+    // Advertise "gamma#100" (pinned).
+    cy_publisher_t* const pub_gamma = cy_advertise(platform.cy, cy_str("gamma#100"));
+    TEST_ASSERT_NOT_NULL(pub_gamma);
+
+    // Spin once to process allocations.
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
+
+    // Iterate all topics and collect their names.
+    std::vector<std::string> topic_names;
+    for (cy_topic_t* topic = cy_topic_iter_first(platform.cy); topic != nullptr;
+         topic              = cy_topic_iter_next(topic)) {
+        const cy_str_t name = cy_topic_name(topic);
+        topic_names.emplace_back(name.str, name.len);
+    }
+
+    // Verify all 3 topics appear in the iteration (order is unspecified).
+    const auto has_name = [&](const char* const expected) {
+        return std::find(topic_names.begin(), topic_names.end(), std::string(expected)) != topic_names.end();
+    };
+    TEST_ASSERT_TRUE(has_name("alpha"));
+    TEST_ASSERT_TRUE(has_name("beta"));
+    TEST_ASSERT_TRUE(has_name("gamma"));
+
+    // Verify each can be found via cy_topic_find_by_name using the resolved (pin-stripped) name.
+    TEST_ASSERT_NOT_NULL(cy_topic_find_by_name(platform.cy, cy_str("alpha")));
+    TEST_ASSERT_NOT_NULL(cy_topic_find_by_name(platform.cy, cy_str("beta")));
+    TEST_ASSERT_NOT_NULL(cy_topic_find_by_name(platform.cy, cy_str("gamma")));
+
+    // Clean up.
+    cy_future_destroy(sub_alpha);
+    cy_future_destroy(sub_beta);
+    cy_unadvertise(pub_gamma);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
+    platform_deinit(&platform);
+}
+
 } // namespace
 
 extern "C" void setUp()
@@ -1321,5 +1424,8 @@ int main()
     RUN_TEST(test_api_core_dedup_oom_on_reliable_message);
     RUN_TEST(test_api_core_gossip_coupling_oom_sweep);
     RUN_TEST(test_api_core_gossip_pins_topic_with_pub_writer);
+    RUN_TEST(test_cy_resolve_uses_node_home_and_namespace);
+    RUN_TEST(test_cy_resolve_with_pin);
+    RUN_TEST(test_topic_iteration_includes_pinned);
     return UNITY_END();
 }
