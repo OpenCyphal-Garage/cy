@@ -1,4 +1,5 @@
 #include <cy_platform.h>
+#include <rapidhash.h>
 #include <unity.h>
 #include "e2e_faults.hpp"
 #include "e2e_sim_net.hpp"
@@ -25,8 +26,8 @@ constexpr cy_us_t step_us        = 20'000;
 constexpr cy_us_t future_timeout = 3'000'000;
 
 constexpr std::array<const char*, topic_count> colliding_topics = {
-    "e2e/migrate/topic_alpha#123456789abcdeff",
-    "e2e/migrate/topic_beta#123456789abdbe72",
+    "e2e/migrate/alpha_0",
+    "e2e/migrate/beta_14014",
 };
 
 struct global_stats_t final
@@ -196,7 +197,7 @@ void destroy_all_handles(e2e::sim_net_t& net, handles_t& handles, cy_us_t& now)
     e2e::drive_for(net, now, 80'000, step_us);
 }
 
-extern "C" void on_arrival_capture(cy_future_t* const sub)
+extern "C" void on_arrival_capture_ordered(cy_future_t* const sub)
 {
     const cy_arrival_t arrival = cy_arrival_move(sub);
     if (arrival.message.content == nullptr) {
@@ -266,7 +267,7 @@ void create_topic_handles(e2e::sim_net_t&   net,
     cy_user_context_t user_ctx = CY_USER_CONTEXT_EMPTY;
     user_ctx.ptr[0]            = &ctx;
     cy_future_context_set(sub, user_ctx);
-    cy_future_callback_set(sub, on_arrival_capture);
+    cy_future_callback_set(sub, on_arrival_capture_ordered);
 }
 
 std::optional<std::uint64_t> publish_best_effort(handles_t&        handles,
@@ -622,6 +623,15 @@ void test_api_pubsub_e2e_e06_end_of_test_global_invariant_checks()
     TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_live_count());
 }
 
+void test_colliding_topics_selftest()
+{
+    constexpr auto modulus = static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit);
+    const auto     sid_0   = rapidhash(colliding_topics.at(0), strlen(colliding_topics.at(0))) % modulus;
+    for (std::size_t i = 1U; i < colliding_topics.size(); i++) {
+        TEST_ASSERT_EQUAL_UINT64(sid_0, rapidhash(colliding_topics.at(i), strlen(colliding_topics.at(i))) % modulus);
+    }
+}
+
 } // namespace
 
 extern "C" void setUp()
@@ -635,6 +645,7 @@ extern "C" void tearDown() { TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_live_c
 int main()
 {
     UNITY_BEGIN();
+    RUN_TEST(test_colliding_topics_selftest);
     RUN_TEST(test_api_pubsub_e2e_e01_publisher_destroyed_with_pending_futures_under_fault_load);
     RUN_TEST(test_api_pubsub_e2e_e02_subscriber_destroyed_during_retransmission_storm);
     RUN_TEST(test_api_pubsub_e2e_e03_determinism_identical_seed_identical_transcript);

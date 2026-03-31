@@ -1,5 +1,6 @@
 #include <cy_platform.h>
 #include <unity.h>
+#include "gossip_test_utils.hpp"
 #include "guarded_heap.h"
 #include "helpers.h"
 #include "message.h"
@@ -8,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <set>
 #include <vector>
 
 namespace {
@@ -52,6 +54,9 @@ struct sim_node_t final
 
     std::uint64_t last_msg_be_hash{ 0U };
     std::uint32_t last_msg_be_subject_id{ 0U };
+
+    std::set<std::uint32_t> active_reader_subjects;
+    std::set<std::uint32_t> active_writer_subjects;
 };
 
 struct sim_event_t
@@ -87,20 +92,7 @@ const sim_node_t* node_from_const(const cy_platform_t* const platform)
     return reinterpret_cast<const sim_node_t*>(platform); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
 }
 
-std::size_t flatten_fragments(const cy_bytes_t message, unsigned char* const out, const std::size_t out_size)
-{
-    std::size_t       copied = 0U;
-    const cy_bytes_t* frag   = &message;
-    while ((frag != nullptr) && (copied < out_size)) {
-        if ((frag->size > 0U) && (frag->data != nullptr)) {
-            const std::size_t n = ((out_size - copied) < frag->size) ? (out_size - copied) : frag->size;
-            std::memcpy(out + copied, frag->data, n);
-            copied += n;
-        }
-        frag = frag->next;
-    }
-    return copied;
-}
+using gossip_test::flatten_fragments;
 
 std::uint64_t read_u64(const unsigned char* const data, const std::size_t offset)
 {
@@ -201,6 +193,8 @@ extern "C" cy_subject_writer_t* sim_subject_writer_new(cy_platform_t* const plat
       static_cast<sim_subject_writer_t*>(guarded_heap_alloc(&self->core_heap, sizeof(sim_subject_writer_t)));
     if (out != nullptr) {
         out->base.subject_id = subject_id;
+        TEST_ASSERT_EQUAL_INT(0U, self->active_writer_subjects.count(subject_id));
+        self->active_writer_subjects.insert(subject_id);
     }
     return (out != nullptr) ? &out->base : nullptr;
 }
@@ -208,6 +202,7 @@ extern "C" cy_subject_writer_t* sim_subject_writer_new(cy_platform_t* const plat
 extern "C" void sim_subject_writer_destroy(cy_platform_t* const platform, cy_subject_writer_t* const writer)
 {
     sim_node_t* const self = node_from(platform);
+    TEST_ASSERT_EQUAL_INT(1U, self->active_writer_subjects.erase(writer->subject_id));
     guarded_heap_free(&self->core_heap, writer);
 }
 
@@ -244,15 +239,28 @@ extern "C" cy_subject_reader_t* sim_subject_reader_new(cy_platform_t* const plat
         out->extent          = extent;
         out->next            = self->readers;
         self->readers        = out;
+        TEST_ASSERT_EQUAL_INT(0U, self->active_reader_subjects.count(subject_id));
+        self->active_reader_subjects.insert(subject_id);
     }
     return (out != nullptr) ? &out->base : nullptr;
 }
 
+extern "C" void sim_subject_reader_extent_set(cy_platform_t* const       platform,
+                                              cy_subject_reader_t* const reader,
+                                              const std::size_t          extent)
+{
+    sim_node_t* const self = node_from(platform);
+    TEST_ASSERT_EQUAL_INT(1U, self->active_reader_subjects.count(reader->subject_id));
+    auto* const r = reinterpret_cast<sim_subject_reader_t*>(reader); // NOLINT(*-reinterpret-cast)
+    r->extent     = extent;
+}
+
 extern "C" void sim_subject_reader_destroy(cy_platform_t* const platform, cy_subject_reader_t* const reader)
 {
-    sim_node_t* const      self = node_from(platform);
-    auto* const            r    = reinterpret_cast<sim_subject_reader_t*>(reader); // NOLINT(*-reinterpret-cast)
-    sim_subject_reader_t** cur  = &self->readers;
+    sim_node_t* const self = node_from(platform);
+    TEST_ASSERT_EQUAL_INT(1U, self->active_reader_subjects.erase(reader->subject_id));
+    auto* const            r   = reinterpret_cast<sim_subject_reader_t*>(reader); // NOLINT(*-reinterpret-cast)
+    sim_subject_reader_t** cur = &self->readers;
     while (*cur != nullptr) {
         if (*cur == r) {
             *cur = r->next;
@@ -333,17 +341,18 @@ void network_node_init(sim_network_t& net, const std::size_t index)
     node.readers      = nullptr;
     node.random_state = UINT64_C(0x1020304050607080) + index;
 
-    node.vtable.subject_writer_new     = sim_subject_writer_new;
-    node.vtable.subject_writer_destroy = sim_subject_writer_destroy;
-    node.vtable.subject_writer_send    = sim_subject_writer_send;
-    node.vtable.subject_reader_new     = sim_subject_reader_new;
-    node.vtable.subject_reader_destroy = sim_subject_reader_destroy;
-    node.vtable.unicast                = sim_unicast_send;
-    node.vtable.unicast_extent_set     = sim_unicast_extent_set;
-    node.vtable.spin                   = sim_spin;
-    node.vtable.now                    = sim_now;
-    node.vtable.realloc                = sim_realloc;
-    node.vtable.random                 = sim_random;
+    node.vtable.subject_writer_new        = sim_subject_writer_new;
+    node.vtable.subject_writer_destroy    = sim_subject_writer_destroy;
+    node.vtable.subject_writer_send       = sim_subject_writer_send;
+    node.vtable.subject_reader_new        = sim_subject_reader_new;
+    node.vtable.subject_reader_extent_set = sim_subject_reader_extent_set;
+    node.vtable.subject_reader_destroy    = sim_subject_reader_destroy;
+    node.vtable.unicast                   = sim_unicast_send;
+    node.vtable.unicast_extent_set        = sim_unicast_extent_set;
+    node.vtable.spin                      = sim_spin;
+    node.vtable.now                       = sim_now;
+    node.vtable.realloc                   = sim_realloc;
+    node.vtable.random                    = sim_random;
 
     node.platform.vtable             = &node.vtable;
     node.platform.subject_id_modulus = static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit);

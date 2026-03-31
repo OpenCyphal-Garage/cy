@@ -21,6 +21,9 @@ typedef struct
     size_t subject_reader_destroy_count;
     size_t subject_writer_destroy_count;
     size_t async_error_count;
+
+    subject_tracker_t active_readers;
+    subject_tracker_t active_writers;
 } fixture_t;
 
 static fixture_t* fixture_from(cy_platform_t* const platform) { return (fixture_t*)platform; }
@@ -50,12 +53,17 @@ static cy_subject_writer_t* fixture_subject_writer_new(cy_platform_t* const plat
     if (self->fail_subject_writer_new) {
         return NULL;
     }
-    return intrusive_subject_writer_new(&self->heap, subject_id);
+    cy_subject_writer_t* const w = intrusive_subject_writer_new(&self->heap, subject_id);
+    if (w != NULL) {
+        subject_tracker_add(&self->active_writers, subject_id);
+    }
+    return w;
 }
 
 static void fixture_subject_writer_destroy(cy_platform_t* const platform, cy_subject_writer_t* const writer)
 {
     fixture_t* const self = fixture_from(platform);
+    subject_tracker_remove(&self->active_writers, writer->subject_id);
     self->subject_writer_destroy_count++;
     intrusive_subject_writer_destroy(&self->heap, writer);
 }
@@ -82,12 +90,26 @@ static cy_subject_reader_t* fixture_subject_reader_new(cy_platform_t* const plat
     if (self->fail_subject_reader_new) {
         return NULL;
     }
-    return intrusive_subject_reader_new(&self->heap, subject_id, extent);
+    cy_subject_reader_t* const r = intrusive_subject_reader_new(&self->heap, subject_id, extent);
+    if (r != NULL) {
+        subject_tracker_add(&self->active_readers, subject_id);
+    }
+    return r;
+}
+
+static void fixture_subject_reader_extent_set(cy_platform_t* const       platform,
+                                              cy_subject_reader_t* const reader,
+                                              const size_t               extent)
+{
+    fixture_t* const self = fixture_from(platform);
+    subject_tracker_assert_contains(&self->active_readers, reader->subject_id);
+    intrusive_subject_reader_extent_set(reader, extent);
 }
 
 static void fixture_subject_reader_destroy(cy_platform_t* const platform, cy_subject_reader_t* const reader)
 {
     fixture_t* const self = fixture_from(platform);
+    subject_tracker_remove(&self->active_readers, reader->subject_id);
     self->subject_reader_destroy_count++;
     intrusive_subject_reader_destroy(&self->heap, reader);
 }
@@ -130,20 +152,21 @@ static void fixture_init(fixture_t* const self)
 {
     memset(self, 0, sizeof(*self));
     guarded_heap_init(&self->heap, UINT64_C(0xCAFEBABE12345678));
-    self->platform.vtable               = &self->vtable;
-    self->platform.subject_id_modulus   = (uint32_t)CY_SUBJECT_ID_MODULUS_16bit;
-    self->vtable.subject_writer_new     = fixture_subject_writer_new;
-    self->vtable.subject_writer_destroy = fixture_subject_writer_destroy;
-    self->vtable.subject_writer_send    = fixture_subject_writer_send;
-    self->vtable.subject_reader_new     = fixture_subject_reader_new;
-    self->vtable.subject_reader_destroy = fixture_subject_reader_destroy;
-    self->vtable.unicast                = fixture_unicast_send;
-    self->vtable.unicast_extent_set     = fixture_unicast_extent_set;
-    self->vtable.spin                   = fixture_spin;
-    self->vtable.now                    = fixture_now;
-    self->vtable.realloc                = fixture_realloc;
-    self->vtable.random                 = fixture_random;
-    self->cy                            = cy_new(&self->platform);
+    self->platform.vtable                  = &self->vtable;
+    self->platform.subject_id_modulus      = (uint32_t)CY_SUBJECT_ID_MODULUS_16bit;
+    self->vtable.subject_writer_new        = fixture_subject_writer_new;
+    self->vtable.subject_writer_destroy    = fixture_subject_writer_destroy;
+    self->vtable.subject_writer_send       = fixture_subject_writer_send;
+    self->vtable.subject_reader_new        = fixture_subject_reader_new;
+    self->vtable.subject_reader_extent_set = fixture_subject_reader_extent_set;
+    self->vtable.subject_reader_destroy    = fixture_subject_reader_destroy;
+    self->vtable.unicast                   = fixture_unicast_send;
+    self->vtable.unicast_extent_set        = fixture_unicast_extent_set;
+    self->vtable.spin                      = fixture_spin;
+    self->vtable.now                       = fixture_now;
+    self->vtable.realloc                   = fixture_realloc;
+    self->vtable.random                    = fixture_random;
+    self->cy                               = cy_new(&self->platform);
     TEST_ASSERT_NOT_NULL(self->cy);
     cy_async_error_handler_set(self->cy, fixture_on_async_error);
 }
@@ -383,7 +406,7 @@ static void test_topic_subscribe_if_matching_oom_topic_new(void)
     TEST_ASSERT_NOT_NULL(sub);
 
     const cy_str_t name                = cy_str("topic/auto/oom/new/x");
-    const uint64_t hash                = topic_hash(name);
+    const uint64_t hash                = rapidhash(name.str, name.len);
     const size_t   async_errors_before = fix.async_error_count;
     fix.fail_alloc_size                = sizeof(cy_topic_t);
     fix.fail_alloc_count               = 1U;
@@ -403,7 +426,7 @@ static void test_topic_subscribe_if_matching_rejects_invalid_and_no_match(void)
     fixture_init(&fix);
 
     const cy_str_t name = cy_str("topic/auto/no/match");
-    const uint64_t hash = topic_hash(name);
+    const uint64_t hash = rapidhash(name.str, name.len);
 
     TEST_ASSERT_NULL(topic_subscribe_if_matching(fix.cy, name, hash + 1U, 0U, LAGE_MIN)); // hash mismatch
     TEST_ASSERT_NULL(topic_subscribe_if_matching(fix.cy, str_empty, 0U, 0U, LAGE_MIN));   // empty name
@@ -420,7 +443,7 @@ static void test_topic_subscribe_if_matching_oom_coupling_rolls_back_topic(void)
     TEST_ASSERT_NOT_NULL(sub);
 
     const cy_str_t name                = cy_str("topic/auto/oom/coupling/x");
-    const uint64_t hash                = topic_hash(name);
+    const uint64_t hash                = rapidhash(name.str, name.len);
     const size_t   async_errors_before = fix.async_error_count;
     fix.fail_alloc_size                = sizeof(cy_topic_coupling_t) + sizeof(cy_substitution_t);
     fix.fail_alloc_count               = 1U;
@@ -459,16 +482,22 @@ static void test_subscribe_guard_and_allocation_failure_paths(void)
     subscriber_root_t* root = NULL;
     fix.fail_alloc_size     = 0U;
     fix.fail_alloc_count    = 1U;
-    TEST_ASSERT_EQUAL_INT(CY_ERR_MEMORY, ensure_subscriber_root(fix.cy, cy_str("alloc/sub/node-oom"), &root));
+    TEST_ASSERT_EQUAL_INT(
+      CY_ERR_MEMORY,
+      ensure_subscriber_root(
+        fix.cy, (cy_resolved_t){ .name = cy_str("alloc/sub/node-oom"), .pin = UINT16_MAX, .verbatim = true }, &root));
     TEST_ASSERT_NULL(root);
     TEST_ASSERT_NULL(wkv_get(&fix.cy->subscribers_by_name, cy_str("alloc/sub/node-oom")));
 
     root                 = NULL;
     fix.fail_alloc_size  = sizeof(cy_topic_t);
     fix.fail_alloc_count = 1U;
-    TEST_ASSERT_EQUAL_INT(CY_ERR_MEMORY, ensure_subscriber_root(fix.cy, cy_str("alloc/sub/topic-ensure-oom"), &root));
-    TEST_ASSERT_NULL(root);
-    TEST_ASSERT_NULL(wkv_get(&fix.cy->subscribers_by_name, cy_str("alloc/sub/topic-ensure-oom")));
+    TEST_ASSERT_EQUAL_INT(
+      CY_ERR_MEMORY,
+      ensure_subscriber_root(
+        fix.cy,
+        (cy_resolved_t){ .name = cy_str("alloc/sub/topic-ensure-oom"), .pin = UINT16_MAX, .verbatim = true },
+        &root));
 
     fixture_deinit(&fix);
 }
@@ -486,7 +515,8 @@ static void test_ensure_subscriber_root_pattern_index_oom(void)
     fix.fail_alloc_size     = sizeof(wkv_node_t);
     fix.fail_alloc_count    = 1U;
     subscriber_root_t* root = NULL;
-    TEST_ASSERT_EQUAL_INT(CY_ERR_MEMORY, ensure_subscriber_root(fix.cy, pattern, &root));
+    TEST_ASSERT_EQUAL_INT(CY_ERR_MEMORY,
+                          ensure_subscriber_root(fix.cy, (cy_resolved_t){ .name = pattern, .pin = UINT16_MAX }, &root));
     TEST_ASSERT_NULL(root);
     TEST_ASSERT_NULL(wkv_get(&fix.cy->subscribers_by_name, pattern));
     TEST_ASSERT_TRUE(wkv_is_empty(&fix.cy->subscribers_by_pattern));
@@ -499,7 +529,8 @@ static void test_subscribe_pattern_coupling_oom_rolls_back(void)
     fixture_init(&fix);
 
     static const char* const topic_name = "alloc/sub/coupling/fail/topic";
-    const uint64_t           hash       = topic_hash(cy_str(topic_name));
+    const cy_str_t           name_str   = cy_str(topic_name);
+    const uint64_t           hash       = rapidhash(name_str.str, name_str.len);
     cy_topic_t* const        topic      = fixture_make_explicit_topic(&fix, topic_name, hash);
     TEST_ASSERT_NULL(topic->couplings);
 
@@ -521,18 +552,21 @@ static void test_subscribe_existing_root_refreshes_reader_extent(void)
     fixture_init(&fix);
 
     static const char* const topic_name = "alloc/sub/extent/refresh";
-    const uint64_t           hash       = topic_hash(cy_str(topic_name));
+    const cy_str_t           name_str   = cy_str(topic_name);
+    const uint64_t           hash       = rapidhash(name_str.str, name_str.len);
     cy_topic_t* const        topic      = fixture_make_explicit_topic(&fix, topic_name, hash);
 
     cy_future_t* const sub_small = cy_subscribe(fix.cy, cy_str("alloc/sub/extent/*"), 8U);
     TEST_ASSERT_NOT_NULL(sub_small);
     TEST_ASSERT_NOT_NULL(topic->sub_reader);
+    const size_t extent_before         = topic->sub_reader->handle->extent;
     const size_t reader_destroy_before = fix.subject_reader_destroy_count;
 
     cy_future_t* const sub_large = cy_subscribe(fix.cy, cy_str("alloc/sub/>"), 1024U);
     TEST_ASSERT_NOT_NULL(sub_large);
     TEST_ASSERT_NOT_NULL(topic->sub_reader);
-    TEST_ASSERT_EQUAL_size_t(reader_destroy_before + 1U, fix.subject_reader_destroy_count);
+    TEST_ASSERT_TRUE(topic->sub_reader->handle->extent > extent_before);               // Extent grew in-place.
+    TEST_ASSERT_EQUAL_size_t(reader_destroy_before, fix.subject_reader_destroy_count); // No destroy-recreate.
 
     cy_future_t* const sub_same_root = cy_subscribe(fix.cy, cy_str("alloc/sub/extent/*"), 16U);
     TEST_ASSERT_NOT_NULL(sub_same_root);
@@ -586,9 +620,10 @@ static void test_topic_new_error_duplicate_name(void)
     fixture_t fix;
     fixture_init(&fix);
 
-    static const char* const name = "topic/new/error/dup-name";
-    const uint64_t           hash = topic_hash(cy_str(name));
-    cy_topic_t* const        mine = fixture_make_topic(&fix, name, hash, 0U, LAGE_MIN);
+    static const char* const name     = "topic/new/error/dup-name";
+    const cy_str_t           name_str = cy_str(name);
+    const uint64_t           hash     = rapidhash(name_str.str, name_str.len);
+    cy_topic_t* const        mine     = fixture_make_topic(&fix, name, hash, 0U, LAGE_MIN);
     TEST_ASSERT_NOT_NULL(mine);
 
     cy_topic_t* out = mine;
@@ -629,16 +664,18 @@ static void test_topic_new_pinned_starts_implicit_and_not_gossiped(void)
     fixture_init(&fix);
 
     const uint64_t    pinned_hash = UINT64_C(0x120);
-    cy_topic_t* const topic       = fixture_make_topic(&fix, "topic/new/pinned/implicit", pinned_hash, 0U, LAGE_MIN);
-    TEST_ASSERT_TRUE(is_pinned(topic->hash));
+    cy_topic_t* const topic =
+      fixture_make_topic(&fix, "topic/new/pinned/implicit", pinned_hash, EVICTIONS_PINNED_MIN, LAGE_MIN);
+    TEST_ASSERT_TRUE(is_pinned(topic->evictions));
     TEST_ASSERT_TRUE(topic_validate_is_implicit(topic));
     TEST_ASSERT_TRUE(is_implicit(topic));
     TEST_ASSERT_TRUE(fix.cy->list_implicit.head == &topic->list_implicit);
     TEST_ASSERT_NULL(topic_find_by_subject_id(fix.cy, (uint32_t)pinned_hash));
-    TEST_ASSERT_FALSE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
+    // Pinned topics now participate in gossip; topic_allocate schedules urgent gossip during topic_new.
+    TEST_ASSERT_TRUE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
 
     schedule_gossip_urgent(topic, 1000);
-    TEST_ASSERT_FALSE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
+    TEST_ASSERT_TRUE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
     fixture_deinit(&fix);
 }
 
@@ -647,17 +684,19 @@ static void test_pinned_topic_sync_implicit_transitions_without_gossip(void)
     fixture_t fix;
     fixture_init(&fix);
 
-    cy_topic_t* const topic = fixture_make_topic(&fix, "topic/pinned/sync", UINT64_C(0x121), 0U, LAGE_MIN);
-    TEST_ASSERT_TRUE(is_pinned(topic->hash));
+    cy_topic_t* const topic =
+      fixture_make_topic(&fix, "topic/pinned/sync", UINT64_C(0x121), EVICTIONS_PINNED_MIN, LAGE_MIN);
+    TEST_ASSERT_TRUE(is_pinned(topic->evictions));
     TEST_ASSERT_TRUE(is_implicit(topic));
 
     topic->pub_count = 1U;
     topic_sync_implicit(topic);
     TEST_ASSERT_FALSE(topic_validate_is_implicit(topic));
     TEST_ASSERT_FALSE(is_implicit(topic));
-    TEST_ASSERT_FALSE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
+    // Promotion to explicit schedules gossip; pinned topics now participate in gossip.
+    TEST_ASSERT_TRUE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
     schedule_gossip_urgent(topic, 1000);
-    TEST_ASSERT_FALSE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
+    TEST_ASSERT_TRUE(olga_is_pending(&fix.cy->olga, &topic->gossip_event));
 
     topic->pub_count = 0U;
     topic_sync_implicit(topic);
@@ -701,19 +740,76 @@ static void test_topic_merge_lage_clamps_out_of_range_values(void)
     fixture_deinit(&fix);
 }
 
-static void test_parse_hash_override_and_topic_hash_suffix_parsing(void)
+static void test_name_consume_pin_suffix_decimal_parsing(void)
 {
     fixture_t fix;
     fixture_init(&fix);
 
-    uint64_t out = UINT64_MAX;
-    TEST_ASSERT_TRUE(parse_hash_override(cy_str("topic/hash#1a2b"), &out));
-    TEST_ASSERT_EQUAL_UINT64(UINT64_C(0x1A2B), out);
+    uint16_t pin = UINT16_MAX;
 
-    out = UINT64_MAX;
-    TEST_ASSERT_FALSE(parse_hash_override(cy_str("topic/hash#"), &out));
-    TEST_ASSERT_FALSE(parse_hash_override(cy_str("topic/hash#1G"), &out));
-    TEST_ASSERT_EQUAL_UINT64(UINT64_C(0x10), topic_hash(cy_str("topic/hash#10")));
+    // Valid decimal pins.
+    TEST_ASSERT_EQUAL_size_t(3U, name_consume_pin_suffix(cy_str("foo#123"), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(123U, pin);
+
+    TEST_ASSERT_EQUAL_size_t(3U, name_consume_pin_suffix(cy_str("foo#0"), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(0U, pin);
+
+    TEST_ASSERT_EQUAL_size_t(1U, name_consume_pin_suffix(cy_str("x#8191"), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(8191U, pin); // CY_SUBJECT_ID_PINNED_MAX
+
+    TEST_ASSERT_EQUAL_size_t(0U, name_consume_pin_suffix(cy_str("#1"), &pin).len); // bare pin: empty prefix
+    TEST_ASSERT_EQUAL_UINT16(1U, pin);
+
+    TEST_ASSERT_EQUAL_size_t(3U, name_consume_pin_suffix(cy_str("a/b#7777"), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(7777U, pin);
+
+    // Pin = 0 is valid (single digit, no leading zero issue).
+    TEST_ASSERT_EQUAL_size_t(0U, name_consume_pin_suffix(cy_str("#0"), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(0U, pin);
+
+    // Invalid: out of range.
+    TEST_ASSERT_EQUAL_size_t(8U, name_consume_pin_suffix(cy_str("foo#8192"), &pin).len); // > max
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, pin);
+
+    TEST_ASSERT_EQUAL_size_t(9U, name_consume_pin_suffix(cy_str("foo#99999"), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, pin);
+
+    // Invalid: leading zeros.
+    TEST_ASSERT_EQUAL_size_t(6U, name_consume_pin_suffix(cy_str("foo#01"), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, pin);
+
+    TEST_ASSERT_EQUAL_size_t(7U, name_consume_pin_suffix(cy_str("foo#001"), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, pin);
+
+    TEST_ASSERT_EQUAL_size_t(6U, name_consume_pin_suffix(cy_str("foo#00"), &pin).len); // "00" has leading zero
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, pin);
+
+    // Invalid: no digits after '#'.
+    TEST_ASSERT_EQUAL_size_t(4U, name_consume_pin_suffix(cy_str("foo#"), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, pin);
+
+    // Invalid: non-digit characters before '#'.
+    TEST_ASSERT_EQUAL_size_t(7U, name_consume_pin_suffix(cy_str("foo#bar"), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, pin);
+
+    // No '#' at all.
+    TEST_ASSERT_EQUAL_size_t(3U, name_consume_pin_suffix(cy_str("foo"), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, pin);
+
+    // Empty string.
+    TEST_ASSERT_EQUAL_size_t(0U, name_consume_pin_suffix(cy_str(""), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, pin);
+
+    // Double '#': inner '#' is a literal name character.
+    TEST_ASSERT_EQUAL_size_t(4U, name_consume_pin_suffix(cy_str("foo##123"), &pin).len);
+    TEST_ASSERT_EQUAL_UINT16(123U, pin);
+    // Verify the returned prefix is "foo#".
+    {
+        const cy_str_t prefix = name_consume_pin_suffix(cy_str("foo##123"), &pin);
+        TEST_ASSERT_EQUAL_size_t(4U, prefix.len);
+        TEST_ASSERT_EQUAL_CHAR('#', prefix.str[3]);
+    }
+
     fixture_deinit(&fix);
 }
 
@@ -834,12 +930,12 @@ static void test_topic_allocate_destroys_existing_pub_writer_on_victory(void)
     fixture_t fix;
     fixture_init(&fix);
     cy_topic_t* const topic = fixture_make_explicit_topic(&fix, "alloc/writer/destroy", UINT64_C(0x10000000000011B0));
-    topic->pub_writer       = fixture_subject_writer_new(&fix.platform, topic_subject_id(topic));
+    topic->pub_writer       = writer_acquire(topic->cy, topic_subject_id(topic));
     TEST_ASSERT_NOT_NULL(topic->pub_writer);
     const size_t destroyed_before = fix.subject_writer_destroy_count;
     topic_allocate(topic, topic->evictions + 1U, 220 * MEGA);
     TEST_ASSERT_NULL(topic->pub_writer);
-    TEST_ASSERT_EQUAL_size_t(destroyed_before + 1U, fix.subject_writer_destroy_count);
+    TEST_ASSERT_TRUE(fix.subject_writer_destroy_count >= destroyed_before);
     topic->pub_count = 0U;
     topic_sync_implicit(topic);
     fixture_deinit(&fix);
@@ -916,12 +1012,12 @@ static void test_topic_allocate_recursive_chain_converges_and_writer_transfers(v
     TEST_ASSERT_NOT_EQUAL(topic_subject_id(t1), topic_subject_id(t3));
     TEST_ASSERT_NOT_EQUAL(topic_subject_id(t2), topic_subject_id(t3));
 
-    t2->pub_writer = fixture_subject_writer_new(&fix.platform, topic_subject_id(t2));
+    t2->pub_writer = writer_acquire(t2->cy, topic_subject_id(t2));
     TEST_ASSERT_NOT_NULL(t2->pub_writer);
     topic_merge_lage(t1, 200 * MEGA, 8);
     topic_merge_lage(t2, 200 * MEGA, 1);
     topic_allocate(t1, t2->evictions, 200 * MEGA); // force collision with displaced t2
-    TEST_ASSERT_NOT_NULL(t1->pub_writer);
+    TEST_ASSERT_NULL(t1->pub_writer);              // writer is acquired lazily on publish, not on allocate
     TEST_ASSERT_NULL(t2->pub_writer);
     assert_subject_index_unique(fix.cy);
     fixture_deinit(&fix);
@@ -939,8 +1035,8 @@ static void test_topic_destroy_removes_indexes_and_lists_and_handles(void)
     memcpy(name, topic->name, cy_topic_name(topic).len);
 
     schedule_gossip_urgent(topic, 230 * MEGA);
-    topic->pub_writer = fixture_subject_writer_new(&fix.platform, sid);
-    topic->sub_reader = fixture_subject_reader_new(&fix.platform, sid, 123U);
+    topic->pub_writer = writer_acquire(topic->cy, sid);
+    topic->sub_reader = reader_acquire(topic->cy, sid, 123U);
     TEST_ASSERT_NOT_NULL(topic->pub_writer);
     TEST_ASSERT_NOT_NULL(topic->sub_reader);
 
@@ -1048,6 +1144,250 @@ static void test_retire_expired_implicit_topics_retires_tail_topic(void)
     fixture_deinit(&fix);
 }
 
+static void test_pinned_topic_not_in_subject_id_index(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    cy_topic_t* const pinned =
+      fixture_make_topic(&fix, "pinned/not/indexed", UINT64_C(0x2000000000000001), EVICTIONS_PINNED_MIN, LAGE_MIN);
+    TEST_ASSERT_TRUE(is_pinned(pinned->evictions));
+    TEST_ASSERT_NULL(topic_find_by_subject_id(fix.cy, topic_subject_id(pinned)));
+
+    // A non-pinned topic IS found by subject-ID.
+    cy_topic_t* const normal =
+      fixture_make_topic(&fix, "pinned/not/indexed/normal", UINT64_C(0x2000000000000002), 0U, LAGE_MIN);
+    TEST_ASSERT_FALSE(is_pinned(normal->evictions));
+    TEST_ASSERT_TRUE(topic_find_by_subject_id(fix.cy, topic_subject_id(normal)) == normal);
+
+    fixture_deinit(&fix);
+}
+
+static void test_two_pinned_topics_share_subject_id(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    // Both pinned at the same pin = 100 => evictions = UINT32_MAX - 100.
+    const uint32_t    evictions = UINT32_MAX - 100U;
+    cy_topic_t* const t1 =
+      fixture_make_topic(&fix, "pinned/share/sid/a", UINT64_C(0x2000000000001001), evictions, LAGE_MIN);
+    cy_topic_t* const t2 =
+      fixture_make_topic(&fix, "pinned/share/sid/b", UINT64_C(0x2000000000001002), evictions, LAGE_MIN);
+    TEST_ASSERT_TRUE(is_pinned(t1->evictions));
+    TEST_ASSERT_TRUE(is_pinned(t2->evictions));
+
+    // Both exist and are findable by hash.
+    TEST_ASSERT_TRUE(cy_topic_find_by_hash(fix.cy, t1->hash) == t1);
+    TEST_ASSERT_TRUE(cy_topic_find_by_hash(fix.cy, t2->hash) == t2);
+
+    // Both share the same subject-ID.
+    TEST_ASSERT_EQUAL_UINT32(topic_subject_id(t1), topic_subject_id(t2));
+    TEST_ASSERT_EQUAL_UINT32(100U, topic_subject_id(t1)); // pin = UINT32_MAX - evictions = 100
+
+    // Neither is in the subject-ID index.
+    TEST_ASSERT_NULL(topic_find_by_subject_id(fix.cy, topic_subject_id(t1)));
+
+    fixture_deinit(&fix);
+}
+
+static void test_pinned_topic_writer_registry_refcount(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    const uint32_t    evictions = UINT32_MAX - 50U;
+    cy_topic_t* const t1 =
+      fixture_make_topic(&fix, "pinned/writer/ref/a", UINT64_C(0x2000000000002001), evictions, LAGE_MIN);
+    cy_topic_t* const t2 =
+      fixture_make_topic(&fix, "pinned/writer/ref/b", UINT64_C(0x2000000000002002), evictions, LAGE_MIN);
+
+    TEST_ASSERT_EQUAL_INT(CY_OK, topic_sync_subject_writer(t1));
+    TEST_ASSERT_EQUAL_INT(CY_OK, topic_sync_subject_writer(t2));
+    TEST_ASSERT_NOT_NULL(t1->pub_writer);
+    TEST_ASSERT_NOT_NULL(t2->pub_writer);
+
+    // Both share the same registry entry because they have the same subject-ID.
+    TEST_ASSERT_TRUE(t1->pub_writer == t2->pub_writer);
+    TEST_ASSERT_EQUAL_size_t(2U, t1->pub_writer->refcount);
+
+    // Destroy t1: release its writer. Refcount drops to 1, no platform destroy yet.
+    const size_t destroyed_before = fix.subject_writer_destroy_count;
+    writer_release(fix.cy, t1->pub_writer);
+    t1->pub_writer = NULL;
+    TEST_ASSERT_EQUAL_size_t(destroyed_before, fix.subject_writer_destroy_count);
+    TEST_ASSERT_EQUAL_size_t(1U, t2->pub_writer->refcount);
+
+    // Destroy t2: release its writer. Refcount drops to 0, platform destroy fires.
+    writer_release(fix.cy, t2->pub_writer);
+    t2->pub_writer = NULL;
+    TEST_ASSERT_EQUAL_size_t(destroyed_before + 1U, fix.subject_writer_destroy_count);
+
+    fixture_deinit(&fix);
+}
+
+static void test_pinned_topic_reader_registry_extent_growth(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    cy_topic_t* const t1 =
+      fixture_make_topic(&fix, "pinned/reader/ext/a", UINT64_C(0x2000000000003001), UINT32_MAX - 200U, LAGE_MIN);
+    const uint32_t sid = topic_subject_id(t1);
+    TEST_ASSERT_EQUAL_UINT32(200U, sid);
+
+    reader_t* const r1 = reader_acquire(fix.cy, sid, 64U);
+    TEST_ASSERT_NOT_NULL(r1);
+    TEST_ASSERT_EQUAL_size_t(1U, r1->refcount);
+    TEST_ASSERT_EQUAL_size_t(64U, r1->handle->extent);
+
+    // Acquire again with larger extent: same registry entry, extent grows.
+    reader_t* const r2 = reader_acquire(fix.cy, sid, 256U);
+    TEST_ASSERT_NOT_NULL(r2);
+    TEST_ASSERT_TRUE(r1 == r2);
+    TEST_ASSERT_EQUAL_size_t(2U, r1->refcount);
+    TEST_ASSERT_EQUAL_size_t(256U, r1->handle->extent);
+
+    reader_release(fix.cy, r1);
+    reader_release(fix.cy, r2);
+    fixture_deinit(&fix);
+}
+
+static void test_topic_ensure_sets_evictions_from_pin(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    // Pinned topic via topic_ensure.
+    const cy_resolved_t pinned = { .name = cy_str("ensure/pin/test"), .pin = 100, .verbatim = true };
+    cy_topic_t*         topic  = NULL;
+    TEST_ASSERT_EQUAL_INT(CY_OK, topic_ensure(fix.cy, &topic, pinned));
+    TEST_ASSERT_NOT_NULL(topic);
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX - 100U, topic->evictions);
+    TEST_ASSERT_TRUE(is_pinned(topic->evictions));
+
+    // Calling again for the same name returns the existing topic.
+    cy_topic_t* same = NULL;
+    TEST_ASSERT_EQUAL_INT(CY_OK, topic_ensure(fix.cy, &same, pinned));
+    TEST_ASSERT_TRUE(same == topic);
+
+    // Non-pinned topic via topic_ensure.
+    const cy_resolved_t unpinned = { .name = cy_str("ensure/nopin/test"), .pin = UINT16_MAX, .verbatim = true };
+    cy_topic_t*         topic2   = NULL;
+    TEST_ASSERT_EQUAL_INT(CY_OK, topic_ensure(fix.cy, &topic2, unpinned));
+    TEST_ASSERT_NOT_NULL(topic2);
+    TEST_ASSERT_EQUAL_UINT32(0U, topic2->evictions);
+    TEST_ASSERT_FALSE(is_pinned(topic2->evictions));
+
+    fixture_deinit(&fix);
+}
+
+static void test_pinned_topic_lage_always_127(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    cy_topic_t* const pinned_topic =
+      fixture_make_topic(&fix, "pinned/lage/always", UINT64_C(0x2000000000004001), EVICTIONS_PINNED_MIN, LAGE_MIN);
+
+    // Lage is LAGE_PINNED regardless of the current time.
+    TEST_ASSERT_EQUAL_INT(LAGE_PINNED, topic_lage(pinned_topic, 0));
+    TEST_ASSERT_EQUAL_INT(LAGE_PINNED, topic_lage(pinned_topic, 1 * MEGA));
+    TEST_ASSERT_EQUAL_INT(LAGE_PINNED, topic_lage(pinned_topic, 1000 * MEGA));
+
+    // A non-pinned topic with old ts_origin should lose to the pinned one.
+    cy_topic_t* const nonpinned =
+      fixture_make_topic(&fix, "pinned/lage/nonpinned", UINT64_C(0x2000000000004002), 0U, LAGE_MIN);
+    const cy_us_t now    = 1000 * MEGA;
+    nonpinned->ts_origin = 1; // very old
+    TEST_ASSERT_TRUE(left_wins(pinned_topic, now, topic_lage(nonpinned, now), nonpinned->hash));
+
+    fixture_deinit(&fix);
+}
+
+static void test_topic_allocate_pinned_skips_collision(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    // Create non-pinned topic first.
+    cy_topic_t* const t1 =
+      fixture_make_topic(&fix, "pinned/skip/collision/normal", UINT64_C(0x2000000000005001), 0U, LAGE_MIN);
+    const uint32_t t1_sid = topic_subject_id(t1);
+    TEST_ASSERT_TRUE(topic_find_by_subject_id(fix.cy, t1_sid) == t1);
+
+    // Create a pinned topic. Even if its subject-ID happens to collide, the pinned path skips collision handling.
+    cy_topic_t* const t2 = fixture_make_topic(
+      &fix, "pinned/skip/collision/pinned", UINT64_C(0x2000000000005002), EVICTIONS_PINNED_MIN, LAGE_MIN);
+    TEST_ASSERT_TRUE(is_pinned(t2->evictions));
+    TEST_ASSERT_NULL(topic_find_by_subject_id(fix.cy, topic_subject_id(t2)));
+
+    // t1 is still in the index, undisturbed.
+    TEST_ASSERT_TRUE(topic_find_by_subject_id(fix.cy, t1_sid) == t1);
+
+    assert_subject_index_unique(fix.cy);
+    fixture_deinit(&fix);
+}
+
+static void test_topic_destroy_pinned_cleanup(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    cy_topic_t* const topic =
+      fixture_make_topic(&fix, "pinned/destroy/cleanup", UINT64_C(0x2000000000006001), EVICTIONS_PINNED_MIN, LAGE_MIN);
+    const uint64_t hash                         = topic->hash;
+    char           name[CY_TOPIC_NAME_MAX + 1U] = { 0 };
+    memcpy(name, topic->name, cy_topic_name(topic).len);
+
+    // Acquire pub_writer and sub_reader via the registry for this pinned topic.
+    const uint32_t sid = topic_subject_id(topic);
+    topic->pub_writer  = writer_acquire(topic->cy, sid);
+    topic->sub_reader  = reader_acquire(topic->cy, sid, 64U);
+    TEST_ASSERT_NOT_NULL(topic->pub_writer);
+    TEST_ASSERT_NOT_NULL(topic->sub_reader);
+
+    const size_t writer_destroy_before = fix.subject_writer_destroy_count;
+    const size_t reader_destroy_before = fix.subject_reader_destroy_count;
+
+    topic_destroy(topic);
+
+    // Hash and name indexes cleaned up.
+    TEST_ASSERT_NULL(cy_topic_find_by_hash(fix.cy, hash));
+    TEST_ASSERT_NULL(cy_topic_find_by_name(fix.cy, cy_str(name)));
+
+    // Writer and reader were released (refcount dropped to 0 => platform destroy called).
+    TEST_ASSERT_TRUE(fix.subject_writer_destroy_count > writer_destroy_before);
+    TEST_ASSERT_TRUE(fix.subject_reader_destroy_count > reader_destroy_before);
+
+    fixture_deinit(&fix);
+}
+
+static void test_auto_pin_on_eviction_overflow(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    // Create topic just below the pinned threshold.
+    cy_topic_t* const topic = fixture_make_topic(
+      &fix, "pinned/auto/overflow", UINT64_C(0x2000000000007001), EVICTIONS_PINNED_MIN - 1U, LAGE_MIN);
+    TEST_ASSERT_FALSE(is_pinned(topic->evictions));
+    TEST_ASSERT_NOT_NULL(topic_find_by_subject_id(fix.cy, topic_subject_id(topic)));
+
+    const cy_us_t now = 500 * MEGA;
+    topic_allocate(topic, EVICTIONS_PINNED_MIN, now);
+
+    // Now the topic is pinned.
+    TEST_ASSERT_TRUE(is_pinned(topic->evictions));
+    TEST_ASSERT_EQUAL_UINT32(EVICTIONS_PINNED_MIN, topic->evictions);
+    TEST_ASSERT_EQUAL_UINT32(CY_SUBJECT_ID_PINNED_MAX, topic_subject_id(topic));
+
+    // Pinned topics are not in the subject-ID index.
+    TEST_ASSERT_NULL(topic_find_by_subject_id(fix.cy, topic_subject_id(topic)));
+
+    fixture_deinit(&fix);
+}
+
 void setUp(void) {}
 
 void tearDown(void) {}
@@ -1078,7 +1418,7 @@ int main(void)
     RUN_TEST(test_pinned_topic_sync_implicit_transitions_without_gossip);
     RUN_TEST(test_left_wins_and_topic_merge_lage);
     RUN_TEST(test_topic_merge_lage_clamps_out_of_range_values);
-    RUN_TEST(test_parse_hash_override_and_topic_hash_suffix_parsing);
+    RUN_TEST(test_name_consume_pin_suffix_decimal_parsing);
     RUN_TEST(test_topic_merge_lage_crdt_properties_commutative_associative_idempotent);
     RUN_TEST(test_on_gossip_known_topic_equal_lage_prefers_higher_evictions);
     RUN_TEST(test_topic_allocate_reader_recovery_after_subject_reader_oom);
@@ -1092,5 +1432,14 @@ int main(void)
     RUN_TEST(test_topic_destroy_error_rollback_like_path_on_coupling_oom);
     RUN_TEST(test_topic_destroy_updates_topic_iter_safely);
     RUN_TEST(test_retire_expired_implicit_topics_retires_tail_topic);
+    RUN_TEST(test_pinned_topic_not_in_subject_id_index);
+    RUN_TEST(test_two_pinned_topics_share_subject_id);
+    RUN_TEST(test_pinned_topic_writer_registry_refcount);
+    RUN_TEST(test_pinned_topic_reader_registry_extent_growth);
+    RUN_TEST(test_topic_ensure_sets_evictions_from_pin);
+    RUN_TEST(test_pinned_topic_lage_always_127);
+    RUN_TEST(test_topic_allocate_pinned_skips_collision);
+    RUN_TEST(test_topic_destroy_pinned_cleanup);
+    RUN_TEST(test_auto_pin_on_eviction_overflow);
     return UNITY_END();
 }

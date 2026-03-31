@@ -1,4 +1,5 @@
 #include <cy_platform.h>
+#include <rapidhash.h>
 #include <unity.h>
 #include "e2e_faults.hpp"
 #include "e2e_sim_net.hpp"
@@ -6,11 +7,10 @@
 #include "e2e_test_utils.hpp"
 #include "helpers.h"
 #include "message.h"
-#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <ranges>
+#include <cstring>
 #include <vector>
 
 namespace {
@@ -19,47 +19,12 @@ constexpr cy_us_t      step_us             = 1'000;
 constexpr cy_us_t      publish_deadline_us = 200'000;
 constexpr cy_us_t      expiry_timeout_us   = 600'000'000;
 constexpr std::uint8_t header_gossip       = 8U;
+constexpr const char*  colliding_topic_a   = "e2e/consensus/collide/a_0";
+constexpr const char*  colliding_topic_b   = "e2e/consensus/collide/b_19583";
 
-struct arrival_sample_t final
-{
-    std::uint32_t publisher_id{ 0U };
-    std::uint64_t sequence{ 0U };
-    std::uint64_t topic_hash{ 0U };
-};
-
-struct arrival_capture_t final
-{
-    std::vector<arrival_sample_t> samples{};
-    std::size_t                   malformed{ 0U };
-};
-
-extern "C" void on_arrival_capture(cy_future_t* const sub)
-{
-    const cy_arrival_t arrival = cy_arrival_move(sub);
-    if (arrival.message.content == nullptr) {
-        return;
-    }
-
-    auto* const capture = static_cast<arrival_capture_t*>(cy_future_context(sub).ptr[0]);
-    TEST_ASSERT_NOT_NULL(capture);
-
-    std::array<unsigned char, 32> bytes{};
-    const std::size_t             size = cy_message_read(arrival.message.content, 0U, bytes.size(), bytes.data());
-
-    e2e::app_payload_t payload{};
-    if (!e2e::app_payload_unpack(bytes.data(), size, payload)) {
-        capture->malformed++;
-        cy_message_refcount_dec(arrival.message.content);
-        return;
-    }
-
-    capture->samples.push_back(arrival_sample_t{
-      .publisher_id = payload.publisher_id,
-      .sequence     = payload.sequence,
-      .topic_hash   = arrival.breadcrumb.topic_hash,
-    });
-    cy_message_refcount_dec(arrival.message.content);
-}
+using e2e::arrival_capture_t;
+using e2e::count_by_publisher;
+using e2e::on_arrival_capture;
 
 void cleanup_case(e2e::sim_net_t&                     net,
                   cy_us_t&                            now,
@@ -77,13 +42,6 @@ void publish_best_effort(cy_publisher_t* const pub,
     const auto       payload = e2e::app_payload_pack(publisher_id, sequence);
     const cy_bytes_t msg     = { .size = payload.size(), .data = payload.data(), .next = nullptr };
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_publish(pub, now + publish_deadline_us, msg));
-}
-
-std::size_t count_by_publisher(const arrival_capture_t& capture, const std::uint32_t publisher_id)
-{
-    const auto count = std::ranges::count_if(
-      capture.samples, [publisher_id](const arrival_sample_t& sample) { return sample.publisher_id == publisher_id; });
-    return static_cast<std::size_t>(count);
 }
 
 void inject_divergent_gossip(e2e::sim_net_t&     net,
@@ -217,9 +175,9 @@ void test_api_consensus_edge_colliding_topics_discover_and_deliver_with_faults()
     constexpr std::uint32_t pub_id_a = 4201U;
     constexpr std::uint32_t pub_id_b = 4202U;
 
-    static constexpr const char* topic_a = "e2e/consensus/collide/a/#1000000000001000";
-    static constexpr const char* topic_b = "e2e/consensus/collide/b/#10000000007feff3";
-    static constexpr const char* pattern = "e2e/consensus/collide/>";
+    constexpr const char* topic_a = colliding_topic_a;
+    constexpr const char* topic_b = colliding_topic_b;
+    constexpr const char* pattern = "e2e/consensus/collide/>";
 
     e2e::fault_plan_t faults{};
     e2e::fault_plan_add_delay(
@@ -433,6 +391,13 @@ void test_api_consensus_edge_implicit_topic_expiry_large_time_jump_with_ordered_
     cleanup_case(net, now, { sub }, {});
 }
 
+void test_colliding_topics_selftest()
+{
+    constexpr auto modulus = static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit);
+    TEST_ASSERT_EQUAL_UINT64(rapidhash(colliding_topic_a, strlen(colliding_topic_a)) % modulus,
+                             rapidhash(colliding_topic_b, strlen(colliding_topic_b)) % modulus);
+}
+
 } // namespace
 
 extern "C" void setUp()
@@ -446,6 +411,7 @@ extern "C" void tearDown() { TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_live_c
 int main()
 {
     UNITY_BEGIN();
+    RUN_TEST(test_colliding_topics_selftest);
     RUN_TEST(test_api_consensus_edge_partition_heal_eventual_bidirectional_delivery);
     RUN_TEST(test_api_consensus_edge_colliding_topics_discover_and_deliver_with_faults);
     RUN_TEST(test_api_consensus_edge_implicit_topics_do_not_keep_each_other_alive);

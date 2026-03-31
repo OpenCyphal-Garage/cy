@@ -22,7 +22,7 @@ constexpr cy_us_t wait_window_us = 1'200'000;
 struct arrival_sample_t final
 {
     std::uint32_t publisher_id{ 0U };
-    std::uint64_t app_seq{ 0U };
+    std::uint64_t sequence{ 0U };
 };
 
 struct arrival_capture_t final
@@ -32,7 +32,7 @@ struct arrival_capture_t final
     std::size_t                   first_malformed_size{ 0U };
 };
 
-extern "C" void on_arrival_capture(cy_future_t* const sub)
+extern "C" void on_arrival_capture_fault(cy_future_t* const sub)
 {
     const cy_arrival_t arrival = cy_arrival_move(sub);
     if (arrival.message.content == nullptr) {
@@ -54,7 +54,7 @@ extern "C" void on_arrival_capture(cy_future_t* const sub)
         cy_message_refcount_dec(arrival.message.content);
         return;
     }
-    capture->samples.push_back(arrival_sample_t{ .publisher_id = payload.publisher_id, .app_seq = payload.sequence });
+    capture->samples.push_back(arrival_sample_t{ .publisher_id = payload.publisher_id, .sequence = payload.sequence });
     cy_message_refcount_dec(arrival.message.content);
 }
 
@@ -85,17 +85,17 @@ cy_future_t* make_subscriber(e2e::sim_net_t& net, const char* const topic_name, 
     cy_user_context_t ctx = CY_USER_CONTEXT_EMPTY;
     ctx.ptr[0]            = &capture;
     cy_future_context_set(sub, ctx);
-    cy_future_callback_set(sub, on_arrival_capture);
+    cy_future_callback_set(sub, on_arrival_capture_fault);
     return sub;
 }
 
 cy_future_t* publish_reliable(cy_publisher_t* const pub,
                               const std::uint32_t   pub_id,
-                              const std::uint64_t   app_seq,
+                              const std::uint64_t   sequence,
                               const cy_us_t         now,
                               const cy_us_t         deadline_offset)
 {
-    const auto       payload = e2e::app_payload_pack(pub_id, app_seq);
+    const auto       payload = e2e::app_payload_pack(pub_id, sequence);
     const cy_bytes_t msg     = { .size = payload.size(), .data = payload.data(), .next = nullptr };
     return cy_publish_reliable(pub, now + deadline_offset, msg);
 }
@@ -105,13 +105,13 @@ cy_future_t* publish_reliable_retry(e2e::sim_net_t&     net,
                                     const bool          allow_spin_media_failures,
                                     cy_publisher_t*     pub,
                                     const std::uint32_t pub_id,
-                                    const std::uint64_t app_seq,
+                                    const std::uint64_t sequence,
                                     const cy_us_t       deadline_offset,
                                     const std::size_t   max_attempts = 256U)
 {
     for (std::size_t attempt = 0U; attempt < max_attempts; attempt++) {
         e2e::set_now(net, now);
-        cy_future_t* const fut = publish_reliable(pub, pub_id, app_seq, now, deadline_offset);
+        cy_future_t* const fut = publish_reliable(pub, pub_id, sequence, now, deadline_offset);
         if (fut != nullptr) {
             return fut;
         }
@@ -125,7 +125,7 @@ std::vector<std::uint64_t> sequences_for(const arrival_capture_t& capture, const
     std::vector<std::uint64_t> out{};
     for (const arrival_sample_t& sample : capture.samples) {
         if (sample.publisher_id == pub_id) {
-            out.push_back(sample.app_seq);
+            out.push_back(sample.sequence);
         }
     }
     return out;

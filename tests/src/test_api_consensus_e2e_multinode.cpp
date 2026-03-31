@@ -1,4 +1,5 @@
 #include <cy_platform.h>
+#include <rapidhash.h>
 #include <unity.h>
 #include "e2e_faults.hpp"
 #include "e2e_sim_net.hpp"
@@ -10,6 +11,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <optional>
 #include <set>
 #include <string>
@@ -21,52 +23,16 @@ namespace {
 constexpr cy_us_t step_us             = 10'000;
 constexpr cy_us_t publish_deadline_us = 300'000;
 
+using e2e::arrival_capture_t;
+using e2e::arrival_sample_t;
+using e2e::count_by_publisher;
+using e2e::on_arrival_capture;
+
 constexpr std::array<const char*, 3> colliding_topics = {
-    "e2e/migrate/topic_alpha#123456789abcdeff",
-    "e2e/migrate/topic_beta#123456789abebef2",
-    "e2e/migrate/topic_gamma#123456789ac09ee5",
+    "e2e/migrate/alpha_0",
+    "e2e/migrate/beta_14014",
+    "e2e/migrate/gamma_67275",
 };
-
-struct arrival_sample_t final
-{
-    std::uint32_t publisher_id{ 0U };
-    std::uint64_t sequence{ 0U };
-    std::uint64_t topic_hash{ 0U };
-};
-
-struct arrival_capture_t final
-{
-    std::vector<arrival_sample_t> samples{};
-    std::size_t                   malformed{ 0U };
-};
-
-extern "C" void on_arrival_capture(cy_future_t* const sub)
-{
-    const cy_arrival_t arrival = cy_arrival_move(sub);
-    if (arrival.message.content == nullptr) {
-        return;
-    }
-
-    auto* const capture = static_cast<arrival_capture_t*>(cy_future_context(sub).ptr[0]);
-    TEST_ASSERT_NOT_NULL(capture);
-
-    std::array<unsigned char, 32> bytes{};
-    const std::size_t             size = cy_message_read(arrival.message.content, 0U, bytes.size(), bytes.data());
-
-    e2e::app_payload_t payload{};
-    if (!e2e::app_payload_unpack(bytes.data(), size, payload)) {
-        capture->malformed++;
-        cy_message_refcount_dec(arrival.message.content);
-        return;
-    }
-
-    capture->samples.push_back(arrival_sample_t{
-      .publisher_id = payload.publisher_id,
-      .sequence     = payload.sequence,
-      .topic_hash   = arrival.breadcrumb.topic_hash,
-    });
-    cy_message_refcount_dec(arrival.message.content);
-}
 
 cy_err_t publish_best_effort(cy_publisher_t* const pub,
                              const std::uint32_t   publisher_id,
@@ -76,13 +42,6 @@ cy_err_t publish_best_effort(cy_publisher_t* const pub,
     const auto       payload = e2e::app_payload_pack(publisher_id, sequence);
     const cy_bytes_t msg     = { .size = payload.size(), .data = payload.data(), .next = nullptr };
     return cy_publish(pub, now + publish_deadline_us, msg);
-}
-
-std::size_t count_from_publisher(const arrival_capture_t& capture, const std::uint32_t publisher_id)
-{
-    const auto count = std::ranges::count_if(
-      capture.samples, [publisher_id](const arrival_sample_t& sample) { return sample.publisher_id == publisher_id; });
-    return static_cast<std::size_t>(count);
 }
 
 std::size_t count_from_publisher_topic(const arrival_capture_t& capture,
@@ -261,7 +220,7 @@ void one_topic_assert_reachability(const one_topic_env_t& env)
             if (receiver == sender) {
                 continue;
             }
-            TEST_ASSERT_TRUE(count_from_publisher(env.captures.at(receiver), pub_id_for(sender)) > 0U);
+            TEST_ASSERT_TRUE(count_by_publisher(env.captures.at(receiver), pub_id_for(sender)) > 0U);
         }
     }
 }
@@ -598,7 +557,7 @@ void test_api_consensus_e2e_m06_node_restart_rejoin_during_collision_migration()
         TEST_ASSERT_EQUAL_size_t(0U, capture.malformed);
     }
     for (std::size_t topic = 0U; topic < topic_count; topic++) {
-        if (count_from_publisher(captures.at(restart_node), pub_id_for_topic(0U, topic)) == 0U) {
+        if (count_by_publisher(captures.at(restart_node), pub_id_for_topic(0U, topic)) == 0U) {
             const std::string msg = "m06 restart receiver missing topic_index=" + std::to_string(topic) +
                                     " pub_id=" + std::to_string(pub_id_for_topic(0U, topic));
             TEST_FAIL_MESSAGE(msg.c_str());
@@ -610,7 +569,7 @@ void test_api_consensus_e2e_m06_node_restart_rejoin_during_collision_migration()
             if (receiver == restart_node) {
                 continue;
             }
-            if (count_from_publisher(captures.at(receiver), pub_id_for_topic(restart_node, topic)) > 0U) {
+            if (count_by_publisher(captures.at(receiver), pub_id_for_topic(restart_node, topic)) > 0U) {
                 receivers++;
             }
         }
@@ -920,6 +879,15 @@ void test_api_consensus_e2e_m10_deterministic_seed_replay_identical_transcript()
     }
 }
 
+void test_colliding_topics_selftest()
+{
+    constexpr auto modulus = static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit);
+    const auto     sid_0   = rapidhash(colliding_topics.at(0), strlen(colliding_topics.at(0))) % modulus;
+    for (std::size_t i = 1U; i < colliding_topics.size(); i++) {
+        TEST_ASSERT_EQUAL_UINT64(sid_0, rapidhash(colliding_topics.at(i), strlen(colliding_topics.at(i))) % modulus);
+    }
+}
+
 } // namespace
 
 extern "C" void setUp()
@@ -933,6 +901,7 @@ extern "C" void tearDown() { TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_live_c
 int main()
 {
     UNITY_BEGIN();
+    RUN_TEST(test_colliding_topics_selftest);
     RUN_TEST(test_api_consensus_e2e_m01_five_node_baseline_convergence);
     RUN_TEST(test_api_consensus_e2e_m02_split_partition_heal_eventual_delivery);
     RUN_TEST(test_api_consensus_e2e_m03_bridge_node_isolation_then_restore);

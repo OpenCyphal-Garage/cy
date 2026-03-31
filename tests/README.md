@@ -12,6 +12,8 @@ When compiling, use multiple jobs to use all CPU cores.
 
 Run all tests in debug build to ensure that all assertion checks are enabled. Coverage builds should disable assertion checks to avoid reporting of uncovered fault branches in `assert()` statements.
 
+Do not use `assert()` statements in the test suite; all invariants must be checked regardless of `NDEBUG`. Prefer `enforce()`-like constructs instead.
+
 Use Clang-Format to format the code when done editing.
 
 Refer to the CI workflow files and `CMakeLists.txt` for the recommended practices on how to build and run the test suite.

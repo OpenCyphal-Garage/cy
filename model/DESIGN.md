@@ -39,11 +39,11 @@ The reliable delivery logic is built on the assumption that any given message ma
 
 The set of subject-ID values ranges from zero (inclusive) up to some transport-specific boundary. For Cyphal/CAN, the maximum is $2^{16}-1$, while for Cyphal/UDP (and all IPv4-based transports in general) the maximum is $2^{23}-1$ due to L2 multicast limitations.
 
-Subject-ID values from 0 to 8191 inclusive are reserved for pinned topics, which are guaranteed to be collision-free.
+Subject-ID values from 0 to 8191 inclusive are reserved for pinned topics.
 
 The maximum subject-ID value is reserved for broadcast subject that is used for low-rate broadcast gossip propagation and scouts. For Cyphal/CAN, this is subject 65535=0xffff, for Cyphal/UDP this is 8388607=0x7fffff.
 
-Values from 8192 (inclusive) up to (8191+modulus) (inclusive) are used for automatic subject-ID allocation for topics. The modulus is the largest prime number not greater than the maximum subject-ID minus 8191 such that $\text{modulus} \mod 4 = 3$ holds. The latter condition enables very efficient constant-time reconstruction of the eviction counter from the subject-ID; while this capability is currently not used in the protocol design (an attempt to use it to optimize gossip propagation was made but rejected due to ambiguities that arise once the eviction counter exceeds half the modulus), it might come useful in the future, especially for diagnostics. For posterity, a simple solver that reconstructs the eviction counter from the subject-ID is provided below.
+Values from 8192 (inclusive) up to (8191+modulus) (inclusive) are used for automatic subject-ID allocation for topics. The modulus is the largest prime number not greater than the maximum subject-ID minus 8191 such that $\text{modulus} \mod 4 = 3$ holds. The latter condition enables very efficient constant-time reconstruction of the eviction counter from the subject-ID; while this capability is currently not used in the protocol design (an attempt to use it to optimize gossip propagation was made but rejected due to ambiguities that arise once the eviction counter exceeds half the modulus), it might come useful in the future, especially for diagnostic tools. For posterity, a simple solver that reconstructs the eviction counter from the subject-ID is provided below.
 
 The subject-ID is derived from the topic hash and eviction counter using quadratic probing. This probing strategy guarantees unique placement until the eviction counter exceeds half the modulus, at which point the sequence will restart. Such restarting behavior is expected and may occur during normal operation of the network.
 
@@ -83,8 +83,8 @@ static uint32_t topic_evictions_from_subject_id(const uint64_t hash,
 {
     const uint32_t p = subject_id_modulus;
     assert((p > 3) && ((p & 3U) == 3U)); // Method below requires p&3=3, i.e. p%4=3
-    if ((subject_id <= CY_SUBJECT_ID_PINNED_MAX) || is_pinned(hash)) {
-        return 0; // Pinned subjects are collision-free, assume zero evictions.
+    if (subject_id <= CY_SUBJECT_ID_PINNED_MAX) {
+        return 0; // Pinned subject; eviction count is not meaningful here.
     }
 
     const uint32_t base = subject_id - (CY_SUBJECT_ID_PINNED_MAX + 1U);
@@ -116,8 +116,6 @@ static uint32_t topic_evictions_from_subject_id(const uint64_t hash,
 ```
 
 ### Headers
-
->TODO: Pinned topics on CAN must have no header to ensure backward compatibility, sort this out later.
 
 The transport layer just ferries opaque blobs between nodes. The job of the session layer is to build and interpret them. To enable that, the session layer adds small fixed-size headers to messages. All headers carry the header type in the first byte; the rest is header-specific. All headers have a fixed size of 24 bytes and favor natural alignment where possible to simplify parsing. The following header types are defined:
 
@@ -155,8 +153,8 @@ The message tags must be unique across reboots to avoid misattribution; for that
 uint8  type
 void8
 uint8  incompatibility
-int8   topic_log_age    # floor(log2(topic_age)) if topic_age>0 else -1, like in the gossip message.
-uint32 evictions        # Offset 4 bytes
+int8   topic_log_age    # floor(log2(topic_age)) if topic_age>0 else -1; 127 for pinned topics.
+uint32 evictions        # For pinned topics, this is 0xFFFFFFFF-subject_id.
 uint64 topic_hash       # For subject allocation collision detection and immediate consensus updates.
 uint64 tag              # For ordering recovery and acknowledgement & response correlation. Random-init, wraparound.
 # Payload follows.
@@ -201,13 +199,22 @@ uint64 message_tag      # The tag of the published message this response pertain
 
 See the `model/` directory for the design rationale.
 
+Pinned topics are manually assigned a specific subject-ID. They differ from ordinary topics as follows:
+
+- The log-age is set to 127 (unreachable for non-pinned topics).
+- The eviction counter is set to `0xFFFFFFFF - subject_id`, thus reserving the range at and above 0xFFFFE000.
+
+This makes CRDT handle the pinning logic without special casing: pinned topics win collisions thanks to the greater log-age (although at the moment they are limited to subject-IDs below 8192, where non-pinned topics cannot appear, but this may change in the future); pinned topics win divergence arbitration against non-pinned ones thanks to the higher eviction counter, thus resulting in a contagious spread of pinning (as intended); when the same topic is pinned to distinct subjects, the one with the smaller subject-ID wins.
+
+There is another desirable consequence of this design. It is expected that the 32-bit eviction counter will never wrap around due to its slow increment rate, so the reserved range is unreachable. If, however, there was a pathological scenario where the eviction counter is incremented at a high rate long enough to risk overflow, the reserved range at the top would automatically arrest the growth at 0xFFFFE000, effectively pinning the topic at the subject-ID of 8191, resulting in a graceful degradation of the protocol instead of a catastrophic failure due to wraparound (which the consensus protocol is not designed to handle).
+
 ```bash
 uint8  type
 void16
-int8   topic_log_age    # floor(log2(topic_age)) if topic_age>0 else -1
+int8   topic_log_age    # floor(log2(topic_age)) if topic_age>0 else -1; 127 for pinned topics.
 uint32 incompatibility
 uint64 topic_hash
-uint32 topic_evictions
+uint32 topic_evictions  # For pinned topics, this is 0xFFFFFFFF-subject_id.
 void24                  # May be used to extend the evictions counter and/or some other purpose.
 utf8[<=CY_TOPIC_NAME_MAX] topic_name  # Has 1 byte length prefix. The name is normalized.
 # Total size is 24 bytes + topic name length.

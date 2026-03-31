@@ -1,4 +1,5 @@
 #include <cy_platform.h>
+#include <rapidhash.h>
 #include <unity.h>
 #include "api_mock_platform_utils.hpp"
 #include "helpers.h"
@@ -8,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <set>
 
 namespace {
 constexpr std::uint8_t header_msg_best_effort = 0U;
@@ -42,6 +44,9 @@ struct test_platform_t final
     std::size_t                   unicast_count{ 0U };
     std::array<unsigned char, 16> last_unicast{};
     std::size_t                   unicast_extent{ 0U };
+
+    std::set<std::uint32_t> active_reader_subjects;
+    std::set<std::uint32_t> active_writer_subjects;
 };
 
 test_platform_t* platform_from(cy_platform_t* const platform)
@@ -52,11 +57,19 @@ test_platform_t* platform_from(cy_platform_t* const platform)
 extern "C" cy_subject_writer_t* platform_subject_writer_new(cy_platform_t* const platform,
                                                             const std::uint32_t  subject_id)
 {
-    return api_test::subject_writer_new<test_platform_t>(platform, subject_id);
+    cy_subject_writer_t* const out = api_test::subject_writer_new<test_platform_t>(platform, subject_id);
+    if (out != nullptr) {
+        test_platform_t* const self = platform_from(platform);
+        TEST_ASSERT_EQUAL_INT(0, self->active_writer_subjects.count(subject_id));
+        self->active_writer_subjects.insert(subject_id);
+    }
+    return out;
 }
 
 extern "C" void platform_subject_writer_destroy(cy_platform_t* const platform, cy_subject_writer_t* const writer)
 {
+    test_platform_t* const self = platform_from(platform);
+    TEST_ASSERT_EQUAL_INT(1, self->active_writer_subjects.erase(writer->subject_id));
     api_test::subject_writer_destroy<test_platform_t>(platform, writer);
 }
 
@@ -78,11 +91,28 @@ extern "C" cy_subject_reader_t* platform_subject_reader_new(cy_platform_t* const
                                                             const std::uint32_t  subject_id,
                                                             const std::size_t    extent)
 {
-    return api_test::subject_reader_new<test_platform_t>(platform, subject_id, extent);
+    cy_subject_reader_t* const out = api_test::subject_reader_new<test_platform_t>(platform, subject_id, extent);
+    if (out != nullptr) {
+        test_platform_t* const self = platform_from(platform);
+        TEST_ASSERT_EQUAL_INT(0, self->active_reader_subjects.count(subject_id));
+        self->active_reader_subjects.insert(subject_id);
+    }
+    return out;
+}
+
+extern "C" void platform_subject_reader_extent_set(cy_platform_t* const       platform,
+                                                   cy_subject_reader_t* const reader,
+                                                   const std::size_t          extent)
+{
+    test_platform_t* const self = platform_from(platform);
+    TEST_ASSERT_EQUAL_INT(1, self->active_reader_subjects.count(reader->subject_id));
+    api_test::subject_reader_extent_set<test_platform_t>(platform, reader, extent);
 }
 
 extern "C" void platform_subject_reader_destroy(cy_platform_t* const platform, cy_subject_reader_t* const reader)
 {
+    test_platform_t* const self = platform_from(platform);
+    TEST_ASSERT_EQUAL_INT(1, self->active_reader_subjects.erase(reader->subject_id));
     api_test::subject_reader_destroy<test_platform_t>(platform, reader);
 }
 
@@ -148,7 +178,7 @@ extern "C" void platform_on_async_error(cy_t* const         cy,
     TEST_FAIL_MESSAGE("Unexpected async error callback invocation");
 }
 
-extern "C" void on_arrival_capture(cy_future_t* const sub)
+extern "C" void on_arrival_capture_rx(cy_future_t* const sub)
 {
     const cy_arrival_t arrival = cy_arrival_move(sub);
     if (arrival.message.content == nullptr) {
@@ -207,8 +237,9 @@ void platform_init(test_platform_t* const self)
     self->vtable.subject_writer_destroy = platform_subject_writer_destroy;
     self->vtable.subject_writer_send    = platform_subject_writer_send;
 
-    self->vtable.subject_reader_new     = platform_subject_reader_new;
-    self->vtable.subject_reader_destroy = platform_subject_reader_destroy;
+    self->vtable.subject_reader_new        = platform_subject_reader_new;
+    self->vtable.subject_reader_extent_set = platform_subject_reader_extent_set;
+    self->vtable.subject_reader_destroy    = platform_subject_reader_destroy;
 
     self->vtable.unicast            = platform_unicast_send;
     self->vtable.unicast_extent_set = platform_unicast_extent_set;
@@ -373,27 +404,34 @@ void test_api_inline_msg_rejects_invalid_lage()
     platform_deinit(&platform);
 }
 
-void test_api_inline_msg_rejects_pinned_hash_nonzero_evictions()
+void test_api_inline_msg_rejects_pinned_evictions_lage_mismatch()
 {
     test_platform_t platform{};
     platform_init(&platform);
     cy_test_message_reset_counters();
 
     self_unsub_capture_t capture{};
-    cy_future_t* const   sub = cy_subscribe(platform.cy, cy_str("#0005"), 256U);
+    cy_future_t* const   sub = cy_subscribe(platform.cy, cy_str("v1#5"), 256U);
     TEST_ASSERT_NOT_NULL(sub);
     cy_user_context_t context = CY_USER_CONTEXT_EMPTY;
     context.ptr[0]            = &capture;
     cy_future_context_set(sub, context);
     cy_future_callback_set(sub, on_arrival_count_only);
 
-    const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("#0005"));
+    const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("v1"));
     TEST_ASSERT_NOT_NULL(topic);
-    TEST_ASSERT_TRUE(cy_topic_hash(topic) <= CY_SUBJECT_ID_PINNED_MAX);
+    TEST_ASSERT_EQUAL_UINT64(rapidhash("v1", 2U), cy_topic_hash(topic)); // Pin stripped; name is "v1".
 
+    // Send a message with pinned evictions but non-pinned lage (mismatch should be rejected).
     std::array<unsigned char, header_bytes + 1U> wire{};
     make_message_header(wire.data(), header_msg_best_effort, UINT64_C(102), cy_topic_hash(topic));
-    wire[4]              = 1U; // evictions in little-endian u32 field [4..7]
+    // Set pinned evictions (UINT32_MAX - 5 = pin to subject 5) in little-endian.
+    const auto pinned_ev = static_cast<std::uint32_t>(UINT32_MAX - 5U);
+    wire[4]              = static_cast<unsigned char>(pinned_ev >> 0U);
+    wire[5]              = static_cast<unsigned char>(pinned_ev >> 8U);
+    wire[6]              = static_cast<unsigned char>(pinned_ev >> 16U);
+    wire[7]              = static_cast<unsigned char>(pinned_ev >> 24U);
+    // lage remains 0 (non-pinned), creating the mismatch.
     wire[header_bytes]   = 0x22U;
     const cy_lane_t lane = { .id = UINT64_C(0x902), .ctx = { { 0 } }, .prio = cy_prio_nominal };
 
@@ -429,7 +467,7 @@ void test_api_inline_msg_rejects_multicast_subject_mismatch()
     const std::uint32_t       expected = compute_subject_id(hash, 0U, modulus);
     const std::uint32_t       max_sid  = CY_SUBJECT_ID_MAX(modulus);
     const std::uint32_t       mismatch = (expected < max_sid) ? (expected + 1U) : (expected - 1U);
-    const cy_subject_reader_t reader   = { .subject_id = mismatch };
+    const cy_subject_reader_t reader   = { .subject_id = mismatch, .extent = 0 };
 
     std::array<unsigned char, header_bytes + 1U> wire{};
     make_message_header(wire.data(), header_msg_best_effort, UINT64_C(103), hash);
@@ -459,7 +497,7 @@ void test_api_inline_msg_unicast_skips_subject_consistency_check()
     cy_user_context_t context = CY_USER_CONTEXT_EMPTY;
     context.ptr[0]            = &capture;
     cy_future_context_set(sub, context);
-    cy_future_callback_set(sub, on_arrival_capture);
+    cy_future_callback_set(sub, on_arrival_capture_rx);
 
     const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("rx/inline/unicast/consistency"));
     TEST_ASSERT_NOT_NULL(topic);
@@ -500,7 +538,7 @@ void test_api_inline_msg_unknown_topic_collision_path_smoke()
     const std::uint32_t modulus     = platform.platform.subject_id_modulus;
     const std::uint64_t remote_hash = cy_topic_hash(local_topic) + static_cast<std::uint64_t>(modulus);
     TEST_ASSERT_NULL(cy_topic_find_by_hash(platform.cy, remote_hash));
-    const cy_subject_reader_t reader = { .subject_id = compute_subject_id(remote_hash, 0U, modulus) };
+    const cy_subject_reader_t reader = { .subject_id = compute_subject_id(remote_hash, 0U, modulus), .extent = 0 };
 
     std::array<unsigned char, header_bytes + 1U> wire{};
     make_message_header(wire.data(), header_msg_best_effort, UINT64_C(105), remote_hash);
@@ -531,7 +569,7 @@ void test_api_reliable_duplicate_acked_once_to_application()
     cy_user_context_t context = CY_USER_CONTEXT_EMPTY;
     context.ptr[0]            = &capture;
     cy_future_context_set(sub, context);
-    cy_future_callback_set(sub, on_arrival_capture);
+    cy_future_callback_set(sub, on_arrival_capture_rx);
 
     const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("rx/dup"));
     TEST_ASSERT_NOT_NULL(topic);
@@ -566,7 +604,7 @@ void test_api_ordered_subscriber_timeout_flush()
     cy_user_context_t context = CY_USER_CONTEXT_EMPTY;
     context.ptr[0]            = &capture;
     cy_future_context_set(sub, context);
-    cy_future_callback_set(sub, on_arrival_capture);
+    cy_future_callback_set(sub, on_arrival_capture_rx);
 
     const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("rx/ord"));
     TEST_ASSERT_NOT_NULL(topic);
@@ -1175,7 +1213,7 @@ int main()
     RUN_TEST(test_api_malformed_header_drops_message);
     RUN_TEST(test_api_inline_msg_rejects_nonzero_incompatibility);
     RUN_TEST(test_api_inline_msg_rejects_invalid_lage);
-    RUN_TEST(test_api_inline_msg_rejects_pinned_hash_nonzero_evictions);
+    RUN_TEST(test_api_inline_msg_rejects_pinned_evictions_lage_mismatch);
     RUN_TEST(test_api_inline_msg_rejects_multicast_subject_mismatch);
     RUN_TEST(test_api_inline_msg_unicast_skips_subject_consistency_check);
     RUN_TEST(test_api_inline_msg_unknown_topic_collision_path_smoke);

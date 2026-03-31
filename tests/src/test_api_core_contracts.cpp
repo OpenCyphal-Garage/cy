@@ -1,4 +1,5 @@
 #include <cy_platform.h>
+#include <rapidhash.h>
 #include <unity.h>
 #include "api_mock_platform_utils.hpp"
 #include "guarded_heap.h"
@@ -9,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <set>
 #include <vector>
 
 namespace {
@@ -48,6 +50,9 @@ struct test_platform_t final
     std::size_t fail_alloc_size{ 0U };
     bool        fail_subject_writer_new{ false };
     bool        fail_subject_reader_new{ false };
+
+    std::set<std::uint32_t> active_reader_subjects;
+    std::set<std::uint32_t> active_writer_subjects;
 };
 
 test_platform_t* platform_from(cy_platform_t* const platform)
@@ -67,11 +72,19 @@ extern "C" cy_subject_writer_t* platform_subject_writer_new(cy_platform_t* const
     if (self->fail_subject_writer_new) {
         return nullptr;
     }
-    return api_test::subject_writer_new<test_platform_t>(platform, subject_id);
+    cy_subject_writer_t* const out = api_test::subject_writer_new<test_platform_t>(platform, subject_id);
+    if (out != nullptr) {
+        test_platform_t* const self_mut = platform_from(platform);
+        TEST_ASSERT_EQUAL_INT(0, self_mut->active_writer_subjects.count(subject_id));
+        self_mut->active_writer_subjects.insert(subject_id);
+    }
+    return out;
 }
 
 extern "C" void platform_subject_writer_destroy(cy_platform_t* const platform, cy_subject_writer_t* const writer)
 {
+    test_platform_t* const self = platform_from(platform);
+    TEST_ASSERT_EQUAL_INT(1, self->active_writer_subjects.erase(writer->subject_id));
     api_test::subject_writer_destroy<test_platform_t>(platform, writer);
 }
 
@@ -97,11 +110,28 @@ extern "C" cy_subject_reader_t* platform_subject_reader_new(cy_platform_t* const
     if (self->fail_subject_reader_new) {
         return nullptr;
     }
-    return api_test::subject_reader_new<test_platform_t>(platform, subject_id, extent);
+    cy_subject_reader_t* const out = api_test::subject_reader_new<test_platform_t>(platform, subject_id, extent);
+    if (out != nullptr) {
+        test_platform_t* const self_mut = platform_from(platform);
+        TEST_ASSERT_EQUAL_INT(0, self_mut->active_reader_subjects.count(subject_id));
+        self_mut->active_reader_subjects.insert(subject_id);
+    }
+    return out;
+}
+
+extern "C" void platform_subject_reader_extent_set(cy_platform_t* const       platform,
+                                                   cy_subject_reader_t* const reader,
+                                                   const std::size_t          extent)
+{
+    test_platform_t* const self = platform_from(platform);
+    TEST_ASSERT_EQUAL_INT(1, self->active_reader_subjects.count(reader->subject_id));
+    api_test::subject_reader_extent_set<test_platform_t>(platform, reader, extent);
 }
 
 extern "C" void platform_subject_reader_destroy(cy_platform_t* const platform, cy_subject_reader_t* const reader)
 {
+    test_platform_t* const self = platform_from(platform);
+    TEST_ASSERT_EQUAL_INT(1, self->active_reader_subjects.erase(reader->subject_id));
     api_test::subject_reader_destroy<test_platform_t>(platform, reader);
 }
 
@@ -182,8 +212,9 @@ void platform_prepare(test_platform_t* const self)
     self->vtable.subject_writer_destroy = platform_subject_writer_destroy;
     self->vtable.subject_writer_send    = platform_subject_writer_send;
 
-    self->vtable.subject_reader_new     = platform_subject_reader_new;
-    self->vtable.subject_reader_destroy = platform_subject_reader_destroy;
+    self->vtable.subject_reader_new        = platform_subject_reader_new;
+    self->vtable.subject_reader_extent_set = platform_subject_reader_extent_set;
+    self->vtable.subject_reader_destroy    = platform_subject_reader_destroy;
 
     self->vtable.unicast            = platform_unicast_send;
     self->vtable.unicast_extent_set = platform_unicast_extent_set;
@@ -300,10 +331,11 @@ void test_api_core_home_namespace_contracts()
     TEST_ASSERT_EQUAL_size_t(9U, home.len);
     TEST_ASSERT_EQUAL_MEMORY("home/node", home.str, home.len);
 
-    TEST_ASSERT_EQUAL_INT(CY_ERR_ARGUMENT, cy_home_set(platform.cy, cy_str("~/bad")));
+    // Homeful home values are accepted (no circularity check; the caller is responsible).
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_home_set(platform.cy, cy_str("~/bad")));
     home = cy_home(platform.cy);
-    TEST_ASSERT_EQUAL_size_t(9U, home.len);
-    TEST_ASSERT_EQUAL_MEMORY("home/node", home.str, home.len);
+    TEST_ASSERT_EQUAL_size_t(5U, home.len);
+    TEST_ASSERT_EQUAL_MEMORY("~/bad", home.str, home.len);
 
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_namespace_set(platform.cy, cy_str("ns//a")));
     ns = cy_namespace(platform.cy);
@@ -528,6 +560,71 @@ void test_api_core_cy_new_validation_and_failure_paths()
     platform_deinit(&success);
 }
 
+void test_subscriber_name_returns_pin_stripped_name()
+{
+    test_platform_t platform{};
+    platform_init(&platform);
+
+    // Subscribe to a pinned topic. Default namespace is empty, so "foo#123" resolves to "foo" with pin=123.
+    cy_future_t* const sub = cy_subscribe(platform.cy, cy_str("foo#123"), 256U);
+    TEST_ASSERT_NOT_NULL(sub);
+
+    std::array<char, CY_TOPIC_NAME_MAX + 1U> name_buf{};
+    cy_subscriber_name(sub, name_buf.data());
+    TEST_ASSERT_EQUAL_STRING("foo", name_buf.data());
+
+    cy_future_destroy(sub);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
+    platform_deinit(&platform);
+}
+
+void test_publisher_topic_for_pinned_has_correct_hash()
+{
+    test_platform_t platform{};
+    platform_init(&platform);
+
+    // Advertise on a pinned topic. "bar#100" resolves to name "bar" with pin=100.
+    cy_publisher_t* const pub = cy_advertise(platform.cy, cy_str("bar#100"));
+    TEST_ASSERT_NOT_NULL(pub);
+
+    cy_topic_t* const topic = cy_publisher_topic(pub);
+    TEST_ASSERT_NOT_NULL(topic);
+
+    // The topic name must be the resolved name without pin suffix.
+    const cy_str_t name = cy_topic_name(topic);
+    TEST_ASSERT_EQUAL_size_t(3U, name.len);
+    TEST_ASSERT_EQUAL_MEMORY("bar", name.str, name.len);
+
+    // The topic hash must equal rapidhash of the resolved name.
+    TEST_ASSERT_EQUAL_UINT64(rapidhash("bar", 3U), cy_topic_hash(topic));
+
+    cy_unadvertise(pub);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
+    platform_deinit(&platform);
+}
+
+void test_topic_find_by_name_uses_resolved_name()
+{
+    test_platform_t platform{};
+    platform_init(&platform);
+
+    // Advertise on a pinned topic. "baz#100" resolves to name "baz" with pin=100.
+    cy_publisher_t* const pub = cy_advertise(platform.cy, cy_str("baz#100"));
+    TEST_ASSERT_NOT_NULL(pub);
+
+    // Lookup by the resolved (pin-stripped) name should succeed.
+    const cy_topic_t* const found = cy_topic_find_by_name(platform.cy, cy_str("baz"));
+    TEST_ASSERT_NOT_NULL(found);
+
+    // Lookup by the original name with pin suffix should fail because the stored name is pin-stripped.
+    const cy_topic_t* const not_found = cy_topic_find_by_name(platform.cy, cy_str("baz#100"));
+    TEST_ASSERT_NULL(not_found);
+
+    cy_unadvertise(pub);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
+    platform_deinit(&platform);
+}
+
 } // namespace
 
 extern "C" void setUp()
@@ -547,5 +644,8 @@ int main()
     RUN_TEST(test_api_core_publish_and_request_argument_guards);
     RUN_TEST(test_api_core_message_contract_and_future_callback_getter);
     RUN_TEST(test_api_core_cy_new_validation_and_failure_paths);
+    RUN_TEST(test_subscriber_name_returns_pin_stripped_name);
+    RUN_TEST(test_publisher_topic_for_pinned_has_correct_hash);
+    RUN_TEST(test_topic_find_by_name_uses_resolved_name);
     return UNITY_END();
 }

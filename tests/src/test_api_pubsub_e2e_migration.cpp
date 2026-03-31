@@ -1,4 +1,5 @@
 #include <cy_platform.h>
+#include <rapidhash.h>
 #include <unity.h>
 #include "e2e_faults.hpp"
 #include "e2e_sim_net.hpp"
@@ -7,10 +8,8 @@
 #include "helpers.h"
 #include "message.h"
 #include <array>
-#include <charconv>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <limits>
 #include <optional>
 #include <numeric>
@@ -30,9 +29,9 @@ constexpr cy_us_t step_us        = 20'000;
 constexpr cy_us_t future_timeout = 3'000'000;
 
 constexpr std::array<const char*, max_topics> colliding_topics = {
-    "e2e/migrate/topic_alpha#123456789abcdeff",
-    "e2e/migrate/topic_beta#123456789abdbe72",
-    "e2e/migrate/topic_gamma#123456789abe9de5",
+    "e2e/migrate/alpha_0",
+    "e2e/migrate/beta_14014",
+    "e2e/migrate/gamma_67275",
 };
 
 struct subscriber_log_t final
@@ -115,21 +114,6 @@ std::uint32_t preferred_subject_id(const cy_platform_t* const platform, const st
     TEST_ASSERT_NOT_NULL(platform);
     TEST_ASSERT_TRUE(topic_hash > CY_SUBJECT_ID_PINNED_MAX);
     return static_cast<std::uint32_t>(CY_SUBJECT_ID_PINNED_MAX + 1U + (topic_hash % platform->subject_id_modulus));
-}
-
-bool topic_hash_from_pinned_literal(const char* const topic_name, std::uint64_t& out)
-{
-    if (topic_name == nullptr) {
-        return false;
-    }
-    const char* const marker = std::strrchr(topic_name, '#');
-    if ((marker == nullptr) || (marker[1] == '\0')) {
-        return false;
-    }
-    const char* const begin = marker + 1;
-    const char* const end   = begin + std::strlen(begin);
-    const auto        res   = std::from_chars(begin, end, out, 16);
-    return (res.ec == std::errc{}) && (res.ptr == end);
 }
 
 bool is_message_frame(const e2e::frame_info_t& frame)
@@ -237,7 +221,7 @@ void destroy_all_handles(e2e::sim_net_t& net, handles_t& handles, const std::siz
     }
 }
 
-extern "C" void on_arrival_capture(cy_future_t* const sub)
+extern "C" void on_arrival_capture_ordered(cy_future_t* const sub)
 {
     const cy_arrival_t arrival = cy_arrival_move(sub);
     if (arrival.message.content == nullptr) {
@@ -307,7 +291,7 @@ void create_topic_handles(e2e::sim_net_t&   net,
     cy_user_context_t user_ctx = CY_USER_CONTEXT_EMPTY;
     user_ctx.ptr[0]            = &ctx;
     cy_future_context_set(sub, user_ctx);
-    cy_future_callback_set(sub, on_arrival_capture);
+    cy_future_callback_set(sub, on_arrival_capture_ordered);
 }
 
 std::optional<std::uint64_t> publish_best_effort(handles_t&        handles,
@@ -478,12 +462,12 @@ d_case_result_t run_d_case(const d_case_config_t& cfg)
     handles_t       handles{};
     cy_us_t         now = 0;
 
+    // Compute hashes directly from topic names (rapidhash of the name since none have pin suffixes).
     for (std::size_t t = 0U; t < cfg.topic_count; t++) {
-        std::uint64_t parsed_hash = 0U;
-        TEST_ASSERT_TRUE(topic_hash_from_pinned_literal(colliding_topics.at(t), parsed_hash));
-        result.topic_hashes.at(t) = parsed_hash;
+        const cy_str_t name       = cy_str(colliding_topics.at(t));
+        result.topic_hashes.at(t) = rapidhash(name.str, name.len);
         result.preferred_subjects.at(t) =
-          preferred_subject_id(e2e::sim_net_platform(net, e2e::sim_node_a), parsed_hash);
+          preferred_subject_id(e2e::sim_net_platform(net, e2e::sim_node_a), result.topic_hashes.at(t));
     }
     const std::uint32_t preferred0 = result.preferred_subjects.at(0U);
     for (std::size_t t = 1U; t < cfg.topic_count; t++) {
@@ -882,6 +866,15 @@ void test_api_pubsub_e2e_d12_receiver_restart_rejoin_during_migration()
     TEST_ASSERT_TRUE(res.success_futures > 0U);
 }
 
+void test_colliding_topics_selftest()
+{
+    constexpr auto modulus = static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit);
+    const auto     sid_0   = rapidhash(colliding_topics.at(0), strlen(colliding_topics.at(0))) % modulus;
+    for (std::size_t i = 1U; i < colliding_topics.size(); i++) {
+        TEST_ASSERT_EQUAL_UINT64(sid_0, rapidhash(colliding_topics.at(i), strlen(colliding_topics.at(i))) % modulus);
+    }
+}
+
 } // namespace
 
 extern "C" void setUp()
@@ -895,6 +888,7 @@ extern "C" void tearDown() { TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_live_c
 int main()
 {
     UNITY_BEGIN();
+    RUN_TEST(test_colliding_topics_selftest);
     RUN_TEST(test_api_pubsub_e2e_d01_collision_introduced_while_idle_convergence_check);
     RUN_TEST(test_api_pubsub_e2e_d02_collision_during_live_reliable_stream_no_faults);
     RUN_TEST(test_api_pubsub_e2e_d03_d02_plus_transient_data_loss);

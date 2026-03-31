@@ -2,7 +2,7 @@
 #include "message.h"
 #include <algorithm>
 #include <array>
-#include <cassert>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <new>
@@ -25,6 +25,13 @@ struct registry_entry_t final
 };
 
 std::array<registry_entry_t, registry_size> g_registry{}; // NOLINT(*-non-const-global-variables)
+
+void enforce(const bool expr)
+{
+    if (!expr) {
+        std::abort();
+    }
+}
 
 sim_node_t* node_from(cy_platform_t* const platform)
 {
@@ -395,13 +402,18 @@ extern "C" cy_subject_writer_t* sim_subject_writer_new(cy_platform_t* const plat
       static_cast<sim_subject_writer_t*>(guarded_heap_alloc(&self->core_heap, sizeof(sim_subject_writer_t)));
     if (out != nullptr) {
         out->base.subject_id = subject_id;
+        const auto ins       = self->active_writer_subjects.insert(subject_id);
+        enforce(ins.second);
     }
     return (out != nullptr) ? &out->base : nullptr;
 }
 
 extern "C" void sim_subject_writer_destroy(cy_platform_t* const platform, cy_subject_writer_t* const writer)
 {
-    sim_node_t* const self = node_from(platform);
+    sim_node_t* const self   = node_from(platform);
+    const auto        erased = self->active_writer_subjects.erase(writer->subject_id);
+    enforce(erased == 1U);
+
     guarded_heap_free(&self->core_heap, writer);
 }
 
@@ -444,14 +456,29 @@ extern "C" cy_subject_reader_t* sim_subject_reader_new(cy_platform_t* const plat
         out->extent          = extent;
         out->next            = self->readers;
         self->readers        = out;
+        const auto ins       = self->active_reader_subjects.insert(subject_id);
+        enforce(ins.second);
     }
     return (out != nullptr) ? &out->base : nullptr;
 }
 
+extern "C" void sim_subject_reader_extent_set(cy_platform_t* const       platform,
+                                              cy_subject_reader_t* const reader,
+                                              const std::size_t          extent)
+{
+    enforce(node_from(platform)->active_reader_subjects.count(reader->subject_id) == 1U);
+    auto* const r =
+      reinterpret_cast<sim_subject_reader_t*>(reader); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+    r->extent = extent;
+}
+
 extern "C" void sim_subject_reader_destroy(cy_platform_t* const platform, cy_subject_reader_t* const reader)
 {
-    sim_node_t* const self = node_from(platform);
-    auto* const       ptr =
+    sim_node_t* const self   = node_from(platform);
+    const auto        erased = self->active_reader_subjects.erase(reader->subject_id);
+    enforce(erased == 1U);
+
+    auto* const ptr =
       reinterpret_cast<sim_subject_reader_t*>(reader); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
     sim_subject_reader_t** p = &self->readers;
     while (*p != nullptr) {
@@ -583,17 +610,18 @@ cy_err_t sim_net_init_ex(sim_net_t& self, const sim_net_config_t& config)
         node.now          = 0;
         node.random_state = config.random_seed_base + (i * UINT64_C(0x9E3779B97F4A7C15));
 
-        node.vtable.subject_writer_new     = sim_subject_writer_new;
-        node.vtable.subject_writer_destroy = sim_subject_writer_destroy;
-        node.vtable.subject_writer_send    = sim_subject_writer_send;
-        node.vtable.subject_reader_new     = sim_subject_reader_new;
-        node.vtable.subject_reader_destroy = sim_subject_reader_destroy;
-        node.vtable.unicast                = sim_unicast_send;
-        node.vtable.unicast_extent_set     = sim_unicast_extent_set;
-        node.vtable.spin                   = sim_spin;
-        node.vtable.now                    = sim_now;
-        node.vtable.realloc                = sim_realloc;
-        node.vtable.random                 = sim_random;
+        node.vtable.subject_writer_new        = sim_subject_writer_new;
+        node.vtable.subject_writer_destroy    = sim_subject_writer_destroy;
+        node.vtable.subject_writer_send       = sim_subject_writer_send;
+        node.vtable.subject_reader_new        = sim_subject_reader_new;
+        node.vtable.subject_reader_extent_set = sim_subject_reader_extent_set;
+        node.vtable.subject_reader_destroy    = sim_subject_reader_destroy;
+        node.vtable.unicast                   = sim_unicast_send;
+        node.vtable.unicast_extent_set        = sim_unicast_extent_set;
+        node.vtable.spin                      = sim_spin;
+        node.vtable.now                       = sim_now;
+        node.vtable.realloc                   = sim_realloc;
+        node.vtable.random                    = sim_random;
 
         node.platform.cy                 = nullptr;
         node.platform.subject_id_modulus = config.subject_id_modulus;
@@ -641,37 +669,37 @@ void sim_net_op_faults_set(sim_net_t& self, const op_fault_plan_t* const op_faul
 
 cy_t* sim_net_cy(sim_net_t& self, const std::size_t node_index)
 {
-    assert(node_index < self.nodes.size());
+    enforce(node_index < self.nodes.size());
     return self.nodes.at(node_index).cy;
 }
 
 const cy_t* sim_net_cy(const sim_net_t& self, const std::size_t node_index)
 {
-    assert(node_index < self.nodes.size());
+    enforce(node_index < self.nodes.size());
     return self.nodes.at(node_index).cy;
 }
 
 cy_platform_t* sim_net_platform(sim_net_t& self, const std::size_t node_index)
 {
-    assert(node_index < self.nodes.size());
+    enforce(node_index < self.nodes.size());
     return &self.nodes.at(node_index).platform;
 }
 
 const cy_platform_t* sim_net_platform(const sim_net_t& self, const std::size_t node_index)
 {
-    assert(node_index < self.nodes.size());
+    enforce(node_index < self.nodes.size());
     return &self.nodes.at(node_index).platform;
 }
 
 void sim_net_node_now_set(sim_net_t& self, const std::size_t node_index, const cy_us_t now)
 {
-    assert(node_index < self.nodes.size());
+    enforce(node_index < self.nodes.size());
     self.nodes.at(node_index).now = now;
 }
 
 std::uint64_t sim_net_node_id(const sim_net_t& self, const std::size_t node_index)
 {
-    assert(node_index < self.nodes.size());
+    enforce(node_index < self.nodes.size());
     return self.nodes.at(node_index).node_id;
 }
 
@@ -679,7 +707,7 @@ std::size_t sim_net_node_count(const sim_net_t& self) { return self.nodes.size()
 
 cy_err_t sim_net_spin_node(sim_net_t& self, const std::size_t node_index)
 {
-    assert(node_index < self.nodes.size());
+    enforce(node_index < self.nodes.size());
     return cy_spin_once(self.nodes.at(node_index).cy);
 }
 
@@ -729,25 +757,25 @@ void sim_net_clear_captures(sim_net_t& self)
 
 guarded_heap_t& sim_net_core_heap(sim_net_t& self, const std::size_t node_index)
 {
-    assert(node_index < self.nodes.size());
+    enforce(node_index < self.nodes.size());
     return self.nodes.at(node_index).core_heap;
 }
 
 const guarded_heap_t& sim_net_core_heap(const sim_net_t& self, const std::size_t node_index)
 {
-    assert(node_index < self.nodes.size());
+    enforce(node_index < self.nodes.size());
     return self.nodes.at(node_index).core_heap;
 }
 
 guarded_heap_t& sim_net_message_heap(sim_net_t& self, const std::size_t node_index)
 {
-    assert(node_index < self.nodes.size());
+    enforce(node_index < self.nodes.size());
     return self.nodes.at(node_index).message_heap;
 }
 
 const guarded_heap_t& sim_net_message_heap(const sim_net_t& self, const std::size_t node_index)
 {
-    assert(node_index < self.nodes.size());
+    enforce(node_index < self.nodes.size());
     return self.nodes.at(node_index).message_heap;
 }
 

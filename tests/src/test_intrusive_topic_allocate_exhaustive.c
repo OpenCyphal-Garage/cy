@@ -21,6 +21,9 @@ typedef struct
     size_t subject_writer_destroy_count;
     size_t async_error_count;
 
+    subject_tracker_t active_readers;
+    subject_tracker_t active_writers;
+
     uint64_t random_state;
 } fixture_t;
 
@@ -73,12 +76,17 @@ static cy_subject_writer_t* fixture_subject_writer_new(cy_platform_t* const plat
     if (self->fail_subject_writer_new) {
         return NULL;
     }
-    return intrusive_subject_writer_new(&self->heap, subject_id);
+    cy_subject_writer_t* const w = intrusive_subject_writer_new(&self->heap, subject_id);
+    if (w != NULL) {
+        subject_tracker_add(&self->active_writers, subject_id);
+    }
+    return w;
 }
 
 static void fixture_subject_writer_destroy(cy_platform_t* const platform, cy_subject_writer_t* const writer)
 {
     fixture_t* const self = fixture_from(platform);
+    subject_tracker_remove(&self->active_writers, writer->subject_id);
     self->subject_writer_destroy_count++;
     intrusive_subject_writer_destroy(&self->heap, writer);
 }
@@ -105,12 +113,26 @@ static cy_subject_reader_t* fixture_subject_reader_new(cy_platform_t* const plat
     if (self->fail_subject_reader_new) {
         return NULL;
     }
-    return intrusive_subject_reader_new(&self->heap, subject_id, extent);
+    cy_subject_reader_t* const r = intrusive_subject_reader_new(&self->heap, subject_id, extent);
+    if (r != NULL) {
+        subject_tracker_add(&self->active_readers, subject_id);
+    }
+    return r;
+}
+
+static void fixture_subject_reader_extent_set(cy_platform_t* const       platform,
+                                              cy_subject_reader_t* const reader,
+                                              const size_t               extent)
+{
+    fixture_t* const self = fixture_from(platform);
+    subject_tracker_assert_contains(&self->active_readers, reader->subject_id);
+    intrusive_subject_reader_extent_set(reader, extent);
 }
 
 static void fixture_subject_reader_destroy(cy_platform_t* const platform, cy_subject_reader_t* const reader)
 {
     fixture_t* const self = fixture_from(platform);
+    subject_tracker_remove(&self->active_readers, reader->subject_id);
     self->subject_reader_destroy_count++;
     intrusive_subject_reader_destroy(&self->heap, reader);
 }
@@ -154,21 +176,22 @@ static void fixture_init(fixture_t* const self)
     memset(self, 0, sizeof(*self));
     guarded_heap_init(&self->heap, UINT64_C(0xD00DFEEDBADC0FFE));
 
-    self->platform.vtable               = &self->vtable;
-    self->platform.subject_id_modulus   = (uint32_t)CY_SUBJECT_ID_MODULUS_16bit;
-    self->vtable.subject_writer_new     = fixture_subject_writer_new;
-    self->vtable.subject_writer_destroy = fixture_subject_writer_destroy;
-    self->vtable.subject_writer_send    = fixture_subject_writer_send;
-    self->vtable.subject_reader_new     = fixture_subject_reader_new;
-    self->vtable.subject_reader_destroy = fixture_subject_reader_destroy;
-    self->vtable.unicast                = fixture_unicast_send;
-    self->vtable.unicast_extent_set     = fixture_unicast_extent_set;
-    self->vtable.spin                   = fixture_spin;
-    self->vtable.now                    = fixture_now;
-    self->vtable.realloc                = fixture_realloc;
-    self->vtable.random                 = fixture_random;
-    self->random_state                  = UINT64_C(0xA5A5A5A55A5A5A5A);
-    self->now                           = (cy_us_t)(1000 * MEGA);
+    self->platform.vtable                  = &self->vtable;
+    self->platform.subject_id_modulus      = (uint32_t)CY_SUBJECT_ID_MODULUS_16bit;
+    self->vtable.subject_writer_new        = fixture_subject_writer_new;
+    self->vtable.subject_writer_destroy    = fixture_subject_writer_destroy;
+    self->vtable.subject_writer_send       = fixture_subject_writer_send;
+    self->vtable.subject_reader_new        = fixture_subject_reader_new;
+    self->vtable.subject_reader_extent_set = fixture_subject_reader_extent_set;
+    self->vtable.subject_reader_destroy    = fixture_subject_reader_destroy;
+    self->vtable.unicast                   = fixture_unicast_send;
+    self->vtable.unicast_extent_set        = fixture_unicast_extent_set;
+    self->vtable.spin                      = fixture_spin;
+    self->vtable.now                       = fixture_now;
+    self->vtable.realloc                   = fixture_realloc;
+    self->vtable.random                    = fixture_random;
+    self->random_state                     = UINT64_C(0xA5A5A5A55A5A5A5A);
+    self->now                              = (cy_us_t)(1000 * MEGA);
 
     self->cy = cy_new(&self->platform);
     TEST_ASSERT_NOT_NULL(self->cy);
@@ -280,6 +303,13 @@ static void model_allocate(model_state_t* const self, const size_t topic_index, 
         const int      that    = model_find_occupant(self, new_sid, (int)current);
         const bool     victory = (that < 0) || model_left_wins(self, current, (size_t)that);
 
+        if (is_pinned(wanted)) {
+            // Pinned topics are not in the subject-ID index (non-unique mapping).
+            self->topics[current].evictions = wanted;
+            self->in_index[current]         = false;
+            return;
+        }
+
         if (victory) {
             if (that >= 0) {
                 self->in_index[(size_t)that] = false;
@@ -306,7 +336,7 @@ static void assert_runtime_subject_index_unique(cy_topic_t* const topics[8],
                                                 const char* const context)
 {
     for (size_t i = 0U; i < topic_count; i++) {
-        TEST_ASSERT_FALSE_MESSAGE(is_pinned(topics[i]->hash), context);
+        TEST_ASSERT_FALSE_MESSAGE(is_pinned(topics[i]->evictions), context);
         const uint32_t sid_i = topic_subject_id(topics[i]);
         for (size_t j = i + 1U; j < topic_count; j++) {
             const uint32_t sid_j = topic_subject_id(topics[j]);
@@ -378,7 +408,8 @@ static size_t fill_high_eviction_domain(const uint32_t modulus, uint32_t out[6])
     out[2] = (modulus / 2U) + 1U;
     out[3] = modulus - 1U;
     out[4] = modulus;
-    out[5] = UINT32_MAX - 4096U;
+    // Stay well below the pinned threshold so that collision-induced increments cannot cross into the pinned range.
+    out[5] = EVICTIONS_PINNED_MIN - 16U;
     return 6U;
 }
 
@@ -414,7 +445,7 @@ static void run_topic_allocate_case(const case_spec_t* const spec, const char* c
         model.topics[i].hash      = topics[i]->hash;
         model.topics[i].evictions = topics[i]->evictions;
         model.topics[i].lage      = topic_lage(topics[i], fix.now);
-        model.in_index[i]         = !is_pinned(topics[i]->hash);
+        model.in_index[i]         = !is_pinned(topics[i]->evictions);
     }
 
     model_allocate(&model, spec->target_index, spec->requested_evictions);
@@ -620,7 +651,7 @@ static void test_topic_allocate_same_subject_id_reallocation_near_uint32_max_exh
     TEST_ASSERT_NOT_NULL(topic);
 
     for (uint32_t i = 0U; i < 4096U; i++) {
-        const uint32_t old_evictions = UINT32_MAX - i;
+        const uint32_t old_evictions = EVICTIONS_PINNED_MIN - 1U - i; // Stay below pinned threshold.
         const uint32_t residue       = old_evictions % modulus;
         const uint32_t mirror        = (residue == 0U) ? 0U : (modulus - residue);
 
@@ -652,13 +683,13 @@ static void test_topic_allocate_displacement_transfers_writer_handle(void)
     cy_topic_t* const winner = fixture_make_topic(&fix, "alloc/transfer/winner", base, 0U, 6);
     cy_topic_t* const loser  = fixture_make_topic(&fix, "alloc/transfer/loser", base + p, 0U, 1);
 
-    loser->pub_writer = fixture_subject_writer_new(&fix.platform, topic_subject_id(loser));
+    loser->pub_writer = writer_acquire(loser->cy, topic_subject_id(loser));
     TEST_ASSERT_NOT_NULL(loser->pub_writer);
-    cy_subject_writer_t* const moved = loser->pub_writer;
 
     topic_allocate(winner, loser->evictions, fix.now);
 
-    TEST_ASSERT_TRUE(winner->pub_writer == moved);
+    // After displacement, writers are released (lazy re-acquisition on next publish).
+    TEST_ASSERT_NULL(winner->pub_writer);
     TEST_ASSERT_NULL(loser->pub_writer);
 
     fixture_deinit(&fix);

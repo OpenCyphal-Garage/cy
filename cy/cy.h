@@ -37,8 +37,8 @@ extern "C"
 
 /// The limit could be set arbitrarily, but chosen this way for compatibility with Cyphal v1.0,
 /// which only has 13-bit subject-IDs. Cyphal v1.1 will never allocate non-pinned topics in this subject-ID range.
-/// For pinned topics, hash<=CY_SUBJECT_ID_PINNED_MAX. The probability of a random hash falling into the pinned
-/// range is ~4.44e-16, or about one in two quadrillion, which is not practically possible.
+/// Pinned topics are identified by evictions >= (UINT32_MAX - CY_SUBJECT_ID_PINNED_MAX).
+/// The pinned subject-ID is UINT32_MAX - evictions.
 #define CY_SUBJECT_ID_PINNED_MAX 0x1FFFU
 
 /// This notably excludes the broadcast subject and gossip shards, which are always at the top, above this maximum.
@@ -587,10 +587,16 @@ cy_err_t cy_remap(cy_t* const cy, const cy_str_t from, const cy_str_t to);
 /// TODO not implemented
 cy_err_t cy_remap_parse(cy_t* const cy, const cy_str_t spec_string);
 
-/// Invokes cy_name_resolve() using the home and the namespace of the node, then applies remapping, if any.
-/// The result is a fully resolved topic name.
-/// On failure, the output string has length SIZE_MAX and NULL data pointer.
-cy_str_t cy_resolve(const cy_t* const cy, const cy_str_t name, const size_t dest_size, char* dest);
+/// Models a fully resolved and normalized topic name. See cy_resolve() et al.
+typedef struct cy_resolved_t
+{
+    cy_str_t name;     ///< Resolved, normalized canonical name (pin-free). On error, ptr is NULL and len=SIZE_MAX.
+    uint16_t pin;      ///< Pinned subject-ID, or UINT16_MAX if not pinned.
+    bool     verbatim; ///< False if this is a pattern that can match multiple topic names.
+} cy_resolved_t;
+
+/// A convenience wrapper for cy_name_resolve(). On failure, the name field has length SIZE_MAX and NULL data pointer.
+cy_resolved_t cy_resolve(const cy_t* const cy, const cy_str_t name, const size_t dest_size, char* const dest);
 
 // TODO: add a way to dump/restore topic configuration for instant initialization. This may be platform-specific.
 
@@ -627,68 +633,65 @@ cy_user_context_t* cy_topic_user_context(cy_topic_t* const topic);
 //                                                      NAMES
 // =====================================================================================================================
 
-/// Shorter topic names reduce the gossip traffic overhead.
+/// Maximum length of a resolved normalized name that appears on the wire.
+/// Names prior to resolution and normalization may be longer (e.g., due to pinning, redundant `/` separators, etc).
 /// In CAN FD networks, normalized topic names should not exceed 48 characters to avoid multi-frame gossips.
 /// This limit is chosen rather arbitrarily, keeping in mind RTPS where the maximum is 255,
 /// and ROS2 where the maximum is 248. In practice, topics very rarely exceed ~100 characters.
 #define CY_TOPIC_NAME_MAX 200
 
-/// A valid name consists of printable ASCII characters except SPACE.
+/// A valid name consists of printable ASCII characters except SPACE; i.e., all ASCII codes in [33, 126] are accepted.
 /// A normalized name does not begin with a separator, does not end with a separator, and does not contain
 /// consecutive separators.
-extern const char cy_name_sep;  ///< `/`
-extern const char cy_name_home; ///< `~` -- replaced with the home of the current node. Homes should be unique.
-extern const char cy_name_one;  ///< `*` -- matches any single name component: "abc/*/def" => "abc/123/def".
-extern const char cy_name_any;  ///< `>` -- matches zero or more components: "abc/>" => "abc", "abc/def", "abc/def/ghi".
-
-/// True iff the given name is valid according to the Cy naming rules. An empty name is not a valid name.
-bool cy_name_is_valid(const cy_str_t name);
-
-/// Returns true iff the name can only match a single topic, which is called a verbatim name;
-/// conversely, returns false for patterns that can match more than one topic.
-/// This is useful for some applications that want to ensure that certain names can match only one topic.
-///
-/// There may be at most one zero-or-more substitution token used, and if used, it must be the last token of the name.
-/// Otherwise, the behavior is currently unstable; it is well-defined internally but may change between minor versions
-/// and result in wire compatibility issues.
-bool cy_name_is_verbatim(const cy_str_t name);
-
-/// Whether the name is relative to the home namespace ~ or is absolute.
-bool cy_name_is_homeful(const cy_str_t name);
-bool cy_name_is_absolute(const cy_str_t name);
+/// Certain combinations of characters have special meaning and may affect final name resolution.
+extern const char cy_name_sep;        ///< `/`
+extern const char cy_name_home;       ///< `~` -- replaced with the home of the current node. Homes should be unique.
+extern const char cy_name_one;        ///< `*` -- matches any single name component: "abc/*/def" => "abc/123/def".
+extern const char cy_name_any;        ///< `>` -- matches 0+ components: "abc/>" => "abc", "abc/def", "abc/def/ghi".
+extern const char cy_name_pin_prefix; ///< `#` -- followed by decimal digits specifying the subject-ID.
 
 /// Joins two (potentially empty) names with cy_name_sep, normalizing both parts, such that the result is
 /// a normalized name. Either part may be empty, in which case it behaves like normalization of the other part.
+/// The output string length may exceed CY_TOPIC_NAME_MAX if allowed by dest_size (allows for the pinning suffix).
 /// On failure, the output string has length SIZE_MAX and NULL data pointer.
 /// The destination is not NUL-terminated.
 cy_str_t cy_name_join(const cy_str_t left, const cy_str_t right, const size_t dest_size, char* const dest);
 
-/// If cy_name_is_homeful(name), expands the home prefix using the provided home string;
-/// otherwise, returns the normalized name.
-/// The result is normalized and written into dest, which must be at least dest_size bytes long.
-/// On failure, the output string has length SIZE_MAX and NULL data pointer.
-/// The destination is not NUL-terminated.
-cy_str_t cy_name_expand_home(cy_str_t name, const cy_str_t home, const size_t dest_size, char* const dest);
-
 /// Constructs the full normalized name as exchanged over the wire prior to remapping: homeful names are expanded,
 /// relative names are prefixed with the namespace, and absolute names are left as-is.
-/// The namespace may be homeful and will be expanded accordingly. Examples:
+/// The pin expression, if present, is removed from the name. Only verbatim names may have pin expressions.
+/// The namespace may be homeful and will be expanded accordingly.
 ///
-///     name="foo/bar"      namespace="ns1"     home="me"   => "ns1/foo/bar"
-///     name="~//foo/bar"   namespace="ns1"     home="me"   => "me/foo/bar"
-///     name="/foo//bar/"   namespace="ns1"     home="me"   => "foo/bar"
-///     name="foo/bar/"     namespace="~//ns1"  home="me"   => "me/ns1/foo/bar"
+/// Examples:
 ///
-/// The dest points to a buffer at least dest_size bytes long.
-/// On failure, the output string has length SIZE_MAX and NULL data pointer.
-/// The destination is not NUL-terminated.
+///     NAME        NAMESPACE   HOME    RESOLVED        PINNING     VERBATIM
+///     foo/bar     ns1         me      ns1/foo/bar     -           yes
+///     ~//foo/bar  ns1         me      me/foo/bar      -           yes
+///     /foo//bar/  ns1         me      foo/bar         -           yes
+///     foo/bar/    ~//ns1      me      me/ns1/foo/bar  -           yes
+///     foo#123     ns1#456     me      ns1#456/foo     123         yes
+///     foo/#123    ns1#456     me      ns1#456/foo     123         yes
+///     */foo       ns1         me      ns1/*/foo       -           no
+///     ~/*/foo/    ns1         me      me/*/foo        -           no
+///     /~/*/foo/   ns1         me      ~/*/foo         -           no
+///
+/// Examples of invalid names leading to resolution failure:
+///
+///     `foo bar\nbaz`  -- spaces and non-printable characters are not allowed.
+///     `foo/*/bar#123` -- patterns cannot be pinned.
+///     ``              -- empty name is not allowed.
+///     `#1234`         -- name is empty after the pin expression is stripped, not allowed.
+///     (long string)   -- final name cannot exceed CY_TOPIC_NAME_MAX regardless of dest_size.
+///
+/// The dest points to a buffer at least dest_size bytes long. On failure, the output string has length SIZE_MAX
+/// and NULL data pointer. The destination is not NUL-terminated.
 ///
 /// TODO: add remapping set.
-cy_str_t cy_name_resolve(const cy_str_t name,
-                         cy_str_t       name_space,
-                         const cy_str_t home,
-                         const size_t   dest_size,
-                         char*          dest);
+cy_resolved_t cy_name_resolve(const cy_str_t name,
+                              const cy_str_t name_space,
+                              const cy_str_t home,
+                              const size_t   dest_size,
+                              char* const    dest);
 
 // =====================================================================================================================
 //                                                  MONITORING & DIAGNOSTICS
