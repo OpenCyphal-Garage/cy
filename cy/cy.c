@@ -1715,6 +1715,10 @@ static cy_topic_t* topic_subscribe_if_matching(cy_t* const       cy,
     // Using the resolved_name here would be deadly since it is stack-allocated.
     if (NULL != wkv_route(&cy->subscribers_by_pattern, cy_topic_name(topic), topic, wkv_cb_couple_new_topic)) {
         ON_ASYNC_ERROR(cy, topic, CY_ERR_MEMORY);
+        // Earlier callbacks may have already coupled some subscriber roots before the failing callback returns.
+        while (topic->couplings != NULL) {
+            topic_decouple_subscriber_root(topic, topic->couplings->root);
+        }
         topic_destroy(topic);
         return NULL;
     }

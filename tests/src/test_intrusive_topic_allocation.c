@@ -217,6 +217,15 @@ static cy_topic_t* fixture_make_explicit_topic(fixture_t* const self, const char
     return topic;
 }
 
+static size_t topic_coupling_count(const cy_topic_t* const topic)
+{
+    size_t count = 0U;
+    for (const cy_topic_coupling_t* cpl = topic->couplings; cpl != NULL; cpl = cpl->next) {
+        count++;
+    }
+    return count;
+}
+
 static void assert_subject_index_unique(const cy_t* const cy)
 {
     uint32_t   prev  = 0U;
@@ -1758,38 +1767,43 @@ static void test_topic_new_fail_cleanup_with_existing_name_index(void)
     fixture_deinit(&fix);
 }
 
-// topic_new OOM during topic_couple / wkv_route (lines 1753-1756).
-// After a pattern subscription is active, inject OOM so that coupling a new implicit topic
-// to its subscriber root fails. Verify the topic is destroyed and async error is reported.
-static void test_topic_subscribe_if_matching_oom_wkv_route_coupling(void)
+// topic_subscribe_if_matching partial rollback after wkv_route coupling OOM.
+// The wildcard-only pattern is coupled first because wkv_route() visits substitution edges before literal edges.
+// We then fail the later literal-path coupling allocation and verify the earlier coupling is rolled back safely.
+static void test_topic_subscribe_if_matching_partial_coupling_oom_rolls_back(void)
 {
     fixture_t fix;
     fixture_init(&fix);
 
-    // Create a pattern subscriber that will match new topics.
-    cy_future_t* const sub = cy_subscribe(fix.cy, cy_str("topic/auto/oom/route/*"), 64U);
-    TEST_ASSERT_NOT_NULL(sub);
+    cy_future_t* const sub_any = cy_subscribe(fix.cy, cy_str("topic/auto/oom/*/*"), 64U);
+    cy_future_t* const sub_one = cy_subscribe(fix.cy, cy_str("topic/auto/oom/route/*"), 64U);
+    TEST_ASSERT_NOT_NULL(sub_any);
+    TEST_ASSERT_NOT_NULL(sub_one);
 
-    // Now create a topic that matches the pattern. The topic_subscribe_if_matching path:
-    // 1. topic_new succeeds
-    // 2. wkv_route with wkv_cb_couple_new_topic fails OOM on the coupling allocation
-    // This should destroy the topic and report async error.
     const cy_str_t name                = cy_str("topic/auto/oom/route/x");
     const uint64_t hash                = rapidhash(name.str, name.len);
     const size_t   async_errors_before = fix.async_error_count;
 
-    // Fail the coupling allocation. The coupling has a flex array with substitutions.
+    // The first coupling uses two substitutions, the second uses one. Fail only the later allocation.
     fix.fail_alloc_size  = sizeof(cy_topic_coupling_t) + sizeof(cy_substitution_t);
     fix.fail_alloc_count = 1U;
 
-    // topic_subscribe_if_matching calls topic_new (which succeeds), then wkv_route which calls
-    // wkv_cb_couple_new_topic -> topic_couple. The coupling alloc fails, wkv_route returns non-NULL,
-    // and topic_subscribe_if_matching destroys the topic and reports async error.
     TEST_ASSERT_NULL(topic_subscribe_if_matching(fix.cy, name, hash, 0U, LAGE_MIN));
+    TEST_ASSERT_NULL(cy_topic_find_by_name(fix.cy, name));
     TEST_ASSERT_NULL(cy_topic_find_by_hash(fix.cy, hash));
     TEST_ASSERT_EQUAL_size_t(async_errors_before + 1U, fix.async_error_count);
 
-    cy_future_destroy(sub);
+    fix.fail_alloc_count = 0U;
+    fix.fail_alloc_size  = 0U;
+
+    cy_topic_t* const topic = topic_subscribe_if_matching(fix.cy, name, hash, 0U, LAGE_MIN);
+    TEST_ASSERT_NOT_NULL(topic);
+    TEST_ASSERT_EQUAL_PTR(topic, cy_topic_find_by_name(fix.cy, name));
+    TEST_ASSERT_EQUAL_PTR(topic, cy_topic_find_by_hash(fix.cy, hash));
+    TEST_ASSERT_EQUAL_size_t(2U, topic_coupling_count(topic));
+
+    cy_future_destroy(sub_one);
+    cy_future_destroy(sub_any);
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(fix.cy));
     fixture_deinit(&fix);
 }
@@ -1855,6 +1869,6 @@ int main(void)
     RUN_TEST(test_topic_new_oom_during_wkv_set);
     RUN_TEST(test_topic_new_oom_during_gossip_reader_alloc);
     RUN_TEST(test_topic_new_fail_cleanup_with_existing_name_index);
-    RUN_TEST(test_topic_subscribe_if_matching_oom_wkv_route_coupling);
+    RUN_TEST(test_topic_subscribe_if_matching_partial_coupling_oom_rolls_back);
     return UNITY_END();
 }
