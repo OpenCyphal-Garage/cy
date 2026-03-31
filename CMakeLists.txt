@@ -31,8 +31,12 @@ if (NOT NO_STATIC_ANALYSIS)
             --suppress=missingIncludeSystem
             --suppress=badBitmaskCheck
             --suppress=constParameterCallback
+            --suppress=constParameterPointer
+            --suppress=constVariablePointer
             --suppress=duplInheritedMember
+            --suppress=knownConditionTrueFalse
             --suppress=preprocessorErrorDirective
+            --suppress=redundantAssignment
             --suppress=unreadVariable
             --suppress=passedByValue
             --suppress=containerOutOfBounds

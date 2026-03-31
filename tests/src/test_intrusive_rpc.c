@@ -595,7 +595,7 @@ static void test_respond_reliable_key_collision_increments_tag(void)
     cy_future_t* const fut2 = cy_respond_reliable(&b2, fixture.now + (80 * KILO), msg);
     TEST_ASSERT_NOT_NULL(fut2);
     const byte_t tag2 = fixture.last_unicast[1];
-    TEST_ASSERT_TRUE(tag1 != tag2); // cppcheck-suppress knownConditionTrueFalse
+    TEST_ASSERT_TRUE(tag1 != tag2);
     TEST_ASSERT_EQUAL_UINT64(1U, b1.seqno);
     TEST_ASSERT_EQUAL_UINT64(1U, b2.seqno);
 

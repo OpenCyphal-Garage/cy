@@ -524,7 +524,7 @@ static void test_on_gossip_unknown_topic_collision_win_and_loss(void)
     const uint32_t ev_before_loss = topic->evictions;
 
     on_gossip_unknown_topic(fix.cy, now + MEGA, remote, 0U, 12);
-    TEST_ASSERT_TRUE(topic->evictions > ev_before_loss); // cppcheck-suppress knownConditionTrueFalse
+    TEST_ASSERT_TRUE(topic->evictions > ev_before_loss);
 
     fixture_deinit(&fix);
 }
