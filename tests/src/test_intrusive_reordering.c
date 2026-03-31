@@ -135,7 +135,7 @@ static void reorder_env_init(reorder_env_t* const self)
 
 static void reorder_env_cleanup(reorder_env_t* const self)
 {
-    reordering_eject_all(&self->rr);
+    reordering_eject_all(&self->rr, false);
     olga_cancel(&self->fixture.cy.olga, &self->rr.timeout);
     cy_message_refcount_dec(self->sub.last_arrival.message.content);
     self->sub.last_arrival.message.content = NULL;
@@ -1057,7 +1057,7 @@ static void test_reordering_drop_stale_keeps_recent(void)
     TEST_ASSERT_TRUE(olga_is_pending(&env.fixture.cy.olga, &rr->timeout));
     TEST_ASSERT_EQUAL_size_t(0, env.capture.count);
 
-    reordering_destroy(rr);
+    reordering_destroy(rr, false);
     TEST_ASSERT_NULL(env.sub.index_reordering_by_remote_id);
     TEST_ASSERT_EQUAL_size_t(1, env.capture.count);
     TEST_ASSERT_EQUAL_UINT64(8U, env.capture.tags[0]);
@@ -1084,6 +1084,40 @@ static void test_reordering_drop_stale_removes_old(void)
     TEST_ASSERT_EQUAL_UINT64(8U, env.capture.tags[0]);
 
     reorder_env_cleanup(&env);
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&env.fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&env.fixture.heap));
+}
+
+static void test_topic_decouple_subscriber_root_drops_interned_messages(void)
+{
+    reorder_env_t env;
+    reorder_env_init(&env);
+
+    env.root.head = &env.sub;
+    TEST_ASSERT_EQUAL_UINT8(CY_OK, topic_couple(&env.topic, &env.root, 0U, NULL));
+    TEST_ASSERT_NOT_NULL(env.topic.couplings);
+    TEST_ASSERT_FALSE(is_implicit(&env.topic));
+
+    reordering_t* const rr = make_dynamic_reordering(&env, 42U, 8U, 0);
+    TEST_ASSERT_NOT_NULL(rr);
+    TEST_ASSERT_TRUE(push_message_rr(&env, rr, 8U, 100, 0x80U));
+    TEST_ASSERT_EQUAL_size_t(1U, rr->interned_count);
+    TEST_ASSERT_EQUAL_size_t(0U, env.capture.count);
+    assert_message_counters(0U, 1U);
+
+    topic_decouple_subscriber_root(&env.topic, &env.root);
+    TEST_ASSERT_NULL(env.topic.couplings);
+    TEST_ASSERT_TRUE(topic_validate_is_implicit(&env.topic));
+    TEST_ASSERT_TRUE(is_implicit(&env.topic));
+    TEST_ASSERT_NULL(env.sub.index_reordering_by_remote_id);
+    TEST_ASSERT_NULL(env.sub.list_reordering_by_recency.head);
+    TEST_ASSERT_NULL(env.sub.list_reordering_by_recency.tail);
+    TEST_ASSERT_NULL(env.sub.last_arrival.message.content);
+    TEST_ASSERT_EQUAL_size_t(0U, env.capture.count);
+    assert_message_counters(1U, 0U);
+
+    reorder_env_cleanup(&env);
+    assert_message_counters(1U, 0U);
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&env.fixture.heap));
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&env.fixture.heap));
 }
@@ -1127,5 +1161,6 @@ int main(void)
     RUN_TEST(test_reordering_duplicate_interned_slot_is_freed);
     RUN_TEST(test_reordering_drop_stale_keeps_recent);
     RUN_TEST(test_reordering_drop_stale_removes_old);
+    RUN_TEST(test_topic_decouple_subscriber_root_drops_interned_messages);
     return UNITY_END();
 }

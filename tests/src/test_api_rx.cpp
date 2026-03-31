@@ -1392,9 +1392,8 @@ void test_api_dedup_gc_after_session_lifetime()
 }
 
 /// When an ordered subscriber is disposed while it has interned (not yet ejected) messages, the deferred destruction
-/// ejects all pending messages via reordering_eject_all -> reordering_eject -> subscriber_notify.
-/// The disposed subscriber should be skipped by subscriber_notify (line 2959).
-void test_api_ordered_disposed_subscriber_eject_skips_notify()
+/// drops all buffered messages silently. No callback should run and the retained message must be released.
+void test_api_ordered_disposed_subscriber_drops_interned_messages()
 {
     test_platform_t platform{};
     platform_init(&platform);
@@ -1418,15 +1417,16 @@ void test_api_ordered_disposed_subscriber_eject_skips_notify()
     // With tag=100, baseline=92, lin_tag=8. This gets interned (not ejected) because lin_tag != last_ejected+1.
     dispatch_message(&platform, topic, header_msg_best_effort, UINT64_C(100), UINT64_C(0xF1), 110, 0xA1U);
     TEST_ASSERT_EQUAL_size_t(0U, capture.count); // Interned (first message triggers resequence).
+    assert_message_counters(0U, 1U);
 
     // Dispose the subscriber while tag=100 is still interned.
     cy_future_destroy(sub);
+    assert_message_counters(0U, 1U);
 
-    // Spin triggers subscriber_destroy -> reordering_eject_all -> reordering_eject -> subscriber_notify.
-    // subscriber_notify must return early due to disposed flag (line 2959).
+    // Spin triggers subscriber_destroy, which must drop the interned message without notifying the application.
     TEST_ASSERT_EQUAL_UINT8(CY_OK, cy_spin_once(platform.cy));
-    TEST_ASSERT_EQUAL_size_t(0U, capture.count); // No deliveries because subscriber was disposed.
-    TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_live_count());
+    TEST_ASSERT_EQUAL_size_t(0U, capture.count);
+    assert_message_counters(1U, 0U);
 
     platform_deinit(&platform);
     TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&platform.message_heap));
@@ -1624,7 +1624,7 @@ int main()
     RUN_TEST(test_api_gossip_rejects_invalid_lage);
     RUN_TEST(test_api_disposed_subscriber_skipped_on_message);
     RUN_TEST(test_api_dedup_gc_after_session_lifetime);
-    RUN_TEST(test_api_ordered_disposed_subscriber_eject_skips_notify);
+    RUN_TEST(test_api_ordered_disposed_subscriber_drops_interned_messages);
     RUN_TEST(test_api_ordered_resequencing_on_large_tag_gap);
     RUN_TEST(test_api_ordered_reordering_slot_alloc_oom);
     RUN_TEST(test_api_ordered_reordering_duplicate_interned);

@@ -3182,12 +3182,21 @@ static void reordering_on_window_expiration(olga_t* const sched, olga_event_t* c
 }
 
 // Ejects all messages in the correct order and leaves the state empty & idle.
-static void reordering_eject_all(reordering_t* const self)
+// Silent drop is to be used during teardown when we don't want to invoke the callback to avoid reentrancy issues.
+static void reordering_eject_all(reordering_t* const self, const bool silenced)
 {
     while (self->interned_count > 0) {
         reordering_slot_t* const slot =
           CAVL2_TO_OWNER(cavl2_min(self->interned_by_lin_tag), reordering_slot_t, index_lin_tag);
-        reordering_eject(self, slot);
+        assert((slot != NULL) && cavl2_is_inserted(self->interned_by_lin_tag, &slot->index_lin_tag));
+        if (!silenced) {
+            reordering_eject(self, slot);
+        } else {
+            cavl2_remove(&self->interned_by_lin_tag, &slot->index_lin_tag);
+            self->interned_count--;
+            cy_message_refcount_dec(slot->message.content);
+            mem_free(self->topic->cy, slot);
+        }
     }
     assert(self->interned_count == 0);
     assert(self->interned_by_lin_tag == NULL);
@@ -3324,12 +3333,12 @@ static bool reordering_push(reordering_t* const   self,
     assert(first_slot != NULL);
     const cy_us_t deadline = first_slot->message.timestamp + self->subscriber->params.reordering_window;
     olga_defer(&cy->olga, deadline, self, reordering_on_window_expiration, &self->timeout);
-    return true; // Interned messages WILL eventually be ejected and seen by the application.
+    return true; // Interned messages will eventually be ejected and seen by the application.
 }
 
-static void reordering_destroy(reordering_t* const self)
+static void reordering_destroy(reordering_t* const self, const bool silenced)
 {
-    reordering_eject_all(self);
+    reordering_eject_all(self, silenced);
     delist(&self->subscriber->list_reordering_by_recency, &self->list_recency);
     assert(cavl2_is_inserted(self->subscriber->index_reordering_by_remote_id, &self->index));
     cavl2_remove(&self->subscriber->index_reordering_by_remote_id, &self->index);
@@ -3344,7 +3353,7 @@ static void reordering_drop_stale(subscriber_t* const owner, const cy_us_t now)
             break;
         }
         CY_TRACE(owner->root->cy, "🧹 N%016jx topic=%016jx", (uintmax_t)rr->remote_id, (uintmax_t)rr->topic->hash);
-        reordering_destroy(rr);
+        reordering_destroy(rr, false);
     }
 }
 
@@ -3805,7 +3814,7 @@ static void topic_decouple_subscriber_root(cy_topic_t* const topic, const subscr
              rr != NULL;) {
             reordering_t* const next = (reordering_t*)cavl2_next_greater((cy_tree_t*)rr);
             if (rr->topic == topic) {
-                reordering_destroy(rr);
+                reordering_destroy(rr, true); // silenced to prevent callback invocation and related reentrancy issues
             }
             rr = next;
         }
@@ -3819,20 +3828,18 @@ static void subscriber_destroy(subscriber_t* const self)
     cy_t* const              cy   = self->base.cy;
     subscriber_root_t* const root = self->root;
     assert((root != NULL) && (root->cy == cy));
+    assert(self->base.callback == NULL); // Must have been reset beforehand by the future framework.
 #if CY_CONFIG_TRACE
     char name[CY_TOPIC_NAME_MAX + 1];
     cy_subscriber_name(&self->base, name);
     CY_TRACE(cy, "🗑️ %s", name);
 #endif
 
-    // Suppress callbacks from reordering_eject() et al that may occur during finalization.
-    assert(self->base.callback == NULL); // Must have been reset beforehand by the future framework.
-
     // Drop all pending ordered messages first because the states keep pointers into topic couplings.
     while (self->index_reordering_by_remote_id != NULL) {
         reordering_t* const rr = CAVL2_TO_OWNER(cavl2_min(self->index_reordering_by_remote_id), reordering_t, index);
         assert(rr != NULL);
-        reordering_destroy(rr);
+        reordering_destroy(rr, true);
     }
     assert(self->list_reordering_by_recency.head == NULL);
     assert(self->list_reordering_by_recency.tail == NULL);
