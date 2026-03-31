@@ -371,6 +371,11 @@ subject-ID only if its state wins that ordinary arbitration. The same rule is ap
 advertisements/subscriptions are added on a node: once a topic instance exists, later local pinning requests attach to
 it without rewriting its current allocation.
 
+For example, if the application joins (i.e., advertises or subscribes to) `foo/bar` followed by `foo/bar#1234`,
+the latter pin is effectively ignored. Same holds if one node joins `foo/bar`, and then some time later another
+node joins `foo/bar#1234` -- the pinning loses arbitration because there is a pre-existing topic that should not be
+disturbed by newcomers.
+
 Unlike the default automatic allocation mode, pinning allows multiple topics to share the same subject-ID ---
 each participant of such multi-tenant subjects will filter out messages of interest upon arrival;
 usually this is only a good idea for relatively low-rate topics.

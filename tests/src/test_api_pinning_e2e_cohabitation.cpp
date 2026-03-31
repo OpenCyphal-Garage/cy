@@ -1,4 +1,4 @@
-// E2E tests for pinned topic cohabitation, inconsistent-pin convergence, and gossip name invariants.
+// E2E tests for pinned topic cohabitation, explicit CRDT arbitration cases, and gossip name invariants.
 
 #include <cy_platform.h>
 #include <rapidhash.h>
@@ -59,6 +59,23 @@ std::optional<std::uint32_t> last_subject_id_for_hash(const std::vector<e2e::fra
         }
     }
     return std::nullopt;
+}
+
+std::uint32_t require_last_subject_id_for_hash(const std::vector<e2e::frame_capture_t>& captures,
+                                               const std::uint64_t                      topic_hash)
+{
+    const auto sid = last_subject_id_for_hash(captures, topic_hash);
+    TEST_ASSERT_TRUE(sid.has_value());
+    return *sid;
+}
+
+void assert_remote_only(const arrival_capture_t& capture,
+                        const std::uint32_t      expected_publisher_id,
+                        const std::uint32_t      unexpected_publisher_id)
+{
+    TEST_ASSERT_EQUAL_size_t(0U, capture.malformed);
+    TEST_ASSERT_TRUE(count_by_publisher(capture, expected_publisher_id) > 0U);
+    TEST_ASSERT_EQUAL_size_t(0U, count_by_publisher(capture, unexpected_publisher_id));
 }
 
 void cleanup_all(e2e::sim_net_t&                     net,
@@ -254,73 +271,153 @@ void test_multinode_cohabitation_with_three_topics()
 }
 
 // ---------------------------------------------------------------------------
-// Test 3: Inconsistent pin convergence. Per README:
-// "Given foo/bar (non-pinned), foo/bar#1234, and foo/bar#123,
-//  the network will converge to foo/bar#123."
+// Test 3: An older unpinned topic beats a newer conflicting pinned topic.
 // ---------------------------------------------------------------------------
-void test_inconsistent_pin_convergence_to_lowest()
+void test_older_unpinned_beats_newer_pinned()
 {
-    e2e::sim_net_config_t cfg{};
-    cfg.node_count       = 3U;
-    cfg.random_seed_base = UINT64_C(0xC003);
-
     e2e::sim_net_t net{};
-    TEST_ASSERT_EQUAL_INT(CY_OK, e2e::sim_net_init_ex(net, cfg));
+    TEST_ASSERT_EQUAL_INT(
+      CY_OK, e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), UINT64_C(0xC003)));
 
-    // Node 0: unpinned. Node 1: pin 1234. Node 2: pin 123 (lowest, should win).
-    cy_publisher_t* const pub_0 = cy_advertise(e2e::sim_net_cy(net, 0U), cy_str("conv/topic"));
-    cy_publisher_t* const pub_1 = cy_advertise(e2e::sim_net_cy(net, 1U), cy_str("conv/topic#1234"));
-    cy_publisher_t* const pub_2 = cy_advertise(e2e::sim_net_cy(net, 2U), cy_str("conv/topic#123"));
-    TEST_ASSERT_NOT_NULL(pub_0);
-    TEST_ASSERT_NOT_NULL(pub_1);
-    TEST_ASSERT_NOT_NULL(pub_2);
+    cy_publisher_t* const pub_old = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("arb/older/unpinned"));
+    TEST_ASSERT_NOT_NULL(pub_old);
 
-    // Each node subscribes.
-    std::array<arrival_capture_t, 3> caps{};
-    std::vector<cy_future_t*>        subs(3U, nullptr);
-    for (std::size_t i = 0U; i < 3U; i++) {
-        subs.at(i) = make_sub(e2e::sim_net_cy(net, i), "conv/topic", caps.at(i));
-    }
-
-    // Drive a long convergence period so gossip resolves the inconsistency.
     cy_us_t now = 0;
-    e2e::drive_for_all(net, now, 3'000'000, step_us);
+    e2e::drive_for(net, now, 4'000'000, step_us);
 
-    // Publish from each node.
-    constexpr std::array<std::uint32_t, 3> pub_ids = { 5501U, 5502U, 5503U };
-    for (std::uint64_t seq = 1U; seq <= 20U; seq++) {
-        e2e::set_now_all(net, now);
-        for (std::size_t i = 0U; i < 3U; i++) {
-            publish_one((i == 0U) ? pub_0 : ((i == 1U) ? pub_1 : pub_2), pub_ids.at(i), seq, now);
-        }
-        TEST_ASSERT_EQUAL_INT(CY_OK, e2e::drive_round_all(net, now));
+    cy_publisher_t* const pub_new =
+      cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_b), cy_str("arb/older/unpinned#321"));
+    TEST_ASSERT_NOT_NULL(pub_new);
+    TEST_ASSERT_EQUAL_UINT64(cy_topic_hash(cy_publisher_topic(pub_old)), cy_topic_hash(cy_publisher_topic(pub_new)));
+
+    arrival_capture_t  cap_a{};
+    arrival_capture_t  cap_b{};
+    cy_future_t* const sub_a = make_sub(e2e::sim_net_cy(net, e2e::sim_node_a), "arb/older/unpinned", cap_a);
+    cy_future_t* const sub_b = make_sub(e2e::sim_net_cy(net, e2e::sim_node_b), "arb/older/unpinned", cap_b);
+
+    e2e::drive_for(net, now, converge_time, step_us);
+
+    constexpr std::uint32_t pub_id_old = 5501U;
+    constexpr std::uint32_t pub_id_new = 5502U;
+    for (std::uint64_t seq = 1U; seq <= 12U; seq++) {
+        e2e::set_now(net, now);
+        publish_one(pub_old, pub_id_old, seq, now);
+        publish_one(pub_new, pub_id_new, seq, now);
+        TEST_ASSERT_EQUAL_INT(CY_OK, e2e::drive_round(net, now, now));
         now += 10'000;
     }
-    e2e::drive_for_all(net, now, delivery_time, step_us);
+    e2e::drive_for(net, now, delivery_time, step_us);
 
-    // Each node receives from the other two publishers (sim_net doesn't loopback).
-    for (std::size_t node = 0U; node < 3U; node++) {
-        TEST_ASSERT_EQUAL_size_t(0U, caps.at(node).malformed);
-        for (std::size_t src = 0U; src < 3U; src++) {
-            if (src == node) {
-                continue;
-            }
-            TEST_ASSERT_TRUE(count_by_publisher(caps.at(node), pub_ids.at(src)) > 0U);
-        }
-    }
+    assert_remote_only(cap_a, pub_id_new, pub_id_old);
+    assert_remote_only(cap_b, pub_id_old, pub_id_new);
 
-    // All message frames must use subject-ID 123 (lowest pin wins).
     const auto& frame_caps = e2e::sim_net_captures(net);
-    const auto  topic_hash = cy_topic_hash(cy_publisher_topic(pub_0));
-    const auto  sid        = last_subject_id_for_hash(frame_caps, topic_hash);
-    TEST_ASSERT_TRUE(sid.has_value());
-    TEST_ASSERT_EQUAL_UINT32(123U, *sid);
+    const auto  topic_hash = cy_topic_hash(cy_publisher_topic(pub_old));
+    const auto  sid        = require_last_subject_id_for_hash(frame_caps, topic_hash);
+    TEST_ASSERT_TRUE(sid > CY_SUBJECT_ID_PINNED_MAX);
 
-    cleanup_all(net, now, subs, { pub_0, pub_1, pub_2 });
+    cleanup_all(net, now, { sub_a, sub_b }, { pub_old, pub_new });
 }
 
 // ---------------------------------------------------------------------------
-// Test 4: Cohabitation with reliable delivery.
+// Test 4: Equal-log-age conflicts are resolved by evictions, so pinned beats
+// unpinned on the tie.
+// ---------------------------------------------------------------------------
+void test_equal_lage_pinned_beats_unpinned_by_evictions()
+{
+    e2e::sim_net_t net{};
+    TEST_ASSERT_EQUAL_INT(
+      CY_OK, e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), UINT64_C(0xC004)));
+
+    cy_publisher_t* const pub_unpinned =
+      cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("arb/equal/pin-tie"));
+    cy_publisher_t* const pub_pinned =
+      cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_b), cy_str("arb/equal/pin-tie#123"));
+    TEST_ASSERT_NOT_NULL(pub_unpinned);
+    TEST_ASSERT_NOT_NULL(pub_pinned);
+    TEST_ASSERT_EQUAL_UINT64(cy_topic_hash(cy_publisher_topic(pub_unpinned)),
+                             cy_topic_hash(cy_publisher_topic(pub_pinned)));
+
+    arrival_capture_t  cap_a{};
+    arrival_capture_t  cap_b{};
+    cy_future_t* const sub_a = make_sub(e2e::sim_net_cy(net, e2e::sim_node_a), "arb/equal/pin-tie", cap_a);
+    cy_future_t* const sub_b = make_sub(e2e::sim_net_cy(net, e2e::sim_node_b), "arb/equal/pin-tie", cap_b);
+
+    cy_us_t now = 0;
+    e2e::drive_for(net, now, converge_time, step_us);
+
+    constexpr std::uint32_t pub_id_unpinned = 5601U;
+    constexpr std::uint32_t pub_id_pinned   = 5602U;
+    for (std::uint64_t seq = 1U; seq <= 12U; seq++) {
+        e2e::set_now(net, now);
+        publish_one(pub_unpinned, pub_id_unpinned, seq, now);
+        publish_one(pub_pinned, pub_id_pinned, seq, now);
+        TEST_ASSERT_EQUAL_INT(CY_OK, e2e::drive_round(net, now, now));
+        now += 10'000;
+    }
+    e2e::drive_for(net, now, delivery_time, step_us);
+
+    assert_remote_only(cap_a, pub_id_pinned, pub_id_unpinned);
+    assert_remote_only(cap_b, pub_id_unpinned, pub_id_pinned);
+
+    const auto& frame_caps = e2e::sim_net_captures(net);
+    const auto  topic_hash = cy_topic_hash(cy_publisher_topic(pub_unpinned));
+    TEST_ASSERT_EQUAL_UINT32(123U, require_last_subject_id_for_hash(frame_caps, topic_hash));
+
+    cleanup_all(net, now, { sub_a, sub_b }, { pub_unpinned, pub_pinned });
+}
+
+// ---------------------------------------------------------------------------
+// Test 5: A late local pin request attaches to the existing topic instance
+// without rewriting its allocation.
+// ---------------------------------------------------------------------------
+void test_late_local_pin_request_does_not_rewrite_existing_topic()
+{
+    e2e::sim_net_t net{};
+    TEST_ASSERT_EQUAL_INT(
+      CY_OK, e2e::sim_net_init(net, static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit), UINT64_C(0xC005)));
+
+    cy_publisher_t* const pub_plain = cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("arb/local/late-pin"));
+    TEST_ASSERT_NOT_NULL(pub_plain);
+
+    arrival_capture_t  cap_b{};
+    cy_future_t* const sub_b = make_sub(e2e::sim_net_cy(net, e2e::sim_node_b), "arb/local/late-pin", cap_b);
+
+    cy_us_t now = 0;
+    e2e::drive_for(net, now, converge_time, step_us);
+
+    cy_publisher_t* const pub_late_pin =
+      cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("arb/local/late-pin#777"));
+    TEST_ASSERT_NOT_NULL(pub_late_pin);
+    TEST_ASSERT_TRUE(cy_publisher_topic(pub_plain) == cy_publisher_topic(pub_late_pin));
+    TEST_ASSERT_EQUAL_size_t(0U, e2e::sim_net_async_errors(net).size());
+
+    constexpr std::uint32_t pub_id_plain = 5701U;
+    constexpr std::uint32_t pub_id_late  = 5702U;
+    for (std::uint64_t seq = 1U; seq <= 12U; seq++) {
+        e2e::set_now(net, now);
+        publish_one(pub_plain, pub_id_plain, seq, now);
+        publish_one(pub_late_pin, pub_id_late, seq, now);
+        TEST_ASSERT_EQUAL_INT(CY_OK, e2e::drive_round(net, now, now));
+        now += 10'000;
+    }
+    e2e::drive_for(net, now, delivery_time, step_us);
+
+    TEST_ASSERT_EQUAL_size_t(0U, cap_b.malformed);
+    TEST_ASSERT_TRUE(count_by_publisher(cap_b, pub_id_plain) > 0U);
+    TEST_ASSERT_TRUE(count_by_publisher(cap_b, pub_id_late) > 0U);
+    TEST_ASSERT_EQUAL_size_t(0U, e2e::sim_net_async_errors(net).size());
+
+    const auto& frame_caps = e2e::sim_net_captures(net);
+    const auto  topic_hash = cy_topic_hash(cy_publisher_topic(pub_plain));
+    const auto  sid        = require_last_subject_id_for_hash(frame_caps, topic_hash);
+    TEST_ASSERT_TRUE(sid > CY_SUBJECT_ID_PINNED_MAX);
+
+    cleanup_all(net, now, { sub_b }, { pub_plain, pub_late_pin });
+}
+
+// ---------------------------------------------------------------------------
+// Test 6: Cohabitation with reliable delivery.
 // Two topics pinned to the same subject-ID, published reliably.
 // Reliable futures must resolve with CY_OK and no cross-delivery.
 // ---------------------------------------------------------------------------
@@ -412,7 +509,7 @@ void test_cohabitation_reliable_delivery()
 }
 
 // ---------------------------------------------------------------------------
-// Test 5: Cohabitation with ordered subscribers.
+// Test 7: Cohabitation with ordered subscribers.
 // Two topics pinned to the same subject-ID, received via cy_subscribe_ordered.
 // Messages must arrive in-order per-topic and no cross-contamination.
 // ---------------------------------------------------------------------------
@@ -503,7 +600,7 @@ void test_cohabitation_ordered_subscriber()
 }
 
 // ---------------------------------------------------------------------------
-// Test 6: Every gossip frame has a normalized name (no '#', no '//', no
+// Test 8: Every gossip frame has a normalized name (no '#', no '//', no
 // leading/trailing '/') and hash == rapidhash(gossiped_name).
 // ---------------------------------------------------------------------------
 void test_gossip_names_normalized_and_hash_consistent()
@@ -609,7 +706,9 @@ int main()
     UNITY_BEGIN();
     RUN_TEST(test_multinode_cohabitation_no_misdelivery);
     RUN_TEST(test_multinode_cohabitation_with_three_topics);
-    RUN_TEST(test_inconsistent_pin_convergence_to_lowest);
+    RUN_TEST(test_older_unpinned_beats_newer_pinned);
+    RUN_TEST(test_equal_lage_pinned_beats_unpinned_by_evictions);
+    RUN_TEST(test_late_local_pin_request_does_not_rewrite_existing_topic);
     RUN_TEST(test_cohabitation_reliable_delivery);
     RUN_TEST(test_cohabitation_ordered_subscriber);
     RUN_TEST(test_gossip_names_normalized_and_hash_consistent);
