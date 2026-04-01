@@ -54,6 +54,7 @@ if (NOT NO_STATIC_ANALYSIS)
             ${CMAKE_SOURCE_DIR}/tests/*/*.[ch]pp
             ${CMAKE_SOURCE_DIR}/examples/*.[ch]
             ${CMAKE_SOURCE_DIR}/cy_udp_posix/*.[ch]
+            ${CMAKE_SOURCE_DIR}/cy_can/*.[ch]
     )
     message(STATUS "Using clang-format: ${clang_format}; files to format: ${format_files}")
     add_custom_target(format COMMAND ${clang_format} -i -fallback-style=none -style=file --verbose ${format_files})
@@ -105,5 +106,6 @@ endif ()
 
 # SUBDIRECTORIES
 add_subdirectory(cy_udp_posix)
+add_subdirectory(cy_can)
 add_subdirectory(examples)
 add_subdirectory(tests)

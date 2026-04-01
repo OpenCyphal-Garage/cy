@@ -4,3 +4,7 @@
 [submodule "lib/unity"]
 	path = lib/unity
 	url = https://github.com/ThrowTheSwitch/Unity
+[submodule "lib/libcanard"]
+	path = lib/libcanard
+	url = https://github.com/OpenCyphal/libcanard
+	branch = experimental
