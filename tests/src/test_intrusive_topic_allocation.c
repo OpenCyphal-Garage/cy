@@ -174,7 +174,7 @@ static void fixture_init(fixture_t* const self)
     self->vtable.now                       = fixture_now;
     self->vtable.realloc                   = fixture_realloc;
     self->vtable.random                    = fixture_random;
-    self->cy                               = cy_new(&self->platform);
+    self->cy                               = cy_new(&self->platform, cy_str("test"), (cy_str_t){ 0, NULL });
     TEST_ASSERT_NOT_NULL(self->cy);
     cy_async_error_handler_set(self->cy, fixture_on_async_error);
 }
@@ -445,9 +445,9 @@ static void test_topic_subscribe_if_matching_rejects_invalid_and_no_match(void)
     const cy_str_t name = cy_str("topic/auto/no/match");
     const uint64_t hash = rapidhash(name.str, name.len);
 
-    TEST_ASSERT_NULL(topic_subscribe_if_matching(fix.cy, name, hash + 1U, 0U, LAGE_MIN)); // hash mismatch
-    TEST_ASSERT_NULL(topic_subscribe_if_matching(fix.cy, str_empty, 0U, 0U, LAGE_MIN));   // empty name
-    TEST_ASSERT_NULL(topic_subscribe_if_matching(fix.cy, name, hash, 0U, LAGE_MIN));      // no pattern subscribers
+    TEST_ASSERT_NULL(topic_subscribe_if_matching(fix.cy, name, hash + 1U, 0U, LAGE_MIN));         // hash mismatch
+    TEST_ASSERT_NULL(topic_subscribe_if_matching(fix.cy, (cy_str_t){ 0, "" }, 0U, 0U, LAGE_MIN)); // empty name
+    TEST_ASSERT_NULL(topic_subscribe_if_matching(fix.cy, name, hash, 0U, LAGE_MIN)); // no pattern subscribers
     fixture_deinit(&fix);
 }
 

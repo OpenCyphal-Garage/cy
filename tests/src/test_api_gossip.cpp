@@ -171,7 +171,7 @@ void platform_init(test_platform_t& self)
     self.vtable.realloc                   = platform_realloc;
     self.vtable.random                    = platform_random;
     api_test::init_platform_base(self.platform, self.vtable);
-    self.cy = cy_new(&self.platform);
+    self.cy = cy_new(&self.platform, cy_str("test"), cy_str_t{ 0, nullptr });
     TEST_ASSERT_NOT_NULL(self.cy);
     cy_async_error_handler_set(self.cy, platform_on_async_error);
 }

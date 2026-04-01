@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstring>
 #include <set>
+#include <string>
 #include <vector>
 
 namespace {
@@ -357,7 +358,8 @@ void network_node_init(sim_network_t& net, const std::size_t index)
     node.platform.vtable             = &node.vtable;
     node.platform.subject_id_modulus = static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit);
     node.platform.cy                 = nullptr;
-    node.cy                          = cy_new(&node.platform);
+    const std::string home           = "node" + std::to_string(index);
+    node.cy                          = cy_new(&node.platform, cy_str(home.c_str()), cy_str_t{ 0, nullptr });
     TEST_ASSERT_NOT_NULL(node.cy);
     cy_async_error_handler_set(node.cy, sim_on_async_error);
 }

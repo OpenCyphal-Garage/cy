@@ -60,7 +60,9 @@ int main(void)
     if (platform == NULL) { ... }
 
     // Set up the local Cyphal node instance.
-    cy_t* cy = cy_new(platform);
+    // Every node needs a home, which should be unique across the network.
+    // The namespace is optional. The POSIX glue provides convenience functions for this.
+    cy_t* cy = cy_new(platform, cy_str("my_node_name"), cy_str(""));  // platform, home, and namespace.
     if (cy == NULL) { ... }
 
     // ... to be continued ...

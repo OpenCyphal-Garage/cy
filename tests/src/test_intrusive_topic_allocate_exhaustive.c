@@ -193,7 +193,7 @@ static void fixture_init(fixture_t* const self)
     self->random_state                     = UINT64_C(0xA5A5A5A55A5A5A5A);
     self->now                              = (cy_us_t)(1000 * MEGA);
 
-    self->cy = cy_new(&self->platform);
+    self->cy = cy_new(&self->platform, cy_str("test"), (cy_str_t){ 0, NULL });
     TEST_ASSERT_NOT_NULL(self->cy);
     cy_async_error_handler_set(self->cy, fixture_on_async_error);
 }

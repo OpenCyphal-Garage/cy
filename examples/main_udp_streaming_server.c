@@ -180,7 +180,12 @@ static void on_stream_request(cy_future_t* const subscriber)
 
 int main(void)
 {
-    cy_t* const cy = cy_new(cy_udp_posix_new());
+    cy_platform_t* const platform = cy_udp_posix_new();
+    if (platform == NULL) {
+        (void)fprintf(stderr, "cy_udp_posix_new\n");
+        return 1;
+    }
+    cy_t* const cy = cy_new(platform, cy_udp_posix_home(platform, NULL), cy_udp_posix_namespace());
     if (cy == NULL) {
         (void)fprintf(stderr, "cy_new\n");
         return 1;
