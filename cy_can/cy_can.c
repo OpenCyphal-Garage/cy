@@ -32,12 +32,6 @@
 /// Default extent for incoming unicast messages; will grow as needed.
 #define UNICAST_EXTENT_INITIAL (HEADER_BYTES + 1024U)
 
-typedef struct subject_writer_t        subject_writer_t;
-typedef struct subject_reader_t        subject_reader_t;
-typedef struct subject_reader_pinned_t subject_reader_pinned_t;
-
-// =====================================================================================================================
-
 typedef struct
 {
     cy_platform_t          base; // Must be first (upcast pattern).
@@ -53,7 +47,7 @@ typedef struct
     // Per-remote unicast transfer-ID counters (one per possible CAN node-ID).
     uint_least8_t unicast_tid[CANARD_NODE_ID_CAPACITY];
 
-    subject_reader_t* tombstone_head; // Deferred destruction list to avoid reentrancy issues.
+    struct subject_reader_t* tombstone_head; // Deferred destruction list to avoid reentrancy issues.
 
     size_t   subject_writer_count;
     size_t   subject_reader_count;
@@ -62,29 +56,29 @@ typedef struct
     uint64_t oom_count; // cy_can-level OOM (message wrapper allocation failures, etc.).
 } cy_can_t;
 
-struct subject_writer_t
+typedef struct subject_writer_t
 {
     cy_subject_writer_t base;
     uint_least8_t       next_tid_13b;
     uint_least8_t       next_tid_16b;
-};
+} subject_writer_t;
 
-struct subject_reader_t
+typedef struct subject_reader_t
 {
-    cy_subject_reader_t   base;
-    canard_subscription_t sub_16b;
-    cy_can_t*             owner;
-    subject_reader_t*     next_tombstone;
-};
+    cy_subject_reader_t      base;
+    canard_subscription_t    sub_16b;
+    cy_can_t*                owner;
+    struct subject_reader_t* next_tombstone;
+} subject_reader_t;
 
 // The runtime type is determined as pinned=subject_id<=CY_SUBJECT_ID_PINNED_MAX.
-struct subject_reader_pinned_t
+typedef struct subject_reader_pinned_t
 {
     subject_reader_t      base;
     canard_subscription_t sub_13b;
     uint64_t              phony_tag;
     uint_least8_t         phony_header[HEADER_BYTES]; // Precomputed for 13-bit reception.
-};
+} subject_reader_pinned_t;
 
 static subject_reader_pinned_t* as_pinned(subject_reader_t* const self)
 {
@@ -463,7 +457,7 @@ static cy_err_t v_subject_writer_send(cy_platform_t* const       platform,
     const uint64_t e_oom       = owner->canard.err.oom;
     const uint64_t e_cap       = owner->canard.err.tx_capacity;
 
-    bool ok;
+    bool ok = false;
     if (pinned && best_effort) { // V1.0 PATH: 13-bit subject-ID, strip the 24-byte Cy header.
         cy_bytes_t stripped = message;
         stripped.data       = (const char*)stripped.data + HEADER_BYTES;
@@ -647,28 +641,30 @@ static cy_err_t v_spin(cy_platform_t* const base, const cy_us_t deadline)
 {
     cy_can_t* const     owner = (cy_can_t*)base;
     const uint_least8_t ibm   = (uint_least8_t)((1U << owner->iface_count) - 1U);
-    cy_us_t             now   = owner->vtable->now(owner->user);
-
-    while (now < deadline) {
+    while (true) {
         canard_poll(&owner->canard, ibm);
 
-        // O(1) tombstone cleanup: finalize all deferred reader destructions.
-        while (owner->tombstone_head != NULL) {
+        // O(1) tombstone cleanup: finalize deferred reader destructions iteratively.
+        if (owner->tombstone_head != NULL) {
             subject_reader_t* const rd = owner->tombstone_head;
             owner->tombstone_head      = rd->next_tombstone;
             reader_finalize(owner, rd);
         }
 
-        cy_can_frame_t frame;
-        (void)memset(&frame, 0, sizeof(frame));
-        if (owner->vtable->rx(owner->user, &frame, deadline)) {
-            now                           = owner->vtable->now(owner->user);
+        const uint_least8_t tx_pending = canard_pending_ifaces(&owner->canard);
+        cy_can_rx_t         frame      = { 0 };
+        if (owner->vtable->rx(owner->user, &frame, deadline, tx_pending)) {
             const canard_bytes_t can_data = { .size = frame.len, .data = frame.data };
-            (void)canard_ingest_frame(&owner->canard, now, frame.iface_index, frame.can_id, can_data);
+            (void)canard_ingest_frame(&owner->canard, frame.timestamp, frame.iface_index, frame.can_id, can_data);
+            if (frame.timestamp > deadline) {
+                break;
+            }
+        } else {
+            if (owner->vtable->now(owner->user) > deadline) {
+                break;
+            }
         }
-        now = owner->vtable->now(owner->user);
     }
-    canard_poll(&owner->canard, ibm);
     return CY_OK;
 }
 
@@ -693,20 +689,18 @@ static uint64_t v_random(cy_platform_t* const base)
     return owner->vtable->random(owner->user);
 }
 
-static const cy_platform_vtable_t platform_vtable = {
-    .subject_writer_new        = v_subject_writer_new,
-    .subject_writer_destroy    = v_subject_writer_destroy,
-    .subject_writer_send       = v_subject_writer_send,
-    .subject_reader_new        = v_subject_reader_new,
-    .subject_reader_destroy    = v_subject_reader_destroy,
-    .subject_reader_extent_set = v_subject_reader_extent_set,
-    .unicast                   = v_unicast_send,
-    .unicast_extent_set        = v_unicast_extent_set,
-    .spin                      = v_spin,
-    .now                       = v_now,
-    .realloc                   = v_realloc,
-    .random                    = v_random,
-};
+static const cy_platform_vtable_t platform_vtable = { .subject_writer_new        = v_subject_writer_new,
+                                                      .subject_writer_destroy    = v_subject_writer_destroy,
+                                                      .subject_writer_send       = v_subject_writer_send,
+                                                      .subject_reader_new        = v_subject_reader_new,
+                                                      .subject_reader_destroy    = v_subject_reader_destroy,
+                                                      .subject_reader_extent_set = v_subject_reader_extent_set,
+                                                      .unicast                   = v_unicast_send,
+                                                      .unicast_extent_set        = v_unicast_extent_set,
+                                                      .spin                      = v_spin,
+                                                      .now                       = v_now,
+                                                      .realloc                   = v_realloc,
+                                                      .random                    = v_random };
 
 // =====================================================================================================================
 // PUBLIC API
@@ -760,27 +754,21 @@ cy_platform_t* cy_can_new(const uint_least8_t          iface_count,
 cy_can_stats_t cy_can_stats(const cy_platform_t* const base)
 {
     const cy_can_t* const owner = (const cy_can_t*)base;
-    return (cy_can_stats_t){
-        .subject_writer_count     = owner->subject_writer_count,
-        .subject_reader_count     = owner->subject_reader_count,
-        .v10_rx_count             = owner->v10_rx_count,
-        .v11_rx_count             = owner->v11_rx_count,
-        .oom_count                = owner->oom_count,
-        .canard_err_oom           = owner->canard.err.oom,
-        .canard_err_tx_capacity   = owner->canard.err.tx_capacity,
-        .canard_err_tx_sacrifice  = owner->canard.err.tx_sacrifice,
-        .canard_err_tx_expiration = owner->canard.err.tx_expiration,
-        .canard_err_rx_frame      = owner->canard.err.rx_frame,
-        .canard_err_rx_transfer   = owner->canard.err.rx_transfer,
-        .canard_err_collision     = owner->canard.err.collision,
-    };
+    return (cy_can_stats_t){ .subject_writer_count     = owner->subject_writer_count,
+                             .subject_reader_count     = owner->subject_reader_count,
+                             .v10_rx_count             = owner->v10_rx_count,
+                             .v11_rx_count             = owner->v11_rx_count,
+                             .oom_count                = owner->oom_count,
+                             .canard_err_oom           = owner->canard.err.oom,
+                             .canard_err_tx_capacity   = owner->canard.err.tx_capacity,
+                             .canard_err_tx_sacrifice  = owner->canard.err.tx_sacrifice,
+                             .canard_err_tx_expiration = owner->canard.err.tx_expiration,
+                             .canard_err_rx_frame      = owner->canard.err.rx_frame,
+                             .canard_err_rx_transfer   = owner->canard.err.rx_transfer,
+                             .canard_err_collision     = owner->canard.err.collision };
 }
 
-void* cy_can_user(const cy_platform_t* const base)
-{
-    const cy_can_t* const owner = (const cy_can_t*)base;
-    return owner->user;
-}
+void* cy_can_user(const cy_platform_t* const base) { return ((const cy_can_t*)base)->user; }
 
 void cy_can_destroy(cy_platform_t* const base)
 {
@@ -790,6 +778,8 @@ void cy_can_destroy(cy_platform_t* const base)
         owner->tombstone_head      = rd->next_tombstone;
         reader_finalize(owner, rd);
     }
+    assert(owner->subject_reader_count == 0); // caller must clean up
+    assert(owner->subject_writer_count == 0); // caller must clean up
     canard_unsubscribe(&owner->canard, &owner->unicast_sub);
     canard_destroy(&owner->canard);
     owner->vtable->realloc(owner->user, owner, 0);

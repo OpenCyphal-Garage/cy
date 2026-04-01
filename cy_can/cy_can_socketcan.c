@@ -112,7 +112,10 @@ static bool v_tx_fd(void* const         user,
     return res == (ssize_t)sizeof(frame);
 }
 
-static bool v_rx(void* const user, cy_can_frame_t* const out_frame, const cy_us_t deadline)
+static bool v_rx(void* const         user,
+                 cy_can_rx_t* const  out_frame,
+                 const cy_us_t       deadline,
+                 const uint_least8_t tx_pending_iface_bitmap)
 {
     socketcan_t* const self = (socketcan_t*)user;
     struct pollfd      fds[CANARD_IFACE_COUNT];
@@ -120,6 +123,9 @@ static bool v_rx(void* const user, cy_can_frame_t* const out_frame, const cy_us_
         fds[i].fd      = self->sock_fd[i];
         fds[i].events  = POLLIN;
         fds[i].revents = 0;
+        if (((tx_pending_iface_bitmap >> i) & 1U) != 0) { // NOLINT(*-signed-bitwise)
+            fds[i].events |= POLLOUT;                     // NOLINT(*-signed-bitwise)
+        }
     }
     const cy_us_t now        = socketcan_now();
     const int     timeout_ms = (deadline > now) ? (int)((deadline - now) / 1000LL) : 0;
@@ -132,6 +138,7 @@ static bool v_rx(void* const user, cy_can_frame_t* const out_frame, const cy_us_
             continue;
         }
         out_frame->iface_index = i;
+        out_frame->timestamp   = socketcan_now(); // embedded systems would typically sample the hardware clock
         if (self->fd_capable) {
             struct canfd_frame frame;
             const ssize_t      n = read(self->sock_fd[i], &frame, sizeof(frame));

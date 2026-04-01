@@ -26,12 +26,13 @@ extern "C"
 /// A received CAN frame (classic or FD).
 typedef struct
 {
+    cy_us_t       timestamp;   ///< Monotonic reception timestamp in microseconds, in cy_can_vtable_t::now() timebase.
     uint32_t      can_id;      ///< 29-bit extended CAN ID.
     uint_least8_t iface_index; ///< The redundant interface the frame was received from.
     uint_least8_t len;         ///< Data length: 0-8 for classic CAN, 0-64 for CAN FD.
     bool          fd;          ///< True if this is a CAN FD frame.
     uint_least8_t data[64];
-} cy_can_frame_t;
+} cy_can_rx_t;
 
 /// Platform-specific CAN driver abstraction. A single vtable manages ALL redundant interfaces.
 /// All functions are non-blocking except rx(), which may block up to the specified deadline.
@@ -51,7 +52,9 @@ typedef struct
     /// Poll all redundant interfaces for a received frame. Returns true if a frame was received.
     /// The implementation may block up to the given deadline; baremetal implementations may ignore the deadline
     /// and return immediately if no frame is available.
-    bool (*rx)(void* user, cy_can_frame_t* out_frame, cy_us_t deadline);
+    /// The tx_pending_iface_bitmap indicates which interfaces have pending TX frames; the implementation should
+    /// also unblock when any of those interfaces become writable, to allow the caller to retry transmissions.
+    bool (*rx)(void* user, cy_can_rx_t* out_frame, cy_us_t deadline, uint_least8_t tx_pending_iface_bitmap);
 
     /// Returns the current monotonic time in microseconds. Must be non-negative and non-decreasing.
     cy_us_t (*now)(void* user);
