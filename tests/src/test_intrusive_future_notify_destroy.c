@@ -241,7 +241,7 @@ static void fixture_init(fixture_t* const self)
     self->vtable.now                       = fixture_now;
     self->vtable.random                    = fixture_random;
 
-    self->cy = cy_new(&self->platform);
+    self->cy = cy_new(&self->platform, cy_str("test"), (cy_str_t){ 0, NULL });
     TEST_ASSERT_NOT_NULL(self->cy);
     cy_async_error_handler_set(self->cy, fixture_async_error_handler);
 }

@@ -149,7 +149,7 @@ int main(const int argc, char* const argv[])
     }
 
     // Set up the node instance.
-    cy_t* const cy = cy_new(platform);
+    cy_t* const cy = cy_new(platform, cy_udp_posix_home(platform, "udp_sub"), cy_udp_posix_namespace());
     if (cy == NULL) {
         (void)fprintf(stderr, "cy_new\n");
         return 1;

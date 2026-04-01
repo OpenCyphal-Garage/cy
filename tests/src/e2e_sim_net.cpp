@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <string>
 #include <new>
 #include <utility>
 
@@ -627,7 +628,8 @@ cy_err_t sim_net_init_ex(sim_net_t& self, const sim_net_config_t& config)
         node.platform.subject_id_modulus = config.subject_id_modulus;
         node.platform.vtable             = &node.vtable;
 
-        node.cy = cy_new(&node.platform);
+        const std::string home = "node" + std::to_string(i);
+        node.cy                = cy_new(&node.platform, cy_str(home.c_str()), cy_str_t{ 0, nullptr });
         if (node.cy == nullptr) {
             sim_net_deinit(self);
             return CY_ERR_MEMORY;

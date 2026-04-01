@@ -64,10 +64,16 @@ cy_platform_t* cy_udp_posix_new_manual(const uint64_t uid,
                                        const uint32_t local_iface_address[CY_UDP_POSIX_IFACE_COUNT_MAX],
                                        const size_t   tx_queue_capacity);
 
-/// Sets up the default home and namespace on the linked Cy instance. Must be invoked after cy_new().
-/// The default home is the fixed-length zero-padded lowercase hex UID (16 lowercase digits). E.g., `0123456789abcdef`.
-/// The default namespace is read from the CYPHAL_NAMESPACE environment variable; if not set, original left unchanged.
-cy_err_t cy_udp_posix_set_default_names(const cy_platform_t* base);
+/// The default home is the fixed-length zero-padded lowercase hex UID (16 lowercase digits); e.g., `0123456789abcdef`.
+/// Optionally, a prefix can be added, which will be prepended to the UID via a `/`; e.g., `my_node/0123456789abcdef`;
+/// NULL is accepted as an empty prefix.
+/// Every node must have a nonempty home and every home should be unique in the network.
+/// The string reference is valid until the next invocation of this function (thread-local static).
+cy_str_t cy_udp_posix_home(const cy_platform_t* const base, const char* const prefix);
+
+/// The default namespace is read from the CYPHAL_NAMESPACE environment variable; if not set, empty namespace is used.
+/// The string reference is valid until the environment is modified (typically until the end of the process lifetime).
+cy_str_t cy_udp_posix_namespace(void);
 
 cy_udp_posix_stats_t cy_udp_posix_stats(const cy_platform_t* base);
 

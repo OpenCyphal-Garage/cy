@@ -524,7 +524,11 @@ cy_future_t* cy_respond_reliable(cy_breadcrumb_t* const breadcrumb, const cy_us_
 // =====================================================================================================================
 
 /// The new instance will be heap-allocated via the platform layer API.
-cy_t* cy_new(cy_platform_t* const platform);
+///
+/// The home must be nonempty and should be unique in the network (a random suffix is one way to ensure this).
+/// The home and namespace will be normalized and copied; the original references don't need to persist.
+/// See cy_name_... for details on name normalization and resolution.
+cy_t* cy_new(cy_platform_t* const platform, const cy_str_t home, const cy_str_t name_space);
 
 /// Cy will clean up all resources obtained from the platform, such as memory and readers/writers, but will not
 /// destroy the platform instance itself; the application is responsible for that.
@@ -549,14 +553,10 @@ void cy_destroy(cy_t* const cy);
 typedef void (*cy_async_error_handler_t)(cy_t*, cy_topic_t*, cy_err_t, uint16_t line_number);
 void cy_async_error_handler_set(cy_t* const cy, const cy_async_error_handler_t handler);
 
-/// See cy_name_... for name resolution details. The provided names will be validated and normalized.
-/// The home should be unique in the network; one way to ensure this is to default it to the node's unique ID.
+/// See cy_name_... for name resolution details.
 /// The returned strings are NUL-terminated. The lifetime is bound to the Cy instance.
-/// The default home and namespace are empty. They should not be changed after the first topic is created.
 cy_str_t cy_home(const cy_t* const cy);
 cy_str_t cy_namespace(const cy_t* const cy);
-cy_err_t cy_home_set(cy_t* const cy, const cy_str_t home);
-cy_err_t cy_namespace_set(cy_t* const cy, const cy_str_t name_space);
 
 /// This function must be invoked periodically to ensure liveness.
 /// The returned value indicates the success of the platform spin().

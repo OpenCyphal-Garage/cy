@@ -220,7 +220,7 @@ static void fixture_init(fixture_t* const self)
     self->vtable.realloc                   = fixture_realloc;
     self->vtable.random                    = fixture_random;
     self->rand_state                       = UINT64_C(0x123456789ABCDEF0);
-    self->cy                               = cy_new(&self->platform);
+    self->cy                               = cy_new(&self->platform, cy_str("test"), (cy_str_t){ 0, NULL });
     TEST_ASSERT_NOT_NULL(self->cy);
     cy_async_error_handler_set(self->cy, fixture_on_async_error);
 }
@@ -242,9 +242,7 @@ static void fixture_deinit(fixture_t* const self)
             self->vtable.subject_writer_destroy(&self->platform, self->cy->broad_writer);
             self->cy->broad_writer = NULL;
         }
-        mem_free(self->cy, (void*)self->cy->home.str);
-        mem_free(self->cy, (void*)self->cy->ns.str);
-        self->vtable.realloc(&self->platform, self->cy, 0U);
+        self->vtable.realloc(&self->platform, self->cy, 0U); // Home and ns are embedded in this allocation.
         self->platform.cy = NULL;
         self->cy          = NULL;
     }

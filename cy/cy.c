@@ -87,7 +87,6 @@ struct cy_tree_t
 #define TREE_NULL ((cy_tree_t){ NULL, { NULL, NULL }, 0 })
 
 static const cy_str_t str_invalid = { .len = SIZE_MAX, .str = NULL };
-static const cy_str_t str_empty   = { .len = 0, .str = "" };
 
 // For printf-style formatting of cy_str_t.
 #define STRFMT_ARG(s) ((int)(s).len), (s).str
@@ -196,8 +195,8 @@ typedef enum
 #define SEQNO48_MASK ((1ULL << 48U) - 1ULL)
 
 static uint32_t topic_subject_id(const cy_topic_t* const topic);
-static cy_str_t name_normalize(const size_t in_size, const char* in, const size_t dest_size, char* const dest);
-static cy_err_t name_assign(const cy_t* const cy, cy_str_t* const assignee, const cy_str_t name);
+static size_t   name_normalized_len(const cy_str_t name);
+static cy_str_t name_normalize(const cy_str_t part, const size_t dest_size, char* const dest);
 
 static size_t  larger(const size_t a, const size_t b) { return (a > b) ? a : b; }
 static size_t  smaller(const size_t a, const size_t b) { return (a < b) ? a : b; }
@@ -4228,30 +4227,36 @@ static void default_async_error_handler(cy_t* const       cy,
     (void)line_number;
 }
 
-cy_t* cy_new(cy_platform_t* const platform)
+cy_t* cy_new(cy_platform_t* const platform, const cy_str_t home, const cy_str_t name_space)
 {
+    // Home is required. Namespace may be empty.
     if ((platform == NULL) || (platform->vtable == NULL) || (platform->cy != NULL) ||
-        !is_valid_subject_id_modulus(platform->subject_id_modulus)) {
+        !is_valid_subject_id_modulus(platform->subject_id_modulus) || (home.len == 0) || (home.str == NULL) ||
+        ((name_space.str == NULL) && (name_space.len > 0))) {
         return NULL;
     }
-    cy_t* const cy = platform->vtable->realloc(platform, NULL, sizeof(cy_t));
+
+    // Normalize and validate the names. Subsequent normalization will certainly succeed.
+    const size_t home_len = name_normalized_len(home);
+    const size_t ns_len   = name_normalized_len(name_space);
+    if ((home_len == 0) || (home_len > CY_TOPIC_NAME_MAX) || (ns_len > CY_TOPIC_NAME_MAX)) { // home required
+        return NULL;
+    }
+
+    // Allocate the memory for the struct and the names in a single chunk, include NUL terminators.
+    cy_t* const cy = platform->vtable->realloc(platform, NULL, sizeof(cy_t) + home_len + ns_len + 2);
     if (cy == NULL) {
         return NULL;
     }
-    memset(cy, 0, sizeof(*cy));
+    memset(cy, 0, sizeof(cy_t) + home_len + ns_len + 2); // Zero the entire allocation incl. NUL terminators.
+    cy->home = name_normalize(home, home_len, (char*)cy + sizeof(cy_t));
+    cy->ns   = name_normalize(name_space, ns_len, (char*)cy + sizeof(cy_t) + home_len + 1);
+    assert((cy->home.str != NULL) && (cy->home.len == home_len) && (cy->home.str[cy->home.len] == '\0'));
+    assert((cy->ns.str != NULL) && (cy->ns.len == ns_len) && (cy->ns.str[cy->ns.len] == '\0'));
+
     cy->platform = platform;
     platform->cy = cy;
     olga_init(&cy->olga, cy, olga_now);
-    {
-        const cy_err_t err = name_assign(cy, &cy->home, str_empty);
-        assert(err == CY_OK); // infallible by design
-        (void)err;
-    }
-    {
-        const cy_err_t err = name_assign(cy, &cy->ns, str_empty);
-        assert(err == CY_OK); // infallible by design
-        (void)err;
-    }
 
     wkv_init(&cy->topics_by_name, &wkv_realloc);
     cy->topics_by_name.context = cy;
@@ -4295,9 +4300,7 @@ cy_t* cy_new(cy_platform_t* const platform)
     cy->broad_reader =
       cy->platform->vtable->subject_reader_new(cy->platform, broadcast_subject_id, CY_AUX_SUBJECT_EXTENT);
     if (cy->broad_reader == NULL) {
-        mem_free(cy, (void*)cy->home.str);
-        mem_free(cy, (void*)cy->ns.str);
-        mem_free(cy, cy);
+        mem_free(cy, cy); // Home and ns are embedded in the same allocation, no separate free needed.
         platform->cy = NULL;
         return NULL;
     }
@@ -4307,8 +4310,6 @@ cy_t* cy_new(cy_platform_t* const platform)
     cy->broad_writer = cy->platform->vtable->subject_writer_new(cy->platform, broadcast_subject_id);
     if (cy->broad_writer == NULL) {
         cy->platform->vtable->subject_reader_destroy(cy->platform, cy->broad_reader);
-        mem_free(cy, (void*)cy->home.str);
-        mem_free(cy, (void*)cy->ns.str);
         mem_free(cy, cy);
         platform->cy = NULL;
         return NULL;
@@ -4318,9 +4319,11 @@ cy_t* cy_new(cy_platform_t* const platform)
     cy->async_error_handler = default_async_error_handler;
     cy->topic_iter          = NULL;
     CY_TRACE(cy,
-             "🚀 ts_started=%ju subject_id_modulus=%ju",
+             "🚀 ts_started=%ju subject_id_modulus=%ju home=%s ns=%s",
              (uintmax_t)cy->ts_started,
-             (uintmax_t)cy->platform->subject_id_modulus);
+             (uintmax_t)cy->platform->subject_id_modulus,
+             cy->home.str,
+             cy->ns.str);
     return cy;
 }
 
@@ -4367,12 +4370,7 @@ void cy_destroy(cy_t* const cy)
     assert(cy->writers == NULL); // All writer registry entries released by topic_destroy.
     assert(cy->readers == NULL); // All reader registry entries released by topic_destroy.
 
-    // Cleanup done, release the memory.
-    mem_free(cy, (void*)cy->home.str);
-    cy->home = str_empty;
-    mem_free(cy, (void*)cy->ns.str);
-    cy->ns = str_empty;
-
+    // Cleanup done, release the memory. Home and ns are embedded in the same allocation.
     mem_free(cy, cy);
 }
 
@@ -4385,9 +4383,6 @@ void cy_async_error_handler_set(cy_t* const cy, const cy_async_error_handler_t h
 
 cy_str_t cy_home(const cy_t* const cy) { return (cy != NULL) ? cy->home : str_invalid; }
 cy_str_t cy_namespace(const cy_t* const cy) { return (cy != NULL) ? cy->ns : str_invalid; }
-
-cy_err_t cy_home_set(cy_t* const cy, const cy_str_t home) { return name_assign(cy, &cy->home, home); }
-cy_err_t cy_namespace_set(cy_t* const cy, const cy_str_t name_space) { return name_assign(cy, &cy->ns, name_space); }
 
 // Returns next deadline or INT64_MAX.
 static cy_us_t poll(cy_t* const cy, cy_us_t* const out_now)
@@ -4885,30 +4880,6 @@ static cy_str_t name_consume_pin_suffix(const cy_str_t name, uint16_t* const out
     return (cy_str_t){ .len = hash_pos, .str = name.str };
 }
 
-// Normalizes the name and copies it into a heap-allocated storage. On OOM, the original is left unchanged.
-static cy_err_t name_assign(const cy_t* const cy, cy_str_t* const assignee, const cy_str_t name)
-{
-    assert(assignee != NULL);
-    if (cy != NULL) {
-        char           normalized[CY_TOPIC_NAME_MAX + 1U];
-        const cy_str_t str = name_normalize(name.len, name.str, sizeof(normalized), normalized);
-        if (str.len <= CY_TOPIC_NAME_MAX) {
-            char* const alloc = mem_alloc_zero(cy, str.len + 1U);
-            if ((alloc == NULL) && (str.len > 0U)) {
-                return CY_ERR_MEMORY;
-            }
-            if (str.len > 0) {
-                memcpy(alloc, str.str, str.len);
-                alloc[str.len] = '\0';
-            }
-            mem_free(cy, (void*)assignee->str);
-            *assignee = (cy_str_t){ .len = str.len, .str = alloc };
-            return CY_OK;
-        }
-    }
-    return CY_ERR_ARGUMENT;
-}
-
 static bool name_is_verbatim(const cy_str_t name)
 {
     wkv_t kv;
@@ -4970,11 +4941,10 @@ static void name_copy_normalized_forward(const cy_str_t name, char* const dest)
 }
 
 // Exact in-place normalization is supported; arbitrary partial overlap is not guaranteed.
-static cy_str_t name_normalize(const size_t in_size, const char* in, const size_t dest_size, char* const dest)
+static cy_str_t name_normalize(const cy_str_t part, const size_t dest_size, char* const dest)
 {
-    assert(((in != NULL) || (in_size == 0U)) && (dest != NULL));
-    const cy_str_t part = { .len = in_size, .str = in };
-    const size_t   len  = name_normalized_len(part);
+    assert(((part.str != NULL) || (part.len == 0U)) && (dest != NULL));
+    const size_t len = name_normalized_len(part);
     if ((len == SIZE_MAX) || (len > dest_size)) {
         return str_invalid;
     }
@@ -5023,7 +4993,7 @@ static cy_str_t name_resolve_construct(const cy_str_t name,
 {
     assert(str_valid(name) && str_valid(name_space) && str_valid(home) && (dest != NULL));
     if (name_is_absolute(name)) {
-        return name_normalize(name.len, name.str, dest_size, dest);
+        return name_normalize(name, dest_size, dest);
     }
     if (name_is_homeful(name)) {
         return cy_name_join(home, str_skip(name, 1), dest_size, dest);

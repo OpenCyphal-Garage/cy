@@ -30,6 +30,12 @@
 #include <errno.h>
 #include <stdio.h>
 
+#if __STDC_VERSION__ >= 201112L
+#include <threads.h>
+#else
+#define thread_local
+#endif
+
 #if (CY_UDP_POSIX_IFACE_COUNT_MAX) != (UDPARD_IFACE_COUNT_MAX)
 #error CY_UDP_POSIX_IFACE_COUNT_MAX != UDPARD_IFACE_COUNT_MAX
 #endif
@@ -887,23 +893,16 @@ cy_platform_t* cy_udp_posix_new_manual(const uint64_t uid,
     return &self->base;
 }
 
-cy_err_t cy_udp_posix_set_default_names(const cy_platform_t* base)
+cy_str_t cy_udp_posix_home(const cy_platform_t* base, const char* const prefix)
 {
-    cy_udp_posix_t* const self     = (cy_udp_posix_t*)base;
-    char                  home[17] = { 0 };
-    (void)snprintf(home, sizeof(home), "%016jx", (uintmax_t)self->udpard_tx.local_uid);
-    assert(home[16] == 0);
-    cy_err_t err = cy_home_set(base->cy, wkv_key(home));
-    CY_TRACE(base->cy, "🏠 Home set to '%s' res=%jd", home, (intmax_t)err);
-    if (err == CY_OK) {
-        const char* const namespace = getenv("CYPHAL_NAMESPACE");
-        if (namespace != NULL) {
-            err = cy_namespace_set(base->cy, wkv_key(namespace));
-            CY_TRACE(base->cy, "🌌 Namespace set to '%s' res=%jd", namespace, (intmax_t)err);
-        }
-    }
-    return err;
+    char uid[17] = { 0 };
+    (void)snprintf(uid, sizeof(uid), "%016jx", (uintmax_t)(((cy_udp_posix_t*)base)->udpard_tx.local_uid));
+    assert(uid[16] == 0);
+    static thread_local char g_home[CY_TOPIC_NAME_MAX + 1];
+    return cy_name_join(cy_str(prefix), cy_str(uid), CY_TOPIC_NAME_MAX, g_home);
 }
+
+cy_str_t cy_udp_posix_namespace(void) { return cy_str(getenv("CYPHAL_NAMESPACE")); }
 
 cy_udp_posix_stats_t cy_udp_posix_stats(const cy_platform_t* base)
 {
