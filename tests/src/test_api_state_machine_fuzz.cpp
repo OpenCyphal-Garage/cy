@@ -12,8 +12,7 @@
 namespace {
 
 struct test_platform_t final : api_test::test_platform_base_t
-{
-};
+{};
 
 struct future_entry_t final
 {
@@ -57,7 +56,9 @@ extern "C" cy_subject_reader_t* platform_subject_reader_new(cy_platform_t* const
     return api_test::subject_reader_new_tracked<test_platform_t>(p, sid, ext);
 }
 
-extern "C" void platform_subject_reader_extent_set(cy_platform_t* const p, cy_subject_reader_t* const r, const std::size_t e)
+extern "C" void platform_subject_reader_extent_set(cy_platform_t* const       p,
+                                                   cy_subject_reader_t* const r,
+                                                   const std::size_t          e)
 {
     api_test::subject_reader_extent_set_tracked<test_platform_t>(p, r, e);
 }
@@ -106,7 +107,7 @@ extern "C" std::uint64_t platform_random(cy_platform_t* const platform)
 
 void platform_init(test_platform_t* const self)
 {
-    *self = test_platform_t{};
+    *self              = test_platform_t{};
     self->random_state = UINT64_C(0xD1CEB00BCAFEBEEF);
     guarded_heap_init(&self->core_heap, UINT64_C(0xFACEB00C12345678));
     guarded_heap_init(&self->message_heap, UINT64_C(0xDEC0DE1234567890));

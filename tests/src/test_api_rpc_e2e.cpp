@@ -1749,8 +1749,7 @@ void test_rpc_on_pinned_topic()
 
     // Node A is the client with a pinned subject-ID.
     static constexpr const char* topic_name = "rpc/svc#300";
-    cy_publisher_t* const        client =
-      cy_advertise_client(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str(topic_name), 128U);
+    cy_publisher_t* const client = cy_advertise_client(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str(topic_name), 128U);
     TEST_ASSERT_NOT_NULL(client);
     cy_ack_timeout_set(client, ack_timeout_us);
 
