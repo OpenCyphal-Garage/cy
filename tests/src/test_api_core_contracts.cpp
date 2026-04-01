@@ -206,7 +206,7 @@ extern "C" void on_done_capture(cy_future_t* const future)
 
 void platform_prepare(test_platform_t* const self)
 {
-    *self = test_platform_t{};
+    *self     = test_platform_t{};
     self->now = 1000;
 
     guarded_heap_init(&self->core_heap, UINT64_C(0xFACEB00C12345678));
@@ -238,10 +238,7 @@ void platform_init(test_platform_t* const self)
     TEST_ASSERT_NOT_NULL(self->cy);
 }
 
-void platform_deinit(test_platform_t* const self)
-{
-    api_test::standard_deinit(*self);
-}
+void platform_deinit(test_platform_t* const self) { api_test::standard_deinit(*self); }
 
 void dispatch_best_effort_unicast(test_platform_t* const            self,
                                   const cy_topic_t* const           topic,
@@ -1271,8 +1268,8 @@ void test_cy_resolve_uses_node_home_and_namespace()
 
     // Homeful name: ~ expands to the home ("mynode"), namespace is not involved.
     {
-        char buf[256]{};
-        const cy_resolved_t r = cy_resolve(platform.cy, cy_str("~/topic"), sizeof(buf), buf);
+        std::array<char, 256U> buf{};
+        const cy_resolved_t    r = cy_resolve(platform.cy, cy_str("~/topic"), buf.size(), buf.data());
         TEST_ASSERT_NOT_NULL(r.name.str);
         TEST_ASSERT_EQUAL_size_t(12U, r.name.len); // "mynode/topic"
         TEST_ASSERT_EQUAL_MEMORY("mynode/topic", r.name.str, r.name.len);
@@ -1282,8 +1279,8 @@ void test_cy_resolve_uses_node_home_and_namespace()
 
     // Relative name: namespace is prepended.
     {
-        char buf[256]{};
-        const cy_resolved_t r = cy_resolve(platform.cy, cy_str("relative/path"), sizeof(buf), buf);
+        std::array<char, 256U> buf{};
+        const cy_resolved_t    r = cy_resolve(platform.cy, cy_str("relative/path"), buf.size(), buf.data());
         TEST_ASSERT_NOT_NULL(r.name.str);
         TEST_ASSERT_EQUAL_size_t(16U, r.name.len); // "ns/relative/path"
         TEST_ASSERT_EQUAL_MEMORY("ns/relative/path", r.name.str, r.name.len);
@@ -1293,8 +1290,8 @@ void test_cy_resolve_uses_node_home_and_namespace()
 
     // Absolute name: bypass namespace and home entirely, leading separator stripped.
     {
-        char buf[256]{};
-        const cy_resolved_t r = cy_resolve(platform.cy, cy_str("/absolute"), sizeof(buf), buf);
+        std::array<char, 256U> buf{};
+        const cy_resolved_t    r = cy_resolve(platform.cy, cy_str("/absolute"), buf.size(), buf.data());
         TEST_ASSERT_NOT_NULL(r.name.str);
         TEST_ASSERT_EQUAL_size_t(8U, r.name.len); // "absolute"
         TEST_ASSERT_EQUAL_MEMORY("absolute", r.name.str, r.name.len);
@@ -1315,8 +1312,8 @@ void test_cy_resolve_with_pin()
 
     // Relative name with pin: namespace prepended, pin stripped and returned separately.
     {
-        char buf[256]{};
-        const cy_resolved_t r = cy_resolve(platform.cy, cy_str("topic#123"), sizeof(buf), buf);
+        std::array<char, 256U> buf{};
+        const cy_resolved_t    r = cy_resolve(platform.cy, cy_str("topic#123"), buf.size(), buf.data());
         TEST_ASSERT_NOT_NULL(r.name.str);
         TEST_ASSERT_EQUAL_size_t(8U, r.name.len); // "ns/topic"
         TEST_ASSERT_EQUAL_MEMORY("ns/topic", r.name.str, r.name.len);
@@ -1326,8 +1323,8 @@ void test_cy_resolve_with_pin()
 
     // Homeful name with pin: home expanded, pin stripped and returned separately.
     {
-        char buf[256]{};
-        const cy_resolved_t r = cy_resolve(platform.cy, cy_str("~/svc#0"), sizeof(buf), buf);
+        std::array<char, 256U> buf{};
+        const cy_resolved_t    r = cy_resolve(platform.cy, cy_str("~/svc#0"), buf.size(), buf.data());
         TEST_ASSERT_NOT_NULL(r.name.str);
         TEST_ASSERT_EQUAL_size_t(10U, r.name.len); // "mynode/svc"
         TEST_ASSERT_EQUAL_MEMORY("mynode/svc", r.name.str, r.name.len);
@@ -1360,15 +1357,14 @@ void test_topic_iteration_includes_pinned()
 
     // Iterate all topics and collect their names.
     std::vector<std::string> topic_names;
-    for (cy_topic_t* topic = cy_topic_iter_first(platform.cy); topic != nullptr;
-         topic              = cy_topic_iter_next(topic)) {
+    for (cy_topic_t* topic = cy_topic_iter_first(platform.cy); topic != nullptr; topic = cy_topic_iter_next(topic)) {
         const cy_str_t name = cy_topic_name(topic);
         topic_names.emplace_back(name.str, name.len);
     }
 
     // Verify all 3 topics appear in the iteration (order is unspecified).
     const auto has_name = [&](const char* const expected) {
-        return std::find(topic_names.begin(), topic_names.end(), std::string(expected)) != topic_names.end();
+        return std::ranges::any_of(topic_names, [expected](const std::string& name) { return name == expected; });
     };
     TEST_ASSERT_TRUE(has_name("alpha"));
     TEST_ASSERT_TRUE(has_name("beta"));

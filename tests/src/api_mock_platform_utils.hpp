@@ -13,13 +13,13 @@ namespace api_test {
 /// The first member must remain cy_platform_t so that platform_from<T> reinterpret_cast works correctly.
 struct test_platform_base_t
 {
-    cy_platform_t        platform{};
-    cy_platform_vtable_t vtable{};
-    guarded_heap_t       core_heap{};
-    guarded_heap_t       message_heap{};
-    cy_t*                cy{ nullptr };
-    cy_us_t              now{ 0 };
-    std::uint64_t        random_state{ UINT64_C(0x123456789ABCDEF0) };
+    cy_platform_t           platform{};
+    cy_platform_vtable_t    vtable{};
+    guarded_heap_t          core_heap{};
+    guarded_heap_t          message_heap{};
+    cy_t*                   cy{ nullptr };
+    cy_us_t                 now{ 0 };
+    std::uint64_t           random_state{ UINT64_C(0x123456789ABCDEF0) };
     std::set<std::uint32_t> active_reader_subjects;
     std::set<std::uint32_t> active_writer_subjects;
 };

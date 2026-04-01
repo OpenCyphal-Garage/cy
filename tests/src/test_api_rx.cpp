@@ -217,7 +217,7 @@ extern "C" void on_arrival_count_only(cy_future_t* const sub)
 
 void platform_init(test_platform_t* const self)
 {
-    *self = test_platform_t{};
+    *self              = test_platform_t{};
     self->random_state = 1U;
 
     guarded_heap_init(&self->core_heap, UINT64_C(0xFACEB00C12345678));
