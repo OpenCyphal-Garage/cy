@@ -490,6 +490,9 @@ static void v_subject_reader_tombstone(cy_platform_t* const platform, cy_subject
     assert(!self->tombstone);
     self->tombstone = true;
     // Close sockets now to stop further reads while we defer the final teardown.
+    // This also makes same-subject recreation safe: unlike libcanard, libudpard has no global uniqueness rule for
+    // subject subscriptions. The old port instance becomes inert as soon as its sockets are closed because only open
+    // sockets are polled, so a new reader may be constructed for the same subject-ID before the old port is freed.
     for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
         udp_wrapper_close(&self->sock[i]);
     }
@@ -655,6 +658,8 @@ static cy_err_t spin_once_until(cy_udp_posix_t* const self, const cy_us_t deadli
     for (subject_reader_t* rd_iter = self->reader_head; rd_iter != NULL;) {
         subject_reader_t* const next = rd_iter->next;
         if (rd_iter->tombstone) {
+            // Deferred teardown exists only to keep list traversal/reentrancy simple; the reader was already rendered
+            // inactive when it was tombstoned by closing its sockets.
             subject_reader_destroy(self, rd_iter);
         } else {
             for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
