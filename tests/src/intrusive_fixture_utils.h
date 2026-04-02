@@ -40,6 +40,7 @@ static inline cy_subject_reader_t* intrusive_subject_reader_new(guarded_heap_t* 
       (intrusive_test_subject_reader_t*)guarded_heap_alloc(heap, sizeof(*out));
     if (out != NULL) {
         out->base.subject_id = subject_id;
+        out->base.extent     = extent;
         out->extent          = extent;
     }
     return (out != NULL) ? &out->base : NULL;
@@ -48,6 +49,7 @@ static inline cy_subject_reader_t* intrusive_subject_reader_new(guarded_heap_t* 
 static inline void intrusive_subject_reader_extent_set(cy_subject_reader_t* const reader, const size_t extent)
 {
     intrusive_test_subject_reader_t* const r = (intrusive_test_subject_reader_t*)reader;
+    reader->extent                           = extent;
     r->extent                                = extent;
 }
 

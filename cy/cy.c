@@ -837,7 +837,8 @@ static cy_tree_t* reader_cavl_factory(void* const user)
             return NULL;
         }
         r->handle->subject_id = ctx->subject_id;
-        r->handle->extent     = ctx->extent; // In case the platform layer didn't set it.
+        // Some platforms may revive a tombstoned incumbent whose extent is already larger than requested.
+        r->handle->extent = larger(r->handle->extent, ctx->extent);
     }
     return (cy_tree_t*)r;
 }

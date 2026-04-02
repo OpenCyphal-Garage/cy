@@ -8,9 +8,11 @@
 // Copyright (c) Pavel Kirienko <pavel@opencyphal.org>
 
 // Feature test macros must come before any system headers.
+// NOLINTBEGIN(bugprone-reserved-identifier)
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+// NOLINTEND(bugprone-reserved-identifier)
 
 #include "cy_can_socketcan.h"
 #include <cy_platform.h>

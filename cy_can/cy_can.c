@@ -48,6 +48,7 @@ typedef struct
     uint_least8_t unicast_tid[CANARD_NODE_ID_CAPACITY];
 
     struct subject_reader_t* tombstone_head; // Deferred destruction list to avoid reentrancy issues.
+    struct subject_reader_t* tombstone_tail;
 
     size_t   subject_writer_count;
     size_t   subject_reader_count;
@@ -68,6 +69,7 @@ typedef struct subject_reader_t
     cy_subject_reader_t      base;
     canard_subscription_t    sub_16b;
     cy_can_t*                owner;
+    struct subject_reader_t* prev_tombstone;
     struct subject_reader_t* next_tombstone;
 } subject_reader_t;
 
@@ -346,9 +348,12 @@ static void v_on_msg_13b(canard_subscription_t* const self,
                          const canard_payload_t       payload)
 {
     (void)transfer_id;
-    subject_reader_pinned_t* const pinned     = (subject_reader_pinned_t*)self->user_context;
-    cy_can_t* const                owner      = pinned->base.owner;
-    const bool                     multiframe = (payload.origin.data != NULL);
+    subject_reader_t* const reader = (subject_reader_t*)self->user_context;
+    assert(reader != NULL);
+    cy_can_t* const                owner  = reader->owner;
+    subject_reader_pinned_t* const pinned = as_pinned(reader);
+    assert((pinned != NULL) && (owner != NULL));
+    const bool multiframe = (payload.origin.data != NULL);
     owner->v10_rx_count++;
 
     const size_t         inline_size = HEADER_BYTES + (multiframe ? 0 : payload.view.size);
@@ -376,8 +381,7 @@ static void v_on_msg_13b(canard_subscription_t* const self,
         }
         msg->seg0_len += payload.view.size;
     }
-    const uint32_t sid = pinned->base.base.subject_id;
-    deliver(owner, &sid, source_node_id, priority, timestamp, msg);
+    deliver(owner, &reader->base.subject_id, source_node_id, priority, timestamp, msg);
 }
 
 /// Service-ID 511 subscription callback for unicast transfers.
@@ -508,9 +512,90 @@ static void build_phony_header(subject_reader_pinned_t* const self, const uint32
     le_serialize_u64(&self->phony_header[8], rapidhash(decimal, dlen));
 }
 
+static void reader_set_extent(subject_reader_t* const self, const size_t extent)
+{
+    self->base.extent                     = extent;
+    self->sub_16b.extent                  = extent;
+    subject_reader_pinned_t* const pinned = as_pinned(self);
+    if (pinned != NULL) {
+        pinned->sub_13b.extent = (extent > HEADER_BYTES) ? (extent - HEADER_BYTES) : 0;
+    }
+}
+
+static bool is_tombstoned(const cy_can_t* const owner, const subject_reader_t* const self)
+{
+    return (self->next_tombstone != NULL) || (self->prev_tombstone != NULL) || (owner->tombstone_head == self) ||
+           (owner->tombstone_tail == self);
+}
+
+static void tombstone_remove(cy_can_t* const owner, subject_reader_t* const self)
+{
+    assert((owner != NULL) && (self != NULL) && is_tombstoned(owner, self));
+    if (self->prev_tombstone != NULL) {
+        self->prev_tombstone->next_tombstone = self->next_tombstone;
+    } else {
+        owner->tombstone_head = self->next_tombstone;
+    }
+    if (self->next_tombstone != NULL) {
+        self->next_tombstone->prev_tombstone = self->prev_tombstone;
+    } else {
+        owner->tombstone_tail = self->prev_tombstone;
+    }
+    self->prev_tombstone = NULL;
+    self->next_tombstone = NULL;
+}
+
+static void tombstone_enqueue(cy_can_t* const owner, subject_reader_t* const self)
+{
+    assert((owner != NULL) && (self != NULL) && !is_tombstoned(owner, self));
+    self->prev_tombstone = owner->tombstone_tail;
+    self->next_tombstone = NULL;
+    if (owner->tombstone_tail != NULL) {
+        owner->tombstone_tail->next_tombstone = self;
+    } else {
+        owner->tombstone_head = self;
+    }
+    owner->tombstone_tail = self;
+}
+
+static subject_reader_t* tombstone_pop(cy_can_t* const owner)
+{
+    subject_reader_t* const out = owner->tombstone_head;
+    if (out != NULL) {
+        tombstone_remove(owner, out);
+    }
+    return out;
+}
+
+static subject_reader_t* reader_try_revive(cy_can_t* const owner, const uint32_t subject_id, const size_t extent)
+{
+    canard_subscription_t* const incumbent =
+      canard_find_subscription(&owner->canard, canard_kind_message_16b, (uint16_t)subject_id);
+    if (incumbent == NULL) {
+        return NULL;
+    }
+    subject_reader_t* const self = (subject_reader_t*)incumbent->user_context;
+    assert((self != NULL) && (self->owner == owner) && (self->base.subject_id == subject_id) &&
+           is_tombstoned(owner, self));
+    if (as_pinned(self) != NULL) {
+        canard_subscription_t* const incumbent_13b =
+          canard_find_subscription(&owner->canard, canard_kind_message_13b, (uint16_t)subject_id);
+        assert((incumbent_13b != NULL) && (((subject_reader_t*)incumbent_13b->user_context) == self));
+        if ((incumbent_13b == NULL) || (((subject_reader_t*)incumbent_13b->user_context) != self)) {
+            return NULL;
+        }
+    }
+    tombstone_remove(owner, self);
+    if (extent > self->base.extent) {
+        reader_set_extent(self, extent);
+    }
+    return self;
+}
+
 /// Finalize a reader: unsubscribe from canard and free memory. Does NOT unlink from any list.
 static void reader_finalize(cy_can_t* const owner, subject_reader_t* const self)
 {
+    assert((owner != NULL) && (self != NULL) && !is_tombstoned(owner, self));
     canard_unsubscribe(&owner->canard, &self->sub_16b);
     subject_reader_pinned_t* const pinned = as_pinned(self);
     if (pinned != NULL) {
@@ -525,10 +610,16 @@ static cy_subject_reader_t* v_subject_reader_new(cy_platform_t* const base,
                                                  const uint32_t       subject_id,
                                                  const size_t         extent)
 {
-    cy_can_t* const         owner  = (cy_can_t*)base;
-    const bool              pinned = (subject_id <= CY_SUBJECT_ID_PINNED_MAX);
-    const size_t            sz     = pinned ? sizeof(subject_reader_pinned_t) : sizeof(subject_reader_t);
-    subject_reader_t* const self   = (subject_reader_t*)owner->vtable->realloc(owner->user, NULL, sz);
+    cy_can_t* const         owner   = (cy_can_t*)base;
+    const bool              pinned  = (subject_id <= CY_SUBJECT_ID_PINNED_MAX);
+    const size_t            sz      = pinned ? sizeof(subject_reader_pinned_t) : sizeof(subject_reader_t);
+    subject_reader_t* const revived = reader_try_revive(owner, subject_id, extent);
+    if (revived != NULL) {
+        CY_TRACE(owner->base.cy, "CAN revive S%08jx extent=%zu", (uintmax_t)subject_id, revived->base.extent);
+        return (cy_subject_reader_t*)revived;
+    }
+
+    subject_reader_t* const self = (subject_reader_t*)owner->vtable->realloc(owner->user, NULL, sz);
     if (self == NULL) {
         return NULL;
     }
@@ -538,29 +629,37 @@ static cy_subject_reader_t* v_subject_reader_new(cy_platform_t* const base,
     self->owner           = owner;
 
     // The extent from Cy already includes the header overhead.
-    const bool ok_16b = canard_subscribe_16b(&owner->canard,
-                                             &self->sub_16b,
-                                             (uint16_t)subject_id,
-                                             extent,
-                                             CANARD_DEFAULT_TRANSFER_ID_TIMEOUT_us,
-                                             &sub_vtable_16b);
-    assert(ok_16b);
-    (void)ok_16b;
+    canard_subscription_t* const sub_16b = canard_subscribe_16b(&owner->canard,
+                                                                &self->sub_16b,
+                                                                (uint16_t)subject_id,
+                                                                extent,
+                                                                CANARD_DEFAULT_TRANSFER_ID_TIMEOUT_us,
+                                                                &sub_vtable_16b);
+    assert(sub_16b == &self->sub_16b);
+    if (sub_16b != &self->sub_16b) {
+        owner->vtable->realloc(owner->user, self, 0);
+        return NULL;
+    }
     self->sub_16b.user_context = self;
 
     if (pinned) {
         subject_reader_pinned_t* const p = (subject_reader_pinned_t*)self;
         // 13-bit payload does not include the Cy header; we prepend it ourselves.
         const size_t extent_13b = (extent > HEADER_BYTES) ? (extent - HEADER_BYTES) : 0;
-        const bool   ok_13b     = canard_subscribe_13b(&owner->canard,
-                                                 &p->sub_13b,
-                                                 (uint16_t)subject_id,
-                                                 extent_13b,
-                                                 CANARD_DEFAULT_TRANSFER_ID_TIMEOUT_us,
-                                                 &sub_vtable_13b);
-        assert(ok_13b);
-        (void)ok_13b;
-        p->sub_13b.user_context = p;
+        assert(canard_find_subscription(&owner->canard, canard_kind_message_13b, (uint16_t)subject_id) == NULL);
+        canard_subscription_t* const sub_13b = canard_subscribe_13b(&owner->canard,
+                                                                    &p->sub_13b,
+                                                                    (uint16_t)subject_id,
+                                                                    extent_13b,
+                                                                    CANARD_DEFAULT_TRANSFER_ID_TIMEOUT_us,
+                                                                    &sub_vtable_13b);
+        assert(sub_13b == &p->sub_13b);
+        if (sub_13b != &p->sub_13b) {
+            canard_unsubscribe(&owner->canard, &self->sub_16b);
+            owner->vtable->realloc(owner->user, self, 0);
+            return NULL;
+        }
+        p->sub_13b.user_context = self;
         build_phony_header(p, subject_id);
     }
 
@@ -574,8 +673,7 @@ static void v_subject_reader_destroy(cy_platform_t* const platform, cy_subject_r
 {
     cy_can_t* const         owner = (cy_can_t*)platform;
     subject_reader_t* const self  = (subject_reader_t*)base;
-    self->next_tombstone          = owner->tombstone_head;
-    owner->tombstone_head         = self;
+    tombstone_enqueue(owner, self);
 }
 
 static void v_subject_reader_extent_set(cy_platform_t* const       base,
@@ -583,12 +681,8 @@ static void v_subject_reader_extent_set(cy_platform_t* const       base,
                                         const size_t               extent)
 {
     (void)base;
-    subject_reader_t* const self          = (subject_reader_t*)reader_base;
-    self->sub_16b.extent                  = extent;
-    subject_reader_pinned_t* const pinned = as_pinned(self);
-    if (pinned != NULL) {
-        pinned->sub_13b.extent = (extent > HEADER_BYTES) ? (extent - HEADER_BYTES) : 0;
-    }
+    subject_reader_t* const self = (subject_reader_t*)reader_base;
+    reader_set_extent(self, extent);
 }
 
 // =====================================================================================================================
@@ -643,14 +737,12 @@ static cy_err_t v_spin(cy_platform_t* const base, const cy_us_t deadline)
     const uint_least8_t ibm   = (uint_least8_t)((1U << owner->iface_count) - 1U);
     while (true) {
         canard_poll(&owner->canard, ibm);
-
-        // O(1) tombstone cleanup: finalize deferred reader destructions iteratively.
-        if (owner->tombstone_head != NULL) {
-            subject_reader_t* const rd = owner->tombstone_head;
-            owner->tombstone_head      = rd->next_tombstone;
-            reader_finalize(owner, rd);
+        {
+            subject_reader_t* const rd = tombstone_pop(owner);
+            if (rd != NULL) {
+                reader_finalize(owner, rd);
+            }
         }
-
         const uint_least8_t tx_pending = canard_pending_ifaces(&owner->canard);
         cy_can_rx_t         frame      = { 0 };
         if (owner->vtable->rx(owner->user, &frame, deadline, tx_pending)) {
@@ -736,13 +828,13 @@ cy_platform_t* cy_can_new(const uint_least8_t          iface_count,
     self->canard.tx.fd        = (vtable->tx_fd != NULL);
     self->canard.user_context = self;
 
-    const bool ok_uni = canard_subscribe_request(&self->canard,
-                                                 &self->unicast_sub,
-                                                 UNICAST_SERVICE_ID,
-                                                 UNICAST_EXTENT_INITIAL,
-                                                 CANARD_DEFAULT_TRANSFER_ID_TIMEOUT_us,
-                                                 &sub_vtable_unicast);
-    if (!ok_uni) {
+    canard_subscription_t* const sub_uni = canard_subscribe_request(&self->canard,
+                                                                    &self->unicast_sub,
+                                                                    UNICAST_SERVICE_ID,
+                                                                    UNICAST_EXTENT_INITIAL,
+                                                                    CANARD_DEFAULT_TRANSFER_ID_TIMEOUT_us,
+                                                                    &sub_vtable_unicast);
+    if (sub_uni != &self->unicast_sub) {
         canard_destroy(&self->canard);
         vtable->realloc(user, self, 0);
         return NULL;
@@ -774,8 +866,8 @@ void cy_can_destroy(cy_platform_t* const base)
 {
     cy_can_t* const owner = (cy_can_t*)base;
     while (owner->tombstone_head != NULL) {
-        subject_reader_t* const rd = owner->tombstone_head;
-        owner->tombstone_head      = rd->next_tombstone;
+        subject_reader_t* const rd = tombstone_pop(owner);
+        assert(rd != NULL);
         reader_finalize(owner, rd);
     }
     assert(owner->subject_reader_count == 0); // caller must clean up

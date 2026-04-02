@@ -73,7 +73,7 @@ typedef struct cy_subject_writer_t
 typedef struct cy_subject_reader_t
 {
     uint32_t subject_id;
-    size_t   extent;
+    size_t   extent; // Platform must either set this to the initial value or zero at construction time.
 } cy_subject_reader_t;
 
 /// Abstracts away the specifics of the transport (UDP, serial, CAN, etc) and the platform where Cy is running
@@ -170,6 +170,7 @@ typedef struct cy_platform_vtable_t
     /// The cy_on_message() callback will be invoked from this function.
     /// This is the only platform function that is allowed to block.
     /// May return additional error codes, which will be forwarded to the application as-is.
+    /// This can only be invoked from within cy_spin*() functions, and is never invoked from cy_on_message().
     cy_err_t (*spin)(cy_platform_t*, cy_us_t deadline);
 
     // === MISC ===
