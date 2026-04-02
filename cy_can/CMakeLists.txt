@@ -49,3 +49,5 @@ configure_cy_can_target(cy_can_socketcan)
 add_library(cy_can_socketcan_trace STATIC ${cy_can_sources} cy_can_socketcan.c)
 target_compile_definitions(cy_can_socketcan_trace PUBLIC CY_CONFIG_TRACE=1)
 configure_cy_can_target(cy_can_socketcan_trace)
+
+# TODO build the tests

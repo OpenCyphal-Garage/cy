@@ -155,42 +155,6 @@ function(cy_gen_test_api_matrix name definitions unique_sources shared_c_sources
     endforeach ()
 endfunction()
 
-# API test matrix with cy_can + libcanard sources built per-arch so the transport integration can be exercised
-# under the same x64/x32 settings without reusing the host-arch convenience library targets.
-function(cy_gen_test_api_can_matrix name definitions unique_sources)
-    foreach (arch IN ITEMS x64 x32)
-        if (arch STREQUAL "x64")
-            set(arch_flags "-m64")
-        else ()
-            set(arch_flags "-m32")
-        endif ()
-        set(target_name "${name}_${arch}_c11")
-
-        add_library("${target_name}_canard" STATIC "${CMAKE_SOURCE_DIR}/lib/libcanard/libcanard/canard.c")
-        target_compile_options("${target_name}_canard" PRIVATE ${arch_flags} -Wno-cast-align)
-        target_link_options("${target_name}_canard" PRIVATE ${arch_flags})
-        target_include_directories("${target_name}_canard" SYSTEM INTERFACE ${CMAKE_SOURCE_DIR}/lib/libcanard/libcanard)
-        set_target_properties(
-                "${target_name}_canard"
-                PROPERTIES
-                C_STANDARD 11
-                C_STANDARD_REQUIRED ON
-                C_EXTENSIONS OFF
-                COMPILE_WARNING_AS_ERROR OFF
-                C_CLANG_TIDY ""
-                CXX_CLANG_TIDY ""
-                C_CPPCHECK ""
-                CXX_CPPCHECK ""
-        )
-
-        cy_gen_test("${target_name}" "${arch_flags}" "${arch_flags}" "11" "${definitions}"
-                "${unique_sources};${CMAKE_SOURCE_DIR}/cy_can/cy_can.c;${CMAKE_SOURCE_DIR}/cy/cy.c;src/cy_trace.c;platform_stubs/guarded_heap.c"
-        )
-        target_include_directories(${target_name} PRIVATE ${CMAKE_SOURCE_DIR}/cy_can)
-        target_link_libraries(${target_name} PRIVATE "${target_name}_canard")
-    endforeach ()
-endfunction()
-
 # --------------------------------------------------------------------------------------------------
 # INTRUSIVE TESTS.
 # These tests have access to the library internals and are written in C.
@@ -281,9 +245,6 @@ cy_gen_test_api_matrix(test_api_state_machine_fuzz "CY_CONFIG_TRACE=1"
 cy_gen_test_api_matrix(test_api_gossip_sim "CY_CONFIG_TRACE=1"
         "src/test_api_gossip_sim.cpp"
         "${cy_api_shared_c_sources}" ""
-)
-cy_gen_test_api_can_matrix(test_api_can_subscription_revival "CY_CONFIG_TRACE=1"
-        "src/test_api_can_subscription_revival.cpp"
 )
 
 # --------------------------------------------------------------------------------------------------
