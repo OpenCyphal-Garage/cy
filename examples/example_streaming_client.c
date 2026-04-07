@@ -1,7 +1,8 @@
 // A tiny streaming client demo: send one request and keep receiving responses.
 
 #include <cy.h>
-#include <cy_udp_posix.h>
+
+#include "example_platform.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -58,8 +59,13 @@ static void on_stream_response(cy_future_t* const future)
     }
 }
 
-int main(const int argc, const char* const argv[])
+int main(int argc, char* argv[])
 {
+    const example_platform_t platform = example_platform_make(&argc, argv);
+    if (platform.platform == NULL) {
+        return 1;
+    }
+
     // Parse optional args: count [period_ms].
     uint32_t count     = DEFAULT_COUNT;
     uint32_t period_ms = DEFAULT_PERIOD_ms;
@@ -77,12 +83,7 @@ int main(const int argc, const char* const argv[])
     }
 
     // Initialize the node.
-    cy_platform_t* const platform = cy_udp_posix_new();
-    if (platform == NULL) {
-        (void)fprintf(stderr, "cy_udp_posix_new\n");
-        return 1;
-    }
-    cy_t* const cy = cy_new(platform, cy_udp_posix_home(platform, NULL), cy_udp_posix_namespace());
+    cy_t* const cy = cy_new(platform.platform, example_platform_home(), example_platform_namespace());
     if (cy == NULL) {
         (void)fprintf(stderr, "cy_new\n");
         return 1;

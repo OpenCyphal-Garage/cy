@@ -1,7 +1,8 @@
 #include <cy.h>
-#include <cy_udp_posix.h>
+
+#include "example_platform.h"
+
 #include <stdio.h>
-#include <stdlib.h>
 #include <stdint.h>
 #include <errno.h>
 
@@ -81,14 +82,13 @@ static void on_file_read_msg(cy_future_t* const subscriber)
     cy_message_refcount_dec(arv.message.content);
 }
 
-int main(void)
+int main(int argc, char* argv[])
 {
-    cy_platform_t* const platform = cy_udp_posix_new();
-    if (platform == NULL) {
-        (void)fprintf(stderr, "cy_udp_posix_new\n");
+    const example_platform_t platform = example_platform_make(&argc, argv);
+    if (platform.platform == NULL) {
         return 1;
     }
-    cy_t* const cy = cy_new(platform, cy_udp_posix_home(platform, "udp_file_server"), cy_udp_posix_namespace());
+    cy_t* const cy = cy_new(platform.platform, example_platform_home(), example_platform_namespace());
     if (cy == NULL) {
         (void)fprintf(stderr, "cy_new\n");
         return 1;

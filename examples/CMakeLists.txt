@@ -24,19 +24,19 @@ endif ()
 
 function(cy_add_example target platform_target)
     add_executable(${target} ${ARGN})
-    target_link_libraries(${target} PRIVATE cy_examples_support ${platform_target})
+    target_link_libraries(${target} PRIVATE cy_examples_support cy_udp_posix cy_can_socketcan)
 endfunction()
 
-# UDP node examples.
-cy_add_example(udp_pub cy_udp_posix main_udp_pub.c)
-cy_add_example(udp_sub cy_udp_posix main_udp_sub.c)
-cy_add_example(udp_time_pub cy_udp_posix main_udp_time_pub.c)
-cy_add_example(udp_echo cy_udp_posix main_udp_echo.c)
+# Node examples.
+cy_add_example(example_pub cy_udp_posix example_pub.c)
+cy_add_example(example_sub cy_udp_posix example_sub.c)
+cy_add_example(example_time_pub cy_udp_posix example_time_pub.c)
+cy_add_example(example_echo cy_udp_posix example_echo.c)
 
-# UDP file transfer examples.
-cy_add_example(udp_file_server cy_udp_posix main_udp_file_server.c)
-cy_add_example(udp_file_client cy_udp_posix main_udp_file_client.c)
+# File transfer examples.
+cy_add_example(example_file_server cy_udp_posix example_file_server.c)
+cy_add_example(example_file_client cy_udp_posix example_file_client.c)
 
-# UDP streaming examples.
-cy_add_example(udp_streaming_server cy_udp_posix main_udp_streaming_server.c)
-cy_add_example(udp_streaming_client cy_udp_posix main_udp_streaming_client.c)
+# Streaming examples.
+cy_add_example(example_streaming_server cy_udp_posix example_streaming_server.c)
+cy_add_example(example_streaming_client cy_udp_posix example_streaming_client.c)

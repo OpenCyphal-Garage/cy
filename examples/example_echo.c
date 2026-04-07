@@ -2,8 +2,8 @@
 // Hint: use pattern subscriptions to receive data from multiple topics concurrently; e.g., `>` to receive everything.
 
 #include <cy.h>
-#include <cy_udp_posix.h>
 
+#include "example_platform.h"
 #include "hexdump.h"
 
 #include <stdio.h>
@@ -43,19 +43,18 @@ static void on_message(cy_future_t* const subscriber)
     cy_message_refcount_dec(arrival.message.content);
 }
 
-int main(const int argc, const char* const argv[])
+int main(int argc, char* argv[])
 {
+    const example_platform_t platform = example_platform_make(&argc, argv);
+    if (platform.platform == NULL) {
+        return 1;
+    }
     if (argc != 2) { // TODO: subscribe to multiple patterns
-        (void)fprintf(stderr, "Usage: %s <topic>\n", argv[0]);
+        (void)fprintf(stderr, "Usage: %s [iface=...] <topic>\n", argv[0]);
         return 1;
     }
 
-    cy_platform_t* const platform = cy_udp_posix_new();
-    if (platform == NULL) {
-        (void)fprintf(stderr, "cy_udp_posix_new\n");
-        return 1;
-    }
-    cy_t* const cy = cy_new(platform, cy_udp_posix_home(platform, "udp_echo"), cy_udp_posix_namespace());
+    cy_t* const cy = cy_new(platform.platform, example_platform_home(), example_platform_namespace());
     if (cy == NULL) {
         (void)fprintf(stderr, "cy_new\n");
         return 1;

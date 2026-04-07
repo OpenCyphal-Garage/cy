@@ -159,7 +159,7 @@ Do not destroy unwanted futures right away because that cancels the associated o
 cy_future_callback_set(future, cy_future_destroy);  // Will destroy itself when done, no need to keep the reference.
 ```
 
-The examples folder contains a simple publisher example `main_udp_time_pub.c`.
+The examples folder contains a simple publisher example `example_time_pub.c`.
 
 ### 📩 Subscribe to topics and receive messages
 
@@ -264,7 +264,7 @@ for (size_t i = 0; i < subs.count; i++) {
 It is also possible to monitor subscriber liveness and alert the application via its callback when messages cease to
 arrive; see the API docs for details.
 
-The examples folder contains a simple subscriber example `main_udp_echo.c`.
+The examples folder contains a simple subscriber example `example_echo.c`.
 
 ### 🔄 RPC & streaming
 
