@@ -53,14 +53,19 @@ The specifics of setting up a local node depend on the platform and transport us
 unlike the rest of the API, which is entirely platform- and transport-agnostic.
 
 ```c++
-#include <cy.h>             // platform- and transport-agnostic Cyphal API
-#include <cy_udp_posix.h>   // thin low-level glue specific to Cyphal/UDP on POSIX systems; choose one for your setup
+#include <cy.h>               // platform- and transport-agnostic Cyphal API
+#include <cy_udp_posix.h>     // thin low-level glue specific to Cyphal/UDP on POSIX systems; choose one for your setup
+#include <cy_can_socketcan.h> // thin low-level glue specific to Cyphal/CAN on SocketCAN; choose one for your setup
 
 int main(void)
 {
     // Set up the platform layer that connects Cy to the underlying transport and OS.
     // Here we're using Cyphal/UDP on POSIX as an example.
     cy_platform_t* platform = cy_udp_posix_new();
+    if (platform == NULL) { ... }
+    
+    // If you need Cyphal/CAN on SocketCAN instead, just replace the above with:
+    cy_platform_t* platform = cy_can_socketcan_new(1, (const char*[]){"can0"}, 1000); // 1 iface, 1000 frames TX queue
     if (platform == NULL) { ... }
 
     // Set up the local Cyphal node instance.
