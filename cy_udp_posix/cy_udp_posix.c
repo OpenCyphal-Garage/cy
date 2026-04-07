@@ -30,6 +30,12 @@
 #include <errno.h>
 #include <stdio.h>
 
+#if __STDC_VERSION__ < 201112L
+#define static_assert(x, ...) typedef char _sa_gl(_sa_, __LINE__)[(x) ? 1 : -1]
+#define _sa_gl(a, b)          _sa_gl2(a, b)
+#define _sa_gl2(a, b)         a##b
+#endif
+
 #if __STDC_VERSION__ >= 201112L
 #include <threads.h>
 #else
@@ -139,14 +145,15 @@ static uint64_t prng64(uint64_t* const state, const uint64_t local_uid)
     return rapidhash_withSeed(state, sizeof(uint64_t), local_uid);
 }
 
+static_assert(offsetof(udpard_bytes_scattered_t, bytes.size) == offsetof(cy_bytes_t, size), "");
+static_assert(offsetof(udpard_bytes_scattered_t, bytes.data) == offsetof(cy_bytes_t, data), "");
+static_assert(offsetof(udpard_bytes_scattered_t, next) == offsetof(cy_bytes_t, next), "");
+
 static udpard_bytes_scattered_t cy_bytes_to_udpard_bytes(const cy_bytes_t message)
 {
     // Instead of converting the entire payload chain, we can just statically validate that the memory layouts
     // are compatible. We cannot make neither libudpard nor cy depend on each other, but perhaps in the future
     // we could introduce a tiny single header providing some common definitions for both, to eliminate such aliasing.
-    static_assert(offsetof(udpard_bytes_scattered_t, bytes.size) == offsetof(cy_bytes_t, size), "");
-    static_assert(offsetof(udpard_bytes_scattered_t, bytes.data) == offsetof(cy_bytes_t, data), "");
-    static_assert(offsetof(udpard_bytes_scattered_t, next) == offsetof(cy_bytes_t, next), "");
     return (udpard_bytes_scattered_t){ .bytes = { .size = message.size, .data = message.data },
                                        .next  = (const udpard_bytes_scattered_t*)message.next };
 }
@@ -326,6 +333,9 @@ struct subject_reader_t
     subject_reader_t* next;
 };
 
+static_assert(sizeof(((subject_reader_t*)0)->history) / sizeof(((subject_reader_t*)0)->history[0]) == 2, "");
+static_assert(sizeof(((udpard_rx_transfer_t*)0)->remote.endpoints) <= sizeof(((cy_lane_t*)0)->ctx), "");
+
 // We use the same handler for both subject and unicast messages, since they both use the same ingestion callback.
 // The difference here is that unicast messages have no associated reader instance.
 static void v_on_msg(udpard_rx_t* const rx, udpard_rx_port_t* const port, const udpard_rx_transfer_t tr)
@@ -335,7 +345,6 @@ static void v_on_msg(udpard_rx_t* const rx, udpard_rx_port_t* const port, const 
                                     .content   = make_message(owner, tr.payload_size_stored, tr.payload) };
     if (msg.content != NULL) {
         cy_lane_t lane = { .id = tr.remote.uid, .prio = (cy_prio_t)tr.priority };
-        static_assert(sizeof(tr.remote.endpoints) <= sizeof(lane.ctx), "");
         memcpy(&lane.ctx, tr.remote.endpoints, sizeof(tr.remote.endpoints));
         const uint32_t* const subject_id = (port->user == NULL) ? NULL // user is NULL for unicast
                                                                 : &((subject_reader_t*)port->user)->base.subject_id;
@@ -350,7 +359,6 @@ static void v_on_msg_stateless(udpard_rx_t* const rx, udpard_rx_port_t* const po
 {
     cy_udp_posix_t* const   owner = rx->user;
     subject_reader_t* const self  = port->user;
-    static_assert(sizeof(self->history) / sizeof(self->history[0]) == 2, "");
     // In the stateless mode, libudpard does not bother deduplicating messages. Gossips/scouts are dup-tolerant,
     // so we could just pass all messages as-is and it will work fine, but it would waste CPU cycles because each
     // message requires some log-time index lookups.
@@ -511,6 +519,8 @@ static void v_subject_reader_extent_set(cy_platform_t* const       base,
 // ---------------------------------------------------------------------------------------------------------------------
 // UNICAST
 
+static_assert(sizeof(udpard_udpip_ep_t[UDPARD_IFACE_COUNT_MAX]) <= sizeof(((cy_lane_t*)0)->ctx), "");
+
 static cy_err_t v_unicast_send(cy_platform_t* const   base,
                                const cy_lane_t* const lane,
                                const cy_us_t          deadline,
@@ -519,7 +529,6 @@ static cy_err_t v_unicast_send(cy_platform_t* const   base,
     cy_udp_posix_t* const owner = (cy_udp_posix_t*)base;
     // Unbox the unicast context.
     udpard_udpip_ep_t endpoints[UDPARD_IFACE_COUNT_MAX] = { 0 };
-    static_assert(sizeof(endpoints) <= sizeof(lane->ctx), "");
     memcpy(endpoints, &lane->ctx, sizeof(udpard_udpip_ep_t) * UDPARD_IFACE_COUNT_MAX);
     // Push the message.
     // We may need better error reporting in libudpard, this is a bit unwieldy.

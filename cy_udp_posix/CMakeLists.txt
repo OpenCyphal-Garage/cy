@@ -28,3 +28,5 @@ target_link_libraries(cy_udp_posix PUBLIC udpard)
 target_include_directories(cy_udp_posix SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(cy_udp_posix PUBLIC ${CMAKE_SOURCE_DIR}/cy)
 set_target_properties(cy_udp_posix PROPERTIES COMPILE_WARNING_AS_ERROR ON C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+
+add_subdirectory(tests)
