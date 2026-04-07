@@ -36,6 +36,10 @@ On an embedded system, one may also prefer to use [`o1heap`](https://github.com/
 management, but this is not a hard dependency -- any allocator will work. O1Heap is the recommended choice for embedded
 platforms due to its hard determinism and low fragmentation.
 
+Pick one of the transport/platform glue layers suitable for your application: `cy_can`, `cy_udp_posix`, etc.
+The integration instructions are identical: simply copy the C files and add them to your build system.
+These components may be moved into dedicated repositories in the future.
+
 🌐 A live demo of the distributed consensus algorithm can be found at <https://gerasim.opencyphal.org>.
 
 For a detailed design overview, refer to `model/`.
@@ -49,14 +53,19 @@ The specifics of setting up a local node depend on the platform and transport us
 unlike the rest of the API, which is entirely platform- and transport-agnostic.
 
 ```c++
-#include <cy.h>             // platform- and transport-agnostic Cyphal API
-#include <cy_udp_posix.h>   // thin low-level glue specific to Cyphal/UDP on POSIX systems; choose one for your setup
+#include <cy.h>               // platform- and transport-agnostic Cyphal API
+#include <cy_udp_posix.h>     // thin low-level glue specific to Cyphal/UDP on POSIX systems; choose one for your setup
+#include <cy_can_socketcan.h> // thin low-level glue specific to Cyphal/CAN on SocketCAN; choose one for your setup
 
 int main(void)
 {
     // Set up the platform layer that connects Cy to the underlying transport and OS.
     // Here we're using Cyphal/UDP on POSIX as an example.
     cy_platform_t* platform = cy_udp_posix_new();
+    if (platform == NULL) { ... }
+    
+    // If you need Cyphal/CAN on SocketCAN instead, just replace the above with:
+    cy_platform_t* platform = cy_can_socketcan_new(1, (const char*[]){"can0"}, 1000); // 1 iface, 1000 frames TX queue
     if (platform == NULL) { ... }
 
     // Set up the local Cyphal node instance.
@@ -150,7 +159,7 @@ Do not destroy unwanted futures right away because that cancels the associated o
 cy_future_callback_set(future, cy_future_destroy);  // Will destroy itself when done, no need to keep the reference.
 ```
 
-The examples folder contains a simple publisher example `main_udp_time_pub.c`.
+The examples folder contains a simple publisher example `example_time_pub.c`.
 
 ### 📩 Subscribe to topics and receive messages
 
@@ -255,7 +264,7 @@ for (size_t i = 0; i < subs.count; i++) {
 It is also possible to monitor subscriber liveness and alert the application via its callback when messages cease to
 arrive; see the API docs for details.
 
-The examples folder contains a simple subscriber example `main_udp_echo.c`.
+The examples folder contains a simple subscriber example `example_echo.c`.
 
 ### 🔄 RPC & streaming
 

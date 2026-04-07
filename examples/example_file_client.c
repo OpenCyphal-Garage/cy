@@ -1,9 +1,10 @@
 #include <cy.h>
-#include <cy_udp_posix.h>
+
+#include "example_platform.h"
+
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
-#include <assert.h>
 
 #define MEGA 1000000LL
 
@@ -27,10 +28,14 @@ typedef struct file_read_response_t
 
 // Command line arguments: file name.
 // The read file will be written into stdout as-is.
-int main(const int argc, const char* const argv[])
+int main(int argc, char* argv[])
 {
+    const example_platform_t platform = example_platform_make(&argc, argv);
+    if (platform.platform == NULL) {
+        return 1;
+    }
     if (argc < 2) {
-        (void)fprintf(stderr, "Usage: %s <file>\n", argv[0]);
+        (void)fprintf(stderr, "Usage: %s [iface=...] <file>\n", argv[0]);
         return 1;
     }
 
@@ -45,12 +50,7 @@ int main(const int argc, const char* const argv[])
     memcpy(req.path, argv[1], req.path_len);
 
     // SET UP THE NODE.
-    cy_platform_t* const platform = cy_udp_posix_new();
-    if (platform == NULL) {
-        (void)fprintf(stderr, "cy_udp_posix_new\n");
-        return 1;
-    }
-    cy_t* const cy = cy_new(platform, cy_udp_posix_home(platform, "udp_file_client"), cy_udp_posix_namespace());
+    cy_t* const cy = cy_new(platform.platform, example_platform_home(), example_platform_namespace());
     if (cy == NULL) {
         (void)fprintf(stderr, "cy_new\n");
         return 1;

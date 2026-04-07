@@ -21,6 +21,7 @@
       <w>cyphal</w>
       <w>cyudp</w>
       <w>deinit</w>
+      <w>destructions</w>
       <w>dgrams</w>
       <w>dscp</w>
       <w>enroute</w>

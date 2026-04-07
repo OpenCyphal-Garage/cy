@@ -1,13 +1,12 @@
 #include <cy.h>
-#include <cy_udp_posix.h>
-#include <eui64.h>
+
+#include "example_platform.h"
 #include "arg_kv.h"
 #include "hexdump.h"
 #include <time.h>
 #include <stdio.h>
 #include <assert.h>
 #include <stdlib.h>
-#include <stdint.h>
 #include <string.h>
 
 #define KILO 1000L
@@ -20,31 +19,18 @@ struct config_publication_t
 
 struct config_t
 {
-    uint64_t local_uid;
-    uint32_t iface_address[CY_UDP_POSIX_IFACE_COUNT_MAX];
-    size_t   tx_queue_capacity;
-
     size_t                       pub_count;
     struct config_publication_t* pubs;
 };
 
 static struct config_t load_config(const int argc, char* const argv[])
 {
-    struct config_t cfg = {
-        .local_uid         = eui64_semirandom(),
-        .tx_queue_capacity = 1000,
-        .pub_count         = 0,
-        .pubs              = calloc((size_t)(argc - 1), sizeof(struct config_publication_t)),
-    };
-    size_t   iface_count = 0;
-    arg_kv_t arg;
+    const size_t    config_capacity = (size_t)((argc > 1) ? (argc - 1) : 1);
+    struct config_t cfg = { .pub_count = 0, .pubs = calloc(config_capacity, sizeof(struct config_publication_t)) };
+    arg_kv_t        arg;
     while ((arg = arg_kv_next(argc, argv)).key_hash != 0) {
         assert(arg.value != NULL);
-        if ((arg_kv_hash("iface") == arg.key_hash) && (iface_count < CY_UDP_POSIX_IFACE_COUNT_MAX)) {
-            cfg.iface_address[iface_count++] = cy_udp_parse_iface_address(arg.value);
-        } else if (arg_kv_hash("txq") == arg.key_hash) {
-            cfg.tx_queue_capacity = strtoul(arg.value, NULL, 0);
-        } else if (arg_kv_hash("pub") == arg.key_hash) {
+        if (arg_kv_hash("pub") == arg.key_hash) {
             struct config_publication_t* x = NULL;
             for (size_t i = 0; i < cfg.pub_count; i++) {
                 if (strcmp(cfg.pubs[i].name, arg.value) == 0) {
@@ -59,12 +45,6 @@ static struct config_t load_config(const int argc, char* const argv[])
         }
     }
     // Print the actual configs we're using.
-    (void)fprintf(stderr, "ifaces:");
-    for (size_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
-        (void)fprintf(stderr, " 0x%08x", (unsigned)cfg.iface_address[i]);
-    }
-    (void)fprintf(stderr, "\nuid: 0x%016llx\n", (unsigned long long)cfg.local_uid);
-    (void)fprintf(stderr, "tx_queue_frames: %zu\n", cfg.tx_queue_capacity);
     (void)fprintf(stderr, "publications:\n");
     for (size_t i = 0; i < cfg.pub_count; i++) {
         (void)fprintf(stderr, "\t%s\n", cfg.pubs[i].name);
@@ -110,23 +90,20 @@ static void on_result(cy_future_t* const future)
     cy_future_destroy(future);
 }
 
-int main(const int argc, char* const argv[])
+int main(int argc, char* argv[])
 {
     srand((unsigned)time(NULL));
-    const struct config_t cfg = load_config(argc, argv);
-
-    // Set up the platform layer that connects Cy to the underlying transport and OS.
-    // This is the only part of the code that is platform-specific; the rest is all portable Cy API usage.
-    cy_platform_t* const platform = cy_udp_posix_new_manual(cfg.local_uid, cfg.iface_address, cfg.tx_queue_capacity);
-    if (platform == NULL) {
-        (void)fprintf(stderr, "cy_udp_posix_new\n");
+    const example_platform_t platform = example_platform_make(&argc, argv);
+    if (platform.platform == NULL) {
         return 1;
     }
+    const struct config_t cfg = load_config(argc, argv);
 
     // Set up the node instance.
-    cy_t* const cy = cy_new(platform, cy_udp_posix_home(platform, "udp_pub"), cy_udp_posix_namespace());
+    cy_t* const cy = cy_new(platform.platform, example_platform_home(), example_platform_namespace());
     if (cy == NULL) {
         (void)fprintf(stderr, "cy_new\n");
+        free(cfg.pubs);
         return 1;
     }
 
@@ -136,6 +113,7 @@ int main(const int argc, char* const argv[])
         publishers[i] = cy_advertise_client(cy, cy_str(cfg.pubs[i].name), MEGA);
         if (publishers[i] == NULL) {
             (void)fprintf(stderr, "cy_advertise_client: NULL\n");
+            free(cfg.pubs);
             return 1;
         }
     }
@@ -153,10 +131,7 @@ int main(const int argc, char* const argv[])
         if (now >= next_publish_at) {
             for (size_t i = 0; i < cfg.pub_count; i++) {
                 char msg[256];
-                (void)sprintf(msg,
-                              "Hello from %016llx! The current time is %.6f s.",
-                              (unsigned long long)cfg.local_uid,
-                              1e-6 * (double)now);
+                (void)sprintf(msg, "Hello from %s! The current time is %.6f s.", cy_home(cy).str, 1e-6 * (double)now);
                 cy_future_t* const future = cy_request(publishers[i], //
                                                        now + (MEGA * 2),
                                                        MEGA * 10,
@@ -171,5 +146,6 @@ int main(const int argc, char* const argv[])
             next_publish_at += 5 * MEGA;
         }
     }
+    free(cfg.pubs);
     return 0;
 }

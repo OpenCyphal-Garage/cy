@@ -52,7 +52,7 @@ typedef struct cy_udp_posix_stats_t
 } cy_udp_posix_stats_t;
 
 /// The default factory that automatically assigns the node parameters that fit most applications:
-/// - A semi-random EUI-64: 20 most significant bits are host-specific, the lower 44 bits are random.
+/// - A semi-random EUI-64.
 /// - The local interfaces are chosen per the defaults configured on the local system.
 /// - The TX queue capacity is set to a reasonable large value.
 cy_platform_t* cy_udp_posix_new(void);

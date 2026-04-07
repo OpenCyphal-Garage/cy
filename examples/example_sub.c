@@ -1,13 +1,12 @@
 #include <cy.h>
-#include <cy_udp_posix.h>
-#include <eui64.h>
+
+#include "example_platform.h"
 #include "arg_kv.h"
 #include "hexdump.h"
 #include <time.h>
 #include <stdio.h>
 #include <assert.h>
 #include <stdlib.h>
-#include <stdint.h>
 #include <string.h>
 
 #define KILO 1000L
@@ -21,33 +20,18 @@ struct config_subscription_t
 
 struct config_t
 {
-    uint32_t iface_address[CY_UDP_POSIX_IFACE_COUNT_MAX];
-    uint64_t local_uid;
-    size_t   tx_queue_capacity;
-
     size_t                        sub_count;
     struct config_subscription_t* subs;
 };
 
 static struct config_t load_config(const int argc, char* const argv[])
 {
-    struct config_t cfg = {
-        .local_uid         = eui64_semirandom(),
-        .tx_queue_capacity = 1000,
-        .sub_count         = 0,
-        .subs              = calloc((size_t)(argc - 1), sizeof(struct config_subscription_t)),
-    };
-    size_t   iface_count = 0;
-    arg_kv_t arg;
+    const size_t    config_capacity = (size_t)((argc > 1) ? (argc - 1) : 1);
+    struct config_t cfg = { .sub_count = 0, .subs = calloc(config_capacity, sizeof(struct config_subscription_t)) };
+    arg_kv_t        arg;
     while ((arg = arg_kv_next(argc, argv)).key_hash != 0) {
         assert(arg.value != NULL);
-        if ((arg_kv_hash("iface") == arg.key_hash) && (iface_count < CY_UDP_POSIX_IFACE_COUNT_MAX)) {
-            cfg.iface_address[iface_count++] = cy_udp_parse_iface_address(arg.value);
-        } else if (arg_kv_hash("uid") == arg.key_hash) {
-            cfg.local_uid = (uint64_t)strtoull(arg.value, NULL, 0);
-        } else if (arg_kv_hash("txq") == arg.key_hash) {
-            cfg.tx_queue_capacity = strtoul(arg.value, NULL, 0);
-        } else if ((arg_kv_hash("sub") == arg.key_hash) || (arg_kv_hash("subord") == arg.key_hash)) {
+        if ((arg_kv_hash("sub") == arg.key_hash) || (arg_kv_hash("subord") == arg.key_hash)) {
             struct config_subscription_t* x = NULL;
             for (size_t i = 0; i < cfg.sub_count; i++) {
                 if (strcmp(cfg.subs[i].name, arg.value) == 0) {
@@ -63,12 +47,6 @@ static struct config_t load_config(const int argc, char* const argv[])
         }
     }
     // Print the actual configs we're using.
-    (void)fprintf(stderr, "ifaces:");
-    for (size_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
-        (void)fprintf(stderr, " 0x%08x", (unsigned)cfg.iface_address[i]);
-    }
-    (void)fprintf(stderr, "\nuid: 0x%016llx\n", (unsigned long long)cfg.local_uid);
-    (void)fprintf(stderr, "tx_queue_frames: %zu\n", cfg.tx_queue_capacity);
     (void)fprintf(stderr, "subscriptions:\n");
     for (size_t i = 0; i < cfg.sub_count; i++) {
         (void)fprintf(stderr, "\t%s\n", cfg.subs[i].name);
@@ -135,23 +113,20 @@ static void on_message(cy_future_t* const subscriber)
     cy_message_refcount_dec(arrival.message.content);
 }
 
-int main(const int argc, char* const argv[])
+int main(int argc, char* argv[])
 {
     srand((unsigned)time(NULL));
-    const struct config_t cfg = load_config(argc, argv);
-
-    // Set up the platform layer that connects Cy to the underlying transport and OS.
-    // This is the only part of the code that is platform-specific; the rest is all portable Cy API usage.
-    cy_platform_t* const platform = cy_udp_posix_new_manual(cfg.local_uid, cfg.iface_address, cfg.tx_queue_capacity);
-    if (platform == NULL) {
-        (void)fprintf(stderr, "cy_udp_posix_new\n");
+    const example_platform_t platform = example_platform_make(&argc, argv);
+    if (platform.platform == NULL) {
         return 1;
     }
+    const struct config_t cfg = load_config(argc, argv);
 
     // Set up the node instance.
-    cy_t* const cy = cy_new(platform, cy_udp_posix_home(platform, "udp_sub"), cy_udp_posix_namespace());
+    cy_t* const cy = cy_new(platform.platform, example_platform_home(), example_platform_namespace());
     if (cy == NULL) {
         (void)fprintf(stderr, "cy_new\n");
+        free(cfg.subs);
         return 1;
     }
 
@@ -162,6 +137,7 @@ int main(const int argc, char* const argv[])
                                              : cy_subscribe(cy, cy_str(cfg.subs[i].name), MEGA);
         if (subscribers[i] == NULL) {
             (void)fprintf(stderr, "cy_subscribe(): NULL\n");
+            free(cfg.subs);
             return 1;
         }
         cy_future_callback_set(subscribers[i], on_message);
@@ -175,5 +151,6 @@ int main(const int argc, char* const argv[])
             break;
         }
     }
+    free(cfg.subs);
     return 0;
 }

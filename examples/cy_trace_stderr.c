@@ -1,10 +1,12 @@
 // Add this file to your build to define cy_trace() that prints trace messages into stderr.
 
 #include "cy_platform.h"
-#include <time.h>
-#include <stdio.h>
+
+#include <assert.h>
 #include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 void cy_trace(cy_t* const         cy,
               const char* const   file,

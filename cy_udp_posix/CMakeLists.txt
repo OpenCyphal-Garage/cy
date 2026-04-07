@@ -21,27 +21,12 @@ set_target_properties(
         CXX_CPPCHECK ""
 )
 
-# Cy UDP POSIX static library. Cy is included as well.
-function(configure_cy_udp_posix_target target)
-    target_link_libraries(${target} PUBLIC udpard)
-    target_include_directories(${target} SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
-    target_include_directories(${target} PUBLIC ${CMAKE_SOURCE_DIR}/cy)
-    set_target_properties(
-            ${target}
-            PROPERTIES
-            COMPILE_WARNING_AS_ERROR ON
-            C_STANDARD_REQUIRED ON
-            C_EXTENSIONS OFF
-    )
-endfunction()
+# Cy UDP POSIX transport glue static library.
+# Consumers link cy/cy.c themselves; this target only contains the transport/platform layer.
+add_library(cy_udp_posix STATIC cy_udp_posix.c udp_wrapper.c)
+target_link_libraries(cy_udp_posix PUBLIC udpard)
+target_include_directories(cy_udp_posix SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(cy_udp_posix PUBLIC ${CMAKE_SOURCE_DIR}/cy)
+set_target_properties(cy_udp_posix PROPERTIES COMPILE_WARNING_AS_ERROR ON C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
 
-set(cy_udp_posix_sources cy_udp_posix.c udp_wrapper.c ../cy/cy.c)
-
-# The normal production build.
-add_library(cy_udp_posix STATIC ${cy_udp_posix_sources})
-configure_cy_udp_posix_target(cy_udp_posix)
-
-# Same but with CY_CONFIG_TRACE=1 for examples and tests.
-add_library(cy_udp_posix_trace STATIC ${cy_udp_posix_sources} cy_trace_stderr.c)
-target_compile_definitions(cy_udp_posix_trace PUBLIC CY_CONFIG_TRACE=1)
-configure_cy_udp_posix_target(cy_udp_posix_trace)
+add_subdirectory(tests)
