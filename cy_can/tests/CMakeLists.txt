@@ -83,6 +83,7 @@ cy_can_add_test(test_api_can_constructor test_api_can_constructor.c)
 cy_can_add_test(test_api_can_pubsub test_api_can_pubsub.c)
 cy_can_add_test(test_api_can_reliable_rpc test_api_can_reliable_rpc.c)
 cy_can_add_test(test_api_can_redundancy_lifecycle test_api_can_redundancy_lifecycle.c)
+cy_can_add_test(test_api_can_tombstone_revival test_api_can_tombstone_revival.c)
 cy_can_add_test(test_api_can_failures test_api_can_failures.c)
 
 if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
