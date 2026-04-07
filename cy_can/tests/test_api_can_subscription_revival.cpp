@@ -157,7 +157,7 @@ void fixture_init(fixture_t* const self)
     self->vtable.realloc    = platform_realloc;
     self->vtable.random     = platform_random;
 
-    self->platform = cy_can_new(1U, 128U, &self->vtable, &self->io);
+    self->platform = cy_can_new(1U, 128U, 0U, &self->vtable, &self->io);
     TEST_ASSERT_NOT_NULL(self->platform);
 
     self->cy = cy_new(self->platform, cy_str("test_can"), cy_str_t{ 0U, nullptr });

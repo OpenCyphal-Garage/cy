@@ -17,6 +17,7 @@
 #pragma once
 
 #include <cy.h>
+#include <canard.h>
 
 #ifdef __cplusplus
 extern "C"
@@ -56,6 +57,11 @@ typedef struct
     /// also unblock when any of those interfaces become writable, to allow the caller to retry transmissions.
     bool (*rx)(void* user, cy_can_rx_t* out_frame, cy_us_t deadline, uint_least8_t tx_pending_iface_bitmap);
 
+    /// Replace the hardware acceptance filter configuration with the supplied filter set.
+    /// This callback is optional; if NULL, libcanard filtering is disabled even if filter_count passed to cy_can_new()
+    /// is nonzero. The callback is only invoked from canard_poll().
+    bool (*filter)(void* user, size_t filter_count, const canard_filter_t* filters);
+
     /// Returns the current monotonic time in microseconds. Must be non-negative and non-decreasing.
     cy_us_t (*now)(void* user);
 
@@ -68,9 +74,12 @@ typedef struct
 
 /// Create a new CAN platform instance. The node-ID will be allocated automatically by libcanard.
 /// The constructor will invoke vtable random() and realloc() immediately.
+/// The filter_count is the number of acceptance filters available to libcanard; pass zero to disable filtering.
+/// Filtering is also disabled if vtable->filter is NULL.
 /// Returns NULL on failure. The iface_count must be in [1, CANARD_IFACE_COUNT].
 cy_platform_t* cy_can_new(const uint_least8_t          iface_count,
                           const size_t                 tx_queue_capacity,
+                          const size_t                 filter_count,
                           const cy_can_vtable_t* const vtable,
                           void* const                  user);
 

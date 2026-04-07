@@ -72,6 +72,8 @@ typedef struct
     uint64_t      prng_state;
 } socketcan_t;
 
+static const size_t socketcan_filter_count = 511U;
+
 static cy_us_t socketcan_now(void)
 {
     struct timespec ts;
@@ -173,6 +175,40 @@ static bool v_rx(void* const         user,
     return false;
 }
 
+static bool v_filter(void* const user, const size_t filter_count, const canard_filter_t* const filters)
+{
+    const socketcan_t* const self  = (const socketcan_t*)user;
+    const struct can_filter  empty = { 0 };
+    struct can_filter*       raw   = NULL;
+    if ((filter_count > 0U) && (filters == NULL)) {
+        return false;
+    }
+    if (filter_count > 0U) {
+        raw = (struct can_filter*)calloc(filter_count, sizeof(struct can_filter));
+        if (raw == NULL) {
+            return false;
+        }
+        for (size_t i = 0; i < filter_count; i++) {
+            raw[i].can_id   = CAN_EFF_FLAG | (filters[i].extended_can_id & CAN_EFF_MASK);
+            raw[i].can_mask = CAN_EFF_FLAG | CAN_RTR_FLAG | (filters[i].extended_mask & CAN_EFF_MASK);
+        }
+    }
+    const void* const optval = (filter_count > 0U) ? (const void*)raw : (const void*)&empty;
+    bool              ok     = true;
+    for (uint_least8_t i = 0; i < self->iface_count; i++) {
+        if (setsockopt(self->sock_fd[i],
+                       SOL_CAN_RAW,
+                       CAN_RAW_FILTER,
+                       optval,
+                       (socklen_t)(filter_count * sizeof(struct can_filter))) < 0) {
+            ok = false;
+            break;
+        }
+    }
+    free(raw);
+    return ok;
+}
+
 static cy_us_t v_now(void* const user)
 {
     (void)user;
@@ -199,12 +235,14 @@ static uint64_t v_random(void* const user)
 static const cy_can_vtable_t socketcan_vtable_fd      = { .tx_classic = v_tx_classic,
                                                           .tx_fd      = v_tx_fd,
                                                           .rx         = v_rx,
+                                                          .filter     = v_filter,
                                                           .now        = v_now,
                                                           .realloc    = v_realloc,
                                                           .random     = v_random };
 static const cy_can_vtable_t socketcan_vtable_classic = { .tx_classic = v_tx_classic,
                                                           .tx_fd      = NULL, // No FD support.
                                                           .rx         = v_rx,
+                                                          .filter     = v_filter,
                                                           .now        = v_now,
                                                           .realloc    = v_realloc,
                                                           .random     = v_random };
@@ -277,7 +315,7 @@ cy_platform_t* cy_can_socketcan_new(const uint_least8_t iface_count,
     }
 
     const cy_can_vtable_t* const vtable = self->fd_capable ? &socketcan_vtable_fd : &socketcan_vtable_classic;
-    cy_platform_t* const         result = cy_can_new(iface_count, tx_queue_capacity, vtable, self);
+    cy_platform_t* const result = cy_can_new(iface_count, tx_queue_capacity, socketcan_filter_count, vtable, self);
     if (result == NULL) {
         goto fail;
     }

@@ -9,7 +9,6 @@
 
 #include "cy_can.h"
 #include <cy_platform.h>
-#include <canard.h>
 
 #define RAPIDHASH_COMPACT
 #include <rapidhash.h>
@@ -34,10 +33,8 @@
 
 typedef struct
 {
-    cy_platform_t          base; // Must be first (upcast pattern).
-    const cy_can_vtable_t* vtable;
-    void*                  user;
-    uint_least8_t          iface_count;
+    cy_platform_t base; // Must be first (upcast pattern).
+    uint_least8_t iface_count;
 
     canard_t canard;
 
@@ -50,6 +47,9 @@ typedef struct
     struct subject_reader_t* tombstone_tail;
 
     uint64_t oom_count; // cy_can-level OOM (message wrapper allocation failures, etc.).
+
+    const cy_can_vtable_t* vtable;
+    void*                  user;
 } cy_can_t;
 
 typedef struct subject_writer_t
@@ -279,7 +279,15 @@ static bool v_canard_tx(canard_t* const      self,
     return owner->vtable->tx_classic(owner->user, iface_index, extended_can_id, can_data.data, len);
 }
 
-static const canard_vtable_t canard_vtbl = { .now = v_canard_now, .tx = v_canard_tx, .filter = NULL };
+static bool v_canard_filter(canard_t* const self, const size_t filter_count, const canard_filter_t* const filters)
+{
+    cy_can_t* const owner = (cy_can_t*)self->user_context;
+    assert((owner != NULL) && (owner->vtable != NULL) && (owner->vtable->filter != NULL));
+    return owner->vtable->filter(owner->user, filter_count, filters);
+}
+
+static const canard_vtable_t canard_vtbl_no_filter = { .now = v_canard_now, .tx = v_canard_tx, .filter = NULL };
+static const canard_vtable_t canard_vtbl_filter = { .now = v_canard_now, .tx = v_canard_tx, .filter = v_canard_filter };
 
 // =====================================================================================================================
 // SUBSCRIPTION CALLBACKS
@@ -423,7 +431,7 @@ static cy_subject_writer_t* v_subject_writer_new(cy_platform_t* const base, cons
         (void)memset(self, 0, sizeof(*self));
         self->base.subject_id = subject_id;
     }
-    CY_TRACE(owner->base.cy, "CAN writer S%08jx n=%zu", (uintmax_t)subject_id, owner->subject_writer_count);
+    CY_TRACE(owner->base.cy, "CAN writer S%08jx", (uintmax_t)subject_id);
     return (cy_subject_writer_t*)self;
 }
 
@@ -786,6 +794,7 @@ static const cy_platform_vtable_t platform_vtable = { .subject_writer_new       
 
 cy_platform_t* cy_can_new(const uint_least8_t          iface_count,
                           const size_t                 tx_queue_capacity,
+                          const size_t                 filter_count,
                           const cy_can_vtable_t* const vtable,
                           void* const                  user)
 {
@@ -806,12 +815,14 @@ cy_platform_t* cy_can_new(const uint_least8_t          iface_count,
     self->base.subject_id_modulus = CY_SUBJECT_ID_MODULUS_16bit;
     self->base.vtable             = &platform_vtable;
 
-    const bool ok = canard_new(&self->canard, //
-                               &canard_vtbl,
+    const bool                   filtering_enabled = (filter_count > 0U) && (vtable->filter != NULL);
+    const canard_vtable_t* const canard_vtable     = filtering_enabled ? &canard_vtbl_filter : &canard_vtbl_no_filter;
+    const bool                   ok                = canard_new(&self->canard,
+                               canard_vtable,
                                make_mem_set(self),
                                tx_queue_capacity,
                                vtable->random(user),
-                               0);
+                               filtering_enabled ? filter_count : 0U);
     if (!ok) {
         vtable->realloc(user, self, 0);
         return NULL;
