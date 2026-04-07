@@ -38,7 +38,6 @@ typedef struct
     const cy_can_vtable_t* vtable;
     void*                  user;
     uint_least8_t          iface_count;
-    uint64_t               prng_state;
 
     canard_t canard;
 
@@ -50,10 +49,6 @@ typedef struct
     struct subject_reader_t* tombstone_head; // Deferred destruction list to avoid reentrancy issues.
     struct subject_reader_t* tombstone_tail;
 
-    size_t   subject_writer_count;
-    size_t   subject_reader_count;
-    uint64_t v10_rx_count;
-    uint64_t v11_rx_count;
     uint64_t oom_count; // cy_can-level OOM (message wrapper allocation failures, etc.).
 } cy_can_t;
 
@@ -317,7 +312,6 @@ static void v_on_msg_16b(canard_subscription_t* const self,
     subject_reader_t* const reader     = (subject_reader_t*)self->user_context;
     cy_can_t* const         owner      = reader->owner;
     const bool              multiframe = (payload.origin.data != NULL);
-    owner->v11_rx_count++;
 
     can_message_t* const msg = make_message(owner, multiframe ? 0 : payload.view.size);
     if (msg == NULL) {
@@ -354,7 +348,6 @@ static void v_on_msg_13b(canard_subscription_t* const self,
     subject_reader_pinned_t* const pinned = as_pinned(reader);
     assert((pinned != NULL) && (owner != NULL));
     const bool multiframe = (payload.origin.data != NULL);
-    owner->v10_rx_count++;
 
     const size_t         inline_size = HEADER_BYTES + (multiframe ? 0 : payload.view.size);
     can_message_t* const msg         = make_message(owner, inline_size);
@@ -429,7 +422,6 @@ static cy_subject_writer_t* v_subject_writer_new(cy_platform_t* const base, cons
     if (self != NULL) {
         (void)memset(self, 0, sizeof(*self));
         self->base.subject_id = subject_id;
-        owner->subject_writer_count++;
     }
     CY_TRACE(owner->base.cy, "CAN writer S%08jx n=%zu", (uintmax_t)subject_id, owner->subject_writer_count);
     return (cy_subject_writer_t*)self;
@@ -439,8 +431,6 @@ static void v_subject_writer_destroy(cy_platform_t* const platform, cy_subject_w
 {
     cy_can_t* const         owner = (cy_can_t*)platform;
     subject_writer_t* const self  = (subject_writer_t*)base;
-    assert(owner->subject_writer_count > 0);
-    owner->subject_writer_count--;
     owner->vtable->realloc(owner->user, self, 0);
 }
 
@@ -601,8 +591,6 @@ static void reader_finalize(cy_can_t* const owner, subject_reader_t* const self)
     if (pinned != NULL) {
         canard_unsubscribe(&owner->canard, &pinned->sub_13b);
     }
-    assert(owner->subject_reader_count > 0);
-    owner->subject_reader_count--;
     owner->vtable->realloc(owner->user, self, 0);
 }
 
@@ -663,7 +651,6 @@ static cy_subject_reader_t* v_subject_reader_new(cy_platform_t* const base,
         build_phony_header(p, subject_id);
     }
 
-    owner->subject_reader_count++;
     CY_TRACE(owner->base.cy, "CAN reader S%08jx extent=%zu pinned=%d", (uintmax_t)subject_id, extent, (int)pinned);
     return (cy_subject_reader_t*)self;
 }
@@ -815,12 +802,16 @@ cy_platform_t* cy_can_new(const uint_least8_t          iface_count,
     self->vtable      = vtable;
     self->user        = user;
     self->iface_count = iface_count;
-    self->prng_state  = vtable->random(user);
 
     self->base.subject_id_modulus = CY_SUBJECT_ID_MODULUS_16bit;
     self->base.vtable             = &platform_vtable;
 
-    const bool ok = canard_new(&self->canard, &canard_vtbl, make_mem_set(self), tx_queue_capacity, self->prng_state, 0);
+    const bool ok = canard_new(&self->canard, //
+                               &canard_vtbl,
+                               make_mem_set(self),
+                               tx_queue_capacity,
+                               vtable->random(user),
+                               0);
     if (!ok) {
         vtable->realloc(user, self, 0);
         return NULL;
@@ -843,23 +834,6 @@ cy_platform_t* cy_can_new(const uint_least8_t          iface_count,
     return &self->base;
 }
 
-cy_can_stats_t cy_can_stats(const cy_platform_t* const base)
-{
-    const cy_can_t* const owner = (const cy_can_t*)base;
-    return (cy_can_stats_t){ .subject_writer_count     = owner->subject_writer_count,
-                             .subject_reader_count     = owner->subject_reader_count,
-                             .v10_rx_count             = owner->v10_rx_count,
-                             .v11_rx_count             = owner->v11_rx_count,
-                             .oom_count                = owner->oom_count,
-                             .canard_err_oom           = owner->canard.err.oom,
-                             .canard_err_tx_capacity   = owner->canard.err.tx_capacity,
-                             .canard_err_tx_sacrifice  = owner->canard.err.tx_sacrifice,
-                             .canard_err_tx_expiration = owner->canard.err.tx_expiration,
-                             .canard_err_rx_frame      = owner->canard.err.rx_frame,
-                             .canard_err_rx_transfer   = owner->canard.err.rx_transfer,
-                             .canard_err_collision     = owner->canard.err.collision };
-}
-
 void* cy_can_user(const cy_platform_t* const base) { return ((const cy_can_t*)base)->user; }
 
 void cy_can_destroy(cy_platform_t* const base)
@@ -870,8 +844,6 @@ void cy_can_destroy(cy_platform_t* const base)
         assert(rd != NULL);
         reader_finalize(owner, rd);
     }
-    assert(owner->subject_reader_count == 0); // caller must clean up
-    assert(owner->subject_writer_count == 0); // caller must clean up
     canard_unsubscribe(&owner->canard, &owner->unicast_sub);
     canard_destroy(&owner->canard);
     owner->vtable->realloc(owner->user, owner, 0);

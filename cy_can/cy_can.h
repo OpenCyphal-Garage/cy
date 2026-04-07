@@ -66,32 +66,13 @@ typedef struct
     uint64_t (*random)(void* user);
 } cy_can_vtable_t;
 
-/// Diagnostic statistics sampled from both cy_can and the underlying libcanard instance.
-typedef struct
-{
-    size_t   subject_writer_count;
-    size_t   subject_reader_count;
-    uint64_t v10_rx_count; ///< 13-bit (v1.0) transfers received.
-    uint64_t v11_rx_count; ///< 16-bit (v1.1) transfers received.
-    uint64_t oom_count;    ///< cy_can-level OOM (message wrapper allocation failures, etc.).
-    // Canard-level counters.
-    uint64_t canard_err_oom;
-    uint64_t canard_err_tx_capacity;
-    uint64_t canard_err_tx_sacrifice;
-    uint64_t canard_err_tx_expiration;
-    uint64_t canard_err_rx_frame;
-    uint64_t canard_err_rx_transfer;
-    uint64_t canard_err_collision;
-} cy_can_stats_t;
-
-/// Create a new CAN platform instance. Node-ID is allocated automatically via libcanard occupancy tracking.
+/// Create a new CAN platform instance. The node-ID will be allocated automatically by libcanard.
+/// The constructor will invoke vtable random() and realloc() immediately.
 /// Returns NULL on failure. The iface_count must be in [1, CANARD_IFACE_COUNT].
 cy_platform_t* cy_can_new(const uint_least8_t          iface_count,
                           const size_t                 tx_queue_capacity,
                           const cy_can_vtable_t* const vtable,
                           void* const                  user);
-
-cy_can_stats_t cy_can_stats(const cy_platform_t* const base);
 
 /// Returns the user context pointer that was passed to cy_can_new().
 void* cy_can_user(const cy_platform_t* const base);
