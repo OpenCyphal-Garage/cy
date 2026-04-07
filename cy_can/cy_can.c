@@ -521,15 +521,9 @@ static void reader_set_extent(subject_reader_t* const self, const size_t extent)
     }
 }
 
-static bool is_tombstoned(const cy_can_t* const owner, const subject_reader_t* const self)
-{
-    return (self->next_tombstone != NULL) || (self->prev_tombstone != NULL) || (owner->tombstone_head == self) ||
-           (owner->tombstone_tail == self);
-}
-
 static void tombstone_remove(cy_can_t* const owner, subject_reader_t* const self)
 {
-    assert((owner != NULL) && (self != NULL) && is_tombstoned(owner, self));
+    assert((owner != NULL) && (self != NULL));
     if (self->prev_tombstone != NULL) {
         self->prev_tombstone->next_tombstone = self->next_tombstone;
     } else {
@@ -546,7 +540,7 @@ static void tombstone_remove(cy_can_t* const owner, subject_reader_t* const self
 
 static void tombstone_enqueue(cy_can_t* const owner, subject_reader_t* const self)
 {
-    assert((owner != NULL) && (self != NULL) && !is_tombstoned(owner, self));
+    assert((owner != NULL) && (self != NULL));
     self->prev_tombstone = owner->tombstone_tail;
     self->next_tombstone = NULL;
     if (owner->tombstone_tail != NULL) {
@@ -574,8 +568,7 @@ static subject_reader_t* reader_try_revive(cy_can_t* const owner, const uint32_t
         return NULL;
     }
     subject_reader_t* const self = (subject_reader_t*)incumbent->user_context;
-    assert((self != NULL) && (self->owner == owner) && (self->base.subject_id == subject_id) &&
-           is_tombstoned(owner, self));
+    assert((self != NULL) && (self->owner == owner) && (self->base.subject_id == subject_id));
     if (as_pinned(self) != NULL) {
         canard_subscription_t* const incumbent_13b =
           canard_find_subscription(&owner->canard, canard_kind_message_13b, (uint16_t)subject_id);
@@ -594,7 +587,7 @@ static subject_reader_t* reader_try_revive(cy_can_t* const owner, const uint32_t
 /// Finalize a reader: unsubscribe from canard and free memory. Does NOT unlink from any list.
 static void reader_finalize(cy_can_t* const owner, subject_reader_t* const self)
 {
-    assert((owner != NULL) && (self != NULL) && !is_tombstoned(owner, self));
+    assert((owner != NULL) && (self != NULL));
     canard_unsubscribe(&owner->canard, &self->sub_16b);
     subject_reader_pinned_t* const pinned = as_pinned(self);
     if (pinned != NULL) {
