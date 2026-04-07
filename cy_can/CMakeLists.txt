@@ -21,33 +21,16 @@ set_target_properties(
         CXX_CPPCHECK ""
 )
 
-# Shared configuration for cy_can targets.
-function(configure_cy_can_target target)
-    target_link_libraries(${target} PUBLIC canard)
-    target_include_directories(${target} SYSTEM INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
-    target_include_directories(${target} PUBLIC ${CMAKE_SOURCE_DIR}/cy)
-    set_target_properties(
-            ${target}
-            PROPERTIES
-            COMPILE_WARNING_AS_ERROR ON
-            C_STANDARD_REQUIRED ON
-            C_EXTENSIONS OFF
-    )
-endfunction()
+# Platform-agnostic CAN transport glue static library.
+# Consumers link cy/cy.c themselves; this target only contains the transport/platform layer.
+add_library(cy_can STATIC cy_can.c)
+target_link_libraries(cy_can PUBLIC canard)
+target_include_directories(cy_can PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/cy)
+set_target_properties(cy_can PROPERTIES COMPILE_WARNING_AS_ERROR ON C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
 
-# Platform-agnostic CAN transport (cy_can.c + cy.c).
-set(cy_can_sources cy_can.c ../cy/cy.c)
-
-add_library(cy_can STATIC ${cy_can_sources})
-configure_cy_can_target(cy_can)
-
-# With Linux SocketCAN support.
-add_library(cy_can_socketcan STATIC ${cy_can_sources} cy_can_socketcan.c)
-configure_cy_can_target(cy_can_socketcan)
-
-# Same but with CY_CONFIG_TRACE=1 for examples and tests.
-add_library(cy_can_socketcan_trace STATIC ${cy_can_sources} cy_can_socketcan.c)
-target_compile_definitions(cy_can_socketcan_trace PUBLIC CY_CONFIG_TRACE=1)
-configure_cy_can_target(cy_can_socketcan_trace)
+# Linux SocketCAN backend for cy_can. Includes cy_can and canard, making it self-contained except for cy.c.
+add_library(cy_can_socketcan STATIC cy_can_socketcan.c)
+target_link_libraries(cy_can_socketcan PUBLIC cy_can)
+set_target_properties(cy_can_socketcan PROPERTIES COMPILE_WARNING_AS_ERROR ON C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
 
 # TODO build the tests

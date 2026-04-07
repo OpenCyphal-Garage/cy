@@ -36,6 +36,10 @@ On an embedded system, one may also prefer to use [`o1heap`](https://github.com/
 management, but this is not a hard dependency -- any allocator will work. O1Heap is the recommended choice for embedded
 platforms due to its hard determinism and low fragmentation.
 
+Pick one of the transport/platform glue layers suitable for your application: `cy_can`, `cy_udp_posix`, etc.
+The integration instructions are identical: simply copy the C files and add them to your build system.
+These components may be moved into dedicated repositories in the future.
+
 🌐 A live demo of the distributed consensus algorithm can be found at <https://gerasim.opencyphal.org>.
 
 For a detailed design overview, refer to `model/`.

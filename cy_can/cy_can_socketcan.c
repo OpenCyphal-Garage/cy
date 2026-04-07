@@ -35,35 +35,6 @@
 #include <linux/can.h>
 #include <linux/can/raw.h>
 
-#if CY_CONFIG_TRACE
-#include <stdio.h>
-#include <stdarg.h>
-
-void cy_trace(cy_t* const         cy,
-              const char* const   file,
-              const uint_fast16_t line,
-              const char* const   func,
-              const char* const   format,
-              ...)
-{
-    (void)cy;
-    struct timespec ts;
-    (void)clock_gettime(CLOCK_MONOTONIC, &ts);
-    const char* fn = strrchr(file, '/');
-    fn             = (fn != NULL) ? (fn + 1) : file;
-    (void)fprintf(
-      stderr, "CY_CAN %05ld.%06ld %s:%u:%s ", (long)ts.tv_sec, ts.tv_nsec / 1000L, fn, (unsigned)line, func);
-    va_list args;
-    va_start(args, format);
-    (void)vfprintf(stderr, format, args);
-    va_end(args);
-    (void)fputc('\n', stderr);
-    (void)fflush(stderr);
-}
-#endif
-
-// =====================================================================================================================
-
 typedef struct
 {
     int           sock_fd[CANARD_IFACE_COUNT];
