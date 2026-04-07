@@ -222,7 +222,7 @@ static const cy_can_vtable_t socketcan_vtable_classic = { .tx_classic = v_tx_cla
 // PUBLIC API
 
 cy_platform_t* cy_can_socketcan_new(const uint_least8_t iface_count,
-                                    const char*         iface_names[],
+                                    const char* const   iface_names[],
                                     const size_t        tx_queue_capacity)
 {
     if ((iface_count == 0) || (iface_count > CANARD_IFACE_COUNT) || (iface_names == NULL)) {

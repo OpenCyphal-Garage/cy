@@ -242,11 +242,12 @@ static can_message_t* make_message(cy_can_t* const owner, const size_t inline_ex
 // =====================================================================================================================
 // cy_bytes_t -> canard_bytes_chain_t ALIASING
 
+static_assert(offsetof(canard_bytes_chain_t, bytes.size) == offsetof(cy_bytes_t, size), "");
+static_assert(offsetof(canard_bytes_chain_t, bytes.data) == offsetof(cy_bytes_t, data), "");
+static_assert(offsetof(canard_bytes_chain_t, next) == offsetof(cy_bytes_t, next), "");
+
 static canard_bytes_chain_t cy_bytes_to_canard(const cy_bytes_t message)
 {
-    static_assert(offsetof(canard_bytes_chain_t, bytes.size) == offsetof(cy_bytes_t, size), "");
-    static_assert(offsetof(canard_bytes_chain_t, bytes.data) == offsetof(cy_bytes_t, data), "");
-    static_assert(offsetof(canard_bytes_chain_t, next) == offsetof(cy_bytes_t, next), "");
     return (canard_bytes_chain_t){ .bytes = { .size = message.size, .data = message.data },
                                    .next  = (const canard_bytes_chain_t*)message.next };
 }

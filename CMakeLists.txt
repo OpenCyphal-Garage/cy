@@ -54,6 +54,7 @@ if (NOT NO_STATIC_ANALYSIS)
             ${CMAKE_SOURCE_DIR}/tests/*/*.[ch]pp
             ${CMAKE_SOURCE_DIR}/examples/*.[ch]
             ${CMAKE_SOURCE_DIR}/cy_udp_posix/*.[ch]
+            ${CMAKE_SOURCE_DIR}/cy_can/tests/*.[ch]
             ${CMAKE_SOURCE_DIR}/cy_udp_posix/tests/*/*.[ch]
             ${CMAKE_SOURCE_DIR}/cy_udp_posix/tests/*/*.[ch]pp
             ${CMAKE_SOURCE_DIR}/cy_can/*.[ch]

@@ -23,7 +23,7 @@ extern "C"
 /// All interfaces must share the same CAN FD capability; FD is auto-detected.
 /// Returns NULL on failure (e.g., interface not found, socket error).
 cy_platform_t* cy_can_socketcan_new(const uint_least8_t iface_count,
-                                    const char*         iface_names[],
+                                    const char* const   iface_names[],
                                     const size_t        tx_queue_capacity);
 
 void cy_can_socketcan_destroy(cy_platform_t* const base);

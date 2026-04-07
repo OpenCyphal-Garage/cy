@@ -33,4 +33,4 @@ add_library(cy_can_socketcan STATIC cy_can_socketcan.c)
 target_link_libraries(cy_can_socketcan PUBLIC cy_can)
 set_target_properties(cy_can_socketcan PROPERTIES COMPILE_WARNING_AS_ERROR ON C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
 
-# TODO build the tests
+add_subdirectory(tests)
