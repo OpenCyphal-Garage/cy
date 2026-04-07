@@ -126,6 +126,7 @@ int main(int argc, char* argv[])
     cy_t* const cy = cy_new(platform.platform, example_platform_home(), example_platform_namespace());
     if (cy == NULL) {
         (void)fprintf(stderr, "cy_new\n");
+        free(cfg.subs);
         return 1;
     }
 
@@ -136,6 +137,7 @@ int main(int argc, char* argv[])
                                              : cy_subscribe(cy, cy_str(cfg.subs[i].name), MEGA);
         if (subscribers[i] == NULL) {
             (void)fprintf(stderr, "cy_subscribe(): NULL\n");
+            free(cfg.subs);
             return 1;
         }
         cy_future_callback_set(subscribers[i], on_message);
@@ -149,5 +151,6 @@ int main(int argc, char* argv[])
             break;
         }
     }
+    free(cfg.subs);
     return 0;
 }

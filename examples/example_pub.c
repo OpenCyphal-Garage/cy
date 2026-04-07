@@ -103,6 +103,7 @@ int main(int argc, char* argv[])
     cy_t* const cy = cy_new(platform.platform, example_platform_home(), example_platform_namespace());
     if (cy == NULL) {
         (void)fprintf(stderr, "cy_new\n");
+        free(cfg.pubs);
         return 1;
     }
 
@@ -112,6 +113,7 @@ int main(int argc, char* argv[])
         publishers[i] = cy_advertise_client(cy, cy_str(cfg.pubs[i].name), MEGA);
         if (publishers[i] == NULL) {
             (void)fprintf(stderr, "cy_advertise_client: NULL\n");
+            free(cfg.pubs);
             return 1;
         }
     }
@@ -144,5 +146,6 @@ int main(int argc, char* argv[])
             next_publish_at += 5 * MEGA;
         }
     }
+    free(cfg.pubs);
     return 0;
 }
