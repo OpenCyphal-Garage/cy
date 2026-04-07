@@ -3,7 +3,9 @@
 #pragma once
 
 #include <cy.h>
+#if defined(__linux__)
 #include <cy_can_socketcan.h>
+#endif
 #include <cy_udp_posix.h>
 #include <eui64.h>
 
@@ -51,12 +53,14 @@ static inline example_platform_t example_platform_make(int* const argc, char** a
         return out;
     }
 
-    uint32_t    udp_iface_address[CY_UDP_POSIX_IFACE_COUNT_MAX] = { 0 };
-    const char* can_iface_name[CANARD_IFACE_COUNT]              = { 0 };
-    size_t      iface_count                                     = 0U;
-    bool        use_udp                                         = false;
-    bool        use_can                                         = false;
-    int         dst                                             = 1;
+    uint32_t udp_iface_address[CY_UDP_POSIX_IFACE_COUNT_MAX] = { 0 };
+#if defined(__linux__)
+    const char* can_iface_name[CANARD_IFACE_COUNT] = { 0 };
+#endif
+    size_t iface_count = 0U;
+    bool   use_udp     = false;
+    bool   use_can     = false;
+    int    dst         = 1;
     for (int src = 1; src < *argc; src++) {
         char* const arg = argv[src];
         if ((arg != NULL) && (strncmp(arg, "iface=", 6) == 0)) {
@@ -66,6 +70,7 @@ static inline example_platform_t example_platform_make(int* const argc, char** a
                 return out;
             }
             if (strncmp(spec, "socketcan:", 10) == 0) {
+#if defined(__linux__)
                 const char* const name = spec + 10;
                 if (name[0] == '\0') {
                     (void)fprintf(stderr, "SocketCAN iface name is empty: %s\n", arg);
@@ -87,6 +92,10 @@ static inline example_platform_t example_platform_make(int* const argc, char** a
                 }
                 can_iface_name[iface_count++] = name;
                 use_can                       = true;
+#else
+                (void)fprintf(stderr, "SocketCAN is only supported on Linux\n");
+                return out;
+#endif
             } else {
                 const uint32_t addr = cy_udp_parse_iface_address(spec);
                 if (addr == 0U) {
@@ -118,8 +127,10 @@ static inline example_platform_t example_platform_make(int* const argc, char** a
     *argc     = dst;
 
     if (use_can) {
+#if defined(__linux__)
         out.platform = cy_can_socketcan_new((uint_least8_t)iface_count, can_iface_name, 1000U);
         out.destroy  = cy_can_socketcan_destroy;
+#endif
     } else if (use_udp) {
         const uint64_t uid = eui64_semirandom();
         if (uid == 0U) {

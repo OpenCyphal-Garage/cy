@@ -29,8 +29,10 @@ target_include_directories(cy_can PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOU
 set_target_properties(cy_can PROPERTIES COMPILE_WARNING_AS_ERROR ON C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
 
 # Linux SocketCAN backend for cy_can. Includes cy_can and canard, making it self-contained except for cy.c.
-add_library(cy_can_socketcan STATIC cy_can_socketcan.c)
-target_link_libraries(cy_can_socketcan PUBLIC cy_can)
-set_target_properties(cy_can_socketcan PROPERTIES COMPILE_WARNING_AS_ERROR ON C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_library(cy_can_socketcan STATIC cy_can_socketcan.c)
+    target_link_libraries(cy_can_socketcan PUBLIC cy_can)
+    set_target_properties(cy_can_socketcan PROPERTIES COMPILE_WARNING_AS_ERROR ON C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+endif ()
 
 add_subdirectory(tests)

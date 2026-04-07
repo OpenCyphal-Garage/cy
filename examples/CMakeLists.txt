@@ -24,7 +24,10 @@ endif ()
 
 function(cy_add_example target platform_target)
     add_executable(${target} ${ARGN})
-    target_link_libraries(${target} PRIVATE cy_examples_support cy_udp_posix cy_can_socketcan)
+    target_link_libraries(${target} PRIVATE cy_examples_support ${platform_target})
+    if (TARGET cy_can_socketcan)
+        target_link_libraries(${target} PRIVATE cy_can_socketcan)
+    endif ()
 endfunction()
 
 # Node examples.
