@@ -218,6 +218,31 @@ static const cy_can_vtable_t socketcan_vtable_classic = { .tx_classic = v_tx_cla
                                                           .realloc    = v_realloc,
                                                           .random     = v_random };
 
+static bool socketcan_iface_is_fd_capable(const int sock, const char* const iface_name)
+{
+    assert(sock >= 0);
+    assert(iface_name != NULL);
+    struct ifreq ifr;
+    (void)memset(&ifr, 0, sizeof(ifr));
+    (void)strncpy(ifr.ifr_name, iface_name, sizeof(ifr.ifr_name) - 1);
+    if (ioctl(sock, SIOCGIFMTU, &ifr) < 0) {
+        return false;
+    }
+    return ifr.ifr_mtu >= (int)CANFD_MTU;
+}
+
+static bool socketcan_set_fd_frames(const socketcan_t* const self, const bool enable)
+{
+    assert(self != NULL);
+    const int value = enable ? 1 : 0;
+    for (uint_least8_t i = 0; i < self->iface_count; i++) {
+        if (setsockopt(self->sock_fd[i], SOL_CAN_RAW, CAN_RAW_FD_FRAMES, &value, sizeof(value)) < 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // =====================================================================================================================
 // PUBLIC API
 
@@ -269,12 +294,10 @@ cy_platform_t* cy_can_socketcan_new(const uint_least8_t iface_count,
         if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
             goto fail;
         }
-        // Try enabling CAN FD. If it fails on any interface, disable FD for all.
-        {
-            const int enable = 1;
-            if (setsockopt(sock, SOL_CAN_RAW, CAN_RAW_FD_FRAMES, &enable, sizeof(enable)) < 0) {
-                self->fd_capable = false;
-            }
+        // Linux reports CAN FD support per interface via MTU. Socket-level CAN_RAW_FD_FRAMES is not enough because
+        // classic-CAN interfaces may still accept the option while rejecting FD frames at transmission time.
+        if (!socketcan_iface_is_fd_capable(sock, iface_names[i])) {
+            self->fd_capable = false;
         }
         // Non-blocking mode.
         {
@@ -283,6 +306,11 @@ cy_platform_t* cy_can_socketcan_new(const uint_least8_t iface_count,
                 (void)fcntl(sock, F_SETFL, flags | O_NONBLOCK); // NOLINT(*-signed-bitwise)
             }
         }
+    }
+
+    if (self->fd_capable && !socketcan_set_fd_frames(self, true)) {
+        self->fd_capable = false;
+        (void)socketcan_set_fd_frames(self, false);
     }
 
     const cy_can_vtable_t* const vtable = self->fd_capable ? &socketcan_vtable_fd : &socketcan_vtable_classic;
