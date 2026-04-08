@@ -33,6 +33,7 @@ struct test_platform_t final : api_test::test_platform_base_t
     std::size_t                   unicast_count{ 0U };
     std::array<unsigned char, 16> last_unicast{};
     std::size_t                   unicast_extent{ 0U };
+    cy_diag_t                     diag{};
 
     std::size_t fail_after_n_allocs{ SIZE_MAX };
     std::size_t alloc_counter{ 0U };
@@ -148,10 +149,10 @@ extern "C" std::uint64_t platform_random(cy_platform_t* const platform)
 
 test_platform_t* g_current_platform{ nullptr }; // NOLINT(*-non-const-global-variables)
 
-extern "C" void platform_on_async_error(cy_t* const         cy,
-                                        cy_topic_t* const   topic,
-                                        const cy_err_t      error,
-                                        const std::uint16_t line_number)
+extern "C" void platform_diag_async_error(cy_t* const         cy,
+                                          cy_topic_t* const   topic,
+                                          const cy_err_t      error,
+                                          const std::uint16_t line_number)
 {
     (void)cy;
     (void)topic;
@@ -166,6 +167,14 @@ extern "C" void platform_on_async_error(cy_t* const         cy,
         TEST_FAIL_MESSAGE("Unexpected async error callback invocation");
     }
 }
+
+const cy_diag_vtable_t platform_diag_vtable = {
+    .async_error       = platform_diag_async_error,
+    .topic_created     = nullptr,
+    .topic_destroyed   = nullptr,
+    .topic_reallocated = nullptr,
+    .gossip_processed  = nullptr,
+};
 
 extern "C" void on_arrival_capture_rx(cy_future_t* const sub)
 {
@@ -243,7 +252,8 @@ void platform_init(test_platform_t* const self)
 
     self->cy = cy_new(&self->platform, cy_str("test"), cy_str_t{ 0, nullptr });
     TEST_ASSERT_NOT_NULL(self->cy);
-    cy_async_error_handler_set(self->cy, platform_on_async_error);
+    self->diag = cy_diag_t{ .next = nullptr, .vtable = &platform_diag_vtable };
+    cy_diag_add(self->cy, &self->diag);
     g_current_platform = self;
 }
 

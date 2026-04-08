@@ -1613,10 +1613,11 @@ void test_api_rpc_e2e_r26_respond_reliable_retransmit_media_error_notifies_then_
     TEST_ASSERT_TRUE(cap.saw_pending_media);
     TEST_ASSERT_TRUE(cap.saw_done_delivery);
 
-    const auto& async_errors = e2e::sim_net_async_errors(net);
-    TEST_ASSERT_TRUE(!async_errors.empty());
-    const bool saw_media_async = std::ranges::any_of(async_errors, [](const e2e::async_error_capture_t& err) {
-        return (err.node_index == e2e::sim_node_b) && (err.error == CY_ERR_MEDIA);
+    const auto& diag_caps = e2e::sim_net_diag_captures(net);
+    TEST_ASSERT_TRUE(!diag_caps.empty());
+    const bool saw_media_async = std::ranges::any_of(diag_caps, [](const e2e::diag_capture_t& err) {
+        return (err.kind == e2e::diag_kind_t::async_error) && (err.node_index == e2e::sim_node_b) &&
+               (err.error == CY_ERR_MEDIA);
     });
     TEST_ASSERT_TRUE(saw_media_async);
 

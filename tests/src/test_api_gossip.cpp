@@ -31,6 +31,7 @@ enum class diag_event_kind_t
     created,
     destroyed,
     gossip_processed,
+    async_error,
 };
 
 struct diag_capture_t
@@ -40,6 +41,8 @@ struct diag_capture_t
     std::uint64_t                            hash{ 0U };
     std::uint32_t                            subject_id{ 0U };
     std::uint32_t                            evictions{ 0U };
+    cy_err_t                                 error{ CY_OK };
+    std::uint16_t                            line_number{ 0U };
     std::size_t                              name_len{ 0U };
     std::array<char, CY_TOPIC_NAME_MAX + 1U> name{};
 };
@@ -90,6 +93,8 @@ void capture_diag(test_platform_t* const  self,
                   const std::uint64_t     hash,
                   const std::uint32_t     subject_id,
                   const std::uint32_t     evictions,
+                  const cy_err_t          error,
+                  const std::uint16_t     line_number,
                   const cy_str_t          name)
 {
     if (self->diag_count >= self->diag_captures.size()) {
@@ -102,6 +107,8 @@ void capture_diag(test_platform_t* const  self,
     out.hash            = hash;
     out.subject_id      = subject_id;
     out.evictions       = evictions;
+    out.error           = error;
+    out.line_number     = line_number;
     out.name_len        = std::min<std::size_t>(name.len, CY_TOPIC_NAME_MAX);
     if ((out.name_len > 0U) && (name.str != nullptr)) {
         std::memcpy(out.name.data(), name.str, out.name_len);
@@ -122,6 +129,8 @@ extern "C" void platform_diag_topic_reallocated(cy_t* const         cy,
                  cy_topic_hash(topic),
                  subject_id,
                  evictions,
+                 CY_OK,
+                 0U,
                  cy_str_t{ 0, nullptr });
 }
 
@@ -129,16 +138,30 @@ extern "C" void platform_diag_topic_created(cy_t* const cy, cy_topic_t* const to
 {
     (void)cy;
     TEST_ASSERT_NOT_NULL(g_diag_platform);
-    capture_diag(
-      g_diag_platform, diag_event_kind_t::created, topic, cy_topic_hash(topic), 0U, 0U, cy_str_t{ 0, nullptr });
+    capture_diag(g_diag_platform,
+                 diag_event_kind_t::created,
+                 topic,
+                 cy_topic_hash(topic),
+                 0U,
+                 0U,
+                 CY_OK,
+                 0U,
+                 cy_str_t{ 0, nullptr });
 }
 
 extern "C" void platform_diag_topic_destroyed(cy_t* const cy, cy_topic_t* const topic)
 {
     (void)cy;
     TEST_ASSERT_NOT_NULL(g_diag_platform);
-    capture_diag(
-      g_diag_platform, diag_event_kind_t::destroyed, topic, cy_topic_hash(topic), 0U, 0U, cy_str_t{ 0, nullptr });
+    capture_diag(g_diag_platform,
+                 diag_event_kind_t::destroyed,
+                 topic,
+                 cy_topic_hash(topic),
+                 0U,
+                 0U,
+                 CY_OK,
+                 0U,
+                 cy_str_t{ 0, nullptr });
 }
 
 extern "C" void platform_diag_gossip_processed(cy_t* const         cy,
@@ -148,10 +171,30 @@ extern "C" void platform_diag_gossip_processed(cy_t* const         cy,
 {
     (void)cy;
     TEST_ASSERT_NOT_NULL(g_diag_platform);
-    capture_diag(g_diag_platform, diag_event_kind_t::gossip_processed, topic, hash, 0U, 0U, name);
+    capture_diag(g_diag_platform, diag_event_kind_t::gossip_processed, topic, hash, 0U, 0U, CY_OK, 0U, name);
+}
+
+extern "C" void platform_diag_async_error(cy_t* const         cy,
+                                          cy_topic_t* const   topic,
+                                          const cy_err_t      error,
+                                          const std::uint16_t line_number)
+{
+    (void)cy;
+    TEST_ASSERT_NOT_NULL(g_diag_platform);
+    capture_diag(g_diag_platform,
+                 diag_event_kind_t::async_error,
+                 topic,
+                 (topic != nullptr) ? cy_topic_hash(topic) : 0U,
+                 0U,
+                 0U,
+                 error,
+                 line_number,
+                 cy_str_t{ 0, nullptr });
+    TEST_FAIL_MESSAGE("Unexpected async error callback invocation");
 }
 
 const cy_diag_vtable_t platform_diag_vtable = {
+    .async_error       = platform_diag_async_error,
     .topic_created     = platform_diag_topic_created,
     .topic_destroyed   = platform_diag_topic_destroyed,
     .topic_reallocated = platform_diag_topic_reallocated,
@@ -239,17 +282,6 @@ extern "C" std::uint64_t platform_random(cy_platform_t* const platform)
     return api_test::random_lcg<test_platform_t>(platform);
 }
 
-extern "C" void platform_on_async_error(cy_t* const         cy,
-                                        cy_topic_t* const   topic,
-                                        const cy_err_t      error,
-                                        const std::uint16_t line_number)
-{
-    (void)cy;
-    (void)topic;
-    (void)error;
-    (void)line_number;
-}
-
 void platform_init(test_platform_t& self)
 {
     self            = test_platform_t{};
@@ -272,7 +304,6 @@ void platform_init(test_platform_t& self)
     api_test::init_platform_base(self.platform, self.vtable);
     self.cy = cy_new(&self.platform, cy_str("test"), cy_str_t{ 0, nullptr });
     TEST_ASSERT_NOT_NULL(self.cy);
-    cy_async_error_handler_set(self.cy, platform_on_async_error);
     self.diag = cy_diag_t{ .next = nullptr, .vtable = &platform_diag_vtable };
     cy_diag_add(self.cy, &self.diag);
 }

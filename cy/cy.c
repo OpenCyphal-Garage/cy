@@ -160,11 +160,10 @@ struct cy_t
     // Slow topic iteration state. Updated every spin; when NULL, restart from scratch.
     cy_topic_t* topic_iter;
 
-    cy_async_error_handler_t async_error_handler;
-    cy_diag_t*               diags;
+    cy_diag_t* diags;
 };
 
-#define ON_ASYNC_ERROR(cy, topic, error) (cy)->async_error_handler((cy), (topic), (error), __LINE__)
+#define ON_ASYNC_ERROR(cy, topic, error) diag_async_error((cy), (topic), (error), __LINE__)
 
 // Side-effect-safe helper for ON_ASYNC_ERROR() that guarantees a single evaluation of the error expression.
 #define ON_ASYNC_ERROR_IF(cy, topic, error)                \
@@ -199,6 +198,7 @@ static uint32_t topic_subject_id(const cy_topic_t* const topic);
 static size_t   name_normalized_len(const cy_str_t name);
 static cy_str_t name_normalize(const cy_str_t part, const size_t dest_size, char* const dest);
 
+static void diag_async_error(cy_t* const cy, cy_topic_t* const topic, const cy_err_t error, const uint16_t line_number);
 static void diag_topic_created(cy_topic_t* const topic);
 static void diag_topic_destroyed(cy_topic_t* const topic);
 static void diag_topic_reallocated(cy_topic_t* const topic);
@@ -4223,22 +4223,6 @@ static bool is_valid_subject_id_modulus(const uint32_t modulus)
 
 static cy_us_t olga_now(olga_t* const sched) { return cy_now((cy_t*)sched->user); }
 
-static void default_async_error_handler(cy_t* const       cy,
-                                        cy_topic_t* const topic,
-                                        const cy_err_t    error,
-                                        const uint16_t    line_number)
-{
-    CY_TRACE(cy,
-             "❌💥⚠️ %s error=%jd at cy.c:%ju",
-             (topic != NULL) ? topic_repr(topic).str : "<no-topic>",
-             (intmax_t)error,
-             (uintmax_t)line_number);
-    (void)cy;
-    (void)topic;
-    (void)error;
-    (void)line_number;
-}
-
 cy_t* cy_new(cy_platform_t* const platform, const cy_str_t home, const cy_str_t name_space)
 {
     // Home is required. Namespace may be empty.
@@ -4328,8 +4312,7 @@ cy_t* cy_new(cy_platform_t* const platform, const cy_str_t home, const cy_str_t 
     }
     cy->broad_writer->subject_id = broadcast_subject_id;
 
-    cy->async_error_handler = default_async_error_handler;
-    cy->topic_iter          = NULL;
+    cy->topic_iter = NULL;
     CY_TRACE(cy,
              "🚀 ts_started=%ju subject_id_modulus=%ju home=%s ns=%s",
              (uintmax_t)cy->ts_started,
@@ -4384,13 +4367,6 @@ void cy_destroy(cy_t* const cy)
 
     // Cleanup done, release the memory. Home and ns are embedded in the same allocation.
     mem_free(cy, cy);
-}
-
-void cy_async_error_handler_set(cy_t* const cy, const cy_async_error_handler_t handler)
-{
-    if (cy != NULL) {
-        cy->async_error_handler = (handler != NULL) ? handler : default_async_error_handler;
-    }
 }
 
 cy_str_t cy_home(const cy_t* const cy) { return (cy != NULL) ? cy->home : str_invalid; }
@@ -5060,12 +5036,24 @@ cy_resolved_t cy_name_resolve(const cy_str_t name,
         }                                                                      \
     } while (0)
 
+static void diag_async_error(cy_t* const cy, cy_topic_t* const topic, const cy_err_t error, const uint16_t line_number)
+{
+    CY_TRACE(cy,
+             "❌💥⚠️ %s error=%jd at cy.c:%ju",
+             (topic != NULL) ? topic_repr(topic).str : "<no-topic>",
+             (intmax_t)error,
+             (uintmax_t)line_number);
+    DIAG_FOREACH(cy, async_error, topic, error, line_number);
+}
+
 static void diag_topic_created(cy_topic_t* const topic) { DIAG_FOREACH(topic->cy, topic_created, topic); }
 static void diag_topic_destroyed(cy_topic_t* const topic) { DIAG_FOREACH(topic->cy, topic_destroyed, topic); }
+
 static void diag_topic_reallocated(cy_topic_t* const topic)
 {
     DIAG_FOREACH(topic->cy, topic_reallocated, topic, topic_subject_id(topic), topic->evictions);
 }
+
 static void diag_gossip_processed(cy_t* const cy, cy_topic_t* const topic, const cy_str_t name, const uint64_t hash)
 {
     DIAG_FOREACH(cy, gossip_processed, topic, name, hash);

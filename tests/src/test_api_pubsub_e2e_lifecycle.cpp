@@ -93,6 +93,7 @@ struct e_case_result_t final
     std::size_t success_futures{ 0U };
     std::size_t failed_futures{ 0U };
     std::size_t pending_futures{ 0U };
+    std::size_t diag_async_errors{ 0U };
     std::size_t diag_reallocated{ 0U };
     std::size_t diag_created{ 0U };
     std::size_t diag_destroyed{ 0U };
@@ -144,6 +145,8 @@ std::uint64_t diag_capture_fingerprint(const e2e::diag_capture_t& cap)
     h               = mix_hash(h, cap.subject_id);
     h               = mix_hash(h, cap.evictions);
     h               = mix_hash(h, cap.gossip_hash);
+    h               = mix_hash(h, cap.error);
+    h               = mix_hash(h, cap.line_number);
     h               = mix_hash(h, cap.name_len);
     for (std::size_t i = 0U; i < std::min<std::size_t>(16U, cap.name_len); i++) {
         h = mix_hash(h, static_cast<std::uint8_t>(cap.name.at(i)));
@@ -434,6 +437,7 @@ void build_transcript(const e2e::sim_net_t& net, e_case_result_t& result)
     summary               = mix_hash(summary, result.pending_futures);
     summary               = mix_hash(summary, result.log.malformed_count);
     summary               = mix_hash(summary, result.log.duplicate_count);
+    summary               = mix_hash(summary, result.diag_async_errors);
     summary               = mix_hash(summary, result.diag_reallocated);
     summary               = mix_hash(summary, result.diag_created);
     summary               = mix_hash(summary, result.diag_destroyed);
@@ -538,13 +542,13 @@ e_case_result_t run_e_case(const e_case_config_t& cfg)
     e2e::drain_queue(net, now, step_us, 20'000U);
     e2e::assert_quiescent(net);
 
-    g_stats.scenarios++;
-    g_stats.async_errors += e2e::sim_net_async_errors(net).size();
-
     e2e::sim_net_deinit(net);
 
     for (const e2e::diag_capture_t& cap : e2e::sim_net_diag_captures(net)) {
         switch (cap.kind) {
+            case e2e::diag_kind_t::async_error:
+                result.diag_async_errors++;
+                break;
             case e2e::diag_kind_t::topic_reallocated:
                 result.diag_reallocated++;
                 break;
@@ -559,6 +563,9 @@ e_case_result_t run_e_case(const e_case_config_t& cfg)
                 break;
         }
     }
+    g_stats.scenarios++;
+    g_stats.async_errors += result.diag_async_errors;
+
     TEST_ASSERT_TRUE(result.diag_reallocated >= result.diag_created);
     TEST_ASSERT_EQUAL_size_t(result.diag_created, result.diag_destroyed);
 

@@ -32,12 +32,13 @@ typedef struct
     cy_err_t last_async_error;
     uint16_t last_async_error_line;
 
-    uint8_t last_multicast_header;
-    uint8_t last_unicast_header;
-    byte_t  last_multicast[HEADER_BYTES];
-    size_t  last_multicast_size;
-    byte_t  last_unicast[HEADER_BYTES + 16U];
-    size_t  last_unicast_size;
+    uint8_t   last_multicast_header;
+    uint8_t   last_unicast_header;
+    byte_t    last_multicast[HEADER_BYTES];
+    size_t    last_multicast_size;
+    byte_t    last_unicast[HEADER_BYTES + 16U];
+    size_t    last_unicast_size;
+    cy_diag_t diag;
 
     subject_tracker_t active_readers;
     subject_tracker_t active_writers;
@@ -197,10 +198,10 @@ static uint64_t fixture_random(cy_platform_t* const platform)
     return self->random_state;
 }
 
-static void fixture_async_error_handler(cy_t* const       cy,
-                                        cy_topic_t* const topic,
-                                        const cy_err_t    error,
-                                        const uint16_t    line_number)
+static void fixture_diag_async_error(cy_t* const       cy,
+                                     cy_topic_t* const topic,
+                                     const cy_err_t    error,
+                                     const uint16_t    line_number)
 {
     (void)topic;
     fixture_t* const self = fixture_from(cy->platform);
@@ -208,6 +209,10 @@ static void fixture_async_error_handler(cy_t* const       cy,
     self->last_async_error      = error;
     self->last_async_error_line = line_number;
 }
+
+static const cy_diag_vtable_t fixture_diag_vtable = {
+    .async_error = fixture_diag_async_error,
+};
 
 static void fixture_init(fixture_t* const self)
 {
@@ -243,7 +248,8 @@ static void fixture_init(fixture_t* const self)
 
     self->cy = cy_new(&self->platform, cy_str("test"), (cy_str_t){ 0, NULL });
     TEST_ASSERT_NOT_NULL(self->cy);
-    cy_async_error_handler_set(self->cy, fixture_async_error_handler);
+    self->diag = (cy_diag_t){ .next = NULL, .vtable = &fixture_diag_vtable };
+    cy_diag_add(self->cy, &self->diag);
 }
 
 static void fixture_spin_to(fixture_t* const self, const cy_us_t now)

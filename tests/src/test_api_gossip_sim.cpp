@@ -49,6 +49,7 @@ struct sim_node_t final
     std::uint64_t random_state{ UINT64_C(0x0123456789ABCDEF) };
 
     sim_subject_reader_t* readers{ nullptr };
+    cy_diag_t             diag{};
 
     std::size_t subject_send_count{ 0U };
     std::size_t unicast_send_count{ 0U };
@@ -316,10 +317,10 @@ extern "C" std::uint64_t sim_random(cy_platform_t* const platform)
     return self->random_state;
 }
 
-extern "C" void sim_on_async_error(cy_t* const         cy,
-                                   cy_topic_t* const   topic,
-                                   const cy_err_t      error,
-                                   const std::uint16_t line_number)
+extern "C" void sim_on_diag_async_error(cy_t* const         cy,
+                                        cy_topic_t* const   topic,
+                                        const cy_err_t      error,
+                                        const std::uint16_t line_number)
 {
     (void)cy;
     (void)topic;
@@ -327,6 +328,14 @@ extern "C" void sim_on_async_error(cy_t* const         cy,
     (void)line_number;
     TEST_FAIL_MESSAGE("Unexpected async error in simulation");
 }
+
+const cy_diag_vtable_t sim_diag_vtable = {
+    .async_error       = sim_on_diag_async_error,
+    .topic_created     = nullptr,
+    .topic_destroyed   = nullptr,
+    .topic_reallocated = nullptr,
+    .gossip_processed  = nullptr,
+};
 
 void network_node_init(sim_network_t& net, const std::size_t index)
 {
@@ -361,7 +370,8 @@ void network_node_init(sim_network_t& net, const std::size_t index)
     const std::string home           = "node" + std::to_string(index);
     node.cy                          = cy_new(&node.platform, cy_str(home.c_str()), cy_str_t{ 0, nullptr });
     TEST_ASSERT_NOT_NULL(node.cy);
-    cy_async_error_handler_set(node.cy, sim_on_async_error);
+    node.diag = cy_diag_t{ .next = nullptr, .vtable = &sim_diag_vtable };
+    cy_diag_add(node.cy, &node.diag);
 }
 
 void network_node_deinit(sim_node_t& node)

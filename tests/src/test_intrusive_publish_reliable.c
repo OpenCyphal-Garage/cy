@@ -14,9 +14,10 @@ typedef struct
     size_t fail_after;      ///< Fail N-th new allocation if new_alloc_count >= fail_after.
     size_t new_alloc_count; ///< Counts new allocations only, excludes realloc/free.
 
-    size_t   async_error_count;
-    cy_err_t last_async_error;
-    uint16_t last_async_error_line;
+    size_t    async_error_count;
+    cy_err_t  last_async_error;
+    uint16_t  last_async_error_line;
+    cy_diag_t diag;
 
     cy_err_t unicast_send_result;
     size_t   unicast_send_count;
@@ -60,10 +61,10 @@ static cy_err_t fixture_unicast_send(cy_platform_t* const   platform,
     return self->unicast_send_result;
 }
 
-static void fixture_on_async_error(cy_t* const       cy,
-                                   cy_topic_t* const topic,
-                                   const cy_err_t    error,
-                                   const uint16_t    line_number)
+static void fixture_diag_async_error(cy_t* const       cy,
+                                     cy_topic_t* const topic,
+                                     const cy_err_t    error,
+                                     const uint16_t    line_number)
 {
     (void)topic;
     fixture_t* const self = (fixture_t*)cy->platform;
@@ -71,6 +72,10 @@ static void fixture_on_async_error(cy_t* const       cy,
     self->last_async_error      = error;
     self->last_async_error_line = line_number;
 }
+
+static const cy_diag_vtable_t fixture_diag_vtable = {
+    .async_error = fixture_diag_async_error,
+};
 
 static void fixture_init(fixture_t* const self)
 {
@@ -82,11 +87,12 @@ static void fixture_init(fixture_t* const self)
     self->vtable.realloc              = fixture_realloc;
     self->vtable.unicast              = fixture_unicast_send;
     self->cy.platform                 = &self->platform;
-    self->cy.async_error_handler      = fixture_on_async_error;
-    self->fail_after                  = SIZE_MAX;
-    self->new_alloc_count             = 0;
-    self->last_async_error            = CY_OK;
-    self->unicast_send_result         = CY_OK;
+    self->diag                        = (cy_diag_t){ .next = NULL, .vtable = &fixture_diag_vtable };
+    cy_diag_add(&self->cy, &self->diag);
+    self->fail_after          = SIZE_MAX;
+    self->new_alloc_count     = 0;
+    self->last_async_error    = CY_OK;
+    self->unicast_send_result = CY_OK;
 }
 
 static void fixture_set_fail_after(fixture_t* const self, const size_t fail_after)

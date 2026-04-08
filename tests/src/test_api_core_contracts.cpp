@@ -30,6 +30,7 @@ enum class diag_event_kind_t
     created,
     destroyed,
     gossip_processed,
+    async_error,
 };
 
 struct diag_event_t
@@ -39,6 +40,8 @@ struct diag_event_t
     std::uint64_t                            hash{ 0U };
     std::uint32_t                            subject_id{ 0U };
     std::uint32_t                            evictions{ 0U };
+    cy_err_t                                 error{ CY_OK };
+    std::uint16_t                            line_number{ 0U };
     std::size_t                              name_len{ 0U };
     std::array<char, CY_TOPIC_NAME_MAX + 1U> name{};
 };
@@ -71,6 +74,8 @@ struct local_pin_case_t
 
 struct test_platform_t final : api_test::test_platform_base_t
 {
+    cy_diag_t async_diag{};
+
     cy_err_t    spin_result{ CY_OK };
     std::size_t spin_call_count{ 0U };
     cy_us_t     spin_last_deadline{ 0 };
@@ -79,6 +84,7 @@ struct test_platform_t final : api_test::test_platform_base_t
     std::size_t multicast_send_count{ 0U };
     std::size_t unicast_send_count{ 0U };
     std::size_t unicast_extent{ 0U };
+    cy_err_t    subject_send_result{ CY_OK };
 
     std::size_t fail_alloc_count{ 0U };
     std::size_t fail_alloc_size{ 0U };
@@ -129,8 +135,9 @@ extern "C" cy_err_t platform_subject_writer_send(cy_platform_t* const       plat
     (void)deadline;
     (void)priority;
     (void)message;
-    platform_from(platform)->multicast_send_count++;
-    return CY_OK;
+    test_platform_t* const self = platform_from(platform);
+    self->multicast_send_count++;
+    return self->subject_send_result;
 }
 
 extern "C" cy_subject_reader_t* platform_subject_reader_new(cy_platform_t* const platform,
@@ -213,10 +220,10 @@ extern "C" std::uint64_t platform_random(cy_platform_t* const platform)
     return api_test::random_lcg<test_platform_t>(platform);
 }
 
-extern "C" void platform_on_async_error(cy_t* const         cy,
-                                        cy_topic_t* const   topic,
-                                        const cy_err_t      error,
-                                        const std::uint16_t line_number)
+extern "C" void platform_diag_async_error(cy_t* const         cy,
+                                          cy_topic_t* const   topic,
+                                          const cy_err_t      error,
+                                          const std::uint16_t line_number)
 {
     (void)cy;
     (void)topic;
@@ -238,6 +245,8 @@ void diag_push(const diag_event_kind_t kind,
                const std::uint64_t     hash,
                const std::uint32_t     subject_id,
                const std::uint32_t     evictions,
+               const cy_err_t          error,
+               const std::uint16_t     line_number,
                const cy_str_t          name)
 {
     TEST_ASSERT_NOT_NULL(g_diag_collector);
@@ -251,6 +260,8 @@ void diag_push(const diag_event_kind_t kind,
     out.hash          = hash;
     out.subject_id    = subject_id;
     out.evictions     = evictions;
+    out.error         = error;
+    out.line_number   = line_number;
     out.name_len      = std::min<std::size_t>(name.len, CY_TOPIC_NAME_MAX);
     if ((out.name_len > 0U) && (name.str != nullptr)) {
         (void)std::memcpy(out.name.data(), name.str, out.name_len);
@@ -266,8 +277,14 @@ extern "C" void on_diag_one_topic_reallocated(cy_t* const         cy,
     (void)cy;
     TEST_ASSERT_NOT_NULL(g_diag_collector);
     g_diag_collector->listener_one_calls++;
-    diag_push(
-      diag_event_kind_t::reallocated, topic, cy_topic_hash(topic), subject_id, evictions, cy_str_t{ 0, nullptr });
+    diag_push(diag_event_kind_t::reallocated,
+              topic,
+              cy_topic_hash(topic),
+              subject_id,
+              evictions,
+              CY_OK,
+              0U,
+              cy_str_t{ 0, nullptr });
 }
 
 extern "C" void on_diag_one_topic_created(cy_t* const cy, cy_topic_t* const topic)
@@ -275,7 +292,7 @@ extern "C" void on_diag_one_topic_created(cy_t* const cy, cy_topic_t* const topi
     (void)cy;
     TEST_ASSERT_NOT_NULL(g_diag_collector);
     g_diag_collector->listener_one_calls++;
-    diag_push(diag_event_kind_t::created, topic, cy_topic_hash(topic), 0U, 0U, cy_str_t{ 0, nullptr });
+    diag_push(diag_event_kind_t::created, topic, cy_topic_hash(topic), 0U, 0U, CY_OK, 0U, cy_str_t{ 0, nullptr });
 }
 
 extern "C" void on_diag_one_topic_destroyed(cy_t* const cy, cy_topic_t* const topic)
@@ -283,7 +300,7 @@ extern "C" void on_diag_one_topic_destroyed(cy_t* const cy, cy_topic_t* const to
     (void)cy;
     TEST_ASSERT_NOT_NULL(g_diag_collector);
     g_diag_collector->listener_one_calls++;
-    diag_push(diag_event_kind_t::destroyed, topic, cy_topic_hash(topic), 0U, 0U, cy_str_t{ 0, nullptr });
+    diag_push(diag_event_kind_t::destroyed, topic, cy_topic_hash(topic), 0U, 0U, CY_OK, 0U, cy_str_t{ 0, nullptr });
 }
 
 extern "C" void on_diag_one_gossip_processed(cy_t* const         cy,
@@ -294,7 +311,25 @@ extern "C" void on_diag_one_gossip_processed(cy_t* const         cy,
     (void)cy;
     TEST_ASSERT_NOT_NULL(g_diag_collector);
     g_diag_collector->listener_one_calls++;
-    diag_push(diag_event_kind_t::gossip_processed, topic, hash, 0U, 0U, name);
+    diag_push(diag_event_kind_t::gossip_processed, topic, hash, 0U, 0U, CY_OK, 0U, name);
+}
+
+extern "C" void on_diag_one_async_error(cy_t* const         cy,
+                                        cy_topic_t* const   topic,
+                                        const cy_err_t      error,
+                                        const std::uint16_t line_number)
+{
+    (void)cy;
+    TEST_ASSERT_NOT_NULL(g_diag_collector);
+    g_diag_collector->listener_one_calls++;
+    diag_push(diag_event_kind_t::async_error,
+              topic,
+              (topic != nullptr) ? cy_topic_hash(topic) : 0U,
+              0U,
+              0U,
+              error,
+              line_number,
+              cy_str_t{ 0, nullptr });
 }
 
 extern "C" void on_diag_two_topic_reallocated(cy_t* const         cy,
@@ -339,7 +374,21 @@ extern "C" void on_diag_two_gossip_processed(cy_t* const         cy,
     g_diag_collector->listener_two_calls++;
 }
 
+extern "C" void on_diag_two_async_error(cy_t* const         cy,
+                                        cy_topic_t* const   topic,
+                                        const cy_err_t      error,
+                                        const std::uint16_t line_number)
+{
+    (void)cy;
+    (void)topic;
+    (void)error;
+    (void)line_number;
+    TEST_ASSERT_NOT_NULL(g_diag_collector);
+    g_diag_collector->listener_two_calls++;
+}
+
 const cy_diag_vtable_t diag_listener_one_vtable = {
+    .async_error       = on_diag_one_async_error,
     .topic_created     = on_diag_one_topic_created,
     .topic_destroyed   = on_diag_one_topic_destroyed,
     .topic_reallocated = on_diag_one_topic_reallocated,
@@ -347,10 +396,19 @@ const cy_diag_vtable_t diag_listener_one_vtable = {
 };
 
 const cy_diag_vtable_t diag_listener_two_vtable = {
+    .async_error       = on_diag_two_async_error,
     .topic_created     = on_diag_two_topic_created,
     .topic_destroyed   = on_diag_two_topic_destroyed,
     .topic_reallocated = on_diag_two_topic_reallocated,
     .gossip_processed  = on_diag_two_gossip_processed,
+};
+
+const cy_diag_vtable_t platform_async_diag_vtable = {
+    .async_error       = platform_diag_async_error,
+    .topic_created     = nullptr,
+    .topic_destroyed   = nullptr,
+    .topic_reallocated = nullptr,
+    .gossip_processed  = nullptr,
 };
 
 void platform_prepare(test_platform_t* const self)
@@ -385,6 +443,8 @@ void platform_init(test_platform_t* const self)
     platform_prepare(self);
     self->cy = cy_new(&self->platform, cy_str("test"), cy_str_t{ 0, nullptr });
     TEST_ASSERT_NOT_NULL(self->cy);
+    self->async_diag = cy_diag_t{ .next = nullptr, .vtable = &platform_async_diag_vtable };
+    cy_diag_add(self->cy, &self->async_diag);
 }
 
 void platform_deinit(test_platform_t* const self) { api_test::standard_deinit(*self); }
@@ -720,16 +780,42 @@ void test_api_core_diag_listener_contracts()
     TEST_ASSERT_TRUE(collector.events.at(0U).subject_id > CY_SUBJECT_ID_PINNED_MAX);
     TEST_ASSERT_EQUAL_UINT32(0U, collector.events.at(0U).evictions);
 
+    cy_future_t* const sub = cy_subscribe(platform.cy, cy_str("core/diag/*"), 128U);
+    TEST_ASSERT_NOT_NULL(sub);
+    platform.alloc_counter       = 0U;
+    platform.fail_after_n_allocs = 0U;
+    dispatch_gossip_unicast(&platform,
+                            rapidhash("core/diag/remote", std::strlen("core/diag/remote")),
+                            0U,
+                            0,
+                            cy_str("core/diag/remote"),
+                            UINT64_C(0xA11CE),
+                            platform.now);
+    platform.fail_after_n_allocs = SIZE_MAX;
+    TEST_ASSERT_EQUAL_size_t(4U, collector.count);
+    TEST_ASSERT_EQUAL_size_t(4U, collector.listener_one_calls);
+    TEST_ASSERT_EQUAL_size_t(4U, collector.listener_two_calls);
+    TEST_ASSERT_TRUE(collector.events.at(2U).kind == diag_event_kind_t::async_error);
+    TEST_ASSERT_NULL(collector.events.at(2U).topic);
+    TEST_ASSERT_EQUAL_INT(CY_ERR_MEMORY, collector.events.at(2U).error);
+    TEST_ASSERT_TRUE(collector.events.at(2U).line_number > 0U);
+    TEST_ASSERT_TRUE(collector.events.at(3U).kind == diag_event_kind_t::gossip_processed);
+    TEST_ASSERT_NULL(collector.events.at(3U).topic);
+    TEST_ASSERT_EQUAL_UINT64(rapidhash("core/diag/remote", std::strlen("core/diag/remote")),
+                             collector.events.at(3U).hash);
+
     cy_diag_remove(platform.cy, &listener_two);
     cy_diag_remove(platform.cy, &listener_two);
+    cy_future_destroy(sub);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
     cy_unadvertise(pub);
     platform_deinit(&platform);
 
-    TEST_ASSERT_EQUAL_size_t(3U, collector.listener_one_calls);
-    TEST_ASSERT_EQUAL_size_t(2U, collector.listener_two_calls);
-    TEST_ASSERT_EQUAL_size_t(3U, collector.count);
-    TEST_ASSERT_TRUE(collector.events.at(2U).kind == diag_event_kind_t::destroyed);
-    TEST_ASSERT_TRUE(collector.events.at(2U).topic == collector.events.at(1U).topic);
+    TEST_ASSERT_EQUAL_size_t(5U, collector.listener_one_calls);
+    TEST_ASSERT_EQUAL_size_t(4U, collector.listener_two_calls);
+    TEST_ASSERT_EQUAL_size_t(5U, collector.count);
+    TEST_ASSERT_TRUE(collector.events.at(4U).kind == diag_event_kind_t::destroyed);
+    TEST_ASSERT_TRUE(collector.events.at(4U).topic == collector.events.at(1U).topic);
 
     g_diag_collector = nullptr;
 }
@@ -821,8 +907,6 @@ void test_api_core_message_contract_and_future_callback_getter()
     const cy_str_t null_topic_name = cy_topic_name(nullptr);
     TEST_ASSERT_EQUAL_size_t(0U, null_topic_name.len);
     TEST_ASSERT_EQUAL_UINT64(UINT64_MAX, cy_topic_hash(nullptr));
-    cy_async_error_handler_set(nullptr, nullptr);
-
     cy_future_destroy(sub);
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
     TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_live_count());
@@ -1165,8 +1249,6 @@ void test_api_core_advertise_oom_sweep()
     for (std::size_t n = 0U; n < 100U; n++) {
         test_platform_t platform{};
         platform_init(&platform);
-        cy_async_error_handler_set(platform.cy, platform_on_async_error);
-
         platform.alloc_counter       = 0U;
         platform.fail_after_n_allocs = n;
 
@@ -1192,8 +1274,6 @@ void test_api_core_subscribe_oom_sweep()
     for (std::size_t n = 0U; n < 100U; n++) {
         test_platform_t platform{};
         platform_init(&platform);
-        cy_async_error_handler_set(platform.cy, platform_on_async_error);
-
         platform.alloc_counter       = 0U;
         platform.fail_after_n_allocs = n;
 
@@ -1217,8 +1297,6 @@ void test_api_core_subscribe_pattern_oom_sweep()
     for (std::size_t n = 0U; n < 100U; n++) {
         test_platform_t platform{};
         platform_init(&platform);
-        cy_async_error_handler_set(platform.cy, platform_on_async_error);
-
         platform.alloc_counter       = 0U;
         platform.fail_after_n_allocs = n;
 
@@ -1276,8 +1354,6 @@ void test_api_core_subscribe_then_advertise_oom_sweep()
     for (std::size_t n = 0U; n < 100U; n++) {
         test_platform_t platform{};
         platform_init(&platform);
-        cy_async_error_handler_set(platform.cy, platform_on_async_error);
-
         // Create a pattern subscriber first -- this populates subscriber_by_pattern.
         cy_future_t* const sub = cy_subscribe(platform.cy, cy_str("oom/*/coupling"), 128U);
         TEST_ASSERT_NOT_NULL(sub);
@@ -1309,8 +1385,6 @@ void test_api_core_dedup_oom_on_reliable_message()
 {
     test_platform_t platform{};
     platform_init(&platform);
-    cy_async_error_handler_set(platform.cy, platform_on_async_error);
-
     cy_future_t* const sub = cy_subscribe(platform.cy, cy_str("oom/dedup/topic"), 256U);
     TEST_ASSERT_NOT_NULL(sub);
     const cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("oom/dedup/topic"));
@@ -1372,7 +1446,6 @@ void test_api_core_gossip_coupling_oom_sweep()
     for (std::size_t n = 0U; n < 100U; n++) {
         test_platform_t platform{};
         platform_init(&platform);
-        cy_async_error_handler_set(platform.cy, platform_on_async_error);
         cy_test_message_reset_counters();
 
         // Create a pattern subscriber first.
@@ -1414,7 +1487,6 @@ void test_api_core_gossip_pins_topic_with_pub_writer()
 {
     test_platform_t platform{};
     platform_init(&platform);
-    cy_async_error_handler_set(platform.cy, platform_on_async_error);
     cy_test_message_reset_counters();
 
     // Advertise a non-pinned topic and publish on it to create the pub_writer lazily.

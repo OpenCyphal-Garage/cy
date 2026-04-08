@@ -2,6 +2,7 @@
 #include "message.h"
 #include <array>
 #include <cstdint>
+#include <ranges>
 #include <unity.h>
 
 namespace e2e {
@@ -63,7 +64,12 @@ cy_err_t drive_round_vector(sim_net_t& net, const std::vector<cy_us_t>& now_by_n
     return CY_OK;
 }
 
-void assert_no_async_errors(const sim_net_t& net) { TEST_ASSERT_EQUAL_size_t(0U, sim_net_async_errors(net).size()); }
+void assert_no_async_errors(const sim_net_t& net)
+{
+    const bool has_async_error = std::ranges::any_of(
+      sim_net_diag_captures(net), [](const diag_capture_t& cap) { return cap.kind == diag_kind_t::async_error; });
+    TEST_ASSERT_FALSE(has_async_error);
+}
 
 void assert_node_heap_clean(const sim_net_t& net, const std::size_t node_index)
 {

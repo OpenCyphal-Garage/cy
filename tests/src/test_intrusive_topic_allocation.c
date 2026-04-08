@@ -18,9 +18,10 @@ typedef struct
     bool   fail_subject_writer_new;
     bool   fail_subject_reader_new;
 
-    size_t subject_reader_destroy_count;
-    size_t subject_writer_destroy_count;
-    size_t async_error_count;
+    size_t    subject_reader_destroy_count;
+    size_t    subject_writer_destroy_count;
+    size_t    async_error_count;
+    cy_diag_t diag;
 
     subject_tracker_t active_readers;
     subject_tracker_t active_writers;
@@ -147,7 +148,7 @@ static cy_err_t fixture_spin(cy_platform_t* const platform, const cy_us_t deadli
     return CY_OK;
 }
 
-static void fixture_on_async_error(cy_t* const cy, cy_topic_t* const topic, const cy_err_t error, const uint16_t line)
+static void fixture_diag_async_error(cy_t* const cy, cy_topic_t* const topic, const cy_err_t error, const uint16_t line)
 {
     (void)topic;
     (void)error;
@@ -155,6 +156,10 @@ static void fixture_on_async_error(cy_t* const cy, cy_topic_t* const topic, cons
     fixture_t* const self = fixture_from(cy->platform);
     self->async_error_count++;
 }
+
+static const cy_diag_vtable_t fixture_diag_vtable = {
+    .async_error = fixture_diag_async_error,
+};
 
 static void fixture_init(fixture_t* const self)
 {
@@ -176,7 +181,8 @@ static void fixture_init(fixture_t* const self)
     self->vtable.random                    = fixture_random;
     self->cy                               = cy_new(&self->platform, cy_str("test"), (cy_str_t){ 0, NULL });
     TEST_ASSERT_NOT_NULL(self->cy);
-    cy_async_error_handler_set(self->cy, fixture_on_async_error);
+    self->diag = (cy_diag_t){ .next = NULL, .vtable = &fixture_diag_vtable };
+    cy_diag_add(self->cy, &self->diag);
 }
 
 static void fixture_deinit(fixture_t* const self)
