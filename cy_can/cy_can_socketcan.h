@@ -20,7 +20,7 @@ extern "C"
 #endif
 
 /// Create a SocketCAN-backed CAN platform instance bound to the given interface names (e.g., "can0", "can1").
-/// All interfaces must share the same CAN FD capability; FD is auto-detected.
+/// CAN FD is auto-detected from the bound interfaces; if any interface is classic-CAN-only, all traffic uses classic.
 /// Returns NULL on failure (e.g., interface not found, socket error).
 cy_platform_t* cy_can_socketcan_new(const uint_least8_t iface_count,
                                     const char* const   iface_names[],

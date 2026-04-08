@@ -46,6 +46,7 @@
       <w>nolintbegin</w>
       <w>nsubs</w>
       <w>opencyphal</w>
+      <w>pipefail</w>
       <w>pktinfo</w>
       <w>popcount</w>
       <w>prevprime</w>
@@ -73,6 +74,7 @@
       <w>undup</w>
       <w>unremap</w>
       <w>usec</w>
+      <w>vcan</w>
       <w>vtbl</w>
       <w>xffffe</w>
       <w>zmaap</w>
