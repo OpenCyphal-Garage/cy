@@ -25,13 +25,37 @@ struct send_capture_t
     std::array<unsigned char, 256> data{};
 };
 
+enum class diag_event_kind_t
+{
+    reallocated,
+    created,
+    destroyed,
+    gossip_processed,
+};
+
+struct diag_capture_t
+{
+    diag_event_kind_t                        kind{ diag_event_kind_t::created };
+    cy_topic_t*                              topic{ nullptr };
+    std::uint64_t                            hash{ 0U };
+    std::uint32_t                            subject_id{ 0U };
+    std::uint32_t                            evictions{ 0U };
+    std::size_t                              name_len{ 0U };
+    std::array<char, CY_TOPIC_NAME_MAX + 1U> name{};
+};
+
 struct test_platform_t final : api_test::test_platform_base_t
 {
     std::size_t                    subject_send_count{ 0U };
     std::size_t                    unicast_send_count{ 0U };
     std::size_t                    capture_count{ 0U };
     std::array<send_capture_t, 64> captures{};
+    cy_diag_t                      diag{};
+    std::size_t                    diag_count{ 0U };
+    std::array<diag_capture_t, 64> diag_captures{};
 };
+
+test_platform_t* g_diag_platform = nullptr; // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 
 test_platform_t* platform_from(cy_platform_t* const platform)
 {
@@ -59,6 +83,80 @@ void capture_send(test_platform_t* const self,
     out.lane_id         = lane_id;
     out.size            = gossip_test::flatten_fragments(message, out.data.data(), out.data.size());
 }
+
+void capture_diag(test_platform_t* const  self,
+                  const diag_event_kind_t kind,
+                  cy_topic_t* const       topic,
+                  const std::uint64_t     hash,
+                  const std::uint32_t     subject_id,
+                  const std::uint32_t     evictions,
+                  const cy_str_t          name)
+{
+    if (self->diag_count >= self->diag_captures.size()) {
+        return;
+    }
+    diag_capture_t& out = self->diag_captures.at(self->diag_count++);
+    out                 = diag_capture_t{};
+    out.kind            = kind;
+    out.topic           = topic;
+    out.hash            = hash;
+    out.subject_id      = subject_id;
+    out.evictions       = evictions;
+    out.name_len        = std::min<std::size_t>(name.len, CY_TOPIC_NAME_MAX);
+    if ((out.name_len > 0U) && (name.str != nullptr)) {
+        std::memcpy(out.name.data(), name.str, out.name_len);
+    }
+    out.name.at(out.name_len) = '\0';
+}
+
+extern "C" void platform_diag_topic_reallocated(cy_t* const         cy,
+                                                cy_topic_t* const   topic,
+                                                const std::uint32_t subject_id,
+                                                const std::uint32_t evictions)
+{
+    (void)cy;
+    TEST_ASSERT_NOT_NULL(g_diag_platform);
+    capture_diag(g_diag_platform,
+                 diag_event_kind_t::reallocated,
+                 topic,
+                 cy_topic_hash(topic),
+                 subject_id,
+                 evictions,
+                 cy_str_t{ 0, nullptr });
+}
+
+extern "C" void platform_diag_topic_created(cy_t* const cy, cy_topic_t* const topic)
+{
+    (void)cy;
+    TEST_ASSERT_NOT_NULL(g_diag_platform);
+    capture_diag(
+      g_diag_platform, diag_event_kind_t::created, topic, cy_topic_hash(topic), 0U, 0U, cy_str_t{ 0, nullptr });
+}
+
+extern "C" void platform_diag_topic_destroyed(cy_t* const cy, cy_topic_t* const topic)
+{
+    (void)cy;
+    TEST_ASSERT_NOT_NULL(g_diag_platform);
+    capture_diag(
+      g_diag_platform, diag_event_kind_t::destroyed, topic, cy_topic_hash(topic), 0U, 0U, cy_str_t{ 0, nullptr });
+}
+
+extern "C" void platform_diag_gossip_processed(cy_t* const         cy,
+                                               cy_topic_t* const   topic,
+                                               const cy_str_t      name,
+                                               const std::uint64_t hash)
+{
+    (void)cy;
+    TEST_ASSERT_NOT_NULL(g_diag_platform);
+    capture_diag(g_diag_platform, diag_event_kind_t::gossip_processed, topic, hash, 0U, 0U, name);
+}
+
+const cy_diag_vtable_t platform_diag_vtable = {
+    .topic_created     = platform_diag_topic_created,
+    .topic_destroyed   = platform_diag_topic_destroyed,
+    .topic_reallocated = platform_diag_topic_reallocated,
+    .gossip_processed  = platform_diag_gossip_processed,
+};
 
 extern "C" cy_subject_writer_t* platform_subject_writer_new(cy_platform_t* const platform,
                                                             const std::uint32_t  subject_id)
@@ -154,7 +252,8 @@ extern "C" void platform_on_async_error(cy_t* const         cy,
 
 void platform_init(test_platform_t& self)
 {
-    self = test_platform_t{};
+    self            = test_platform_t{};
+    g_diag_platform = &self;
     guarded_heap_init(&self.core_heap, UINT64_C(0xAAAABBBBCCCCDDDD));
     guarded_heap_init(&self.message_heap, UINT64_C(0x1111222233334444));
 
@@ -174,9 +273,17 @@ void platform_init(test_platform_t& self)
     self.cy = cy_new(&self.platform, cy_str("test"), cy_str_t{ 0, nullptr });
     TEST_ASSERT_NOT_NULL(self.cy);
     cy_async_error_handler_set(self.cy, platform_on_async_error);
+    self.diag = cy_diag_t{ .next = nullptr, .vtable = &platform_diag_vtable };
+    cy_diag_add(self.cy, &self.diag);
 }
 
-void platform_deinit(test_platform_t& self) { api_test::standard_deinit(self); }
+void platform_deinit(test_platform_t& self)
+{
+    api_test::standard_deinit(self);
+    g_diag_platform = nullptr;
+}
+
+void reset_diag(test_platform_t& self) { self.diag_count = 0U; }
 
 void dispatch_raw(test_platform_t&                      platform,
                   const std::array<unsigned char, 256>& wire,
@@ -846,6 +953,139 @@ void test_api_gossip_discovered_implicit_topic_keeps_allocation_after_local_pin_
     platform_deinit(p);
 }
 
+void test_api_diag_gossip_no_match_reports_null_topic()
+{
+    test_platform_t p{};
+    platform_init(p);
+
+    reset_diag(p);
+    dispatch_gossip(p,
+                    cy_lane_t{ .id = 240U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
+                    nullptr,
+                    4U,
+                    0,
+                    UINT64_C(0x1000000000004401),
+                    0U,
+                    "api/diag/unknown/topic",
+                    p.now);
+
+    TEST_ASSERT_EQUAL_size_t(1U, p.diag_count);
+    TEST_ASSERT_TRUE(p.diag_captures.at(0U).kind == diag_event_kind_t::gossip_processed);
+    TEST_ASSERT_TRUE(p.diag_captures.at(0U).topic == nullptr);
+    TEST_ASSERT_EQUAL_UINT64(UINT64_C(0x1000000000004401), p.diag_captures.at(0U).hash);
+    TEST_ASSERT_EQUAL_size_t(std::strlen("api/diag/unknown/topic"), p.diag_captures.at(0U).name_len);
+    TEST_ASSERT_EQUAL_MEMORY(
+      "api/diag/unknown/topic", p.diag_captures.at(0U).name.data(), p.diag_captures.at(0U).name_len);
+
+    platform_deinit(p);
+}
+
+void test_api_diag_gossip_known_and_autocreated_ordering()
+{
+    test_platform_t p{};
+    platform_init(p);
+
+    static const char* const known_name = "api/diag/known/topic";
+    cy_publisher_t* const    pub        = cy_advertise(p.cy, cy_str(known_name));
+    TEST_ASSERT_NOT_NULL(pub);
+    const cy_topic_t* const known_topic = cy_topic_find_by_name(p.cy, cy_str(known_name));
+    TEST_ASSERT_NOT_NULL(known_topic);
+
+    reset_diag(p);
+    dispatch_gossip(p,
+                    cy_lane_t{ .id = 241U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
+                    nullptr,
+                    4U,
+                    0,
+                    cy_topic_hash(known_topic),
+                    0U,
+                    known_name,
+                    p.now);
+    TEST_ASSERT_EQUAL_size_t(1U, p.diag_count);
+    TEST_ASSERT_TRUE(p.diag_captures.at(0U).kind == diag_event_kind_t::gossip_processed);
+    TEST_ASSERT_TRUE(p.diag_captures.at(0U).topic == known_topic);
+
+    cy_future_t* const pattern = cy_subscribe(p.cy, cy_str("api/diag/auto/*"), 128U);
+    TEST_ASSERT_NOT_NULL(pattern);
+    reset_diag(p);
+    {
+        static const char* const auto_name = "api/diag/auto/topic";
+        const std::uint64_t      auto_hash = rapidhash(auto_name, std::strlen(auto_name));
+        dispatch_gossip(p,
+                        cy_lane_t{ .id = 242U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
+                        nullptr,
+                        4U,
+                        0,
+                        auto_hash,
+                        0U,
+                        auto_name,
+                        p.now);
+        TEST_ASSERT_EQUAL_size_t(3U, p.diag_count);
+        TEST_ASSERT_TRUE(p.diag_captures.at(0U).kind == diag_event_kind_t::reallocated);
+        TEST_ASSERT_TRUE(p.diag_captures.at(1U).kind == diag_event_kind_t::created);
+        TEST_ASSERT_TRUE(p.diag_captures.at(2U).kind == diag_event_kind_t::gossip_processed);
+        TEST_ASSERT_TRUE(p.diag_captures.at(0U).topic == p.diag_captures.at(1U).topic);
+        TEST_ASSERT_TRUE(p.diag_captures.at(1U).topic == p.diag_captures.at(2U).topic);
+        TEST_ASSERT_EQUAL_UINT64(auto_hash, p.diag_captures.at(2U).hash);
+        TEST_ASSERT_EQUAL_MEMORY(auto_name, p.diag_captures.at(2U).name.data(), p.diag_captures.at(2U).name_len);
+    }
+
+    cy_unadvertise(pub);
+    cy_future_destroy(pattern);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(p.cy));
+    platform_deinit(p);
+}
+
+void test_api_diag_gossip_known_topic_local_loss_emits_reallocated_then_processed()
+{
+    test_platform_t p{};
+    platform_init(p);
+
+    static const char* const local_topic_name = "api/diag/local-loss/topic";
+    cy_publisher_t* const    pub              = cy_advertise(p.cy, cy_str(local_topic_name));
+    TEST_ASSERT_NOT_NULL(pub);
+    const cy_topic_t* const local_topic = cy_topic_find_by_name(p.cy, cy_str(local_topic_name));
+    TEST_ASSERT_NOT_NULL(local_topic);
+
+    p.now = 32'000'000;
+    spin_for(p, 50'000);
+    reset_diag(p);
+
+    dispatch_gossip(p,
+                    cy_lane_t{ .id = 243U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
+                    nullptr,
+                    4U,
+                    20,
+                    cy_topic_hash(local_topic),
+                    2U,
+                    local_topic_name,
+                    p.now);
+
+    TEST_ASSERT_EQUAL_size_t(2U, p.diag_count);
+    TEST_ASSERT_TRUE(p.diag_captures.at(0U).kind == diag_event_kind_t::reallocated);
+    TEST_ASSERT_TRUE(p.diag_captures.at(1U).kind == diag_event_kind_t::gossip_processed);
+    TEST_ASSERT_TRUE(p.diag_captures.at(0U).topic == local_topic);
+    TEST_ASSERT_TRUE(p.diag_captures.at(1U).topic == local_topic);
+    TEST_ASSERT_EQUAL_UINT32(2U, p.diag_captures.at(0U).evictions);
+
+    cy_unadvertise(pub);
+    platform_deinit(p);
+}
+
+void test_api_diag_invalid_gossip_has_no_callbacks()
+{
+    test_platform_t p{};
+    platform_init(p);
+    cy_test_message_reset_counters();
+    const cy_lane_t lane = { .id = 244U, .ctx = { { 0 } }, .prio = cy_prio_nominal };
+
+    reset_diag(p);
+    dispatch_gossip(p, lane, nullptr, 1U, static_cast<std::int8_t>(127), UINT64_C(0x1234), 0U, "x/y", 102);
+    TEST_ASSERT_EQUAL_size_t(0U, p.diag_count);
+
+    platform_deinit(p);
+}
+
 } // namespace
 
 extern "C" void setUp()
@@ -876,5 +1116,9 @@ int main()
     RUN_TEST(test_gossip_frame_for_pinned_topic_has_measured_lage);
     RUN_TEST(test_api_gossip_discovered_implicit_topic_keeps_allocation_after_local_pin_advertise);
     RUN_TEST(test_api_gossip_discovered_implicit_topic_keeps_allocation_after_local_pin_subscribe);
+    RUN_TEST(test_api_diag_gossip_no_match_reports_null_topic);
+    RUN_TEST(test_api_diag_gossip_known_and_autocreated_ordering);
+    RUN_TEST(test_api_diag_gossip_known_topic_local_loss_emits_reallocated_then_processed);
+    RUN_TEST(test_api_diag_invalid_gossip_has_no_callbacks);
     return UNITY_END();
 }

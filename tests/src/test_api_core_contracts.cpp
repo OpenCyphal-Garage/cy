@@ -24,6 +24,35 @@ struct callback_capture_t
     cy_err_t    last_error{ CY_OK };
 };
 
+enum class diag_event_kind_t
+{
+    reallocated,
+    created,
+    destroyed,
+    gossip_processed,
+};
+
+struct diag_event_t
+{
+    diag_event_kind_t                        kind{ diag_event_kind_t::created };
+    cy_topic_t*                              topic{ nullptr };
+    std::uint64_t                            hash{ 0U };
+    std::uint32_t                            subject_id{ 0U };
+    std::uint32_t                            evictions{ 0U };
+    std::size_t                              name_len{ 0U };
+    std::array<char, CY_TOPIC_NAME_MAX + 1U> name{};
+};
+
+struct diag_collector_t
+{
+    std::size_t                   listener_one_calls{ 0U };
+    std::size_t                   listener_two_calls{ 0U };
+    std::size_t                   count{ 0U };
+    std::array<diag_event_t, 32U> events{};
+};
+
+diag_collector_t* g_diag_collector = nullptr; // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+
 enum class local_op_t
 {
     subscribe,
@@ -203,6 +232,126 @@ extern "C" void on_done_capture(cy_future_t* const future)
     cap->last_done  = cy_future_done(future);
     cap->last_error = cy_future_error(future);
 }
+
+void diag_push(const diag_event_kind_t kind,
+               cy_topic_t* const       topic,
+               const std::uint64_t     hash,
+               const std::uint32_t     subject_id,
+               const std::uint32_t     evictions,
+               const cy_str_t          name)
+{
+    TEST_ASSERT_NOT_NULL(g_diag_collector);
+    if (g_diag_collector->count >= g_diag_collector->events.size()) {
+        return;
+    }
+    diag_event_t& out = g_diag_collector->events.at(g_diag_collector->count++);
+    out               = diag_event_t{};
+    out.kind          = kind;
+    out.topic         = topic;
+    out.hash          = hash;
+    out.subject_id    = subject_id;
+    out.evictions     = evictions;
+    out.name_len      = std::min<std::size_t>(name.len, CY_TOPIC_NAME_MAX);
+    if ((out.name_len > 0U) && (name.str != nullptr)) {
+        (void)std::memcpy(out.name.data(), name.str, out.name_len);
+    }
+    out.name.at(out.name_len) = '\0';
+}
+
+extern "C" void on_diag_one_topic_reallocated(cy_t* const         cy,
+                                              cy_topic_t* const   topic,
+                                              const std::uint32_t subject_id,
+                                              const std::uint32_t evictions)
+{
+    (void)cy;
+    TEST_ASSERT_NOT_NULL(g_diag_collector);
+    g_diag_collector->listener_one_calls++;
+    diag_push(
+      diag_event_kind_t::reallocated, topic, cy_topic_hash(topic), subject_id, evictions, cy_str_t{ 0, nullptr });
+}
+
+extern "C" void on_diag_one_topic_created(cy_t* const cy, cy_topic_t* const topic)
+{
+    (void)cy;
+    TEST_ASSERT_NOT_NULL(g_diag_collector);
+    g_diag_collector->listener_one_calls++;
+    diag_push(diag_event_kind_t::created, topic, cy_topic_hash(topic), 0U, 0U, cy_str_t{ 0, nullptr });
+}
+
+extern "C" void on_diag_one_topic_destroyed(cy_t* const cy, cy_topic_t* const topic)
+{
+    (void)cy;
+    TEST_ASSERT_NOT_NULL(g_diag_collector);
+    g_diag_collector->listener_one_calls++;
+    diag_push(diag_event_kind_t::destroyed, topic, cy_topic_hash(topic), 0U, 0U, cy_str_t{ 0, nullptr });
+}
+
+extern "C" void on_diag_one_gossip_processed(cy_t* const         cy,
+                                             cy_topic_t* const   topic,
+                                             const cy_str_t      name,
+                                             const std::uint64_t hash)
+{
+    (void)cy;
+    TEST_ASSERT_NOT_NULL(g_diag_collector);
+    g_diag_collector->listener_one_calls++;
+    diag_push(diag_event_kind_t::gossip_processed, topic, hash, 0U, 0U, name);
+}
+
+extern "C" void on_diag_two_topic_reallocated(cy_t* const         cy,
+                                              cy_topic_t* const   topic,
+                                              const std::uint32_t subject_id,
+                                              const std::uint32_t evictions)
+{
+    (void)cy;
+    (void)topic;
+    (void)subject_id;
+    (void)evictions;
+    TEST_ASSERT_NOT_NULL(g_diag_collector);
+    g_diag_collector->listener_two_calls++;
+}
+
+extern "C" void on_diag_two_topic_created(cy_t* const cy, cy_topic_t* const topic)
+{
+    (void)cy;
+    (void)topic;
+    TEST_ASSERT_NOT_NULL(g_diag_collector);
+    g_diag_collector->listener_two_calls++;
+}
+
+extern "C" void on_diag_two_topic_destroyed(cy_t* const cy, cy_topic_t* const topic)
+{
+    (void)cy;
+    (void)topic;
+    TEST_ASSERT_NOT_NULL(g_diag_collector);
+    g_diag_collector->listener_two_calls++;
+}
+
+extern "C" void on_diag_two_gossip_processed(cy_t* const         cy,
+                                             cy_topic_t* const   topic,
+                                             const cy_str_t      name,
+                                             const std::uint64_t hash)
+{
+    (void)cy;
+    (void)topic;
+    (void)name;
+    (void)hash;
+    TEST_ASSERT_NOT_NULL(g_diag_collector);
+    g_diag_collector->listener_two_calls++;
+}
+
+const cy_diag_vtable_t diag_listener_one_vtable = {
+    .topic_created     = on_diag_one_topic_created,
+    .topic_destroyed   = on_diag_one_topic_destroyed,
+    .topic_reallocated = on_diag_one_topic_reallocated,
+    .gossip_processed  = on_diag_one_gossip_processed,
+};
+
+const cy_diag_vtable_t diag_listener_two_vtable = {
+    .topic_created     = on_diag_two_topic_created,
+    .topic_destroyed   = on_diag_two_topic_destroyed,
+    .topic_reallocated = on_diag_two_topic_reallocated,
+    .gossip_processed  = on_diag_two_gossip_processed,
+};
 
 void platform_prepare(test_platform_t* const self)
 {
@@ -536,6 +685,53 @@ void test_api_core_priority_ack_and_topic_metadata()
     cy_unadvertise(pub);
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
     platform_deinit(&platform);
+}
+
+void test_api_core_diag_listener_contracts()
+{
+    test_platform_t platform{};
+    platform_init(&platform);
+
+    diag_collector_t collector{};
+    g_diag_collector = &collector;
+
+    cy_diag_t listener_one{ .next = nullptr, .vtable = &diag_listener_one_vtable };
+    cy_diag_t listener_two{ .next = nullptr, .vtable = &diag_listener_two_vtable };
+
+    cy_diag_add(nullptr, &listener_one);
+    cy_diag_add(platform.cy, nullptr);
+    cy_diag_remove(nullptr, &listener_one);
+    cy_diag_remove(platform.cy, nullptr);
+    cy_diag_remove(platform.cy, &listener_two);
+
+    cy_diag_add(platform.cy, &listener_one);
+    cy_diag_add(platform.cy, &listener_one);
+    cy_diag_add(platform.cy, &listener_two);
+
+    cy_publisher_t* const pub = cy_advertise(platform.cy, cy_str("core/diag/topic"));
+    TEST_ASSERT_NOT_NULL(pub);
+    TEST_ASSERT_EQUAL_size_t(2U, collector.listener_one_calls);
+    TEST_ASSERT_EQUAL_size_t(2U, collector.listener_two_calls);
+    TEST_ASSERT_EQUAL_size_t(2U, collector.count);
+    TEST_ASSERT_TRUE(collector.events.at(0U).kind == diag_event_kind_t::reallocated);
+    TEST_ASSERT_TRUE(collector.events.at(1U).kind == diag_event_kind_t::created);
+    TEST_ASSERT_TRUE(collector.events.at(0U).topic == collector.events.at(1U).topic);
+    TEST_ASSERT_EQUAL_UINT64(cy_topic_hash(cy_publisher_topic(pub)), collector.events.at(0U).hash);
+    TEST_ASSERT_TRUE(collector.events.at(0U).subject_id > CY_SUBJECT_ID_PINNED_MAX);
+    TEST_ASSERT_EQUAL_UINT32(0U, collector.events.at(0U).evictions);
+
+    cy_diag_remove(platform.cy, &listener_two);
+    cy_diag_remove(platform.cy, &listener_two);
+    cy_unadvertise(pub);
+    platform_deinit(&platform);
+
+    TEST_ASSERT_EQUAL_size_t(3U, collector.listener_one_calls);
+    TEST_ASSERT_EQUAL_size_t(2U, collector.listener_two_calls);
+    TEST_ASSERT_EQUAL_size_t(3U, collector.count);
+    TEST_ASSERT_TRUE(collector.events.at(2U).kind == diag_event_kind_t::destroyed);
+    TEST_ASSERT_TRUE(collector.events.at(2U).topic == collector.events.at(1U).topic);
+
+    g_diag_collector = nullptr;
 }
 
 void test_api_core_publish_and_request_argument_guards()
@@ -1393,6 +1589,7 @@ int main()
     RUN_TEST(test_api_core_time_and_spin_contracts);
     RUN_TEST(test_api_core_home_namespace_contracts);
     RUN_TEST(test_api_core_priority_ack_and_topic_metadata);
+    RUN_TEST(test_api_core_diag_listener_contracts);
     RUN_TEST(test_api_core_publish_and_request_argument_guards);
     RUN_TEST(test_api_core_message_contract_and_future_callback_getter);
     RUN_TEST(test_api_core_cy_new_validation_and_failure_paths);

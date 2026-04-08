@@ -230,6 +230,35 @@ void capture_async_error(sim_net_t&          net,
     }
 }
 
+void capture_diag(sim_net_t&          net,
+                  const std::size_t   node_index,
+                  const diag_kind_t   kind,
+                  cy_topic_t* const   topic,
+                  const std::uint32_t subject_id,
+                  const std::uint32_t evictions,
+                  const std::uint64_t gossip_hash,
+                  const cy_str_t      name)
+{
+    diag_capture_t out{};
+    out.node_index  = node_index;
+    out.kind        = kind;
+    out.has_topic   = topic != nullptr;
+    out.topic_hash  = (topic != nullptr) ? cy_topic_hash(topic) : 0U;
+    out.subject_id  = subject_id;
+    out.evictions   = evictions;
+    out.gossip_hash = gossip_hash;
+    out.name_len    = std::min<std::size_t>(name.len, CY_TOPIC_NAME_MAX);
+    if ((out.name_len > 0U) && (name.str != nullptr)) {
+        std::memcpy(out.name.data(), name.str, out.name_len);
+    }
+    out.name.at(out.name_len) = '\0';
+    try {
+        net.diag_captures.push_back(out);
+    } catch (const std::bad_alloc&) {
+        return;
+    }
+}
+
 bool capture_push(sim_net_t& net, const frame_capture_t& capture)
 {
     try {
@@ -574,6 +603,63 @@ extern "C" void sim_on_async_error(cy_t* const         cy,
                         (topic != nullptr) ? cy_topic_hash(topic) : 0U);
 }
 
+extern "C" void sim_on_diag_topic_reallocated(cy_t* const         cy,
+                                              cy_topic_t* const   topic,
+                                              const std::uint32_t subject_id,
+                                              const std::uint32_t evictions)
+{
+    const registry_entry_t* const entry = registry_find_by_cy(cy);
+    if (entry == nullptr) {
+        return;
+    }
+    capture_diag(*entry->net,
+                 entry->node_index,
+                 diag_kind_t::topic_reallocated,
+                 topic,
+                 subject_id,
+                 evictions,
+                 0U,
+                 cy_str_t{ 0, nullptr });
+}
+
+extern "C" void sim_on_diag_topic_created(cy_t* const cy, cy_topic_t* const topic)
+{
+    const registry_entry_t* const entry = registry_find_by_cy(cy);
+    if (entry == nullptr) {
+        return;
+    }
+    capture_diag(*entry->net, entry->node_index, diag_kind_t::topic_created, topic, 0U, 0U, 0U, cy_str_t{ 0, nullptr });
+}
+
+extern "C" void sim_on_diag_topic_destroyed(cy_t* const cy, cy_topic_t* const topic)
+{
+    const registry_entry_t* const entry = registry_find_by_cy(cy);
+    if (entry == nullptr) {
+        return;
+    }
+    capture_diag(
+      *entry->net, entry->node_index, diag_kind_t::topic_destroyed, topic, 0U, 0U, 0U, cy_str_t{ 0, nullptr });
+}
+
+extern "C" void sim_on_diag_gossip_processed(cy_t* const         cy,
+                                             cy_topic_t* const   topic,
+                                             const cy_str_t      name,
+                                             const std::uint64_t hash)
+{
+    const registry_entry_t* const entry = registry_find_by_cy(cy);
+    if (entry == nullptr) {
+        return;
+    }
+    capture_diag(*entry->net, entry->node_index, diag_kind_t::gossip_processed, topic, 0U, 0U, hash, name);
+}
+
+const cy_diag_vtable_t sim_diag_vtable = {
+    .topic_created     = sim_on_diag_topic_created,
+    .topic_destroyed   = sim_on_diag_topic_destroyed,
+    .topic_reallocated = sim_on_diag_topic_reallocated,
+    .gossip_processed  = sim_on_diag_gossip_processed,
+};
+
 } // namespace
 
 cy_err_t sim_net_init(sim_net_t& self, const std::uint32_t subject_id_modulus, const std::uint64_t random_seed_base)
@@ -639,13 +725,14 @@ cy_err_t sim_net_init_ex(sim_net_t& self, const sim_net_config_t& config)
             return CY_ERR_CAPACITY;
         }
         cy_async_error_handler_set(node.cy, sim_on_async_error);
+        node.diag_listener = cy_diag_t{ .next = nullptr, .vtable = &sim_diag_vtable };
+        cy_diag_add(node.cy, &node.diag_listener);
     }
     return CY_OK;
 }
 
 void sim_net_deinit(sim_net_t& self)
 {
-    registry_remove(&self);
     for (sim_node_t& node : self.nodes) {
         if (node.cy != nullptr) {
             cy_destroy(node.cy);
@@ -654,6 +741,7 @@ void sim_net_deinit(sim_net_t& self)
         node.readers = nullptr;
         node.network = nullptr;
     }
+    registry_remove(&self);
     self.queue.clear();
     self.frame_faults = nullptr;
     self.op_faults    = nullptr;
@@ -745,6 +833,8 @@ const std::vector<frame_capture_t>& sim_net_captures(const sim_net_t& self) { re
 
 const std::vector<async_error_capture_t>& sim_net_async_errors(const sim_net_t& self) { return self.async_errors; }
 
+const std::vector<diag_capture_t>& sim_net_diag_captures(const sim_net_t& self) { return self.diag_captures; }
+
 const std::vector<op_fault_capture_t>& sim_net_op_fault_captures(const sim_net_t& self)
 {
     return self.op_fault_captures;
@@ -754,6 +844,7 @@ void sim_net_clear_captures(sim_net_t& self)
 {
     self.captures.clear();
     self.async_errors.clear();
+    self.diag_captures.clear();
     self.op_fault_captures.clear();
 }
 

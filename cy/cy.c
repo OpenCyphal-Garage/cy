@@ -161,6 +161,7 @@ struct cy_t
     cy_topic_t* topic_iter;
 
     cy_async_error_handler_t async_error_handler;
+    cy_diag_t*               diags;
 };
 
 #define ON_ASYNC_ERROR(cy, topic, error) (cy)->async_error_handler((cy), (topic), (error), __LINE__)
@@ -197,6 +198,11 @@ typedef enum
 static uint32_t topic_subject_id(const cy_topic_t* const topic);
 static size_t   name_normalized_len(const cy_str_t name);
 static cy_str_t name_normalize(const cy_str_t part, const size_t dest_size, char* const dest);
+
+static void diag_topic_created(cy_topic_t* const topic);
+static void diag_topic_destroyed(cy_topic_t* const topic);
+static void diag_topic_reallocated(cy_topic_t* const topic);
+static void diag_gossip_processed(cy_t* const cy, cy_topic_t* const topic, const cy_str_t name, const uint64_t hash);
 
 static size_t  larger(const size_t a, const size_t b) { return (a > b) ? a : b; }
 static size_t  smaller(const size_t a, const size_t b) { return (a < b) ? a : b; }
@@ -1416,6 +1422,7 @@ static void topic_allocate(cy_topic_t* const topic, const uint32_t new_evictions
         topic->evictions = new_evictions;
         topic_sync_subject_reader(topic);
         schedule_gossip_urgent(topic, now);
+        diag_topic_reallocated(topic);
         return;
     }
 
@@ -1478,6 +1485,7 @@ static void topic_allocate(cy_topic_t* const topic, const uint32_t new_evictions
         // Ensure the change is announced to the network.
         // Per the model, every change to subject-ID occupation MUST be broadcast to reveal collisions.
         schedule_gossip_urgent(topic, now);
+        diag_topic_reallocated(topic);
 
         // Re-allocate the defeated topic with incremented eviction counter.
         // Its writer, if transferred above, is cleared here so the recursive call won't destroy it.
@@ -1612,6 +1620,7 @@ static cy_err_t topic_new(cy_t* const        cy,
     if (out_topic != NULL) {
         *out_topic = topic;
     }
+    diag_topic_created(topic);
     CY_TRACE(cy, "✨ %s topic_count=%zu", topic_repr(topic).str, cavl_count(cy->topics_by_hash));
     (void)cavl_count; // Suppress unused function warning when tracing is disabled.
     return CY_OK;
@@ -2015,6 +2024,7 @@ static void on_gossip(cy_t* const          cy,
         // urgent-gossip it too, meaning that we will emit two gossips this cycle: own and forward.
         on_gossip_unknown_topic(cy, ts, hash, evictions, lage);
     }
+    diag_gossip_processed(cy, mine, name, hash);
 }
 
 typedef struct
@@ -4120,6 +4130,7 @@ static void topic_destroy(cy_topic_t* const topic)
 
     // Ensure no gossip callback can run while we are tearing down storage it may touch.
     unschedule_gossip(topic);
+    diag_topic_destroyed(topic);
 
     // Release subject reader/writer from registry.
     if (topic->sub_reader != NULL) {
@@ -5031,4 +5042,61 @@ cy_resolved_t cy_name_resolve(const cy_str_t name,
         return (cy_resolved_t){ .name = str_invalid, .pin = UINT16_MAX };
     }
     return (cy_resolved_t){ .name = res, .pin = pin, .verbatim = verbatim };
+}
+
+// =====================================================================================================================
+//                                                  MONITORING & DIAGNOSTICS
+// =====================================================================================================================
+
+#define DIAG_FOREACH(cy, diag_call, ...)                                       \
+    do {                                                                       \
+        assert((cy) != NULL);                                                  \
+        for (cy_diag_t* diag = (cy)->diags; diag != NULL;) {                   \
+            cy_diag_t* const next = diag->next;                                \
+            if ((diag->vtable != NULL) && (diag->vtable->diag_call != NULL)) { \
+                diag->vtable->diag_call((cy), __VA_ARGS__);                    \
+            }                                                                  \
+            diag = next;                                                       \
+        }                                                                      \
+    } while (0)
+
+static void diag_topic_created(cy_topic_t* const topic) { DIAG_FOREACH(topic->cy, topic_created, topic); }
+static void diag_topic_destroyed(cy_topic_t* const topic) { DIAG_FOREACH(topic->cy, topic_destroyed, topic); }
+static void diag_topic_reallocated(cy_topic_t* const topic)
+{
+    DIAG_FOREACH(topic->cy, topic_reallocated, topic, topic_subject_id(topic), topic->evictions);
+}
+static void diag_gossip_processed(cy_t* const cy, cy_topic_t* const topic, const cy_str_t name, const uint64_t hash)
+{
+    DIAG_FOREACH(cy, gossip_processed, topic, name, hash);
+}
+
+void cy_diag_add(cy_t* const cy, cy_diag_t* const diag)
+{
+    if ((cy == NULL) || (diag == NULL)) {
+        return;
+    }
+    for (const cy_diag_t* p = cy->diags; p != NULL; p = p->next) {
+        if (p == diag) {
+            return;
+        }
+    }
+    diag->next = cy->diags;
+    cy->diags  = diag;
+}
+
+void cy_diag_remove(cy_t* const cy, cy_diag_t* const diag)
+{
+    if ((cy == NULL) || (diag == NULL)) {
+        return;
+    }
+    cy_diag_t** p = &cy->diags;
+    while (*p != NULL) {
+        if (*p == diag) {
+            *p         = diag->next;
+            diag->next = NULL;
+            return;
+        }
+        p = &(*p)->next;
+    }
 }

@@ -2,6 +2,7 @@
 
 #include "e2e_faults.hpp"
 #include "guarded_heap.h"
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <set>
@@ -20,6 +21,27 @@ struct async_error_capture_t final
     std::uint16_t line_number{ 0U };
     bool          has_topic{ false };
     std::uint64_t topic_hash{ 0U };
+};
+
+enum class diag_kind_t
+{
+    topic_reallocated,
+    topic_created,
+    topic_destroyed,
+    gossip_processed,
+};
+
+struct diag_capture_t final
+{
+    std::size_t                              node_index{ 0U };
+    diag_kind_t                              kind{ diag_kind_t::topic_created };
+    bool                                     has_topic{ false };
+    std::uint64_t                            topic_hash{ 0U };
+    std::uint32_t                            subject_id{ 0U };
+    std::uint32_t                            evictions{ 0U };
+    std::uint64_t                            gossip_hash{ 0U };
+    std::size_t                              name_len{ 0U };
+    std::array<char, CY_TOPIC_NAME_MAX + 1U> name{};
 };
 
 struct frame_capture_t final
@@ -72,6 +94,7 @@ struct sim_node_t final
     std::uint64_t random_state{ UINT64_C(0x1020304050607080) };
 
     sim_subject_reader_t* readers{ nullptr };
+    cy_diag_t             diag_listener{};
 
     std::set<std::uint32_t> active_reader_subjects;
     std::set<std::uint32_t> active_writer_subjects;
@@ -90,6 +113,7 @@ struct sim_net_t final
     std::vector<queued_frame_t>        queue{};
     std::vector<frame_capture_t>       captures{};
     std::vector<async_error_capture_t> async_errors{};
+    std::vector<diag_capture_t>        diag_captures{};
     std::vector<op_fault_capture_t>    op_fault_captures{};
     std::uint64_t                      next_sequence{ 0U };
     std::uint64_t                      next_operation_sequence{ 0U };
@@ -125,6 +149,7 @@ void sim_net_deliver_due(sim_net_t& self, cy_us_t now_limit);
 std::size_t                               sim_net_pending_frames(const sim_net_t& self);
 const std::vector<frame_capture_t>&       sim_net_captures(const sim_net_t& self);
 const std::vector<async_error_capture_t>& sim_net_async_errors(const sim_net_t& self);
+const std::vector<diag_capture_t>&        sim_net_diag_captures(const sim_net_t& self);
 const std::vector<op_fault_capture_t>&    sim_net_op_fault_captures(const sim_net_t& self);
 void                                      sim_net_clear_captures(sim_net_t& self);
 guarded_heap_t&                           sim_net_core_heap(sim_net_t& self, std::size_t node_index);

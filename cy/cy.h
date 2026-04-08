@@ -698,8 +698,6 @@ cy_resolved_t cy_name_resolve(const cy_str_t name,
 //                                                  MONITORING & DIAGNOSTICS
 // =====================================================================================================================
 
-// TODO: topic hooks: extern functions similar to cy_trace invoked when a topic is created/destroyed/(un)subscribed/etc.
-
 /// If CY_CONFIG_TRACE is defined and is non-zero, cy_trace() shall be defined externally.
 #ifndef CY_CONFIG_TRACE
 #define CY_CONFIG_TRACE 0
@@ -723,6 +721,41 @@ extern void cy_trace(cy_t* const         cy,
   __attribute__((__format__(__printf__, 5, 6)))
 #endif
   ;
+
+/// The application can install an arbitrary number of such diagnostic listeners.
+/// Any of the vtable function pointers can be NULL.
+/// If multiple listeners are installed, they will be invoked in an unspecified order.
+/// Adding/removing listeners from within a callback is not supported.
+/// The application must not access any fields in cy_diag_t.
+typedef struct cy_diag_t        cy_diag_t;
+typedef struct cy_diag_vtable_t cy_diag_vtable_t;
+struct cy_diag_t
+{
+    cy_diag_t*              next;
+    const cy_diag_vtable_t* vtable;
+};
+
+struct cy_diag_vtable_t
+{
+    /// Creation is reported immediately after creation, and destruction is reported immediately before destruction.
+    void (*topic_created)(cy_t*, cy_topic_t*);
+    void (*topic_destroyed)(cy_t*, cy_topic_t*);
+
+    /// Reallocation is reported immediately after the new allocation state is committed.
+    /// This includes the initial allocation performed during topic creation.
+    void (*topic_reallocated)(cy_t*, cy_topic_t*, uint32_t subject_id, uint32_t evictions);
+
+    /// Inline gossips may not be reported here. The name lifetime ends upon return from the handler.
+    /// The function is invoked immediately after the gossip message is processed.
+    /// The topic object is NULL if the gossip is not associated with any locally known topic.
+    void (*gossip_processed)(cy_t*, cy_topic_t*, cy_str_t name, uint64_t hash);
+};
+
+/// Addition/removal are O(n), but n is expected to be very small.
+/// Once installed, the instance must not be moved.
+/// Duplicate addition and nonexistent removal are no-ops.
+void cy_diag_add(cy_t* const cy, cy_diag_t* const diag);
+void cy_diag_remove(cy_t* const cy, cy_diag_t* const diag);
 
 #ifdef __cplusplus
 }
