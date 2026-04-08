@@ -328,6 +328,11 @@ static void v_on_msg_16b(canard_subscription_t* const self,
             owner->vtable->realloc(owner->user, payload.origin.data, 0);
         }
         owner->oom_count++;
+        CY_TRACE(owner->base.cy,
+                 "RX OOM S%08jx size=%zu multiframe=%d",
+                 (uintmax_t)reader->base.subject_id,
+                 payload.view.size,
+                 (int)multiframe);
         return;
     }
     if (multiframe) {
@@ -365,6 +370,11 @@ static void v_on_msg_13b(canard_subscription_t* const self,
             owner->vtable->realloc(owner->user, payload.origin.data, 0);
         }
         owner->oom_count++;
+        CY_TRACE(owner->base.cy,
+                 "RX OOM S%08jx size=%zu multiframe=%d",
+                 (uintmax_t)reader->base.subject_id,
+                 payload.view.size,
+                 (int)multiframe);
         return;
     }
     // Stamp precomputed phony header with incrementing tag.
@@ -404,6 +414,11 @@ static void v_on_msg_unicast(canard_subscription_t* const self,
             owner->vtable->realloc(owner->user, payload.origin.data, 0);
         }
         owner->oom_count++;
+        CY_TRACE(owner->base.cy,
+                 "RX OOM N%016jx size=%zu multiframe=%d",
+                 (uintmax_t)source_node_id,
+                 payload.view.size,
+                 (int)multiframe);
         return;
     }
     if (multiframe) {
@@ -432,7 +447,7 @@ static cy_subject_writer_t* v_subject_writer_new(cy_platform_t* const base, cons
         (void)memset(self, 0, sizeof(*self));
         self->base.subject_id = subject_id;
     }
-    CY_TRACE(owner->base.cy, "CAN writer S%08jx", (uintmax_t)subject_id);
+    CY_TRACE(owner->base.cy, "CAN writer S%08jx ptr=%p", (uintmax_t)subject_id, (void*)self);
     return (cy_subject_writer_t*)self;
 }
 
@@ -440,6 +455,9 @@ static void v_subject_writer_destroy(cy_platform_t* const platform, cy_subject_w
 {
     cy_can_t* const         owner = (cy_can_t*)platform;
     subject_writer_t* const self  = (subject_writer_t*)base;
+    if (owner->base.cy != NULL) {
+        CY_TRACE(owner->base.cy, "S%08jx ptr=%p", (uintmax_t)self->base.subject_id, (void*)self);
+    }
     owner->vtable->realloc(owner->user, self, 0);
 }
 
@@ -457,11 +475,12 @@ static cy_err_t v_subject_writer_send(cy_platform_t* const       platform,
     assert((message.data != NULL) && (message.size >= HEADER_BYTES));
     const bool     pinned      = (sid <= CY_SUBJECT_ID_PINNED_MAX);
     const bool     best_effort = (((const uint_least8_t*)message.data)[0] == 0); // header_msg_be
+    const bool     use_13b     = pinned && best_effort;
     const uint64_t e_oom       = owner->canard.err.oom;
     const uint64_t e_cap       = owner->canard.err.tx_capacity;
 
     bool ok = false;
-    if (pinned && best_effort) { // V1.0 PATH: 13-bit subject-ID, strip the 24-byte Cy header.
+    if (use_13b) { // V1.0 PATH: 13-bit subject-ID, strip the 24-byte Cy header.
         cy_bytes_t stripped = message;
         stripped.data       = (const char*)stripped.data + HEADER_BYTES;
         stripped.size -= HEADER_BYTES;
@@ -489,13 +508,14 @@ static cy_err_t v_subject_writer_send(cy_platform_t* const       platform,
     if (ok) {
         return CY_OK;
     }
+    cy_err_t err = CY_ERR_ARGUMENT;
     if (owner->canard.err.oom > e_oom) {
-        return CY_ERR_MEMORY;
+        err = CY_ERR_MEMORY;
+    } else if (owner->canard.err.tx_capacity > e_cap) {
+        err = CY_ERR_CAPACITY;
     }
-    if (owner->canard.err.tx_capacity > e_cap) {
-        return CY_ERR_CAPACITY;
-    }
-    return CY_ERR_ARGUMENT;
+    CY_TRACE(owner->base.cy, "S%08jx path=%s err=%jd", (uintmax_t)sid, use_13b ? "13b" : "16b", (intmax_t)err);
+    return err;
 }
 
 // =====================================================================================================================
@@ -588,6 +608,9 @@ static subject_reader_t* reader_try_revive(cy_can_t* const owner, const uint32_t
 static void reader_finalize(cy_can_t* const owner, subject_reader_t* const self)
 {
     assert((owner != NULL) && (self != NULL));
+    if (owner->base.cy != NULL) {
+        CY_TRACE(owner->base.cy, "S%08jx ptr=%p", (uintmax_t)self->base.subject_id, (void*)self);
+    }
     canard_unsubscribe(&owner->canard, &self->sub_16b);
     subject_reader_pinned_t* const pinned = as_pinned(self);
     if (pinned != NULL) {
@@ -662,6 +685,9 @@ static void v_subject_reader_destroy(cy_platform_t* const platform, cy_subject_r
 {
     cy_can_t* const         owner = (cy_can_t*)platform;
     subject_reader_t* const self  = (subject_reader_t*)base;
+    if (owner->base.cy != NULL) {
+        CY_TRACE(owner->base.cy, "tombstone S%08jx ptr=%p", (uintmax_t)self->base.subject_id, (void*)self);
+    }
     tombstone_enqueue(owner, self);
 }
 
@@ -671,6 +697,9 @@ static void v_subject_reader_extent_set(cy_platform_t* const       base,
 {
     (void)base;
     subject_reader_t* const self = (subject_reader_t*)reader_base;
+    if (extent > self->base.extent) {
+        CY_TRACE(self->owner->base.cy, "S%08jx %zu->%zu", (uintmax_t)self->base.subject_id, self->base.extent, extent);
+    }
     reader_set_extent(self, extent);
 }
 
@@ -698,21 +727,24 @@ static cy_err_t v_unicast_send(cy_platform_t* const   base,
                                    cy_bytes_to_canard(message),
                                    NULL);
     if (ok) {
+        CY_TRACE(owner->base.cy, "N%016jx OK", (uintmax_t)lane->id);
         return CY_OK;
     }
+    cy_err_t err = CY_ERR_ARGUMENT;
     if (owner->canard.err.oom > e_oom) {
-        return CY_ERR_MEMORY;
+        err = CY_ERR_MEMORY;
+    } else if (owner->canard.err.tx_capacity > e_cap) {
+        err = CY_ERR_CAPACITY;
     }
-    if (owner->canard.err.tx_capacity > e_cap) {
-        return CY_ERR_CAPACITY;
-    }
-    return CY_ERR_ARGUMENT;
+    CY_TRACE(owner->base.cy, "N%016jx FAILURE err=%jd", (uintmax_t)lane->id, (intmax_t)err);
+    return err;
 }
 
 static void v_unicast_extent_set(cy_platform_t* const base, const size_t extent)
 {
     cy_can_t* const owner = (cy_can_t*)base;
     if (extent > owner->unicast_sub.extent) {
+        CY_TRACE(owner->base.cy, "%zu->%zu", owner->unicast_sub.extent, extent);
         owner->unicast_sub.extent = extent;
     }
 }
