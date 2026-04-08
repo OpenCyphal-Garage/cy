@@ -537,22 +537,6 @@ cy_t* cy_new(cy_platform_t* const platform, const cy_str_t home, const cy_str_t 
 /// (such as publishers, subscribers, futures, etc).
 void cy_destroy(cy_t* const cy);
 
-/// The async error handler is used to report errors occurring in Cy asynchronously with API invocations,
-/// and in a few minor cases may also be invoked synchronously with some API calls.
-/// In particular, it is used for topic resubscription errors occurring in response to consensus updates,
-/// and also in cases where Cy is unable to create an implicit subscription on pattern match due to lack of memory.
-///
-/// Normally, the error handler does not need to do anything specific aside from perhaps logging the error or updating
-/// relevant performance counters. Cy will keep attempting to repeat the failing operation continuously until it
-/// succeeds or the condition requiring the operation is lifted, unless the operation is not mandatory for correctness.
-///
-/// Since Cy is a single-file library, the line number uniquely identifies the error site.
-/// The topic pointer may be NULL depending on the nature of the error.
-///
-/// The default handler will simply CY_TRACE() the error, which is a no-op unless tracing is enabled.
-typedef void (*cy_async_error_handler_t)(cy_t*, cy_topic_t*, cy_err_t, uint16_t line_number);
-void cy_async_error_handler_set(cy_t* const cy, const cy_async_error_handler_t handler);
-
 /// See cy_name_... for name resolution details.
 /// The returned strings are NUL-terminated. The lifetime is bound to the Cy instance.
 cy_str_t cy_home(const cy_t* const cy);
@@ -560,7 +544,7 @@ cy_str_t cy_namespace(const cy_t* const cy);
 
 /// This function must be invoked periodically to ensure liveness.
 /// The returned value indicates the success of the platform spin().
-/// Gossips are published from this function; their failures, if any, are reported via the async error handler.
+/// Gossips are published from this function; their failures, if any, are reported via diagnostics listeners.
 /// The function will return not later than the specified deadline. It may return early.
 cy_err_t               cy_spin_until(cy_t* const cy, const cy_us_t deadline);
 static inline cy_err_t cy_spin_once(cy_t* const cy) { return cy_spin_until(cy, 0); }
@@ -698,8 +682,6 @@ cy_resolved_t cy_name_resolve(const cy_str_t name,
 //                                                  MONITORING & DIAGNOSTICS
 // =====================================================================================================================
 
-// TODO: topic hooks: extern functions similar to cy_trace invoked when a topic is created/destroyed/(un)subscribed/etc.
-
 /// If CY_CONFIG_TRACE is defined and is non-zero, cy_trace() shall be defined externally.
 #ifndef CY_CONFIG_TRACE
 #define CY_CONFIG_TRACE 0
@@ -723,6 +705,55 @@ extern void cy_trace(cy_t* const         cy,
   __attribute__((__format__(__printf__, 5, 6)))
 #endif
   ;
+
+/// The application can install an arbitrary number of such diagnostic listeners.
+/// Any of the vtable function pointers can be NULL.
+/// If multiple listeners are installed, they will be invoked in an unspecified order.
+/// Adding/removing listeners from within a callback is not supported.
+/// The application must not access any fields in cy_diag_t.
+typedef struct cy_diag_t        cy_diag_t;
+typedef struct cy_diag_vtable_t cy_diag_vtable_t;
+struct cy_diag_t
+{
+    cy_diag_t*              next;
+    const cy_diag_vtable_t* vtable;
+};
+
+struct cy_diag_vtable_t
+{
+    /// Async errors are used to report errors occurring in Cy asynchronously with API invocations,
+    /// and in a few minor cases may also be invoked synchronously with some API calls.
+    /// In particular, they are used for topic resubscription errors occurring in response to consensus updates,
+    /// and also in cases where Cy is unable to create an implicit subscription on pattern match due to lack of memory.
+    ///
+    /// Normally, the listener does not need to do anything specific aside from perhaps logging the error or updating
+    /// relevant performance counters. Cy will keep attempting to repeat the failing operation continuously until it
+    /// succeeds or the condition requiring the operation is lifted, unless the operation is not mandatory for
+    /// correctness.
+    ///
+    /// Since Cy is a single-file library, the line number uniquely identifies the error site.
+    /// The topic pointer may be NULL depending on the nature of the error.
+    void (*async_error)(cy_t*, cy_topic_t*, cy_err_t, uint16_t line_number);
+
+    /// Creation is reported immediately after creation, and destruction is reported immediately before destruction.
+    void (*topic_created)(cy_t*, cy_topic_t*);
+    void (*topic_destroyed)(cy_t*, cy_topic_t*);
+
+    /// Reallocation is reported immediately after the new allocation state is committed.
+    /// This includes the initial allocation performed during topic creation.
+    void (*topic_reallocated)(cy_t*, cy_topic_t*, uint32_t subject_id, uint32_t evictions);
+
+    /// Inline gossips may not be reported here. The name lifetime ends upon return from the handler.
+    /// The function is invoked immediately after the gossip message is processed.
+    /// The topic object is NULL if the gossip is not associated with any locally known topic.
+    void (*gossip_processed)(cy_t*, cy_topic_t*, cy_str_t name, uint64_t hash);
+};
+
+/// Addition/removal are O(n), but n is expected to be very small.
+/// Once installed, the instance must not be moved.
+/// Duplicate addition and nonexistent removal are no-ops.
+void cy_diag_add(cy_t* const cy, cy_diag_t* const diag);
+void cy_diag_remove(cy_t* const cy, cy_diag_t* const diag);
 
 #ifdef __cplusplus
 }

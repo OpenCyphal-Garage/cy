@@ -16,6 +16,7 @@ typedef struct
     size_t               async_error_count;
     cy_err_t             last_async_error;
     uint16_t             last_async_error_line;
+    cy_diag_t            diag;
 } reorder_fixture_t;
 
 typedef struct
@@ -46,10 +47,10 @@ static void* fixture_realloc(cy_platform_t* const platform, void* const ptr, con
 
 static cy_us_t fixture_now(cy_platform_t* const platform) { return ((reorder_fixture_t*)platform)->now; }
 
-static void fixture_on_async_error(cy_t* const       cy,
-                                   cy_topic_t* const topic,
-                                   const cy_err_t    error,
-                                   const uint16_t    line_number)
+static void fixture_diag_async_error(cy_t* const       cy,
+                                     cy_topic_t* const topic,
+                                     const cy_err_t    error,
+                                     const uint16_t    line_number)
 {
     (void)topic;
     reorder_fixture_t* const self = (reorder_fixture_t*)cy->platform;
@@ -57,6 +58,10 @@ static void fixture_on_async_error(cy_t* const       cy,
     self->last_async_error      = error;
     self->last_async_error_line = line_number;
 }
+
+static const cy_diag_vtable_t fixture_diag_vtable = {
+    .async_error = fixture_diag_async_error,
+};
 
 static void on_arrival(cy_future_t* const sub)
 {
@@ -89,13 +94,14 @@ static void reorder_env_init(reorder_env_t* const self)
     self->fixture.vtable.now                  = fixture_now;
     self->fixture.vtable.realloc              = fixture_realloc;
     self->fixture.cy.platform                 = &self->fixture.platform;
-    self->fixture.cy.async_error_handler      = fixture_on_async_error;
-    self->fixture.now                         = 0;
-    self->fixture.fail_alloc_size             = 0;
-    self->fixture.fail_alloc_count            = 0;
-    self->fixture.async_error_count           = 0;
-    self->fixture.last_async_error            = CY_OK;
-    self->fixture.last_async_error_line       = 0;
+    self->fixture.diag                        = (cy_diag_t){ .next = NULL, .vtable = &fixture_diag_vtable };
+    cy_diag_add(&self->fixture.cy, &self->fixture.diag);
+    self->fixture.now                   = 0;
+    self->fixture.fail_alloc_size       = 0;
+    self->fixture.fail_alloc_count      = 0;
+    self->fixture.async_error_count     = 0;
+    self->fixture.last_async_error      = CY_OK;
+    self->fixture.last_async_error_line = 0;
     olga_init(&self->fixture.cy.olga, &self->fixture.cy, olga_now);
 
     self->root.cy = &self->fixture.cy;

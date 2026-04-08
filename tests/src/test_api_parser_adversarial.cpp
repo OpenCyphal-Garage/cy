@@ -18,6 +18,7 @@ struct test_platform_t final : api_test::test_platform_base_t
 {
     std::size_t subject_send_count{ 0U };
     std::size_t unicast_send_count{ 0U };
+    cy_diag_t   diag{};
 };
 
 std::size_t g_async_error_count = 0U; // NOLINT(*-non-const-global-variables)
@@ -108,10 +109,10 @@ extern "C" std::uint64_t platform_random(cy_platform_t* const platform)
     return api_test::random_lcg<test_platform_t>(platform);
 }
 
-extern "C" void on_async_error(cy_t* const         cy,
-                               cy_topic_t* const   topic,
-                               const cy_err_t      error,
-                               const std::uint16_t line_number)
+extern "C" void on_diag_async_error(cy_t* const         cy,
+                                    cy_topic_t* const   topic,
+                                    const cy_err_t      error,
+                                    const std::uint16_t line_number)
 {
     (void)topic;
     (void)error;
@@ -119,6 +120,14 @@ extern "C" void on_async_error(cy_t* const         cy,
     TEST_ASSERT_NOT_NULL(cy);
     g_async_error_count++;
 }
+
+const cy_diag_vtable_t platform_diag_vtable = {
+    .async_error       = on_diag_async_error,
+    .topic_created     = nullptr,
+    .topic_destroyed   = nullptr,
+    .topic_reallocated = nullptr,
+    .gossip_processed  = nullptr,
+};
 
 void platform_init(test_platform_t* const self)
 {
@@ -144,7 +153,8 @@ void platform_init(test_platform_t* const self)
     api_test::init_platform_base(self->platform, self->vtable);
     self->cy = cy_new(&self->platform, cy_str("test"), cy_str_t{ 0, nullptr });
     TEST_ASSERT_NOT_NULL(self->cy);
-    cy_async_error_handler_set(self->cy, on_async_error);
+    self->diag = cy_diag_t{ .next = nullptr, .vtable = &platform_diag_vtable };
+    cy_diag_add(self->cy, &self->diag);
 }
 
 void platform_deinit(test_platform_t* const self) { api_test::standard_deinit(*self); }

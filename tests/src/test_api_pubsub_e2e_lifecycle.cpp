@@ -93,6 +93,11 @@ struct e_case_result_t final
     std::size_t success_futures{ 0U };
     std::size_t failed_futures{ 0U };
     std::size_t pending_futures{ 0U };
+    std::size_t diag_async_errors{ 0U };
+    std::size_t diag_reallocated{ 0U };
+    std::size_t diag_created{ 0U };
+    std::size_t diag_destroyed{ 0U };
+    std::size_t diag_gossip_processed{ 0U };
 
     std::array<std::uint64_t, topic_count> topic_hashes{};
     std::array<std::uint32_t, topic_count> preferred_subjects{};
@@ -126,6 +131,25 @@ std::uint64_t capture_fingerprint(const e2e::frame_capture_t& cap)
     h               = mix_hash(h, cap.frame.wire.size());
     for (std::size_t i = 0U; i < std::min<std::size_t>(16U, cap.frame.wire.size()); i++) {
         h = mix_hash(h, cap.frame.wire.at(i));
+    }
+    return h;
+}
+
+std::uint64_t diag_capture_fingerprint(const e2e::diag_capture_t& cap)
+{
+    std::uint64_t h = UINT64_C(0x3141592653589793);
+    h               = mix_hash(h, cap.node_index);
+    h               = mix_hash(h, static_cast<std::uint64_t>(cap.kind));
+    h               = mix_hash(h, cap.has_topic ? 1U : 0U);
+    h               = mix_hash(h, cap.topic_hash);
+    h               = mix_hash(h, cap.subject_id);
+    h               = mix_hash(h, cap.evictions);
+    h               = mix_hash(h, cap.gossip_hash);
+    h               = mix_hash(h, cap.error);
+    h               = mix_hash(h, cap.line_number);
+    h               = mix_hash(h, cap.name_len);
+    for (std::size_t i = 0U; i < std::min<std::size_t>(16U, cap.name_len); i++) {
+        h = mix_hash(h, static_cast<std::uint8_t>(cap.name.at(i)));
     }
     return h;
 }
@@ -387,10 +411,15 @@ void wait_futures(e2e::sim_net_t&                    net,
 void build_transcript(const e2e::sim_net_t& net, e_case_result_t& result)
 {
     result.transcript.clear();
-    result.transcript.reserve(e2e::sim_net_captures(net).size() + result.log.unique.size() + 8U);
+    result.transcript.reserve(e2e::sim_net_captures(net).size() + e2e::sim_net_diag_captures(net).size() +
+                              result.log.unique.size() + 8U);
 
     for (const e2e::frame_capture_t& cap : e2e::sim_net_captures(net)) {
         result.transcript.push_back(capture_fingerprint(cap));
+    }
+
+    for (const e2e::diag_capture_t& cap : e2e::sim_net_diag_captures(net)) {
+        result.transcript.push_back(diag_capture_fingerprint(cap));
     }
 
     for (const auto& key : result.log.unique) {
@@ -408,6 +437,11 @@ void build_transcript(const e2e::sim_net_t& net, e_case_result_t& result)
     summary               = mix_hash(summary, result.pending_futures);
     summary               = mix_hash(summary, result.log.malformed_count);
     summary               = mix_hash(summary, result.log.duplicate_count);
+    summary               = mix_hash(summary, result.diag_async_errors);
+    summary               = mix_hash(summary, result.diag_reallocated);
+    summary               = mix_hash(summary, result.diag_created);
+    summary               = mix_hash(summary, result.diag_destroyed);
+    summary               = mix_hash(summary, result.diag_gossip_processed);
     result.transcript.push_back(summary);
 }
 
@@ -502,18 +536,40 @@ e_case_result_t run_e_case(const e_case_config_t& cfg)
         }
     }
 
-    build_transcript(net, result);
-
     destroy_futures(futures);
     destroy_all_handles(net, handles, now);
 
     e2e::drain_queue(net, now, step_us, 20'000U);
     e2e::assert_quiescent(net);
 
-    g_stats.scenarios++;
-    g_stats.async_errors += e2e::sim_net_async_errors(net).size();
-
     e2e::sim_net_deinit(net);
+
+    for (const e2e::diag_capture_t& cap : e2e::sim_net_diag_captures(net)) {
+        switch (cap.kind) {
+            case e2e::diag_kind_t::async_error:
+                result.diag_async_errors++;
+                break;
+            case e2e::diag_kind_t::topic_reallocated:
+                result.diag_reallocated++;
+                break;
+            case e2e::diag_kind_t::topic_created:
+                result.diag_created++;
+                break;
+            case e2e::diag_kind_t::topic_destroyed:
+                result.diag_destroyed++;
+                break;
+            case e2e::diag_kind_t::gossip_processed:
+                result.diag_gossip_processed++;
+                break;
+        }
+    }
+    g_stats.scenarios++;
+    g_stats.async_errors += result.diag_async_errors;
+
+    TEST_ASSERT_TRUE(result.diag_reallocated >= result.diag_created);
+    TEST_ASSERT_EQUAL_size_t(result.diag_created, result.diag_destroyed);
+
+    build_transcript(net, result);
     e2e::assert_all_node_heaps_clean(net);
     e2e::assert_no_live_messages();
 
@@ -614,6 +670,9 @@ void test_api_pubsub_e2e_e05_no_unexpected_async_errors_on_success_path()
     const e_case_result_t res = run_e_case(cfg);
     TEST_ASSERT_TRUE(res.success_futures > 0U);
     TEST_ASSERT_EQUAL_size_t(0U, res.failed_futures);
+    TEST_ASSERT_TRUE(res.diag_created > 0U);
+    TEST_ASSERT_EQUAL_size_t(res.diag_created, res.diag_destroyed);
+    TEST_ASSERT_TRUE(res.diag_reallocated >= res.diag_created);
 }
 
 void test_api_pubsub_e2e_e06_end_of_test_global_invariant_checks()

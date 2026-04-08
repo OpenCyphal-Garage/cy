@@ -17,6 +17,28 @@ typedef struct
     uint32_t      evictions;
 } send_capture_t;
 
+typedef enum
+{
+    diag_kind_reallocated,
+    diag_kind_created,
+    diag_kind_destroyed,
+    diag_kind_gossip_processed,
+    diag_kind_async_error,
+} diag_kind_t;
+
+typedef struct
+{
+    diag_kind_t kind;
+    cy_topic_t* topic;
+    uint64_t    hash;
+    uint32_t    subject_id;
+    uint32_t    evictions;
+    cy_err_t    error;
+    uint16_t    line_number;
+    size_t      name_len;
+    char        name[CY_TOPIC_NAME_MAX + 1U];
+} diag_capture_t;
+
 #define CAPTURE_CAPACITY 64U
 
 typedef struct
@@ -43,9 +65,15 @@ typedef struct
     size_t         capture_count;
     send_capture_t capture[CAPTURE_CAPACITY];
 
+    cy_diag_t      diag;
+    size_t         diag_count;
+    diag_capture_t diag_capture[CAPTURE_CAPACITY];
+
     subject_tracker_t active_readers;
     subject_tracker_t active_writers;
 } fixture_t;
+
+static void fixture_install_diag(fixture_t* const self);
 
 static fixture_t* fixture_from(cy_platform_t* const platform) { return (fixture_t*)platform; }
 
@@ -65,6 +93,99 @@ static size_t flatten_fragments(const cy_bytes_t message, unsigned char* const o
     }
     return copied;
 }
+
+static void capture_diag(fixture_t* const  self,
+                         const diag_kind_t kind,
+                         cy_topic_t* const topic,
+                         const cy_str_t    name,
+                         const uint64_t    hash,
+                         const uint32_t    subject_id,
+                         const uint32_t    evictions,
+                         const cy_err_t    error,
+                         const uint16_t    line_number)
+{
+    if (self->diag_count >= CAPTURE_CAPACITY) {
+        return;
+    }
+    diag_capture_t* const out = &self->diag_capture[self->diag_count++];
+    memset(out, 0, sizeof(*out));
+    out->kind        = kind;
+    out->topic       = topic;
+    out->hash        = hash;
+    out->subject_id  = subject_id;
+    out->evictions   = evictions;
+    out->error       = error;
+    out->line_number = line_number;
+    out->name_len    = smaller(name.len, CY_TOPIC_NAME_MAX);
+    if ((out->name_len > 0U) && (name.str != NULL)) {
+        memcpy(out->name, name.str, out->name_len);
+    }
+    out->name[out->name_len] = '\0';
+}
+
+static void fixture_diag_topic_reallocated(cy_t* const       cy,
+                                           cy_topic_t* const topic,
+                                           const uint32_t    subject_id,
+                                           const uint32_t    evictions)
+{
+    fixture_t* const self = fixture_from(cy->platform);
+    capture_diag(self,
+                 diag_kind_reallocated,
+                 topic,
+                 (cy_str_t){ .len = 0U, .str = NULL },
+                 cy_topic_hash(topic),
+                 subject_id,
+                 evictions,
+                 CY_OK,
+                 0U);
+}
+
+static void fixture_diag_topic_created(cy_t* const cy, cy_topic_t* const topic)
+{
+    fixture_t* const self = fixture_from(cy->platform);
+    capture_diag(
+      self, diag_kind_created, topic, (cy_str_t){ .len = 0U, .str = NULL }, cy_topic_hash(topic), 0U, 0U, CY_OK, 0U);
+}
+
+static void fixture_diag_topic_destroyed(cy_t* const cy, cy_topic_t* const topic)
+{
+    fixture_t* const self = fixture_from(cy->platform);
+    capture_diag(
+      self, diag_kind_destroyed, topic, (cy_str_t){ .len = 0U, .str = NULL }, cy_topic_hash(topic), 0U, 0U, CY_OK, 0U);
+}
+
+static void fixture_diag_gossip_processed(cy_t* const       cy,
+                                          cy_topic_t* const topic,
+                                          const cy_str_t    name,
+                                          const uint64_t    hash)
+{
+    fixture_t* const self = fixture_from(cy->platform);
+    capture_diag(self, diag_kind_gossip_processed, topic, name, hash, 0U, 0U, CY_OK, 0U);
+}
+
+static void fixture_diag_async_error(cy_t* const cy, cy_topic_t* const topic, const cy_err_t error, const uint16_t line)
+{
+    fixture_t* const self = fixture_from(cy->platform);
+    self->async_error_count++;
+    self->last_async_error = error;
+    capture_diag(self,
+                 diag_kind_async_error,
+                 topic,
+                 (cy_str_t){ .len = 0U, .str = NULL },
+                 (topic != NULL) ? cy_topic_hash(topic) : 0U,
+                 0U,
+                 0U,
+                 error,
+                 line);
+}
+
+static const cy_diag_vtable_t fixture_diag_vtable = {
+    .async_error       = fixture_diag_async_error,
+    .topic_reallocated = fixture_diag_topic_reallocated,
+    .topic_created     = fixture_diag_topic_created,
+    .topic_destroyed   = fixture_diag_topic_destroyed,
+    .gossip_processed  = fixture_diag_gossip_processed,
+};
 
 static void capture_send(fixture_t* const self,
                          const bool       unicast,
@@ -192,15 +313,6 @@ static cy_err_t fixture_spin(cy_platform_t* const platform, const cy_us_t deadli
     return CY_OK;
 }
 
-static void fixture_on_async_error(cy_t* const cy, cy_topic_t* const topic, const cy_err_t error, const uint16_t line)
-{
-    (void)topic;
-    (void)line;
-    fixture_t* const self = fixture_from(cy->platform);
-    self->async_error_count++;
-    self->last_async_error = error;
-}
-
 static void fixture_init(fixture_t* const self)
 {
     memset(self, 0, sizeof(*self));
@@ -222,8 +334,17 @@ static void fixture_init(fixture_t* const self)
     self->rand_state                       = UINT64_C(0x123456789ABCDEF0);
     self->cy                               = cy_new(&self->platform, cy_str("test"), (cy_str_t){ 0, NULL });
     TEST_ASSERT_NOT_NULL(self->cy);
-    cy_async_error_handler_set(self->cy, fixture_on_async_error);
+    fixture_install_diag(self);
 }
+
+static void fixture_install_diag(fixture_t* const self)
+{
+    self->diag       = (cy_diag_t){ .next = NULL, .vtable = &fixture_diag_vtable };
+    self->diag_count = 0U;
+    cy_diag_add(self->cy, &self->diag);
+}
+
+static void fixture_reset_diag(fixture_t* const self) { self->diag_count = 0U; }
 
 static void fixture_deinit(fixture_t* const self)
 {
@@ -936,6 +1057,104 @@ static void test_subscriber_pattern_index_lifecycle_with_scout_failure(void)
     fixture_deinit(&fix);
 }
 
+static void test_diag_topic_creation_reallocation_and_destruction(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+    fixture_install_diag(&fix);
+
+    const char*       topic_name = "intrusive/diag/topic";
+    const uint64_t    hash       = rapidhash(topic_name, strlen(topic_name));
+    cy_topic_t* const topic      = fixture_make_topic(&fix, topic_name, hash, 0U);
+    TEST_ASSERT_NOT_NULL(topic);
+
+    TEST_ASSERT_EQUAL_size_t(2U, fix.diag_count);
+    TEST_ASSERT_EQUAL_INT(diag_kind_reallocated, fix.diag_capture[0].kind);
+    TEST_ASSERT_TRUE(fix.diag_capture[0].topic == topic);
+    TEST_ASSERT_EQUAL_UINT64(hash, fix.diag_capture[0].hash);
+    TEST_ASSERT_EQUAL_UINT32(topic_subject_id(topic), fix.diag_capture[0].subject_id);
+    TEST_ASSERT_EQUAL_UINT32(0U, fix.diag_capture[0].evictions);
+    TEST_ASSERT_EQUAL_INT(diag_kind_created, fix.diag_capture[1].kind);
+    TEST_ASSERT_TRUE(fix.diag_capture[1].topic == topic);
+    TEST_ASSERT_EQUAL_UINT64(hash, fix.diag_capture[1].hash);
+
+    topic_destroy(topic);
+    TEST_ASSERT_EQUAL_size_t(3U, fix.diag_count);
+    TEST_ASSERT_EQUAL_INT(diag_kind_destroyed, fix.diag_capture[2].kind);
+    TEST_ASSERT_TRUE(fix.diag_capture[2].topic == topic);
+    TEST_ASSERT_EQUAL_UINT64(hash, fix.diag_capture[2].hash);
+
+    fixture_deinit(&fix);
+}
+
+static void test_diag_gossip_processed_known_unknown_and_autocreate(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+    fixture_install_diag(&fix);
+    fix.now = 20 * MEGA;
+
+    cy_topic_t* const known =
+      fixture_make_explicit_topic(&fix, "intrusive/diag/known", UINT64_C(0x1000000000002210), 0U);
+    TEST_ASSERT_NOT_NULL(known);
+
+    fixture_reset_diag(&fix);
+    on_gossip(fix.cy,
+              fix.now,
+              known->hash,
+              known->evictions,
+              topic_lage(known, fix.now),
+              cy_topic_name(known),
+              gossip_broadcast);
+    TEST_ASSERT_EQUAL_size_t(1U, fix.diag_count);
+    TEST_ASSERT_EQUAL_INT(diag_kind_gossip_processed, fix.diag_capture[0].kind);
+    TEST_ASSERT_TRUE(fix.diag_capture[0].topic == known);
+    TEST_ASSERT_EQUAL_UINT64(known->hash, fix.diag_capture[0].hash);
+    TEST_ASSERT_EQUAL_size_t(cy_topic_name(known).len, fix.diag_capture[0].name_len);
+    TEST_ASSERT_EQUAL_MEMORY(cy_topic_name(known).str, fix.diag_capture[0].name, fix.diag_capture[0].name_len);
+
+    uint64_t unknown_hash = 0U;
+    for (uint64_t candidate = 1U; unknown_hash == 0U; candidate++) {
+        if (candidate == known->hash) {
+            continue;
+        }
+        if (topic_find_by_subject_id(
+              fix.cy, topic_subject_id_impl(candidate, 0U, fix.cy->platform->subject_id_modulus)) == NULL) {
+            unknown_hash = candidate;
+        }
+    }
+    fixture_reset_diag(&fix);
+    on_gossip(fix.cy, fix.now, unknown_hash, 0U, 0, cy_str("intrusive/diag/unknown"), gossip_broadcast);
+    TEST_ASSERT_EQUAL_size_t(1U, fix.diag_count);
+    TEST_ASSERT_EQUAL_INT(diag_kind_gossip_processed, fix.diag_capture[0].kind);
+    TEST_ASSERT_NULL(fix.diag_capture[0].topic);
+    TEST_ASSERT_EQUAL_UINT64(unknown_hash, fix.diag_capture[0].hash);
+    TEST_ASSERT_EQUAL_size_t(strlen("intrusive/diag/unknown"), fix.diag_capture[0].name_len);
+    TEST_ASSERT_EQUAL_MEMORY("intrusive/diag/unknown", fix.diag_capture[0].name, fix.diag_capture[0].name_len);
+
+    cy_future_t* const sub = cy_subscribe(fix.cy, cy_str("intrusive/diag/auto/*"), 64U);
+    TEST_ASSERT_NOT_NULL(sub);
+    fixture_reset_diag(&fix);
+    {
+        const char* const name = "intrusive/diag/auto/topic";
+        const uint64_t    hash = rapidhash(name, strlen(name));
+        on_gossip(fix.cy, fix.now, hash, 0U, 0, cy_str(name), gossip_broadcast);
+        TEST_ASSERT_EQUAL_size_t(3U, fix.diag_count);
+        TEST_ASSERT_EQUAL_INT(diag_kind_reallocated, fix.diag_capture[0].kind);
+        TEST_ASSERT_EQUAL_INT(diag_kind_created, fix.diag_capture[1].kind);
+        TEST_ASSERT_EQUAL_INT(diag_kind_gossip_processed, fix.diag_capture[2].kind);
+        TEST_ASSERT_TRUE(fix.diag_capture[0].topic == fix.diag_capture[1].topic);
+        TEST_ASSERT_TRUE(fix.diag_capture[1].topic == fix.diag_capture[2].topic);
+        TEST_ASSERT_EQUAL_UINT64(hash, fix.diag_capture[2].hash);
+        TEST_ASSERT_EQUAL_size_t(strlen(name), fix.diag_capture[2].name_len);
+        TEST_ASSERT_EQUAL_MEMORY(name, fix.diag_capture[2].name, fix.diag_capture[2].name_len);
+    }
+
+    cy_future_destroy(sub);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(fix.cy));
+    fixture_deinit(&fix);
+}
+
 void setUp(void) {}
 
 void tearDown(void) {}
@@ -965,5 +1184,7 @@ int main(void)
     RUN_TEST(test_on_gossip_unknown_topic_pinned_not_in_index_no_collision);
     RUN_TEST(test_topic_subscribe_if_matching_pinned_low_wire_age_preserves_age);
     RUN_TEST(test_subscriber_pattern_index_lifecycle_with_scout_failure);
+    RUN_TEST(test_diag_topic_creation_reallocation_and_destruction);
+    RUN_TEST(test_diag_gossip_processed_known_unknown_and_autocreate);
     return UNITY_END();
 }

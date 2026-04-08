@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstring>
 #include <optional>
+#include <ranges>
 #include <string>
 #include <vector>
 
@@ -390,7 +391,9 @@ void test_late_local_pin_request_does_not_rewrite_existing_topic()
       cy_advertise(e2e::sim_net_cy(net, e2e::sim_node_a), cy_str("arb/local/late-pin#777"));
     TEST_ASSERT_NOT_NULL(pub_late_pin);
     TEST_ASSERT_TRUE(cy_publisher_topic(pub_plain) == cy_publisher_topic(pub_late_pin));
-    TEST_ASSERT_EQUAL_size_t(0U, e2e::sim_net_async_errors(net).size());
+    TEST_ASSERT_FALSE(std::ranges::any_of(e2e::sim_net_diag_captures(net), [](const e2e::diag_capture_t& cap) {
+        return cap.kind == e2e::diag_kind_t::async_error;
+    }));
 
     constexpr std::uint32_t pub_id_plain = 5701U;
     constexpr std::uint32_t pub_id_late  = 5702U;
@@ -406,7 +409,9 @@ void test_late_local_pin_request_does_not_rewrite_existing_topic()
     TEST_ASSERT_EQUAL_size_t(0U, cap_b.malformed);
     TEST_ASSERT_TRUE(count_by_publisher(cap_b, pub_id_plain) > 0U);
     TEST_ASSERT_TRUE(count_by_publisher(cap_b, pub_id_late) > 0U);
-    TEST_ASSERT_EQUAL_size_t(0U, e2e::sim_net_async_errors(net).size());
+    TEST_ASSERT_FALSE(std::ranges::any_of(e2e::sim_net_diag_captures(net), [](const e2e::diag_capture_t& cap) {
+        return cap.kind == e2e::diag_kind_t::async_error;
+    }));
 
     const auto& frame_caps = e2e::sim_net_captures(net);
     const auto  topic_hash = cy_topic_hash(cy_publisher_topic(pub_plain));

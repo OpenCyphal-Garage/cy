@@ -15,6 +15,8 @@ constexpr std::size_t header_bytes = 24U;
 
 struct test_platform_t final : api_test::test_platform_base_t
 {
+    cy_diag_t diag{};
+
     std::size_t fail_after{ std::numeric_limits<std::size_t>::max() };
     std::size_t new_alloc_count{ 0U };
 
@@ -171,10 +173,10 @@ extern "C" std::uint64_t platform_random(cy_platform_t* const platform)
     return api_test::random_lcg<test_platform_t>(platform);
 }
 
-extern "C" void platform_on_async_error(cy_t* const         cy,
-                                        cy_topic_t* const   topic,
-                                        const cy_err_t      error,
-                                        const std::uint16_t line_number)
+extern "C" void platform_diag_async_error(cy_t* const         cy,
+                                          cy_topic_t* const   topic,
+                                          const cy_err_t      error,
+                                          const std::uint16_t line_number)
 {
     (void)cy;
     (void)topic;
@@ -182,6 +184,14 @@ extern "C" void platform_on_async_error(cy_t* const         cy,
     (void)line_number;
     TEST_FAIL_MESSAGE("Unexpected async error callback invocation");
 }
+
+const cy_diag_vtable_t platform_diag_vtable = {
+    .async_error       = platform_diag_async_error,
+    .topic_created     = nullptr,
+    .topic_destroyed   = nullptr,
+    .topic_reallocated = nullptr,
+    .gossip_processed  = nullptr,
+};
 
 struct callback_capture_t
 {
@@ -376,7 +386,8 @@ void platform_init(test_platform_t* const self)
 
     self->cy = cy_new(&self->platform, cy_str("test"), cy_str_t{ 0, nullptr });
     TEST_ASSERT_NOT_NULL(self->cy);
-    cy_async_error_handler_set(self->cy, platform_on_async_error);
+    self->diag = cy_diag_t{ .next = nullptr, .vtable = &platform_diag_vtable };
+    cy_diag_add(self->cy, &self->diag);
 }
 
 void platform_deinit(test_platform_t* const self) { api_test::standard_deinit(*self); }
@@ -671,7 +682,7 @@ void test_retransmission_send_error_does_not_abort_future()
     cy_future_t* const fut      = cy_publish_reliable(pub, deadline, msg);
     TEST_ASSERT_NOT_NULL(fut);
 
-    cy_async_error_handler_set(platform.cy, nullptr);
+    cy_diag_remove(platform.cy, &platform.diag);
     const std::size_t multicast_before    = platform.reliable_multicast_count;
     platform.fail_next_reliable_multicast = true;
     const cy_us_t t0                      = platform.now;
@@ -706,7 +717,7 @@ void test_retransmission_send_error_partial_known_acks_fails()
     const std::uint64_t hash     = topic_hash_for(platform, topic_name);
     TEST_ASSERT_NOT_NULL(fut);
 
-    cy_async_error_handler_set(platform.cy, nullptr);
+    cy_diag_remove(platform.cy, &platform.diag);
     platform.fail_next_reliable_multicast = true;
     const cy_us_t t0                      = platform.now;
     spin_to(platform, t0 + ACK_TIMEOUT + 1);
@@ -738,7 +749,7 @@ void test_retransmission_send_error_all_known_acks_succeeds()
     const std::uint64_t hash = topic_hash_for(platform, topic_name);
     TEST_ASSERT_NOT_NULL(fut);
 
-    cy_async_error_handler_set(platform.cy, nullptr);
+    cy_diag_remove(platform.cy, &platform.diag);
     platform.fail_next_reliable_multicast = true;
     const cy_us_t t0                      = platform.now;
     spin_to(platform, t0 + ACK_TIMEOUT + 1);
@@ -767,7 +778,7 @@ void test_retransmission_send_error_no_associations_single_ack_succeeds()
     const std::uint64_t hash = topic_hash_for(platform, topic_name);
     TEST_ASSERT_NOT_NULL(fut);
 
-    cy_async_error_handler_set(platform.cy, nullptr);
+    cy_diag_remove(platform.cy, &platform.diag);
     platform.fail_next_reliable_multicast = true;
     const cy_us_t t0                      = platform.now;
     spin_to(platform, t0 + ACK_TIMEOUT + 1);
@@ -792,7 +803,7 @@ void test_retransmission_send_error_is_sticky_across_retries()
     cy_future_t* const fut      = cy_publish_reliable(pub, deadline, msg);
     TEST_ASSERT_NOT_NULL(fut);
 
-    cy_async_error_handler_set(platform.cy, nullptr);
+    cy_diag_remove(platform.cy, &platform.diag);
     platform.fail_next_reliable_multicast = true;
     const cy_us_t t0                      = platform.now;
 

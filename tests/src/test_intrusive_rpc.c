@@ -24,8 +24,9 @@ typedef struct
     byte_t    last_unicast[HEADER_BYTES];
     size_t    last_unicast_size;
 
-    size_t   async_error_count;
-    cy_err_t last_async_error;
+    size_t    async_error_count;
+    cy_err_t  last_async_error;
+    cy_diag_t diag;
 } fixture_t;
 
 typedef struct
@@ -101,10 +102,10 @@ static cy_err_t fixture_unicast_send(cy_platform_t* const   platform,
     return self->unicast_send_result;
 }
 
-static void fixture_on_async_error(cy_t* const       cy,
-                                   cy_topic_t* const topic,
-                                   const cy_err_t    error,
-                                   const uint16_t    line_number)
+static void fixture_diag_async_error(cy_t* const       cy,
+                                     cy_topic_t* const topic,
+                                     const cy_err_t    error,
+                                     const uint16_t    line_number)
 {
     (void)topic;
     (void)line_number;
@@ -112,6 +113,10 @@ static void fixture_on_async_error(cy_t* const       cy,
     self->async_error_count++;
     self->last_async_error = error;
 }
+
+static const cy_diag_vtable_t fixture_diag_vtable = {
+    .async_error = fixture_diag_async_error,
+};
 
 static void fixture_init(fixture_t* const self)
 {
@@ -127,7 +132,8 @@ static void fixture_init(fixture_t* const self)
     self->vtable.now                  = fixture_now;
     self->vtable.random               = fixture_random;
     self->cy.platform                 = &self->platform;
-    self->cy.async_error_handler      = fixture_on_async_error;
+    self->diag                        = (cy_diag_t){ .next = NULL, .vtable = &fixture_diag_vtable };
+    cy_diag_add(&self->cy, &self->diag);
     olga_init(&self->cy.olga, &self->cy, olga_now);
     self->cy.ack_baseline_timeout = ACK_BASELINE_DEFAULT_TIMEOUT_us;
     self->fail_after              = SIZE_MAX;
