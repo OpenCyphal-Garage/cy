@@ -266,7 +266,7 @@ arrive; see the API docs for details.
 
 The examples folder contains a simple subscriber example `example_echo.c`.
 
-### 🗺 Name remapping
+### 🗺️ Name remapping
 
 Conventionally, topic names are hardcoded in the application, especially in embedded systems, like `my/topic` above.
 Integration of a node into a network requires some way of altering such names to match the actual network configuration.
