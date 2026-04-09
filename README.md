@@ -399,7 +399,12 @@ A topic name may not be empty, therefore `#1234` is invalid because the part bef
 ## 🚌 Compatibility with Cyphal/CAN v1.0
 
 Cyphal v1.1 is wire-compatible with Cyphal/CAN v1.0.
-To join a Cyphal/CAN v1.0 subject, use pinned topics like `1234#1234`, where 1234 is the desired subject-ID.
+To join a Cyphal/CAN v1.0 subject, use pinned topics like `1234#1234`, where 1234 is the desired subject-ID;
+the same number is repeated twice: first as the topic name, then as the pin expression.
+
+Old nodes implementing Cyphal/CAN v1.0 do not participate in the service discovery protocol, meaning that a topic
+that is only joined by v1.0 nodes will not be discoverable to pattern subscribers. Only verbatim subscriptions
+will work with such topics.
 
 Cyphal v1.1 has no RPC in the same way as Cyphal/CAN v1.0 does.
 To use RPC in a legacy CAN network, a low-level CAN transport access is required at the moment;
