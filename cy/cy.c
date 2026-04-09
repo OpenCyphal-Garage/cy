@@ -5030,7 +5030,7 @@ cy_resolved_t cy_name_resolve(const cy_str_t name,
         for (cy_diag_t* diag = (cy)->diags; diag != NULL;) {                   \
             cy_diag_t* const next = diag->next;                                \
             if ((diag->vtable != NULL) && (diag->vtable->diag_call != NULL)) { \
-                diag->vtable->diag_call((cy), __VA_ARGS__);                    \
+                diag->vtable->diag_call(diag, __VA_ARGS__);                    \
             }                                                                  \
             diag = next;                                                       \
         }                                                                      \

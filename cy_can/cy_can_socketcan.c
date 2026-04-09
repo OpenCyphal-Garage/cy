@@ -256,8 +256,9 @@ cy_platform_t* cy_can_socketcan_new(const uint_least8_t iface_count,
     // Seed the PRNG from all available entropy sources.
     uint64_t prng_seed = 0;
     {
-        const int fd = open("/dev/urandom", O_RDONLY);
-        (void)read(fd, &prng_seed, sizeof(prng_seed));
+        const int     fd   = open("/dev/urandom", O_RDONLY);
+        const ssize_t drop = read(fd, &prng_seed, sizeof(prng_seed));
+        (void)drop;
         (void)close(fd);
     }
     prng_seed ^= (uint64_t)socketcan_now();

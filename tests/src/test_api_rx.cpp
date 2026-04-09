@@ -147,23 +147,25 @@ extern "C" std::uint64_t platform_random(cy_platform_t* const platform)
     return api_test::random_lcg<test_platform_t>(platform);
 }
 
-test_platform_t* g_current_platform{ nullptr }; // NOLINT(*-non-const-global-variables)
+test_platform_t* platform_from_diag(cy_diag_t* const diag)
+{
+    TEST_ASSERT_NOT_NULL(diag);
+    auto* const out = static_cast<test_platform_t*>(diag->user_context.ptr[0]);
+    TEST_ASSERT_NOT_NULL(out);
+    return out;
+}
 
-extern "C" void platform_diag_async_error(cy_t* const         cy,
+extern "C" void platform_diag_async_error(cy_diag_t* const    diag,
                                           cy_topic_t* const   topic,
                                           const cy_err_t      error,
                                           const std::uint16_t line_number)
 {
-    (void)cy;
     (void)topic;
     (void)error;
     (void)line_number;
-    if (g_current_platform != nullptr) {
-        g_current_platform->async_error_count++;
-        if (!g_current_platform->expect_async_errors) {
-            TEST_FAIL_MESSAGE("Unexpected async error callback invocation");
-        }
-    } else {
+    test_platform_t* const self = platform_from_diag(diag);
+    self->async_error_count++;
+    if (!self->expect_async_errors) {
         TEST_FAIL_MESSAGE("Unexpected async error callback invocation");
     }
 }
@@ -252,16 +254,12 @@ void platform_init(test_platform_t* const self)
 
     self->cy = cy_new(&self->platform, cy_str("test"), cy_str_t{ 0, nullptr });
     TEST_ASSERT_NOT_NULL(self->cy);
-    self->diag = cy_diag_t{ .next = nullptr, .vtable = &platform_diag_vtable };
+    self->diag = cy_diag_t{ .next = nullptr, .user_context = CY_USER_CONTEXT_EMPTY, .vtable = &platform_diag_vtable };
+    self->diag.user_context.ptr[0] = self;
     cy_diag_add(self->cy, &self->diag);
-    g_current_platform = self;
 }
 
-void platform_deinit(test_platform_t* const self)
-{
-    api_test::standard_deinit(*self);
-    g_current_platform = nullptr;
-}
+void platform_deinit(test_platform_t* const self) { api_test::standard_deinit(*self); }
 
 void assert_message_counters(const std::size_t destroyed, const std::size_t live)
 {

@@ -47,13 +47,13 @@ static void* fixture_realloc(cy_platform_t* const platform, void* const ptr, con
 
 static cy_us_t fixture_now(cy_platform_t* const platform) { return ((reorder_fixture_t*)platform)->now; }
 
-static void fixture_diag_async_error(cy_t* const       cy,
+static void fixture_diag_async_error(cy_diag_t* const  diag,
                                      cy_topic_t* const topic,
                                      const cy_err_t    error,
                                      const uint16_t    line_number)
 {
     (void)topic;
-    reorder_fixture_t* const self = (reorder_fixture_t*)cy->platform;
+    reorder_fixture_t* const self = (reorder_fixture_t*)diag->user_context.ptr[0];
     self->async_error_count++;
     self->last_async_error      = error;
     self->last_async_error_line = line_number;
@@ -94,7 +94,9 @@ static void reorder_env_init(reorder_env_t* const self)
     self->fixture.vtable.now                  = fixture_now;
     self->fixture.vtable.realloc              = fixture_realloc;
     self->fixture.cy.platform                 = &self->fixture.platform;
-    self->fixture.diag                        = (cy_diag_t){ .next = NULL, .vtable = &fixture_diag_vtable };
+    self->fixture.diag =
+      (cy_diag_t){ .next = NULL, .user_context = CY_USER_CONTEXT_EMPTY, .vtable = &fixture_diag_vtable };
+    self->fixture.diag.user_context.ptr[0] = &self->fixture;
     cy_diag_add(&self->fixture.cy, &self->fixture.diag);
     self->fixture.now                   = 0;
     self->fixture.fail_alloc_size       = 0;

@@ -102,14 +102,14 @@ static cy_err_t fixture_unicast_send(cy_platform_t* const   platform,
     return self->unicast_send_result;
 }
 
-static void fixture_diag_async_error(cy_t* const       cy,
+static void fixture_diag_async_error(cy_diag_t* const  diag,
                                      cy_topic_t* const topic,
                                      const cy_err_t    error,
                                      const uint16_t    line_number)
 {
     (void)topic;
     (void)line_number;
-    fixture_t* const self = (fixture_t*)cy->platform;
+    fixture_t* const self = (fixture_t*)diag->user_context.ptr[0];
     self->async_error_count++;
     self->last_async_error = error;
 }
@@ -132,7 +132,8 @@ static void fixture_init(fixture_t* const self)
     self->vtable.now                  = fixture_now;
     self->vtable.random               = fixture_random;
     self->cy.platform                 = &self->platform;
-    self->diag                        = (cy_diag_t){ .next = NULL, .vtable = &fixture_diag_vtable };
+    self->diag = (cy_diag_t){ .next = NULL, .user_context = CY_USER_CONTEXT_EMPTY, .vtable = &fixture_diag_vtable };
+    self->diag.user_context.ptr[0] = self;
     cy_diag_add(&self->cy, &self->diag);
     olga_init(&self->cy.olga, &self->cy, olga_now);
     self->cy.ack_baseline_timeout = ACK_BASELINE_DEFAULT_TIMEOUT_us;
