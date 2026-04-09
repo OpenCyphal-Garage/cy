@@ -959,11 +959,9 @@ cy_can_v0_subscription_t* cy_can_v0_subscribe(cy_platform_t* const base,
         return NULL;
     }
     (void)memset(self, 0, sizeof(*self));
-    self->owner             = owner;
-    canard_us_t tid_timeout = transfer_id_timeout;
-    if (tid_timeout < 0) {
-        tid_timeout = INT64_C(2000000); // Must match CANARD_DEFAULT_TRANSFER_ID_TIMEOUT_us.
-    }
+    self->owner = owner;
+    const canard_us_t tid_timeout =
+      (transfer_id_timeout < 0) ? (canard_us_t)CANARD_DEFAULT_TRANSFER_ID_TIMEOUT_us : transfer_id_timeout;
     canard_subscription_t* const sub =
       canard_v0_subscribe(&owner->canard, &self->sub, data_type_id, crc_seed, extent, tid_timeout, &sub_vtable_v0);
     if (sub != &self->sub) {

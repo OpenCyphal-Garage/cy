@@ -412,3 +412,5 @@ The `cy_can` transport layer exposes a small sidecar API for legacy UAVCAN v0 / 
 
 This API is transport-local: it uses v0 data type IDs and CRC seeds directly, and it does not create Cy topics or
 participate in the Cy consensus protocol. Event processing is still driven by the usual `cy_spin...()` calls.
+
+See [`examples/example_dronecan_echo.c`](examples/example_dronecan_echo.c) for a minimal SocketCAN subscriber.

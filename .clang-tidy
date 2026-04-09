@@ -63,6 +63,8 @@ Checks: >-
   -cert-dcl16-c,
   -cert-oop11-cpp,
   -cert-err33-c,
+  -cert-err34-c,
+  -bugprone-unchecked-string-to-number-conversion,
   -hicpp-invalid-access-moved,
   -hicpp-uppercase-literal-suffix,
   -hicpp-move-const-arg,
