@@ -128,7 +128,7 @@ jobs:
         with:
           submodules: true
       - run: cmake -S . -B $GITHUB_WORKSPACE/build -DCMAKE_BUILD_TYPE=Debug -DNO_STATIC_ANALYSIS=ON
-      - run: cd $GITHUB_WORKSPACE/build && make -j"$(nproc)" example_echo example_time_pub
+      - run: cd $GITHUB_WORKSPACE/build && make -j"$(nproc)" example_echo example_time_pub example_dronecan_echo
       - run: python3 tools/ci_example_smoke.py --build-dir $GITHUB_WORKSPACE/build
 
   test_model_montecarlo:
