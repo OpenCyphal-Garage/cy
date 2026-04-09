@@ -1005,9 +1005,7 @@ void cy_can_v0_unsubscribe(cy_can_v0_subscription_t* const self)
         if (owner == NULL) {
             return;
         }
-        if ((owner != NULL) && (owner->base.cy != NULL)) {
-            CY_TRACE(owner->base.cy, "DTID=%ju ptr=%p", (uintmax_t)self->sub.port_id, (void*)self);
-        }
+        CY_TRACE(owner->base.cy, "DTID=%ju ptr=%p", (uintmax_t)self->sub.port_id, (void*)self);
         canard_unsubscribe(&owner->canard, &self->sub);
         owner->vtable->realloc(owner->user, self, 0);
     }
