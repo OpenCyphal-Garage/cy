@@ -35,6 +35,10 @@ cy_add_example(example_pub cy_udp_posix example_pub.c)
 cy_add_example(example_sub cy_udp_posix example_sub.c)
 cy_add_example(example_time_pub cy_udp_posix example_time_pub.c)
 cy_add_example(example_echo cy_udp_posix example_echo.c)
+if (TARGET cy_can_socketcan)
+    add_executable(example_dronecan_echo example_dronecan_echo.c)
+    target_link_libraries(example_dronecan_echo PRIVATE cy_examples_support cy_can_socketcan)
+endif ()
 
 # File transfer examples.
 cy_add_example(example_file_server cy_udp_posix example_file_server.c)

@@ -399,7 +399,23 @@ A topic name may not be empty, therefore `#1234` is invalid because the part bef
 ## 🚌 Compatibility with Cyphal/CAN v1.0
 
 Cyphal v1.1 is wire-compatible with Cyphal/CAN v1.0.
-To join a Cyphal/CAN v1.0 subject, use pinned topics like `1234#1234`, where 1234 is the desired subject-ID.
+To join a Cyphal/CAN v1.0 subject, use pinned topics like `1234#1234`, where 1234 is the desired subject-ID;
+the same number is repeated twice: first as the topic name, then as the pin expression.
+
+Old nodes implementing Cyphal/CAN v1.0 do not participate in the service discovery protocol, meaning that a topic
+that is only joined by v1.0 nodes will not be discoverable to pattern subscribers. Only verbatim subscriptions
+will work with such topics.
 
 Cyphal v1.1 has no RPC in the same way as Cyphal/CAN v1.0 does.
-To use RPC in a legacy CAN network, a low-level CAN transport access is required.
+To use RPC in a legacy CAN network, a low-level CAN transport access is required at the moment;
+first-class v1.0 RPC support may be added in the future if there is demand (please discuss on the forum).
+
+## 🚁 Compatibility with UAVCAN v0 / DroneCAN
+
+The `cy_can` transport layer exposes a small sidecar API for legacy UAVCAN v0 / DroneCAN interoperability:
+`cy_can_v0_subscribe()` and `cy_can_v0_publish()`.
+
+This API is transport-local: it uses v0 data type IDs and CRC seeds directly, and it does not create Cy topics or
+participate in the Cy consensus protocol. Event processing is still driven by the usual `cy_spin...()` calls.
+
+See [`examples/example_dronecan_echo.c`](examples/example_dronecan_echo.c) for a minimal SocketCAN subscriber.

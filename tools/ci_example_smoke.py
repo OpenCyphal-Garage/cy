@@ -3,7 +3,8 @@
 Smoke-test a pair of examples in unattended CI:
 1) example_echo subscribes to a topic.
 2) example_time_pub publishes wall-clock timestamps onto that topic.
-The test passes once echo output contains both topic name and timestamp text.
+3) example_dronecan_echo subscribes to a DroneCAN/UAVCAN v0 message on vcan.
+The test passes once the expected output is observed.
 """
 
 from __future__ import annotations
@@ -14,6 +15,8 @@ import pathlib
 import re
 import shutil
 import signal
+import socket
+import struct
 import subprocess
 import sys
 import time
@@ -23,6 +26,14 @@ from dataclasses import dataclass
 TOPIC = "demo/time"
 TOPIC_RE = re.compile(r"\bdemo/time\b")
 TIMESTAMP_RE = re.compile(r"\b\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\b")
+DRONECAN_DATA_TYPE_ID = 341
+DRONECAN_PAYLOAD = bytes((0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07))
+DRONECAN_SOURCE_NODE_ID = 42
+DRONECAN_TRANSFER_ID = 0
+DRONECAN_PRIORITY = 4
+CAN_EFF_FLAG = 0x80000000
+DRONECAN_HEX_RE = re.compile(r"\b01 02 03 04 05 06 07\b")
+DRONECAN_META_RE = re.compile(r"\bsrc=42\b.*\btid=0\b.*\bsize=7\b")
 
 
 @dataclass
@@ -37,6 +48,13 @@ class SmokeResult:
     failure_reason: str
     echo_files: ProcessFiles
     pub_files: ProcessFiles
+
+
+@dataclass
+class SingleProcessSmokeResult:
+    passed: bool
+    failure_reason: str
+    files: ProcessFiles
 
 
 @dataclass
@@ -122,6 +140,17 @@ def cleanup_vcan(setup: VcanSetup | None) -> None:
     _ = run_quiet(setup.privilege_prefix + [setup.ip_cmd, "link", "delete", "dev", setup.iface_name])
 
 
+def send_dronecan_single_frame(iface_name: str) -> None:
+    if not hasattr(socket, "PF_CAN") or not hasattr(socket, "CAN_RAW"):
+        raise OSError("Python raw CAN sockets are unavailable")
+    can_id = CAN_EFF_FLAG | (DRONECAN_PRIORITY << 24) | (DRONECAN_DATA_TYPE_ID << 8) | DRONECAN_SOURCE_NODE_ID
+    frame_payload = DRONECAN_PAYLOAD + bytes((0xC0 | DRONECAN_TRANSFER_ID,))
+    frame = struct.pack("=IB3x8s", can_id, len(frame_payload), frame_payload.ljust(8, b"\x00"))
+    with socket.socket(socket.PF_CAN, socket.SOCK_RAW, socket.CAN_RAW) as sock:
+        sock.bind((iface_name,))
+        sock.send(frame)
+
+
 def run_smoke_case(
     build_dir: pathlib.Path,
     echo_bin: pathlib.Path,
@@ -179,6 +208,57 @@ def run_smoke_case(
     return SmokeResult(passed=passed, failure_reason=failure_reason, echo_files=echo_files, pub_files=pub_files)
 
 
+def run_dronecan_smoke_case(
+    build_dir: pathlib.Path,
+    echo_bin: pathlib.Path,
+    timeout_sec: float,
+    publisher_delay_sec: float,
+    iface_name: str,
+) -> SingleProcessSmokeResult:
+    files = ProcessFiles(stdout=build_dir / "example_smoke_dronecan_echo.out",
+                         stderr=build_dir / "example_smoke_dronecan_echo.err")
+    for f in (files.stdout, files.stderr):
+        f.write_text("", encoding="utf8")
+
+    echo_proc: subprocess.Popen[str] | None = None
+    passed = False
+    failure_reason = ""
+    next_send_at = time.monotonic() + publisher_delay_sec
+
+    try:
+        with files.stdout.open("w", encoding="utf8") as echo_out, files.stderr.open("w", encoding="utf8") as echo_err:
+            echo_proc = subprocess.Popen([str(echo_bin), iface_name, str(DRONECAN_DATA_TYPE_ID)],
+                                         stdout=echo_out,
+                                         stderr=echo_err)
+
+        deadline = time.monotonic() + timeout_sec
+        while time.monotonic() < deadline:
+            if (echo_proc.poll() is not None) and (echo_proc.returncode != 0):
+                failure_reason = f"example_dronecan_echo exited early with code {echo_proc.returncode}"
+                break
+
+            now = time.monotonic()
+            if now >= next_send_at:
+                try:
+                    send_dronecan_single_frame(iface_name)
+                except OSError as ex:
+                    failure_reason = f"failed to send DroneCAN frame: {ex}"
+                    break
+                next_send_at = now + 0.2
+
+            echo_stdout = read_text(files.stdout)
+            if DRONECAN_HEX_RE.search(echo_stdout) and DRONECAN_META_RE.search(echo_stdout):
+                passed = True
+                break
+            time.sleep(0.05)
+        if not passed and not failure_reason:
+            failure_reason = "timeout waiting for expected DroneCAN echo output"
+    finally:
+        terminate_process(echo_proc)
+
+    return SingleProcessSmokeResult(passed=passed, failure_reason=failure_reason, files=files)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--build-dir", default="build", help="CMake build directory path")
@@ -189,7 +269,8 @@ def main() -> int:
     build_dir = pathlib.Path(args.build_dir).resolve()
     echo_bin = build_dir / "examples" / "example_echo"
     pub_bin = build_dir / "examples" / "example_time_pub"
-    for bin_path in (echo_bin, pub_bin):
+    dronecan_echo_bin = build_dir / "examples" / "example_dronecan_echo"
+    for bin_path in (echo_bin, pub_bin, dronecan_echo_bin):
         if not (bin_path.is_file() and os.access(bin_path, os.X_OK)):
             print(f"Missing executable: {bin_path}", file=sys.stderr)
             return 2
@@ -229,20 +310,30 @@ def main() -> int:
                                      "vcan",
                                      [iface_arg, TOPIC],
                                      [iface_arg])
+        if not vcan_result.passed:
+            print(f"Example smoke test failed: {vcan_result.failure_reason}", file=sys.stderr)
+            print("--- vcan example_echo stdout (tail) ---", file=sys.stderr)
+            print(short(read_text(vcan_result.echo_files.stdout)), file=sys.stderr)
+            print("--- vcan example_echo stderr (tail) ---", file=sys.stderr)
+            print(short(read_text(vcan_result.echo_files.stderr)), file=sys.stderr)
+            print("--- vcan example_time_pub stderr (tail) ---", file=sys.stderr)
+            print(short(read_text(vcan_result.pub_files.stderr)), file=sys.stderr)
+            return 1
+        dronecan_result = run_dronecan_smoke_case(
+            build_dir, dronecan_echo_bin, args.timeout_sec, args.publisher_delay_sec, vcan_setup.iface_name
+        )
     finally:
         cleanup_vcan(vcan_setup)
 
-    if vcan_result.passed:
-        print("Example smoke test passed: observed echoed demo/time timestamp over UDP and vcan.")
+    if dronecan_result.passed:
+        print("Example smoke test passed: observed echoed demo/time timestamp over UDP/vcan and DroneCAN over vcan.")
         return 0
 
-    print(f"Example smoke test failed: {vcan_result.failure_reason}", file=sys.stderr)
-    print("--- vcan example_echo stdout (tail) ---", file=sys.stderr)
-    print(short(read_text(vcan_result.echo_files.stdout)), file=sys.stderr)
-    print("--- vcan example_echo stderr (tail) ---", file=sys.stderr)
-    print(short(read_text(vcan_result.echo_files.stderr)), file=sys.stderr)
-    print("--- vcan example_time_pub stderr (tail) ---", file=sys.stderr)
-    print(short(read_text(vcan_result.pub_files.stderr)), file=sys.stderr)
+    print(f"Example smoke test failed: {dronecan_result.failure_reason}", file=sys.stderr)
+    print("--- DroneCAN example stderr (tail) ---", file=sys.stderr)
+    print(short(read_text(dronecan_result.files.stderr)), file=sys.stderr)
+    print("--- DroneCAN example stdout (tail) ---", file=sys.stderr)
+    print(short(read_text(dronecan_result.files.stdout)), file=sys.stderr)
     return 1
 
 
