@@ -266,6 +266,53 @@ arrive; see the API docs for details.
 
 The examples folder contains a simple subscriber example `example_echo.c`.
 
+### 🗺️ Name remapping
+
+Conventionally, topic names are hardcoded in the application, especially in embedded systems, like `my/topic` above.
+Integration of a node into a network requires some way of altering such names to match the actual network configuration.
+This can be done via namespacing as introduced earlier, and via name remapping.
+Readers familiar with ROS will feel right at home with these concepts.
+
+The namespace is specified once when the node is created, as shown in the very beginning of the tutorial.
+Name remappings are introduced after the node is created, and normally it should be done before the first
+topic is joined to ensure names are resolved consistently.
+
+```c++
+// Map the hardcoded topic name "camera/left" to the actual topic name "/head/camera/upper_left" on the network.
+cy_err_t err = cy_remap(cy, cy_str("camera/left"), cy_str("/head/camera/upper_left"));
+if (err != CY_OK) { ... }
+```
+
+The `from` name will be matched against the hardcoded names used in the application,
+and the `to` name can be arbitrary: relative, absolute (`/zoo`), homeful (`~/zoo`), etc.
+
+The example above is not super useful because both names are hardcoded, but this is for illustration purposes only.
+It is possible to automatically parse and apply remappings from a single configuration string;
+software nodes can read this string from a configuration file, CLI options, or an environment variable,
+while embedded nodes can read it from the non-volatile configuration memory.
+The string is simply a list of whitespace-separated `from=to` pairs (any whitespace goes, including newlines).
+
+```c++
+cy_str_t remap_config = cy_str("camera/left=/head/camera/upper_left camera/right=/head/camera/upper_right");
+cy_err_t err = cy_remap_parse(cy, remap_config);
+if (err != CY_OK) { ... }
+```
+
+Cyphal v1.1 recommends a convention of two environment variables (assumed empty if unset):
+
+- `CYPHAL_NAMESPACE` -- the namespace to use for the node.
+- `CYPHAL_REMAP` -- the name remapping configuration string as described above.
+
+This enables the following usage in software nodes (`cy_str()` is NULL-safe) to absorb the configuration cleanly:
+
+```c++
+cy_t* cy = cy_new(platform, cy_str("my_node_name"), cy_str(getenv("CYPHAL_NAMESPACE")));
+if (cy == NULL) { ... }
+(void)cy_remap_parse(cy, cy_str(getenv("CYPHAL_REMAP")));
+```
+
+>NB: The convention of only two environment variables is significantly simplified compared to the original Cyphal v1.0.
+
 ### 🔄 RPC & streaming
 
 Cyphal v1.1 implements RPC with optional streaming directly on top of pub/sub by allowing subscribers to optionally

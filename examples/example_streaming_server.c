@@ -10,6 +10,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #define TOPIC_NAME           "demo/stream"
 #define RESPONSE_DEADLINE_us (2 * 1000000LL)
@@ -186,11 +187,13 @@ int main(int argc, char* argv[])
     if (platform.platform == NULL) {
         return 1;
     }
-    cy_t* const cy = cy_new(platform.platform, example_platform_home(), example_platform_namespace());
+    cy_t* const cy = cy_new(platform.platform, example_platform_home(), cy_str(getenv("CYPHAL_NAMESPACE")));
     if (cy == NULL) {
         (void)fprintf(stderr, "cy_new\n");
         return 1;
     }
+    // Allow the integrator to override hardcoded topic names from the environment.
+    (void)cy_remap_parse(cy, cy_str(getenv("CYPHAL_REMAP")));
 
     // Subscribe to the request topic.
     cy_future_t* const sub = cy_subscribe(cy, cy_str(TOPIC_NAME), RESPONSE_MAX);

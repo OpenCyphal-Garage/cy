@@ -5,6 +5,7 @@
 #include "example_platform.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -33,11 +34,13 @@ int main(int argc, char* argv[])
     if (platform.platform == NULL) {
         return 1;
     }
-    cy_t* const cy = cy_new(platform.platform, example_platform_home(), example_platform_namespace());
+    cy_t* const cy = cy_new(platform.platform, example_platform_home(), cy_str(getenv("CYPHAL_NAMESPACE")));
     if (cy == NULL) {
         (void)fprintf(stderr, "cy_new\n");
         return 1;
     }
+    // Allow the integrator to override hardcoded topic names from the environment.
+    (void)cy_remap_parse(cy, cy_str(getenv("CYPHAL_REMAP")));
 
     cy_publisher_t* const pub = cy_advertise(cy, cy_str(topic_name));
     if (pub == NULL) {

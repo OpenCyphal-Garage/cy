@@ -83,11 +83,13 @@ int main(int argc, char* argv[])
     }
 
     // Initialize the node.
-    cy_t* const cy = cy_new(platform.platform, example_platform_home(), example_platform_namespace());
+    cy_t* const cy = cy_new(platform.platform, example_platform_home(), cy_str(getenv("CYPHAL_NAMESPACE")));
     if (cy == NULL) {
         (void)fprintf(stderr, "cy_new\n");
         return 1;
     }
+    // Allow the integrator to override hardcoded topic names from the environment.
+    (void)cy_remap_parse(cy, cy_str(getenv("CYPHAL_REMAP")));
 
     // Create the publisher that will issue the request.
     cy_publisher_t* const pub = cy_advertise_client(cy, cy_str(TOPIC_NAME), RESPONSE_MAX);

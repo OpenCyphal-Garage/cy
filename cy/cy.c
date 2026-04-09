@@ -118,6 +118,10 @@ struct cy_t
     cy_str_t home;
     cy_str_t ns;
 
+    // Name remapping configuration. Keys are normalized from-prefixes.
+    // Values are heap-allocated NUL-terminated to-prefix strings owned by this cy_t.
+    wkv_t remap;
+
     // Topics are indexed in multiple ways for various lookups.
     // Pinned topics are identified by evictions >= EVICTIONS_PINNED_MIN, not by their hash.
     wkv_t      topics_by_name;       // Contains ALL topics, may be empty.
@@ -195,8 +199,11 @@ typedef enum
 #define SEQNO48_MASK ((1ULL << 48U) - 1ULL)
 
 static uint32_t topic_subject_id(const cy_topic_t* const topic);
+static bool     str_valid(const cy_str_t str);
 static size_t   name_normalized_len(const cy_str_t name);
 static cy_str_t name_normalize(const cy_str_t part, const size_t dest_size, char* const dest);
+static cy_str_t name_consume_pin_suffix(const cy_str_t name, uint16_t* const out_pin);
+static bool     name_is_verbatim(const cy_str_t name);
 
 static void diag_async_error(cy_t* const cy, cy_topic_t* const topic, const cy_err_t error, const uint16_t line_number);
 static void diag_topic_created(cy_topic_t* const topic);
@@ -4274,6 +4281,11 @@ cy_t* cy_new(cy_platform_t* const platform, const cy_str_t home, const cy_str_t 
     cy->subscribers_by_pattern.sub_one = cy_name_one;
     cy->subscribers_by_pattern.sub_any = cy_name_any;
 
+    wkv_init(&cy->remap, &wkv_realloc);
+    cy->remap.context = cy;
+    cy->remap.sub_one = cy_name_one;
+    cy->remap.sub_any = cy_name_any;
+
     cy->respond_futures_by_tag = NULL;
 
     cy->unicast_extent = HEADER_BYTES + 1024U; // Arbitrary initial size; will be refined when publishers are created.
@@ -4365,6 +4377,14 @@ void cy_destroy(cy_t* const cy)
     assert(cy->writers == NULL); // All writer registry entries released by topic_destroy.
     assert(cy->readers == NULL); // All reader registry entries released by topic_destroy.
 
+    // Drain the remap table: the to-string values are owned by this cy_t and must be freed here.
+    while (!wkv_is_empty(&cy->remap)) {
+        wkv_node_t* const n = wkv_at(&cy->remap, 0);
+        assert((n != NULL) && (n->value != NULL));
+        mem_free(cy, n->value);
+        wkv_del(&cy->remap, n);
+    }
+
     // Cleanup done, release the memory. Home and ns are embedded in the same allocation.
     mem_free(cy, cy);
 }
@@ -4428,8 +4448,110 @@ cy_us_t cy_uptime(const cy_t* const cy) { return cy_now(cy) - cy->ts_started; }
 
 cy_resolved_t cy_resolve(const cy_t* const cy, const cy_str_t name, const size_t dest_size, char* const dest)
 {
-    // TODO: remapping!
-    return cy_name_resolve(name, cy_namespace(cy), cy_home(cy), dest_size, dest);
+    if (cy == NULL) {
+        return (cy_resolved_t){ .name = str_invalid, .pin = UINT16_MAX };
+    }
+    return cy_name_resolve(&cy->remap, name, cy_namespace(cy), cy_home(cy), dest_size, dest);
+}
+
+static bool remap_spec_is_whitespace(const char c)
+{
+    return (c == ' ') || (c == '\t') || (c == '\n') || (c == '\r') || (c == '\x0b') || (c == '\x0c');
+}
+
+cy_err_t cy_remap(cy_t* const cy, const cy_str_t from, const cy_str_t to)
+{
+    if ((cy == NULL) || !str_valid(from) || !str_valid(to) || (from.len == 0U)) {
+        return CY_ERR_ARGUMENT;
+    }
+
+    // Normalize the `from` lookup key. The lookup at apply time also normalizes the user's input through
+    // the same path, so the integrator's spelling does not need to match the application's exactly (extra
+    // slashes, leading/trailing slashes are all collapsed). Pinning of `from` is unspecified behavior.
+    char           from_buf[CY_TOPIC_NAME_MAX + 1U];
+    const cy_str_t from_norm = name_normalize(from, sizeof(from_buf), from_buf);
+    if ((from_norm.str == NULL) || (from_norm.len == 0U)) {
+        return CY_ERR_NAME;
+    }
+
+    // Validate `to`. It is stored verbatim (no normalization) so that absolute (`/...`) and homeful (`~/...`)
+    // paths are preserved for the apply-time `name_resolve_construct` substitution.
+    // Char-set validation is done via `name_normalized_len`; we discard the normalized length itself.
+    // Pinned patterns are rejected here because cy_name_resolve would reject them at apply time anyway.
+    if (name_normalized_len(to) == SIZE_MAX) {
+        return CY_ERR_NAME;
+    }
+    {
+        uint16_t   to_pin   = UINT16_MAX;
+        const bool verbatim = name_is_verbatim(name_consume_pin_suffix(to, &to_pin));
+        const bool pinned   = to_pin <= CY_SUBJECT_ID_PINNED_MAX;
+        if (pinned && !verbatim) {
+            return CY_ERR_NAME;
+        }
+    }
+
+    // Allocate the verbatim copy of `to` before touching the wkv so an OOM can be rolled back cleanly.
+    char* const new_to = (char*)mem_alloc(cy, to.len + 1U);
+    if (new_to == NULL) {
+        return CY_ERR_MEMORY;
+    }
+    if (to.len > 0U) {
+        memcpy(new_to, to.str, to.len);
+    }
+    new_to[to.len] = '\0';
+
+    // Insert or find the node. On OOM, free the new copy and leave the table unchanged.
+    wkv_node_t* const node = wkv_set(&cy->remap, from_norm);
+    if (node == NULL) {
+        mem_free(cy, new_to);
+        return CY_ERR_MEMORY;
+    }
+    mem_free(cy, node->value); // Overwrite the old value, if any; NULL is safe.
+    node->value = new_to;
+    return CY_OK;
+}
+
+cy_err_t cy_remap_parse(cy_t* const cy, const cy_str_t spec_string)
+{
+    if (cy == NULL) {
+        return CY_ERR_ARGUMENT;
+    }
+    if (spec_string.str == NULL) {
+        return (spec_string.len == 0U) ? CY_OK : CY_ERR_ARGUMENT;
+    }
+    size_t i = 0U;
+    while (i < spec_string.len) {
+        while ((i < spec_string.len) && remap_spec_is_whitespace(spec_string.str[i])) {
+            i++;
+        }
+        if (i >= spec_string.len) {
+            break;
+        }
+        const size_t tok_start = i;
+        while ((i < spec_string.len) && !remap_spec_is_whitespace(spec_string.str[i])) {
+            i++;
+        }
+        const size_t tok_len = i - tok_start;
+        // Locate the first '=' within the token; skip the token if absent.
+        size_t eq_off = tok_len;
+        for (size_t j = 0U; j < tok_len; j++) {
+            if (spec_string.str[tok_start + j] == '=') {
+                eq_off = j;
+                break;
+            }
+        }
+        if (eq_off >= tok_len) {
+            continue; // Malformed: no '=', silently ignored per docs.
+        }
+        const cy_str_t from = { .len = eq_off, .str = &spec_string.str[tok_start] };
+        const cy_str_t to   = { .len = tok_len - eq_off - 1U, .str = &spec_string.str[tok_start + eq_off + 1U] };
+        const cy_err_t err  = cy_remap(cy, from, to);
+        if (err == CY_ERR_MEMORY) {
+            return err; // OOM is a hard stop; the table may be partially updated per the documented contract.
+        }
+        // CY_ERR_NAME / CY_ERR_ARGUMENT are treated as "invalid pair" and silently ignored.
+    }
+    return CY_OK;
 }
 
 cy_topic_t* cy_topic_find_by_name(const cy_t* const cy, const cy_str_t name)
@@ -4992,32 +5114,57 @@ static cy_str_t name_resolve_construct(const cy_str_t name,
     return cy_name_join(name_space, name, dest_size, dest);
 }
 
-cy_resolved_t cy_name_resolve(const cy_str_t name,
-                              const cy_str_t name_space,
-                              const cy_str_t home,
-                              const size_t   dest_size,
-                              char* const    dest)
+cy_resolved_t cy_name_resolve(const wkv_t* const remap,
+                              const cy_str_t     name,
+                              const cy_str_t     name_space,
+                              const cy_str_t     home,
+                              const size_t       dest_size,
+                              char* const        dest)
 {
     if ((dest == NULL) || !str_valid(name) || !str_valid(name_space) || !str_valid(home)) {
         return (cy_resolved_t){ .name = str_invalid, .pin = UINT16_MAX };
     }
-    uint16_t pin = UINT16_MAX;
-    // Strip the pin first to ensure the fully resolved name fits into the size limit.
-    const cy_str_t res = name_resolve_construct(name_consume_pin_suffix(name, &pin), //
-                                                name_space,
-                                                home,
-                                                dest_size,
-                                                dest);
-    if ((res.len == 0) || (res.len > CY_TOPIC_NAME_MAX)) {
+
+    // Remap applied before ns/home resolution, on the (normalized, pin-free) raw user input.
+    // Pre-strip the user's pin so that pinned queries can still match unpinned `from` keys,
+    // and so that the user's pin is available as a fallback if no rule matches.
+    uint16_t       user_pin       = UINT16_MAX;
+    const cy_str_t name_unpinned  = name_consume_pin_suffix(name, &user_pin);
+    cy_str_t       effective_name = name_unpinned;
+    uint16_t       effective_pin  = user_pin;
+    if ((remap != NULL) && !wkv_is_empty(remap)) {
+        // Normalize the lookup key so the integrator's `from` matches the user's input regardless of minor
+        // syntactic variations (extra slashes, leading/trailing slashes). Stored `from` keys are normalized too.
+        char           lookup_buf[CY_TOPIC_NAME_MAX + 1U];
+        const cy_str_t lookup_key = name_normalize(name_unpinned, sizeof(lookup_buf), lookup_buf);
+        if (lookup_key.str != NULL) {
+            const wkv_node_t* const node = wkv_get(remap, lookup_key);
+            if (node != NULL) {
+                // A rule matched: substitute the stored `to` for the user's name and discard the user's pin
+                // (per the spec, the matched rule's pin — present or absent — wins outright).
+                const char* const stored = (const char*)node->value;
+                const cy_str_t    to_str = { .len = strlen(stored), .str = stored };
+                effective_name           = name_consume_pin_suffix(to_str, &effective_pin);
+            }
+        }
+    }
+
+    // Run the standard ns/home expansion on whatever name we ended up with (user's input or matched `to`).
+    // The `to` may itself be absolute (`/...`), homeful (`~/...`), or relative — name_resolve_construct
+    // handles each correctly because the substitution happens at the same level as a normal user input.
+    const cy_str_t res = name_resolve_construct(effective_name, name_space, home, dest_size, dest);
+    if ((res.str == NULL) || (res.len == 0U) || (res.len > CY_TOPIC_NAME_MAX)) {
         return (cy_resolved_t){ .name = str_invalid, .pin = UINT16_MAX };
     }
-    // Pinned topic names cannot be patterns.
-    const bool pinned   = pin <= CY_SUBJECT_ID_PINNED_MAX;
+
+    // Pinned topic names cannot be patterns. This catches both an unfortunate user input (e.g. `foo/*#42`)
+    // and a remap rule whose stored `to` is a pinned pattern (reachable if wkv_t is populated manually).
+    const bool pinned   = effective_pin <= CY_SUBJECT_ID_PINNED_MAX;
     const bool verbatim = name_is_verbatim(res);
     if (!verbatim && pinned) {
         return (cy_resolved_t){ .name = str_invalid, .pin = UINT16_MAX };
     }
-    return (cy_resolved_t){ .name = res, .pin = pin, .verbatim = verbatim };
+    return (cy_resolved_t){ .name = res, .pin = effective_pin, .verbatim = verbatim };
 }
 
 // =====================================================================================================================
