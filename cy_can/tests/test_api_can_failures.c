@@ -8,12 +8,13 @@ static const cy_us_t spin_slice_us = (cy_us_t)10000;
 
 static void test_api_can_failures_constructor_oom(void)
 {
-    can_test_bus_t  bus;
-    can_test_node_t node;
+    static const uint64_t prng_seed = UINT64_C(0xA110C8E0A110C8E0);
+    can_test_bus_t        bus;
+    can_test_node_t       node;
     can_test_bus_init(&bus);
     can_test_node_prepare(&node, &bus, 1U, false, true);
     can_test_heap_fail_after(&node.heap, 0U);
-    TEST_ASSERT_NULL(cy_can_new(1U, 32U, 4U, &node.vtable, &node));
+    TEST_ASSERT_NULL(cy_can_new(1U, 32U, 4U, prng_seed, &node.vtable, &node));
     can_test_heap_allow_all(&node.heap);
     can_test_node_destroy(&node);
 }

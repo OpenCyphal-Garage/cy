@@ -49,7 +49,7 @@ struct can_test_node_t
     cy_platform_t*       platform;
     cy_t*                cy;
     cy_us_t              now;
-    uint64_t             random_state;
+    uint64_t             prng_seed;
     uint_least8_t        iface_count;
     bool                 fd_capable;
     bool                 self_loopback;
