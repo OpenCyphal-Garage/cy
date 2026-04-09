@@ -222,6 +222,10 @@ cy_gen_test_api_matrix(test_api_name "CY_CONFIG_TRACE=1"
         "src/test_api_name.cpp"
         "${CMAKE_SOURCE_DIR}/cy/cy.c;src/cy_trace.c" ""
 )
+cy_gen_test_api_matrix(test_api_remap "CY_CONFIG_TRACE=1"
+        "src/test_api_remap.cpp"
+        "${cy_api_shared_c_sources}" ""
+)
 cy_gen_test_api_matrix(test_api_publish_reliable "CY_CONFIG_TRACE=1"
         "src/test_api_publish_reliable.cpp"
         "${cy_api_shared_c_sources}" ""

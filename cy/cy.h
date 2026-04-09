@@ -555,19 +555,18 @@ cy_us_t cy_now(const cy_t* const cy);
 /// The time since cy_new() in microseconds.
 cy_us_t cy_uptime(const cy_t* const cy);
 
+/// See cy_name_resolve() for a detailed description of the remapping mechanism.
 /// The strings will be copied into an internal storage, so they don't have to survive after this call.
-/// The effect is incremental. If a remapping for the same "from" already exists, it will be replaced with the new "to".
+/// The effect is incremental. If a remapping for the same `from` already exists, it is replaced with the new `to`.
 /// On error, the node remap configuration is left unchanged.
-/// TODO not implemented
 cy_err_t cy_remap(cy_t* const cy, const cy_str_t from, const cy_str_t to);
 
 /// Like cy_remap(), but the remappings are read from a string of the form "from1=to1 from2=to2 "...
 /// and applied sequentially via cy_remap(). The effect of multiple invocations is incremental.
-/// The from/to are separated with `=` (equals), and the pairs are separated with ASCII whitespaces " \t\n\r\x0b\x0c".
+/// The from/to are separated with `=` (equals), and the pairs are separated with ASCII whitespaces ` \t\n\r\x0b\x0c`.
 /// This is designed to support single-string configuration parameters storing all remappings in one place.
 /// Invalid pairs are ignored. The string does not have to survive after this call.
 /// On error, the node remap configuration may be left in an inconsistent state.
-/// TODO not implemented
 cy_err_t cy_remap_parse(cy_t* const cy, const cy_str_t spec_string);
 
 /// Models a fully resolved and normalized topic name. See cy_resolve() et al.
@@ -580,8 +579,6 @@ typedef struct cy_resolved_t
 
 /// A convenience wrapper for cy_name_resolve(). On failure, the name field has length SIZE_MAX and NULL data pointer.
 cy_resolved_t cy_resolve(const cy_t* const cy, const cy_str_t name, const size_t dest_size, char* const dest);
-
-// TODO: add a way to dump/restore topic configuration for instant initialization. This may be platform-specific.
 
 /// Complexity is logarithmic in the number of topics. NULL if not found.
 /// In practical terms, these queries are very fast and efficient.
@@ -641,12 +638,15 @@ extern const char cy_name_pin_prefix; ///< `#` -- followed by decimal digits spe
 /// Exact in-place use is supported: dest may equal left.str or right.str. Other overlap modes not supported.
 cy_str_t cy_name_join(const cy_str_t left, const cy_str_t right, const size_t dest_size, char* const dest);
 
-/// Constructs the full normalized name as exchanged over the wire prior to remapping: homeful names are expanded,
-/// relative names are prefixed with the namespace, and absolute names are left as-is.
-/// The pin expression, if present, is removed from the name. Only verbatim names may have pin expressions.
-/// The namespace may be homeful and will be expanded accordingly.
+/// Constructs the full resolved normalized topic name exchanged over the wire: home expanded, namespace added,
+/// remapping rules applied. The pin expression, if present, is stripped; only verbatim names may be pinned.
 ///
-/// Examples:
+/// The guiding principle is that applications hardcode topic names as verbatim strings, usually non-pinned;
+/// pinning and wildcard patterns are normally introduced ONLY through remapping by the integrator at node startup.
+/// This gives integrators authority over subject-ID pinning and pattern subscriptions without the application having
+/// to know anything about either.
+///
+/// Examples without remap:
 ///
 ///     NAME        NAMESPACE   HOME    RESOLVED        PINNING     VERBATIM
 ///     foo/bar     ns1         me      ns1/foo/bar     -           yes
@@ -658,6 +658,18 @@ cy_str_t cy_name_join(const cy_str_t left, const cy_str_t right, const size_t de
 ///     */foo       ns1         me      ns1/*/foo       -           no
 ///     ~/*/foo/    ns1         me      me/*/foo        -           no
 ///     /~/*/foo/   ns1         me      ~/*/foo         -           no
+///
+/// Examples with a remap. Remap is applied before namespace/home resolution: a matching `to` takes the user
+/// input's place and then goes through the same resolution pipeline as a directly-supplied name.
+/// When a rule matches, the user's pin is discarded; only the matching rule's pin (if any) is honoured.
+/// Behavior unstable if `from` contains a pinning expression.
+///
+///     NAME        FROM    TO      NAMESPACE   HOME    RESOLVED    PINNING REMARK
+///     foo/bar     foo/bar zoo     ns          me      ns/zoo      -       relative remap
+///     foo/bar     foo/bar zoo#123 ns          me      ns/zoo      123     pinned relative remap
+///     foo/bar#456 foo/bar zoo     ns          me      ns/zoo      -       matched rule discards user pin
+///     foo/bar     foo/bar /zoo    ns          me      zoo         -       absolute remap (ns ignored)
+///     foo/bar     foo/bar ~/zoo   ns          me      me/zoo      -       homeful remap (home expanded)
 ///
 /// Examples of invalid names leading to resolution failure:
 ///
@@ -671,12 +683,14 @@ cy_str_t cy_name_join(const cy_str_t left, const cy_str_t right, const size_t de
 /// and NULL data pointer. The destination is not NUL-terminated.
 /// Destination must not overlap with any of the input strings.
 ///
-/// TODO: add remapping set.
-cy_resolved_t cy_name_resolve(const cy_str_t name,
-                              const cy_str_t name_space,
-                              const cy_str_t home,
-                              const size_t   dest_size,
-                              char* const    dest);
+/// The remap is a wkv storing normalized `from`-strings as keys and NUL-terminated `to`-strings as values `char*`.
+/// May be NULL if no remapping is desired.
+cy_resolved_t cy_name_resolve(const wkv_t* const remap,
+                              const cy_str_t     name,
+                              const cy_str_t     name_space,
+                              const cy_str_t     home,
+                              const size_t       dest_size,
+                              char* const        dest);
 
 // =====================================================================================================================
 //                                                  MONITORING & DIAGNOSTICS
