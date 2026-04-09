@@ -18,10 +18,9 @@ struct test_platform_t final : api_test::test_platform_base_t
 {
     std::size_t subject_send_count{ 0U };
     std::size_t unicast_send_count{ 0U };
+    std::size_t async_error_count{ 0U };
     cy_diag_t   diag{};
 };
-
-std::size_t g_async_error_count = 0U; // NOLINT(*-non-const-global-variables)
 
 test_platform_t* platform_from(cy_platform_t* const platform)
 {
@@ -109,7 +108,15 @@ extern "C" std::uint64_t platform_random(cy_platform_t* const platform)
     return api_test::random_lcg<test_platform_t>(platform);
 }
 
-extern "C" void on_diag_async_error(cy_t* const         cy,
+test_platform_t* platform_from_diag(cy_diag_t* const diag)
+{
+    TEST_ASSERT_NOT_NULL(diag);
+    auto* const out = static_cast<test_platform_t*>(diag->user_context.ptr[0]);
+    TEST_ASSERT_NOT_NULL(out);
+    return out;
+}
+
+extern "C" void on_diag_async_error(cy_diag_t* const    diag,
                                     cy_topic_t* const   topic,
                                     const cy_err_t      error,
                                     const std::uint16_t line_number)
@@ -117,8 +124,7 @@ extern "C" void on_diag_async_error(cy_t* const         cy,
     (void)topic;
     (void)error;
     (void)line_number;
-    TEST_ASSERT_NOT_NULL(cy);
-    g_async_error_count++;
+    platform_from_diag(diag)->async_error_count++;
 }
 
 const cy_diag_vtable_t platform_diag_vtable = {
@@ -131,9 +137,8 @@ const cy_diag_vtable_t platform_diag_vtable = {
 
 void platform_init(test_platform_t* const self)
 {
-    *self               = test_platform_t{};
-    self->random_state  = UINT64_C(0xA5A5A5A5A5A5A5A5);
-    g_async_error_count = 0U;
+    *self              = test_platform_t{};
+    self->random_state = UINT64_C(0xA5A5A5A5A5A5A5A5);
     guarded_heap_init(&self->core_heap, UINT64_C(0xFACEB00C12345678));
     guarded_heap_init(&self->message_heap, UINT64_C(0xDEC0DE1234567890));
 
@@ -153,7 +158,8 @@ void platform_init(test_platform_t* const self)
     api_test::init_platform_base(self->platform, self->vtable);
     self->cy = cy_new(&self->platform, cy_str("test"), cy_str_t{ 0, nullptr });
     TEST_ASSERT_NOT_NULL(self->cy);
-    self->diag = cy_diag_t{ .next = nullptr, .vtable = &platform_diag_vtable };
+    self->diag = cy_diag_t{ .next = nullptr, .user_context = CY_USER_CONTEXT_EMPTY, .vtable = &platform_diag_vtable };
+    self->diag.user_context.ptr[0] = self;
     cy_diag_add(self->cy, &self->diag);
 }
 
@@ -283,7 +289,7 @@ void test_api_parser_adversarial_mutation_corpus()
 
     TEST_ASSERT_TRUE(spin_count > 0U);
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
-    TEST_ASSERT_TRUE(g_async_error_count <= (corpus.size() * 2U));
+    TEST_ASSERT_TRUE(platform.async_error_count <= (corpus.size() * 2U));
 
     cy_unadvertise(pub);
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
@@ -329,11 +335,11 @@ void test_adversarial_gossip_pinned_evictions_accept_in_range_lages()
         const char* const   name          = names.at(i);
         const cy_str_t      wire_name     = cy_str(name);
         const std::uint64_t hash          = rapidhash(name, std::strlen(name));
-        const std::size_t   errors_before = g_async_error_count;
+        const std::size_t   errors_before = platform.async_error_count;
         const auto          wire          = make_gossip(hash, evictions_pinned, accepted_lages.at(i), wire_name);
         dispatch_raw(&platform, wire, lane, nullptr, static_cast<cy_us_t>(1000) + static_cast<cy_us_t>(i));
         TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_live_count());
-        TEST_ASSERT_EQUAL_size_t(errors_before, g_async_error_count);
+        TEST_ASSERT_EQUAL_size_t(errors_before, platform.async_error_count);
         TEST_ASSERT_NOT_NULL(cy_topic_find_by_hash(platform.cy, hash));
     }
 
@@ -373,7 +379,7 @@ void test_adversarial_inline_crdt_pinned_accept_in_range_lages()
     static const std::array<std::uint8_t, 4> types          = { 0U, 1U, 0U, 1U };
 
     for (std::size_t i = 0U; i < accepted_lages.size(); i++) {
-        const std::size_t errors_before = g_async_error_count;
+        const std::size_t errors_before = platform.async_error_count;
         const auto        wire          = make_msg(
           types.at(i), UINT64_C(0x1122334455667700) + i, accepted_lages.at(i), static_cast<unsigned char>(0x40U + i));
         dispatch_raw(&platform, wire, lane, &reader, static_cast<cy_us_t>(2000) + static_cast<cy_us_t>(i));
@@ -384,7 +390,7 @@ void test_adversarial_inline_crdt_pinned_accept_in_range_lages()
         TEST_ASSERT_EQUAL_size_t(1U, cy_message_read(arrival.message.content, 0U, 1U, &first));
         TEST_ASSERT_EQUAL_UINT8(static_cast<unsigned char>(0x40U + i), first);
         cy_message_refcount_dec(arrival.message.content);
-        TEST_ASSERT_EQUAL_size_t(errors_before, g_async_error_count);
+        TEST_ASSERT_EQUAL_size_t(errors_before, platform.async_error_count);
     }
 
     cy_future_destroy(sub);

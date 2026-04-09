@@ -9,39 +9,35 @@ static const cy_us_t spin_slice_us = (cy_us_t)10000;
 
 static void test_api_can_constructor_rejects_invalid_arguments(void)
 {
-    can_test_bus_t  bus;
-    can_test_node_t node;
+    static const uint64_t prng_seed = UINT64_C(0xC0DEC0DEC0DEC0DE);
+    can_test_bus_t        bus;
+    can_test_node_t       node;
     can_test_bus_init(&bus);
     can_test_node_prepare(&node, &bus, 1U, false, true);
 
-    TEST_ASSERT_NULL(cy_can_new(0U, 16U, 0U, &node.vtable, &node));
-    TEST_ASSERT_NULL(cy_can_new(CANARD_IFACE_COUNT + 1U, 16U, 0U, &node.vtable, &node));
-    TEST_ASSERT_NULL(cy_can_new(1U, 16U, 0U, NULL, &node));
+    TEST_ASSERT_NULL(cy_can_new(0U, 16U, 0U, prng_seed, &node.vtable, &node));
+    TEST_ASSERT_NULL(cy_can_new(CANARD_IFACE_COUNT + 1U, 16U, 0U, prng_seed, &node.vtable, &node));
+    TEST_ASSERT_NULL(cy_can_new(1U, 16U, 0U, prng_seed, NULL, &node));
 
     {
         cy_can_vtable_t v = node.vtable;
         v.tx_classic      = NULL;
-        TEST_ASSERT_NULL(cy_can_new(1U, 16U, 0U, &v, &node));
+        TEST_ASSERT_NULL(cy_can_new(1U, 16U, 0U, prng_seed, &v, &node));
     }
     {
         cy_can_vtable_t v = node.vtable;
         v.rx              = NULL;
-        TEST_ASSERT_NULL(cy_can_new(1U, 16U, 0U, &v, &node));
+        TEST_ASSERT_NULL(cy_can_new(1U, 16U, 0U, prng_seed, &v, &node));
     }
     {
         cy_can_vtable_t v = node.vtable;
         v.now             = NULL;
-        TEST_ASSERT_NULL(cy_can_new(1U, 16U, 0U, &v, &node));
+        TEST_ASSERT_NULL(cy_can_new(1U, 16U, 0U, prng_seed, &v, &node));
     }
     {
         cy_can_vtable_t v = node.vtable;
         v.realloc         = NULL;
-        TEST_ASSERT_NULL(cy_can_new(1U, 16U, 0U, &v, &node));
-    }
-    {
-        cy_can_vtable_t v = node.vtable;
-        v.random          = NULL;
-        TEST_ASSERT_NULL(cy_can_new(1U, 16U, 0U, &v, &node));
+        TEST_ASSERT_NULL(cy_can_new(1U, 16U, 0U, prng_seed, &v, &node));
     }
 
     can_test_node_destroy(&node);

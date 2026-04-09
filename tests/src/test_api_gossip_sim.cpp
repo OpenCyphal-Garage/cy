@@ -317,12 +317,12 @@ extern "C" std::uint64_t sim_random(cy_platform_t* const platform)
     return self->random_state;
 }
 
-extern "C" void sim_on_diag_async_error(cy_t* const         cy,
+extern "C" void sim_on_diag_async_error(cy_diag_t* const    diag,
                                         cy_topic_t* const   topic,
                                         const cy_err_t      error,
                                         const std::uint16_t line_number)
 {
-    (void)cy;
+    (void)diag;
     (void)topic;
     (void)error;
     (void)line_number;
@@ -370,7 +370,8 @@ void network_node_init(sim_network_t& net, const std::size_t index)
     const std::string home           = "node" + std::to_string(index);
     node.cy                          = cy_new(&node.platform, cy_str(home.c_str()), cy_str_t{ 0, nullptr });
     TEST_ASSERT_NOT_NULL(node.cy);
-    node.diag = cy_diag_t{ .next = nullptr, .vtable = &sim_diag_vtable };
+    node.diag = cy_diag_t{ .next = nullptr, .user_context = CY_USER_CONTEXT_EMPTY, .vtable = &sim_diag_vtable };
+    node.diag.user_context.ptr[0] = &node;
     cy_diag_add(node.cy, &node.diag);
 }
 

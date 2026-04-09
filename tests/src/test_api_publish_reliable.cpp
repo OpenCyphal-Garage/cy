@@ -173,12 +173,12 @@ extern "C" std::uint64_t platform_random(cy_platform_t* const platform)
     return api_test::random_lcg<test_platform_t>(platform);
 }
 
-extern "C" void platform_diag_async_error(cy_t* const         cy,
+extern "C" void platform_diag_async_error(cy_diag_t* const    diag,
                                           cy_topic_t* const   topic,
                                           const cy_err_t      error,
                                           const std::uint16_t line_number)
 {
-    (void)cy;
+    (void)diag;
     (void)topic;
     (void)error;
     (void)line_number;
@@ -386,7 +386,7 @@ void platform_init(test_platform_t* const self)
 
     self->cy = cy_new(&self->platform, cy_str("test"), cy_str_t{ 0, nullptr });
     TEST_ASSERT_NOT_NULL(self->cy);
-    self->diag = cy_diag_t{ .next = nullptr, .vtable = &platform_diag_vtable };
+    self->diag = cy_diag_t{ .next = nullptr, .user_context = CY_USER_CONTEXT_EMPTY, .vtable = &platform_diag_vtable };
     cy_diag_add(self->cy, &self->diag);
 }
 

@@ -25,7 +25,7 @@ extern "C"
 #endif
 
 /// A received CAN frame (classic or FD).
-typedef struct
+typedef struct cy_can_rx_t
 {
     cy_us_t       timestamp;   ///< Monotonic reception timestamp in microseconds, in cy_can_vtable_t::now() timebase.
     uint32_t      can_id;      ///< 29-bit extended CAN ID.
@@ -59,7 +59,7 @@ typedef struct
 
     /// Replace the hardware acceptance filter configuration with the supplied filter set.
     /// This callback is optional; if NULL, libcanard filtering is disabled even if filter_count passed to cy_can_new()
-    /// is nonzero. The callback is only invoked from canard_poll().
+    /// is nonzero. The callback is only invoked from cy_spin...().
     bool (*filter)(void* user, size_t filter_count, const canard_filter_t* filters);
 
     /// Returns the current monotonic time in microseconds. Must be non-negative and non-decreasing.
@@ -67,19 +67,23 @@ typedef struct
 
     /// Standard realloc semantics; if size is zero, the call shall behave as free.
     void* (*realloc)(void* user, void* ptr, size_t size);
-
-    /// Returns a random 64-bit unsigned integer. See cy_platform_vtable_t for the seeding recommendations.
-    uint64_t (*random)(void* user);
 } cy_can_vtable_t;
 
 /// Create a new CAN platform instance. The node-ID will be allocated automatically by libcanard.
-/// The constructor will invoke vtable random() and realloc() immediately.
+/// The constructor will invoke vtable realloc() immediately.
+///
 /// The filter_count is the number of acceptance filters available to libcanard; pass zero to disable filtering.
 /// Filtering is also disabled if vtable->filter is NULL.
+///
+/// The PRNG seed must be distinct across reboots in quick succession, and it should be hashed with the node's UID,
+/// such that distinct nodes are likely to have distinct seed, and the same node after a reboot starts with a new seed.
+/// See cy_platform_vtable_t documentation for recommendations on how to implement PRNG seeding on an embedded system.
+///
 /// Returns NULL on failure. The iface_count must be in [1, CANARD_IFACE_COUNT].
 cy_platform_t* cy_can_new(const uint_least8_t          iface_count,
                           const size_t                 tx_queue_capacity,
                           const size_t                 filter_count,
+                          const uint64_t               prng_seed,
                           const cy_can_vtable_t* const vtable,
                           void* const                  user);
 

@@ -58,8 +58,6 @@ struct test_platform_t final : api_test::test_platform_base_t
     std::array<diag_capture_t, 64> diag_captures{};
 };
 
-test_platform_t* g_diag_platform = nullptr; // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
-
 test_platform_t* platform_from(cy_platform_t* const platform)
 {
     return api_test::platform_from<test_platform_t>(platform);
@@ -116,14 +114,20 @@ void capture_diag(test_platform_t* const  self,
     out.name.at(out.name_len) = '\0';
 }
 
-extern "C" void platform_diag_topic_reallocated(cy_t* const         cy,
+test_platform_t* platform_from_diag(cy_diag_t* const diag)
+{
+    TEST_ASSERT_NOT_NULL(diag);
+    auto* const out = static_cast<test_platform_t*>(diag->user_context.ptr[0]);
+    TEST_ASSERT_NOT_NULL(out);
+    return out;
+}
+
+extern "C" void platform_diag_topic_reallocated(cy_diag_t* const    diag,
                                                 cy_topic_t* const   topic,
                                                 const std::uint32_t subject_id,
                                                 const std::uint32_t evictions)
 {
-    (void)cy;
-    TEST_ASSERT_NOT_NULL(g_diag_platform);
-    capture_diag(g_diag_platform,
+    capture_diag(platform_from_diag(diag),
                  diag_event_kind_t::reallocated,
                  topic,
                  cy_topic_hash(topic),
@@ -134,11 +138,9 @@ extern "C" void platform_diag_topic_reallocated(cy_t* const         cy,
                  cy_str_t{ 0, nullptr });
 }
 
-extern "C" void platform_diag_topic_created(cy_t* const cy, cy_topic_t* const topic)
+extern "C" void platform_diag_topic_created(cy_diag_t* const diag, cy_topic_t* const topic)
 {
-    (void)cy;
-    TEST_ASSERT_NOT_NULL(g_diag_platform);
-    capture_diag(g_diag_platform,
+    capture_diag(platform_from_diag(diag),
                  diag_event_kind_t::created,
                  topic,
                  cy_topic_hash(topic),
@@ -149,11 +151,9 @@ extern "C" void platform_diag_topic_created(cy_t* const cy, cy_topic_t* const to
                  cy_str_t{ 0, nullptr });
 }
 
-extern "C" void platform_diag_topic_destroyed(cy_t* const cy, cy_topic_t* const topic)
+extern "C" void platform_diag_topic_destroyed(cy_diag_t* const diag, cy_topic_t* const topic)
 {
-    (void)cy;
-    TEST_ASSERT_NOT_NULL(g_diag_platform);
-    capture_diag(g_diag_platform,
+    capture_diag(platform_from_diag(diag),
                  diag_event_kind_t::destroyed,
                  topic,
                  cy_topic_hash(topic),
@@ -164,24 +164,20 @@ extern "C" void platform_diag_topic_destroyed(cy_t* const cy, cy_topic_t* const 
                  cy_str_t{ 0, nullptr });
 }
 
-extern "C" void platform_diag_gossip_processed(cy_t* const         cy,
+extern "C" void platform_diag_gossip_processed(cy_diag_t* const    diag,
                                                cy_topic_t* const   topic,
                                                const cy_str_t      name,
                                                const std::uint64_t hash)
 {
-    (void)cy;
-    TEST_ASSERT_NOT_NULL(g_diag_platform);
-    capture_diag(g_diag_platform, diag_event_kind_t::gossip_processed, topic, hash, 0U, 0U, CY_OK, 0U, name);
+    capture_diag(platform_from_diag(diag), diag_event_kind_t::gossip_processed, topic, hash, 0U, 0U, CY_OK, 0U, name);
 }
 
-extern "C" void platform_diag_async_error(cy_t* const         cy,
+extern "C" void platform_diag_async_error(cy_diag_t* const    diag,
                                           cy_topic_t* const   topic,
                                           const cy_err_t      error,
                                           const std::uint16_t line_number)
 {
-    (void)cy;
-    TEST_ASSERT_NOT_NULL(g_diag_platform);
-    capture_diag(g_diag_platform,
+    capture_diag(platform_from_diag(diag),
                  diag_event_kind_t::async_error,
                  topic,
                  (topic != nullptr) ? cy_topic_hash(topic) : 0U,
@@ -284,8 +280,7 @@ extern "C" std::uint64_t platform_random(cy_platform_t* const platform)
 
 void platform_init(test_platform_t& self)
 {
-    self            = test_platform_t{};
-    g_diag_platform = &self;
+    self = test_platform_t{};
     guarded_heap_init(&self.core_heap, UINT64_C(0xAAAABBBBCCCCDDDD));
     guarded_heap_init(&self.message_heap, UINT64_C(0x1111222233334444));
 
@@ -304,15 +299,12 @@ void platform_init(test_platform_t& self)
     api_test::init_platform_base(self.platform, self.vtable);
     self.cy = cy_new(&self.platform, cy_str("test"), cy_str_t{ 0, nullptr });
     TEST_ASSERT_NOT_NULL(self.cy);
-    self.diag = cy_diag_t{ .next = nullptr, .vtable = &platform_diag_vtable };
+    self.diag = cy_diag_t{ .next = nullptr, .user_context = CY_USER_CONTEXT_EMPTY, .vtable = &platform_diag_vtable };
+    self.diag.user_context.ptr[0] = &self;
     cy_diag_add(self.cy, &self.diag);
 }
 
-void platform_deinit(test_platform_t& self)
-{
-    api_test::standard_deinit(self);
-    g_diag_platform = nullptr;
-}
+void platform_deinit(test_platform_t& self) { api_test::standard_deinit(self); }
 
 void reset_diag(test_platform_t& self) { self.diag_count = 0U; }
 

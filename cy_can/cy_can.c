@@ -34,6 +34,7 @@
 typedef struct
 {
     cy_platform_t base; // Must be first (upcast pattern).
+    uint64_t      prng_state;
     uint_least8_t iface_count;
 
     canard_t canard;
@@ -799,7 +800,8 @@ static void* v_realloc(cy_platform_t* const base, void* const ptr, const size_t 
 static uint64_t v_random(cy_platform_t* const base)
 {
     cy_can_t* const owner = (cy_can_t*)base;
-    return owner->vtable->random(owner->user);
+    owner->prng_state += 0xA0761D6478BD642FULL;
+    return rapidhash_withSeed(&owner->prng_state, sizeof(uint64_t), (uintptr_t)owner);
 }
 
 static const cy_platform_vtable_t platform_vtable = { .subject_writer_new        = v_subject_writer_new,
@@ -821,12 +823,12 @@ static const cy_platform_vtable_t platform_vtable = { .subject_writer_new       
 cy_platform_t* cy_can_new(const uint_least8_t          iface_count,
                           const size_t                 tx_queue_capacity,
                           const size_t                 filter_count,
+                          const uint64_t               prng_seed,
                           const cy_can_vtable_t* const vtable,
                           void* const                  user)
 {
     if ((vtable == NULL) || (vtable->tx_classic == NULL) || (vtable->rx == NULL) || (vtable->now == NULL) ||
-        (vtable->realloc == NULL) || (vtable->random == NULL) || (iface_count == 0) ||
-        (iface_count > CANARD_IFACE_COUNT)) {
+        (vtable->realloc == NULL) || (iface_count == 0) || (iface_count > CANARD_IFACE_COUNT)) {
         return NULL;
     }
     cy_can_t* const self = (cy_can_t*)vtable->realloc(user, NULL, sizeof(cy_can_t));
@@ -834,6 +836,7 @@ cy_platform_t* cy_can_new(const uint_least8_t          iface_count,
         return NULL;
     }
     (void)memset(self, 0, sizeof(*self));
+    self->prng_state  = prng_seed ^ (uintptr_t)self;
     self->vtable      = vtable;
     self->user        = user;
     self->iface_count = iface_count;
@@ -847,7 +850,7 @@ cy_platform_t* cy_can_new(const uint_least8_t          iface_count,
                                canard_vtable,
                                make_mem_set(self),
                                tx_queue_capacity,
-                               vtable->random(user),
+                               v_random(&self->base),
                                filtering_enabled ? filter_count : 0U);
     if (!ok) {
         vtable->realloc(user, self, 0);

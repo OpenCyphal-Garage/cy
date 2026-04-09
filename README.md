@@ -63,7 +63,7 @@ int main(void)
     // Here we're using Cyphal/UDP on POSIX as an example.
     cy_platform_t* platform = cy_udp_posix_new();
     if (platform == NULL) { ... }
-    
+
     // If you need Cyphal/CAN on SocketCAN instead, just replace the above with:
     cy_platform_t* platform = cy_can_socketcan_new(1, (const char*[]){"can0"}, 1000); // 1 iface, 1000 frames TX queue
     if (platform == NULL) { ... }

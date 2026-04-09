@@ -263,14 +263,6 @@ static cy_us_t v_now(void* const user)
     return self->now;
 }
 
-static uint64_t v_random(void* const user)
-{
-    can_test_node_t* const self = (can_test_node_t*)user;
-    TEST_ASSERT_NOT_NULL(self);
-    self->random_state = (self->random_state * UINT64_C(6364136223846793005)) + UINT64_C(1);
-    return self->random_state;
-}
-
 static void* v_realloc(void* const user, void* const ptr, const size_t size)
 {
     can_test_node_t* const self = (can_test_node_t*)user;
@@ -345,14 +337,20 @@ void can_test_node_prepare(can_test_node_t* const self,
                            const bool             fd_capable,
                            const bool             enable_filter_callback)
 {
+    size_t node_index = 0U;
     TEST_ASSERT_NOT_NULL(self);
     TEST_ASSERT_TRUE((iface_count > 0U) && (iface_count <= CAN_TEST_MAX_IFACES));
+    if (bus != NULL) {
+        while ((node_index < CAN_TEST_MAX_NODES) && (bus->nodes[node_index] != NULL)) {
+            node_index++;
+        }
+    }
     (void)memset(self, 0, sizeof(*self));
-    self->bus          = bus;
-    self->now          = 1000;
-    self->random_state = UINT64_C(0x123456789ABCDEF0);
-    self->iface_count  = iface_count;
-    self->fd_capable   = fd_capable;
+    self->bus         = bus;
+    self->now         = 1000;
+    self->prng_seed   = UINT64_C(0x123456789ABCDEF0) ^ (UINT64_C(0x9E3779B97F4A7C15) * (uint64_t)(node_index + 1U));
+    self->iface_count = iface_count;
+    self->fd_capable  = fd_capable;
     can_test_heap_init(&self->heap);
     self->vtable.tx_classic = v_tx_classic;
     self->vtable.tx_fd      = fd_capable ? v_tx_fd : NULL;
@@ -360,14 +358,14 @@ void can_test_node_prepare(can_test_node_t* const self,
     self->vtable.filter     = enable_filter_callback ? v_filter : NULL;
     self->vtable.now        = v_now;
     self->vtable.realloc    = v_realloc;
-    self->vtable.random     = v_random;
     bus_register_node(bus, self);
 }
 
 void can_test_node_make_platform(can_test_node_t* const self, const size_t tx_queue_capacity, const size_t filter_count)
 {
     TEST_ASSERT_NOT_NULL(self);
-    self->platform = cy_can_new(self->iface_count, tx_queue_capacity, filter_count, &self->vtable, self);
+    self->platform =
+      cy_can_new(self->iface_count, tx_queue_capacity, filter_count, self->prng_seed, &self->vtable, self);
     TEST_ASSERT_NOT_NULL(self->platform);
 }
 

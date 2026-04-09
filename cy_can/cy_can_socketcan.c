@@ -40,7 +40,6 @@ typedef struct
     int           sock_fd[CANARD_IFACE_COUNT];
     uint_least8_t iface_count;
     bool          fd_capable;
-    uint64_t      prng_state;
 } socketcan_t;
 
 static const size_t socketcan_filter_count = 511U;
@@ -196,27 +195,18 @@ static void* v_realloc(void* const user, void* const ptr, const size_t size)
     return NULL;
 }
 
-static uint64_t v_random(void* const user)
-{
-    socketcan_t* const self = (socketcan_t*)user;
-    self->prng_state += 0xA0761D6478BD642FULL;
-    return rapidhash_withSeed(&self->prng_state, sizeof(uint64_t), (uintptr_t)self);
-}
-
 static const cy_can_vtable_t socketcan_vtable_fd      = { .tx_classic = v_tx_classic,
                                                           .tx_fd      = v_tx_fd,
                                                           .rx         = v_rx,
                                                           .filter     = v_filter,
                                                           .now        = v_now,
-                                                          .realloc    = v_realloc,
-                                                          .random     = v_random };
+                                                          .realloc    = v_realloc };
 static const cy_can_vtable_t socketcan_vtable_classic = { .tx_classic = v_tx_classic,
                                                           .tx_fd      = NULL, // No FD support.
                                                           .rx         = v_rx,
                                                           .filter     = v_filter,
                                                           .now        = v_now,
-                                                          .realloc    = v_realloc,
-                                                          .random     = v_random };
+                                                          .realloc    = v_realloc };
 
 static bool socketcan_iface_is_fd_capable(const int sock, const char* const iface_name)
 {
@@ -263,17 +253,18 @@ cy_platform_t* cy_can_socketcan_new(const uint_least8_t iface_count,
         self->sock_fd[i] = -1;
     }
 
-    // Seed the PRNG from best available source.
+    // Seed the PRNG from all available entropy sources.
+    uint64_t prng_seed = 0;
     {
-        const int    fd = open("/dev/urandom", O_RDONLY);
-        const size_t sz = sizeof(self->prng_state);
-        const bool   ok = (fd >= 0) && (read(fd, &self->prng_state, sz) == (ssize_t)sz);
+        const int     fd   = open("/dev/urandom", O_RDONLY);
+        const ssize_t drop = read(fd, &prng_seed, sizeof(prng_seed));
+        (void)drop;
         (void)close(fd);
-        if (!ok) {
-            self->prng_state = ((uint64_t)socketcan_now()) ^ (uint64_t)time(NULL) ^ ((uint64_t)(uintptr_t)self);
-        }
     }
+    prng_seed ^= (uint64_t)socketcan_now();
+    prng_seed ^= (uint64_t)time(NULL);
 
+    // Set up the sockets.
     for (uint_least8_t i = 0; i < iface_count; i++) {
         const int sock = socket(PF_CAN, SOCK_RAW, CAN_RAW);
         if (sock < 0) {
@@ -313,8 +304,12 @@ cy_platform_t* cy_can_socketcan_new(const uint_least8_t iface_count,
         (void)socketcan_set_fd_frames(self, false);
     }
 
-    const cy_can_vtable_t* const vtable = self->fd_capable ? &socketcan_vtable_fd : &socketcan_vtable_classic;
-    cy_platform_t* const result = cy_can_new(iface_count, tx_queue_capacity, socketcan_filter_count, vtable, self);
+    cy_platform_t* const result = cy_can_new(iface_count, //
+                                             tx_queue_capacity,
+                                             socketcan_filter_count,
+                                             prng_seed,
+                                             self->fd_capable ? &socketcan_vtable_fd : &socketcan_vtable_classic,
+                                             self);
     if (result == NULL) {
         goto fail;
     }

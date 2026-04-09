@@ -123,12 +123,12 @@ static void capture_diag(fixture_t* const  self,
     out->name[out->name_len] = '\0';
 }
 
-static void fixture_diag_topic_reallocated(cy_t* const       cy,
+static void fixture_diag_topic_reallocated(cy_diag_t* const  diag,
                                            cy_topic_t* const topic,
                                            const uint32_t    subject_id,
                                            const uint32_t    evictions)
 {
-    fixture_t* const self = fixture_from(cy->platform);
+    fixture_t* const self = (fixture_t*)diag->user_context.ptr[0];
     capture_diag(self,
                  diag_kind_reallocated,
                  topic,
@@ -140,32 +140,35 @@ static void fixture_diag_topic_reallocated(cy_t* const       cy,
                  0U);
 }
 
-static void fixture_diag_topic_created(cy_t* const cy, cy_topic_t* const topic)
+static void fixture_diag_topic_created(cy_diag_t* const diag, cy_topic_t* const topic)
 {
-    fixture_t* const self = fixture_from(cy->platform);
+    fixture_t* const self = (fixture_t*)diag->user_context.ptr[0];
     capture_diag(
       self, diag_kind_created, topic, (cy_str_t){ .len = 0U, .str = NULL }, cy_topic_hash(topic), 0U, 0U, CY_OK, 0U);
 }
 
-static void fixture_diag_topic_destroyed(cy_t* const cy, cy_topic_t* const topic)
+static void fixture_diag_topic_destroyed(cy_diag_t* const diag, cy_topic_t* const topic)
 {
-    fixture_t* const self = fixture_from(cy->platform);
+    fixture_t* const self = (fixture_t*)diag->user_context.ptr[0];
     capture_diag(
       self, diag_kind_destroyed, topic, (cy_str_t){ .len = 0U, .str = NULL }, cy_topic_hash(topic), 0U, 0U, CY_OK, 0U);
 }
 
-static void fixture_diag_gossip_processed(cy_t* const       cy,
+static void fixture_diag_gossip_processed(cy_diag_t* const  diag,
                                           cy_topic_t* const topic,
                                           const cy_str_t    name,
                                           const uint64_t    hash)
 {
-    fixture_t* const self = fixture_from(cy->platform);
+    fixture_t* const self = (fixture_t*)diag->user_context.ptr[0];
     capture_diag(self, diag_kind_gossip_processed, topic, name, hash, 0U, 0U, CY_OK, 0U);
 }
 
-static void fixture_diag_async_error(cy_t* const cy, cy_topic_t* const topic, const cy_err_t error, const uint16_t line)
+static void fixture_diag_async_error(cy_diag_t* const  diag,
+                                     cy_topic_t* const topic,
+                                     const cy_err_t    error,
+                                     const uint16_t    line)
 {
-    fixture_t* const self = fixture_from(cy->platform);
+    fixture_t* const self = (fixture_t*)diag->user_context.ptr[0];
     self->async_error_count++;
     self->last_async_error = error;
     capture_diag(self,
@@ -339,8 +342,9 @@ static void fixture_init(fixture_t* const self)
 
 static void fixture_install_diag(fixture_t* const self)
 {
-    self->diag       = (cy_diag_t){ .next = NULL, .vtable = &fixture_diag_vtable };
-    self->diag_count = 0U;
+    self->diag = (cy_diag_t){ .next = NULL, .user_context = CY_USER_CONTEXT_EMPTY, .vtable = &fixture_diag_vtable };
+    self->diag.user_context.ptr[0] = self;
+    self->diag_count               = 0U;
     cy_diag_add(self->cy, &self->diag);
 }
 
