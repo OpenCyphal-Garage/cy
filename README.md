@@ -298,7 +298,7 @@ cy_err_t err = cy_remap_parse(cy, remap_config);
 if (err != CY_OK) { ... }
 ```
 
-Cyphal v1.1 recommends a convention of two environment variables (assumed empty if unset):
+One environment variable convention is:
 
 - `CYPHAL_NAMESPACE` -- the namespace to use for the node.
 - `CYPHAL_REMAP` -- the name remapping configuration string as described above.
