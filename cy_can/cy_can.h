@@ -93,6 +93,63 @@ void* cy_can_user(const cy_platform_t* const base);
 /// Requires the Cy instance to be unlinked first and all Cy-allocated resources freed.
 void cy_can_destroy(cy_platform_t* const base);
 
+// =====================================================================================================================
+//                                      LEGACY UAVCAN V0 / DRONECAN WIRE COMPATIBILITY API
+// =====================================================================================================================
+
+// This is a compact sidecar API that is not part of the main stack, used only to provide limited interoperability
+// with legacy UAVCAN v0 / DroneCAN nodes. It runs as part of the main event loop.
+
+typedef struct cy_can_v0_subscription_t cy_can_v0_subscription_t;
+
+/// Callback for legacy UAVCAN v0 / DroneCAN message transfers.
+/// The payload expires upon return and is always single-fragment: payload.next==NULL.
+typedef void (*cy_can_v0_on_transfer_t)(cy_can_v0_subscription_t* const subscription,
+                                        const cy_us_t                   timestamp,
+                                        const cy_prio_t                 priority,
+                                        const uint_least8_t             source_node_id,
+                                        const uint_least8_t             transfer_id,
+                                        const cy_bytes_t                payload);
+
+/// Register a legacy UAVCAN v0 / DroneCAN message subscription on the local cy_can instance.
+/// The platform must originate from cy_can_new(); to progress transfers, spin the attached Cy instance regularly.
+///
+/// The extent is the maximum application payload size in bytes, excluding the legacy transfer CRC.
+/// The transfer-ID timeout may be negative, in which case the default timeout from libcanard is used.
+///
+/// At most one local v0 message subscription may exist for a given data type ID. Returns NULL on invalid arguments,
+/// duplicate local subscription, or memory exhaustion.
+cy_can_v0_subscription_t* cy_can_v0_subscribe(cy_platform_t* const base,
+                                              const uint16_t       data_type_id,
+                                              const uint16_t       crc_seed,
+                                              const size_t         extent,
+                                              const cy_us_t        transfer_id_timeout);
+
+/// Application-owned arbitrary context shared with the callback.
+/// Safe to invoke with NULL: returns CY_USER_CONTEXT_EMPTY or has no effect.
+cy_user_context_t cy_can_v0_subscription_context(const cy_can_v0_subscription_t* const subscription);
+void cy_can_v0_subscription_context_set(cy_can_v0_subscription_t* const subscription, const cy_user_context_t context);
+
+/// Optional callback invoked when a matching transfer is received.
+cy_can_v0_on_transfer_t cy_can_v0_subscription_callback(const cy_can_v0_subscription_t* const subscription);
+void                    cy_can_v0_subscription_callback_set(cy_can_v0_subscription_t* const subscription,
+                                                            const cy_can_v0_on_transfer_t   callback);
+
+/// Destroy a v0 message subscription. No effect if the pointer is NULL.
+void cy_can_v0_unsubscribe(cy_can_v0_subscription_t* const self);
+
+/// Publish a legacy UAVCAN v0 / DroneCAN message transfer.
+/// The CRC seed is relevant only for multi-frame transfers; it can be derived from the data type signature using
+/// canard_v0_crc_seed_from_data_type_signature().
+/// Returns CY_OK, CY_ERR_MEMORY, CY_ERR_CAPACITY, or CY_ERR_ARGUMENT.
+cy_err_t cy_can_v0_publish(cy_platform_t* const base,
+                           const cy_us_t        deadline,
+                           const cy_prio_t      priority,
+                           const uint16_t       data_type_id,
+                           const uint16_t       crc_seed,
+                           const uint_least8_t  transfer_id,
+                           const cy_bytes_t     payload);
+
 #ifdef __cplusplus
 }
 #endif

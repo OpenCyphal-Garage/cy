@@ -820,6 +820,16 @@ static const cy_platform_vtable_t platform_vtable = { .subject_writer_new       
 // =====================================================================================================================
 // PUBLIC API
 
+static cy_can_t* as_cy_can(cy_platform_t* const base)
+{
+    return ((base != NULL) && (base->vtable == &platform_vtable)) ? (cy_can_t*)base : NULL;
+}
+
+static const cy_can_t* as_cy_can_const(const cy_platform_t* const base)
+{
+    return ((base != NULL) && (base->vtable == &platform_vtable)) ? (const cy_can_t*)base : NULL;
+}
+
 cy_platform_t* cy_can_new(const uint_least8_t          iface_count,
                           const size_t                 tx_queue_capacity,
                           const size_t                 filter_count,
@@ -874,11 +884,18 @@ cy_platform_t* cy_can_new(const uint_least8_t          iface_count,
     return &self->base;
 }
 
-void* cy_can_user(const cy_platform_t* const base) { return ((const cy_can_t*)base)->user; }
+void* cy_can_user(const cy_platform_t* const base)
+{
+    const cy_can_t* const owner = as_cy_can_const(base);
+    return (owner != NULL) ? owner->user : NULL;
+}
 
 void cy_can_destroy(cy_platform_t* const base)
 {
-    cy_can_t* const owner = (cy_can_t*)base;
+    cy_can_t* const owner = as_cy_can(base);
+    if (owner == NULL) {
+        return;
+    }
     while (owner->tombstone_head != NULL) {
         subject_reader_t* const rd = tombstone_pop(owner);
         assert(rd != NULL);
@@ -887,4 +904,150 @@ void cy_can_destroy(cy_platform_t* const base)
     canard_unsubscribe(&owner->canard, &owner->unicast_sub);
     canard_destroy(&owner->canard);
     owner->vtable->realloc(owner->user, owner, 0);
+}
+
+// =====================================================================================================================
+//                                      LEGACY UAVCAN V0 / DRONECAN WIRE COMPATIBILITY API
+// =====================================================================================================================
+
+struct cy_can_v0_subscription_t
+{
+    cy_can_t*               owner;
+    canard_subscription_t   sub;
+    cy_user_context_t       context;
+    cy_can_v0_on_transfer_t callback;
+};
+
+static void v_on_msg_v0(canard_subscription_t* const self,
+                        const canard_us_t            timestamp,
+                        const canard_prio_t          priority,
+                        const uint_least8_t          source_node_id,
+                        const uint_least8_t          transfer_id,
+                        const canard_payload_t       payload)
+{
+    cy_can_v0_subscription_t* const sub = (cy_can_v0_subscription_t*)self->user_context;
+    assert((sub != NULL) && (sub->owner != NULL));
+    cy_can_t* const               owner = sub->owner;
+    const cy_bytes_t              data  = { .size = payload.view.size, .data = payload.view.data, .next = NULL };
+    const cy_can_v0_on_transfer_t cb    = sub->callback;
+    if (cb != NULL) {
+        cb(sub, timestamp, (cy_prio_t)priority, source_node_id, transfer_id, data);
+    }
+    if (payload.origin.data != NULL) {
+        owner->vtable->realloc(owner->user, payload.origin.data, 0);
+    }
+}
+
+static const canard_subscription_vtable_t sub_vtable_v0 = { .on_message = v_on_msg_v0 };
+
+cy_can_v0_subscription_t* cy_can_v0_subscribe(cy_platform_t* const base,
+                                              const uint16_t       data_type_id,
+                                              const uint16_t       crc_seed,
+                                              const size_t         extent,
+                                              const cy_us_t        transfer_id_timeout)
+{
+    cy_can_t* const owner = as_cy_can(base);
+    if (owner == NULL) {
+        return NULL;
+    }
+    if (canard_find_subscription(&owner->canard, canard_kind_v0_message, data_type_id) != NULL) {
+        return NULL;
+    }
+    cy_can_v0_subscription_t* const self =
+      (cy_can_v0_subscription_t*)owner->vtable->realloc(owner->user, NULL, sizeof(*self));
+    if (self == NULL) {
+        return NULL;
+    }
+    (void)memset(self, 0, sizeof(*self));
+    self->owner             = owner;
+    canard_us_t tid_timeout = transfer_id_timeout;
+    if (tid_timeout < 0) {
+        tid_timeout = INT64_C(2000000); // Must match CANARD_DEFAULT_TRANSFER_ID_TIMEOUT_us.
+    }
+    canard_subscription_t* const sub =
+      canard_v0_subscribe(&owner->canard, &self->sub, data_type_id, crc_seed, extent, tid_timeout, &sub_vtable_v0);
+    if (sub != &self->sub) {
+        owner->vtable->realloc(owner->user, self, 0);
+        return NULL;
+    }
+    self->sub.user_context = self;
+    CY_TRACE(owner->base.cy, "DTID=%ju extent=%zu ptr=%p", (uintmax_t)data_type_id, extent, (void*)self);
+    return self;
+}
+
+cy_user_context_t cy_can_v0_subscription_context(const cy_can_v0_subscription_t* const subscription)
+{
+    return (subscription != NULL) ? subscription->context : CY_USER_CONTEXT_EMPTY;
+}
+
+void cy_can_v0_subscription_context_set(cy_can_v0_subscription_t* const subscription, const cy_user_context_t context)
+{
+    if (subscription != NULL) {
+        subscription->context = context;
+    }
+}
+
+cy_can_v0_on_transfer_t cy_can_v0_subscription_callback(const cy_can_v0_subscription_t* const subscription)
+{
+    return (subscription != NULL) ? subscription->callback : NULL;
+}
+
+void cy_can_v0_subscription_callback_set(cy_can_v0_subscription_t* const subscription,
+                                         const cy_can_v0_on_transfer_t   callback)
+{
+    if (subscription != NULL) {
+        subscription->callback = callback;
+    }
+}
+
+void cy_can_v0_unsubscribe(cy_can_v0_subscription_t* const self)
+{
+    if (self != NULL) {
+        cy_can_t* const owner = self->owner;
+        if (owner == NULL) {
+            return;
+        }
+        if ((owner != NULL) && (owner->base.cy != NULL)) {
+            CY_TRACE(owner->base.cy, "DTID=%ju ptr=%p", (uintmax_t)self->sub.port_id, (void*)self);
+        }
+        canard_unsubscribe(&owner->canard, &self->sub);
+        owner->vtable->realloc(owner->user, self, 0);
+    }
+}
+
+cy_err_t cy_can_v0_publish(cy_platform_t* const base,
+                           const cy_us_t        deadline,
+                           const cy_prio_t      priority,
+                           const uint16_t       data_type_id,
+                           const uint16_t       crc_seed,
+                           const uint_least8_t  transfer_id,
+                           const cy_bytes_t     payload)
+{
+    cy_can_t* const owner = as_cy_can(base);
+    if ((owner == NULL) || (deadline < 0) || ((payload.data == NULL) && (payload.size > 0))) {
+        return CY_ERR_ARGUMENT;
+    }
+    const uint_least8_t ibm   = (uint_least8_t)((1U << owner->iface_count) - 1U);
+    const uint64_t      e_oom = owner->canard.err.oom;
+    const uint64_t      e_cap = owner->canard.err.tx_capacity;
+    const bool          ok    = canard_v0_publish(&owner->canard,
+                                      deadline,
+                                      ibm,
+                                      (canard_prio_t)priority,
+                                      data_type_id,
+                                      crc_seed,
+                                      transfer_id,
+                                      cy_bytes_to_canard(payload),
+                                      NULL);
+    if (ok) {
+        return CY_OK;
+    }
+    cy_err_t err = CY_ERR_ARGUMENT;
+    if (owner->canard.err.oom > e_oom) {
+        err = CY_ERR_MEMORY;
+    } else if (owner->canard.err.tx_capacity > e_cap) {
+        err = CY_ERR_CAPACITY;
+    }
+    CY_TRACE(owner->base.cy, "DTID=%ju err=%jd", (uintmax_t)data_type_id, (intmax_t)err);
+    return err;
 }
