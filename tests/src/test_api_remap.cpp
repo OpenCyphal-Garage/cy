@@ -167,7 +167,7 @@ void test_remap_namespace_without_equal_sign()
 {
     test_platform_t p{};
     platform_init(&p, cy_str("b"));
-    assert_namespace(cy_namespace(p.cy), "b");
+    assert_namespace(cy_namespace(p.cy), "");
     platform_deinit(&p);
 }
 
@@ -402,8 +402,10 @@ void test_remap_parse_whitespace_variants()
 void test_remap_parse_malformed_tokens_silently_ignored()
 {
     test_platform_t p{};
-    // First token has no '=' (interpreted as a namespace). Second has a pinned `from` (invalid). Third is valid.
-    platform_init(&p, cy_str("nosep x#42=bad good=ok"));
+    // First token has nothing before '=' (interpreted as a namespace).
+    // Second has a pinned `from` (invalid).
+    // Third is valid.
+    platform_init(&p, cy_str("=nosep x#42=bad good=ok"));
 
     std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
     assert_namespace(cy_namespace(p.cy), "nosep");

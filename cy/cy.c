@@ -4272,18 +4272,10 @@ static namespace_parse_t cy_namespace_parse(const cy_str_t spec_string)
             out.remap      = (cy_str_t){ .len = spec_string.len - i, .str = &spec_string.str[i] };
             return out;
         }
-        // If after removing whitespace, the first token doesn't contain '=', namespace is detected.
-        const size_t ns_start = i;
-        while ((i < spec_string.len) && !remap_spec_is_whitespace(spec_string.str[i])) {
-            // If '=' is encountered before the end of the token, that's a topic remap, not a namespace.
-            if (spec_string.str[i] == '=') {
-                return out;
-            }
-            i++;
-        }
-        out.found      = true;
-        out.name_space = (cy_str_t){ .len = i - ns_start, .str = &spec_string.str[ns_start] };
-        out.remap      = (cy_str_t){ .len = spec_string.len - i, .str = &spec_string.str[i] };
+        // If after removing whitespace, the first token doesn't contain '=', no namespace is detected.
+        out.found      = false;
+        out.name_space = (cy_str_t){ .len = 0U, .str = NULL };
+        out.remap      = spec_string;
         return out;
     }
 
