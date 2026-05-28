@@ -527,8 +527,10 @@ cy_future_t* cy_respond_reliable(cy_breadcrumb_t* const breadcrumb, const cy_us_
 ///
 /// The home must be nonempty and should be unique in the network (a random suffix is one way to ensure this).
 /// The home and namespace will be normalized and copied; the original references don't need to persist.
+/// The remap string is a whitespace-separated list of `from=to` pairs; it is parsed and copied during construction.
+/// Tokens without `=` are ignored. Invalid pairs or allocation failures cause construction to fail.
 /// See cy_name_... for details on name normalization and resolution.
-cy_t* cy_new(cy_platform_t* const platform, const cy_str_t home, const cy_str_t name_space);
+cy_t* cy_new(cy_platform_t* const platform, const cy_str_t home, const cy_str_t name_space, const cy_str_t remap);
 
 /// Cy will clean up all resources obtained from the platform, such as memory and readers/writers, but will not
 /// destroy the platform instance itself; the application is responsible for that.
@@ -567,7 +569,7 @@ cy_err_t cy_remap(cy_t* const cy, const cy_str_t from, const cy_str_t to);
 /// This is designed to support single-string configuration parameters storing all remappings in one place.
 /// Invalid pairs are ignored. The string does not have to survive after this call.
 /// On error, the node remap configuration may be left in an inconsistent state.
-cy_err_t cy_remap_parse(cy_t* const cy, const cy_str_t spec_string);
+// cy_err_t cy_remap_parse(cy_t* const cy, const cy_str_t spec_string);
 
 /// Models a fully resolved and normalized topic name. See cy_resolve() et al.
 typedef struct cy_resolved_t

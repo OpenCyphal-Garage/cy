@@ -252,7 +252,7 @@ void platform_init(test_platform_t* const self)
 
     api_test::init_platform_base(self->platform, self->vtable);
 
-    self->cy = cy_new(&self->platform, cy_str("test"), cy_str_t{ 0, nullptr });
+    self->cy = cy_new(&self->platform, cy_str("test"), cy_str_t{ 0, nullptr }, cy_str_t{ 0, nullptr });
     TEST_ASSERT_NOT_NULL(self->cy);
     self->diag = cy_diag_t{ .next = nullptr, .user_context = CY_USER_CONTEXT_EMPTY, .vtable = &platform_diag_vtable };
     self->diag.user_context.ptr[0] = self;

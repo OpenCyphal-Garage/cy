@@ -374,7 +374,7 @@ void can_test_node_make_cy(can_test_node_t* const self, const char* const home)
     TEST_ASSERT_NOT_NULL(self);
     TEST_ASSERT_NOT_NULL(home);
     TEST_ASSERT_NOT_NULL(self->platform);
-    self->cy = cy_new(self->platform, cy_str(home), (cy_str_t){ 0U, NULL });
+    self->cy = cy_new(self->platform, cy_str(home), (cy_str_t){ 0U, NULL }, (cy_str_t){ 0U, NULL });
     TEST_ASSERT_NOT_NULL(self->cy);
 }
 

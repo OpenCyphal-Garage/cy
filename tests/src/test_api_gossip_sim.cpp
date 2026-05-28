@@ -368,7 +368,7 @@ void network_node_init(sim_network_t& net, const std::size_t index)
     node.platform.subject_id_modulus = static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit);
     node.platform.cy                 = nullptr;
     const std::string home           = "node" + std::to_string(index);
-    node.cy                          = cy_new(&node.platform, cy_str(home.c_str()), cy_str_t{ 0, nullptr });
+    node.cy = cy_new(&node.platform, cy_str(home.c_str()), cy_str_t{ 0, nullptr }, cy_str_t{ 0, nullptr });
     TEST_ASSERT_NOT_NULL(node.cy);
     node.diag = cy_diag_t{ .next = nullptr, .user_context = CY_USER_CONTEXT_EMPTY, .vtable = &sim_diag_vtable };
     node.diag.user_context.ptr[0] = &node;

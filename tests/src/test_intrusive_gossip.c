@@ -335,7 +335,7 @@ static void fixture_init(fixture_t* const self)
     self->vtable.realloc                   = fixture_realloc;
     self->vtable.random                    = fixture_random;
     self->rand_state                       = UINT64_C(0x123456789ABCDEF0);
-    self->cy                               = cy_new(&self->platform, cy_str("test"), (cy_str_t){ 0, NULL });
+    self->cy = cy_new(&self->platform, cy_str("test"), (cy_str_t){ 0, NULL }, (cy_str_t){ 0, NULL });
     TEST_ASSERT_NOT_NULL(self->cy);
     fixture_install_diag(self);
 }

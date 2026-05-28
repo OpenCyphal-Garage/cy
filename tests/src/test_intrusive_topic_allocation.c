@@ -182,7 +182,7 @@ static void fixture_init(fixture_t* const self)
     self->vtable.now                       = fixture_now;
     self->vtable.realloc                   = fixture_realloc;
     self->vtable.random                    = fixture_random;
-    self->cy                               = cy_new(&self->platform, cy_str("test"), (cy_str_t){ 0, NULL });
+    self->cy = cy_new(&self->platform, cy_str("test"), (cy_str_t){ 0, NULL }, (cy_str_t){ 0, NULL });
     TEST_ASSERT_NOT_NULL(self->cy);
     self->diag = (cy_diag_t){ .next = NULL, .user_context = CY_USER_CONTEXT_EMPTY, .vtable = &fixture_diag_vtable };
     self->diag.user_context.ptr[0] = self;

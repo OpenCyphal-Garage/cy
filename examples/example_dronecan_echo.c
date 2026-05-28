@@ -48,7 +48,8 @@ int main(const int argc, const char* const argv[])
         return 1;
     }
 
-    cy_t* const cy = cy_new(platform, cy_str("example_dronecan_echo"), cy_str(getenv("CYPHAL_NAMESPACE")));
+    cy_t* const cy = cy_new(
+      platform, cy_str("example_dronecan_echo"), cy_str(getenv("CYPHAL_NAMESPACE")), cy_str(getenv("CYPHAL_REMAP")));
     if (cy == NULL) {
         (void)fprintf(stderr, "cy_new\n");
         cy_can_socketcan_destroy(platform);

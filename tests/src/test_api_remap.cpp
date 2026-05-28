@@ -1,4 +1,4 @@
-// Integration tests for cy_remap / cy_remap_parse and their interaction with cy_resolve.
+// Integration tests for cy_remap / constructor-time remap parsing and their interaction with cy_resolve.
 // These use a live cy_t (via cy_new) and a guarded heap so that leaks and OOM rollback are observable.
 #include <cy_platform.h>
 #include <unity.h>
@@ -109,7 +109,7 @@ extern "C" std::uint64_t platform_random(cy_platform_t* const platform)
     return api_test::random_lcg<test_platform_t>(platform);
 }
 
-void platform_init(test_platform_t* const self)
+void platform_init(test_platform_t* const self, const cy_str_t remap = cy_str_t{ 0, nullptr })
 {
     *self              = test_platform_t{};
     self->random_state = UINT64_C(0xD1CEB00BCAFEBEEF);
@@ -130,7 +130,7 @@ void platform_init(test_platform_t* const self)
     self->vtable.random                    = platform_random;
 
     api_test::init_platform_base(self->platform, self->vtable);
-    self->cy = cy_new(&self->platform, cy_str("test"), cy_str_t{ 0, nullptr });
+    self->cy = cy_new(&self->platform, cy_str("test"), cy_str_t{ 0, nullptr }, remap);
     TEST_ASSERT_NOT_NULL(self->cy);
 }
 
@@ -329,13 +329,12 @@ void test_remap_normalized_lookup()
     platform_deinit(&p);
 }
 
-// ---------- cy_remap_parse ----------
+// ---------- constructor-time remap parsing ----------
 
 void test_remap_parse_multiple_pairs()
 {
     test_platform_t p{};
-    platform_init(&p);
-    TEST_ASSERT_EQUAL_INT(CY_OK, cy_remap_parse(p.cy, cy_str("a=x b/c=y foo/bar=baz/qux")));
+    platform_init(&p, cy_str("a=x b/c=y foo/bar=baz/qux"));
 
     std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
     assert_resolved(cy_resolve(p.cy, cy_str("a"), buf.size(), buf.data()), "x");
@@ -347,9 +346,8 @@ void test_remap_parse_multiple_pairs()
 void test_remap_parse_whitespace_variants()
 {
     test_platform_t p{};
-    platform_init(&p);
     // Mix of space, tab, newline, carriage return, vertical tab, form feed.
-    TEST_ASSERT_EQUAL_INT(CY_OK, cy_remap_parse(p.cy, cy_str("\t\na=x\r\n  b=y\v\fc=z")));
+    platform_init(&p, cy_str("\t\na=x\r\n  b=y\v\fc=z"));
 
     std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
     assert_resolved(cy_resolve(p.cy, cy_str("a"), buf.size(), buf.data()), "x");
@@ -361,9 +359,8 @@ void test_remap_parse_whitespace_variants()
 void test_remap_parse_malformed_tokens_silently_ignored()
 {
     test_platform_t p{};
-    platform_init(&p);
     // First token has no '=' (silently ignored). Second has a pinned `from` (invalid). Third is valid.
-    TEST_ASSERT_EQUAL_INT(CY_OK, cy_remap_parse(p.cy, cy_str("nosep x#42=bad good=ok")));
+    platform_init(&p, cy_str("nosep x#42=bad good=ok"));
 
     std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
     assert_resolved(cy_resolve(p.cy, cy_str("good"), buf.size(), buf.data()), "ok");
@@ -374,9 +371,14 @@ void test_remap_parse_malformed_tokens_silently_ignored()
 void test_remap_parse_empty_string_is_ok()
 {
     test_platform_t p{};
-    platform_init(&p);
-    TEST_ASSERT_EQUAL_INT(CY_OK, cy_remap_parse(p.cy, cy_str("")));
-    TEST_ASSERT_EQUAL_INT(CY_OK, cy_remap_parse(p.cy, cy_str("   \t\n")));
+    platform_init(&p, cy_str(""));
+    platform_deinit(&p);
+}
+
+void test_remap_parse_whitespace_only_string_is_ok()
+{
+    test_platform_t p{};
+    platform_init(&p, cy_str("   \t\n"));
     platform_deinit(&p);
 }
 
@@ -441,6 +443,7 @@ int main()
     RUN_TEST(test_remap_parse_whitespace_variants);
     RUN_TEST(test_remap_parse_malformed_tokens_silently_ignored);
     RUN_TEST(test_remap_parse_empty_string_is_ok);
+    RUN_TEST(test_remap_parse_whitespace_only_string_is_ok);
     RUN_TEST(test_remap_oom_on_value_alloc_leaves_state_unchanged);
     RUN_TEST(test_remap_destroy_drains_all_entries);
     return UNITY_END();

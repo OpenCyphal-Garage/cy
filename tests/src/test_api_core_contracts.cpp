@@ -441,7 +441,7 @@ void platform_prepare(test_platform_t* const self)
 void platform_init(test_platform_t* const self)
 {
     platform_prepare(self);
-    self->cy = cy_new(&self->platform, cy_str("test"), cy_str_t{ 0, nullptr });
+    self->cy = cy_new(&self->platform, cy_str("test"), cy_str_t{ 0, nullptr }, cy_str_t{ 0, nullptr });
     TEST_ASSERT_NOT_NULL(self->cy);
     self->async_diag =
       cy_diag_t{ .next = nullptr, .user_context = CY_USER_CONTEXT_EMPTY, .vtable = &platform_async_diag_vtable };
@@ -628,7 +628,7 @@ void test_api_core_home_namespace_contracts()
     {
         test_platform_t platform{};
         platform_prepare(&platform);
-        platform.cy = cy_new(&platform.platform, cy_str("home//node"), cy_str("ns//a"));
+        platform.cy = cy_new(&platform.platform, cy_str("home//node"), cy_str("ns//a"), cy_str_t{ 0, nullptr });
         TEST_ASSERT_NOT_NULL(platform.cy);
 
         const cy_str_t home = cy_home(platform.cy);
@@ -648,7 +648,7 @@ void test_api_core_home_namespace_contracts()
     {
         test_platform_t platform{};
         platform_prepare(&platform);
-        platform.cy = cy_new(&platform.platform, cy_str("myhome"), cy_str_t{ 0, nullptr });
+        platform.cy = cy_new(&platform.platform, cy_str("myhome"), cy_str_t{ 0, nullptr }, cy_str_t{ 0, nullptr });
         TEST_ASSERT_NOT_NULL(platform.cy);
 
         const cy_str_t ns = cy_namespace(platform.cy);
@@ -669,7 +669,8 @@ void test_api_core_home_namespace_contracts()
     {
         test_platform_t platform{};
         platform_prepare(&platform);
-        TEST_ASSERT_NULL(cy_new(&platform.platform, cy_str_t{ 0, nullptr }, cy_str_t{ 0, nullptr }));
+        TEST_ASSERT_NULL(
+          cy_new(&platform.platform, cy_str_t{ 0, nullptr }, cy_str_t{ 0, nullptr }, cy_str_t{ 0, nullptr }));
         platform_deinit(&platform);
     }
 
@@ -677,7 +678,8 @@ void test_api_core_home_namespace_contracts()
     {
         test_platform_t platform{};
         platform_prepare(&platform);
-        TEST_ASSERT_NULL(cy_new(&platform.platform, cy_str("bad home"), cy_str_t{ 0, nullptr }));
+        TEST_ASSERT_NULL(
+          cy_new(&platform.platform, cy_str("bad home"), cy_str_t{ 0, nullptr }, cy_str_t{ 0, nullptr }));
         platform_deinit(&platform);
     }
 
@@ -685,7 +687,7 @@ void test_api_core_home_namespace_contracts()
     {
         test_platform_t platform{};
         platform_prepare(&platform);
-        TEST_ASSERT_NULL(cy_new(&platform.platform, cy_str("good"), cy_str("bad ns")));
+        TEST_ASSERT_NULL(cy_new(&platform.platform, cy_str("good"), cy_str("bad ns"), cy_str_t{ 0, nullptr }));
         platform_deinit(&platform);
     }
 }
@@ -936,36 +938,38 @@ void test_api_core_message_contract_and_future_callback_getter()
 
 void test_api_core_cy_new_validation_and_failure_paths()
 {
-    const cy_str_t h  = cy_str("h");
-    const cy_str_t ns = cy_str_t{ 0, nullptr };
+    const cy_str_t h     = cy_str("h");
+    const cy_str_t ns    = cy_str_t{ 0, nullptr };
+    const cy_str_t remap = cy_str_t{ 0, nullptr };
 
-    TEST_ASSERT_NULL(cy_new(nullptr, h, ns));
+    TEST_ASSERT_NULL(cy_new(nullptr, h, ns, remap));
 
     test_platform_t platform{};
     platform_prepare(&platform);
 
     platform.platform.vtable = nullptr;
-    TEST_ASSERT_NULL(cy_new(&platform.platform, h, ns));
+    TEST_ASSERT_NULL(cy_new(&platform.platform, h, ns, remap));
     platform.platform.vtable = &platform.vtable;
 
     platform.platform.cy = reinterpret_cast<cy_t*>(&platform); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
-    TEST_ASSERT_NULL(cy_new(&platform.platform, h, ns));
+    TEST_ASSERT_NULL(cy_new(&platform.platform, h, ns, remap));
     platform.platform.cy = nullptr;
 
     platform.platform.subject_id_modulus = 8000U; // below minimum
-    TEST_ASSERT_NULL(cy_new(&platform.platform, h, ns));
+    TEST_ASSERT_NULL(cy_new(&platform.platform, h, ns, remap));
     platform.platform.subject_id_modulus = 8192U; // even
-    TEST_ASSERT_NULL(cy_new(&platform.platform, h, ns));
+    TEST_ASSERT_NULL(cy_new(&platform.platform, h, ns, remap));
     platform.platform.subject_id_modulus = 24573U; // odd composite
-    TEST_ASSERT_NULL(cy_new(&platform.platform, h, ns));
+    TEST_ASSERT_NULL(cy_new(&platform.platform, h, ns, remap));
     platform.platform.subject_id_modulus = 65537U; // prime but mod 4 != 3
-    TEST_ASSERT_NULL(cy_new(&platform.platform, h, ns));
+    TEST_ASSERT_NULL(cy_new(&platform.platform, h, ns, remap));
     platform.platform.subject_id_modulus = static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit);
 
     // Home/namespace argument validation.
-    TEST_ASSERT_NULL(cy_new(&platform.platform, cy_str_t{ 0, nullptr }, ns)); // empty home rejected
-    TEST_ASSERT_NULL(cy_new(&platform.platform, cy_str("a b"), ns));          // home with space rejected
-    TEST_ASSERT_NULL(cy_new(&platform.platform, h, cy_str_t{ 5, nullptr }));  // NULL ns.str with nonzero len rejected
+    TEST_ASSERT_NULL(cy_new(&platform.platform, cy_str_t{ 0, nullptr }, ns, remap)); // empty home rejected
+    TEST_ASSERT_NULL(cy_new(&platform.platform, cy_str("a b"), ns, remap));          // home with space rejected
+    TEST_ASSERT_NULL(
+      cy_new(&platform.platform, h, cy_str_t{ 5, nullptr }, remap)); // NULL ns.str with nonzero len rejected
 
     platform_deinit(&platform);
 
@@ -973,24 +977,24 @@ void test_api_core_cy_new_validation_and_failure_paths()
     platform_prepare(&fail_alloc);
     fail_alloc.fail_alloc_size  = 0U;
     fail_alloc.fail_alloc_count = 1U;
-    TEST_ASSERT_NULL(cy_new(&fail_alloc.platform, h, ns));
+    TEST_ASSERT_NULL(cy_new(&fail_alloc.platform, h, ns, remap));
     platform_deinit(&fail_alloc);
 
     test_platform_t fail_reader{};
     platform_prepare(&fail_reader);
     fail_reader.fail_subject_reader_new = true;
-    TEST_ASSERT_NULL(cy_new(&fail_reader.platform, h, ns));
+    TEST_ASSERT_NULL(cy_new(&fail_reader.platform, h, ns, remap));
     platform_deinit(&fail_reader);
 
     test_platform_t fail_writer{};
     platform_prepare(&fail_writer);
     fail_writer.fail_subject_writer_new = true;
-    TEST_ASSERT_NULL(cy_new(&fail_writer.platform, h, ns));
+    TEST_ASSERT_NULL(cy_new(&fail_writer.platform, h, ns, remap));
     platform_deinit(&fail_writer);
 
     test_platform_t success{};
     platform_prepare(&success);
-    success.cy = cy_new(&success.platform, h, ns);
+    success.cy = cy_new(&success.platform, h, ns, remap);
     TEST_ASSERT_NOT_NULL(success.cy);
     platform_deinit(&success);
 }
@@ -1546,7 +1550,7 @@ void test_cy_resolve_uses_node_home_and_namespace()
 {
     test_platform_t platform{};
     platform_prepare(&platform);
-    platform.cy = cy_new(&platform.platform, cy_str("mynode"), cy_str("ns"));
+    platform.cy = cy_new(&platform.platform, cy_str("mynode"), cy_str("ns"), cy_str_t{ 0, nullptr });
     TEST_ASSERT_NOT_NULL(platform.cy);
 
     // Homeful name: ~ expands to the home ("mynode"), namespace is not involved.
@@ -1589,7 +1593,7 @@ void test_cy_resolve_with_pin()
 {
     test_platform_t platform{};
     platform_prepare(&platform);
-    platform.cy = cy_new(&platform.platform, cy_str("mynode"), cy_str("ns"));
+    platform.cy = cy_new(&platform.platform, cy_str("mynode"), cy_str("ns"), cy_str_t{ 0, nullptr });
     TEST_ASSERT_NOT_NULL(platform.cy);
 
     // Relative name with pin: namespace prepended, pin stripped and returned separately.

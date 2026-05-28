@@ -4230,7 +4230,9 @@ static bool is_valid_subject_id_modulus(const uint32_t modulus)
 
 static cy_us_t olga_now(olga_t* const sched) { return cy_now((cy_t*)sched->user); }
 
-cy_t* cy_new(cy_platform_t* const platform, const cy_str_t home, const cy_str_t name_space)
+static cy_err_t cy_remap_parse(cy_t* const cy, const cy_str_t spec_string);
+
+cy_t* cy_new(cy_platform_t* const platform, const cy_str_t home, const cy_str_t name_space, const cy_str_t remap)
 {
     // Home is required. Namespace may be empty.
     if ((platform == NULL) || (platform->vtable == NULL) || (platform->cy != NULL) ||
@@ -4285,6 +4287,12 @@ cy_t* cy_new(cy_platform_t* const platform, const cy_str_t home, const cy_str_t 
     cy->remap.context = cy;
     cy->remap.sub_one = cy_name_one;
     cy->remap.sub_any = cy_name_any;
+
+    cy_err_t err = cy_remap_parse(cy, remap);
+    if (err != CY_OK) {
+        cy_destroy(cy);
+        return NULL;
+    }
 
     cy->respond_futures_by_tag = NULL;
 
@@ -4511,7 +4519,7 @@ cy_err_t cy_remap(cy_t* const cy, const cy_str_t from, const cy_str_t to)
     return CY_OK;
 }
 
-cy_err_t cy_remap_parse(cy_t* const cy, const cy_str_t spec_string)
+static cy_err_t cy_remap_parse(cy_t* const cy, const cy_str_t spec_string)
 {
     if (cy == NULL) {
         return CY_ERR_ARGUMENT;
