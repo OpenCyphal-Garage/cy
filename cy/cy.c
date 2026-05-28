@@ -4232,6 +4232,64 @@ static cy_us_t olga_now(olga_t* const sched) { return cy_now((cy_t*)sched->user)
 
 static cy_err_t cy_remap_parse(cy_t* const cy, const cy_str_t spec_string);
 
+static bool remap_spec_is_whitespace(const char c)
+{
+    return (c == ' ') || (c == '\t') || (c == '\n') || (c == '\r') || (c == '\x0b') || (c == '\x0c');
+}
+
+typedef struct namespace_parse_t
+{
+    bool     found;
+    cy_str_t name_space;
+    cy_str_t remap;
+} namespace_parse_t;
+
+static namespace_parse_t cy_namespace_parse(const cy_str_t spec_string)
+{
+    const cy_str_t    none = { .len = 0U, .str = NULL };
+    namespace_parse_t out  = { .found = false, .name_space = none, .remap = spec_string };
+
+    if (spec_string.str == NULL) {
+        return out;
+    }
+
+    size_t i = 0U;
+    while (i < spec_string.len) {
+        while ((i < spec_string.len) && remap_spec_is_whitespace(spec_string.str[i])) {
+            i++;
+        }
+        if (i >= spec_string.len) {
+            break;
+        }
+        // If after removing whitespace, first char is '=', namespace is detected.
+        if (spec_string.str[i] == '=') {
+            const size_t ns_start = i + 1U;
+            while ((i < spec_string.len) && !remap_spec_is_whitespace(spec_string.str[i])) {
+                i++;
+            }
+            out.found      = true;
+            out.name_space = (cy_str_t){ .len = i - ns_start, .str = &spec_string.str[ns_start] };
+            out.remap      = (cy_str_t){ .len = spec_string.len - i, .str = &spec_string.str[i] };
+            return out;
+        }
+        // If after removing whitespace, the first token doesn't contain '=', namespace is detected.
+        const size_t ns_start = i;
+        while ((i < spec_string.len) && !remap_spec_is_whitespace(spec_string.str[i])) {
+            // If '=' is encountered before the end of the token, that's a topic remap, not a namespace.
+            if (spec_string.str[i] == '=') {
+                return out;
+            }
+            i++;
+        }
+        out.found      = true;
+        out.name_space = (cy_str_t){ .len = i - ns_start, .str = &spec_string.str[ns_start] };
+        out.remap      = (cy_str_t){ .len = spec_string.len - i, .str = &spec_string.str[i] };
+        return out;
+    }
+
+    return out;
+}
+
 cy_t* cy_new(cy_platform_t* const platform, const cy_str_t home, const cy_str_t name_space, const cy_str_t remap)
 {
     // Home is required. Namespace may be empty.
@@ -4241,9 +4299,14 @@ cy_t* cy_new(cy_platform_t* const platform, const cy_str_t home, const cy_str_t 
         return NULL;
     }
 
+    const namespace_parse_t parsed_ns    = cy_namespace_parse(remap);
+    const bool              use_remap_ns = (name_space.len == 0U) && parsed_ns.found && (parsed_ns.name_space.len > 0U);
+    const cy_str_t          effective_ns = use_remap_ns ? parsed_ns.name_space : name_space;
+    const cy_str_t          remap_tail   = parsed_ns.found ? parsed_ns.remap : remap;
+
     // Normalize and validate the names. Subsequent normalization will certainly succeed.
     const size_t home_len = name_normalized_len(home);
-    const size_t ns_len   = name_normalized_len(name_space);
+    const size_t ns_len   = name_normalized_len(effective_ns);
     if ((home_len == 0) || (home_len > CY_TOPIC_NAME_MAX) || (ns_len > CY_TOPIC_NAME_MAX)) { // home required
         return NULL;
     }
@@ -4255,7 +4318,7 @@ cy_t* cy_new(cy_platform_t* const platform, const cy_str_t home, const cy_str_t 
     }
     memset(cy, 0, sizeof(cy_t) + home_len + ns_len + 2); // Zero the entire allocation incl. NUL terminators.
     cy->home = name_normalize(home, home_len, (char*)cy + sizeof(cy_t));
-    cy->ns   = name_normalize(name_space, ns_len, (char*)cy + sizeof(cy_t) + home_len + 1);
+    cy->ns   = name_normalize(effective_ns, ns_len, (char*)cy + sizeof(cy_t) + home_len + 1);
     assert((cy->home.str != NULL) && (cy->home.len == home_len) && (cy->home.str[cy->home.len] == '\0'));
     assert((cy->ns.str != NULL) && (cy->ns.len == ns_len) && (cy->ns.str[cy->ns.len] == '\0'));
 
@@ -4288,7 +4351,7 @@ cy_t* cy_new(cy_platform_t* const platform, const cy_str_t home, const cy_str_t 
     cy->remap.sub_one = cy_name_one;
     cy->remap.sub_any = cy_name_any;
 
-    cy_err_t err = cy_remap_parse(cy, remap);
+    cy_err_t err = cy_remap_parse(cy, remap_tail);
     if (err != CY_OK) {
         cy_destroy(cy);
         return NULL;
@@ -4460,11 +4523,6 @@ cy_resolved_t cy_resolve(const cy_t* const cy, const cy_str_t name, const size_t
         return (cy_resolved_t){ .name = str_invalid, .pin = UINT16_MAX };
     }
     return cy_name_resolve(&cy->remap, name, cy_namespace(cy), cy_home(cy), dest_size, dest);
-}
-
-static bool remap_spec_is_whitespace(const char c)
-{
-    return (c == ' ') || (c == '\t') || (c == '\n') || (c == '\r') || (c == '\x0b') || (c == '\x0c');
 }
 
 cy_err_t cy_remap(cy_t* const cy, const cy_str_t from, const cy_str_t to)

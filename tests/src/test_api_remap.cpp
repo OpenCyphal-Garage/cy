@@ -1,5 +1,6 @@
 // Integration tests for cy_remap / constructor-time remap parsing and their interaction with cy_resolve.
 // These use a live cy_t (via cy_new) and a guarded heap so that leaks and OOM rollback are observable.
+#include <cassert>
 #include <cy_platform.h>
 #include <unity.h>
 #include "api_mock_platform_utils.hpp"
@@ -7,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <unity_internals.h>
 
 namespace {
 
@@ -109,7 +111,9 @@ extern "C" std::uint64_t platform_random(cy_platform_t* const platform)
     return api_test::random_lcg<test_platform_t>(platform);
 }
 
-void platform_init(test_platform_t* const self, const cy_str_t remap = cy_str_t{ 0, nullptr })
+void platform_init(test_platform_t* const self,
+                   const cy_str_t         remap      = cy_str_t{ 0, nullptr },
+                   const cy_str_t         name_space = cy_str_t{ 0, nullptr })
 {
     *self              = test_platform_t{};
     self->random_state = UINT64_C(0xD1CEB00BCAFEBEEF);
@@ -130,7 +134,7 @@ void platform_init(test_platform_t* const self, const cy_str_t remap = cy_str_t{
     self->vtable.random                    = platform_random;
 
     api_test::init_platform_base(self->platform, self->vtable);
-    self->cy = cy_new(&self->platform, cy_str("test"), cy_str_t{ 0, nullptr }, remap);
+    self->cy = cy_new(&self->platform, cy_str("test"), name_space, remap);
     TEST_ASSERT_NOT_NULL(self->cy);
 }
 
@@ -143,7 +147,37 @@ void assert_resolved(const cy_resolved_t r, const char* const expected)
     TEST_ASSERT_EQUAL_STRING_LEN(expected, r.name.str, r.name.len);
 }
 
-// ---------- cy_remap + cy_resolve happy path ----------
+void assert_namespace(const cy_str_t ns, const char* const expected)
+{
+    TEST_ASSERT_NOT_NULL(ns.str);
+    TEST_ASSERT_EQUAL_size_t(std::strlen(expected), ns.len);
+    TEST_ASSERT_EQUAL_STRING_LEN(expected, ns.str, ns.len);
+}
+
+// ---------- cy_namespace + cy_remap + cy_resolve happy path ----------
+void test_remap_namespace_with_equal_sign()
+{
+    test_platform_t p{};
+    platform_init(&p, cy_str("=a/b"));
+    assert_namespace(cy_namespace(p.cy), "a/b");
+    platform_deinit(&p);
+}
+
+void test_remap_namespace_without_equal_sign()
+{
+    test_platform_t p{};
+    platform_init(&p, cy_str("b"));
+    assert_namespace(cy_namespace(p.cy), "b");
+    platform_deinit(&p);
+}
+
+void test_remap_namespace_with_multiple_equal_signs()
+{
+    test_platform_t p{};
+    platform_init(&p, cy_str("=a=b=/c"));
+    assert_namespace(cy_namespace(p.cy), "a=b=/c");
+    platform_deinit(&p);
+}
 
 void test_remap_insert_and_resolve_exact()
 {
@@ -272,6 +306,15 @@ void test_remap_to_homeful_expands_home()
     platform_deinit(&p);
 }
 
+// A specified namespace overrides a mapped one.
+void test_remap_specified_namespace_overrides_mapped()
+{
+    test_platform_t p{};
+    platform_init(&p, cy_str("foo"), cy_str("bar")); // "foo" is mapped to "bar" is namespace specified
+    assert_namespace(cy_namespace(p.cy), "bar");
+    platform_deinit(&p);
+}
+
 // ---------- pin handling ----------
 
 // Matched rule with pinned `to`: the rule's pin wins (and the user's pin is discarded).
@@ -359,12 +402,14 @@ void test_remap_parse_whitespace_variants()
 void test_remap_parse_malformed_tokens_silently_ignored()
 {
     test_platform_t p{};
-    // First token has no '=' (silently ignored). Second has a pinned `from` (invalid). Third is valid.
+    // First token has no '=' (interpreted as a namespace). Second has a pinned `from` (invalid). Third is valid.
     platform_init(&p, cy_str("nosep x#42=bad good=ok"));
 
     std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
-    assert_resolved(cy_resolve(p.cy, cy_str("good"), buf.size(), buf.data()), "ok");
-    assert_resolved(cy_resolve(p.cy, cy_str("nosep"), buf.size(), buf.data()), "nosep");
+    assert_namespace(cy_namespace(p.cy), "nosep");
+    assert_resolved(cy_resolve(p.cy, cy_str("good"), buf.size(), buf.data()), "nosep/ok");
+    // QUESTION: is cy_resolve("nosep") expected to resolve to "nosep/nosep" or return nothing/error?
+    assert_resolved(cy_resolve(p.cy, cy_str("nosep"), buf.size(), buf.data()), "nosep/nosep");
     platform_deinit(&p);
 }
 
@@ -425,6 +470,9 @@ extern "C" void tearDown() {}
 int main()
 {
     UNITY_BEGIN();
+    RUN_TEST(test_remap_namespace_with_equal_sign);
+    RUN_TEST(test_remap_namespace_without_equal_sign);
+    RUN_TEST(test_remap_namespace_with_multiple_equal_signs);
     RUN_TEST(test_remap_insert_and_resolve_exact);
     RUN_TEST(test_remap_no_prefix_match);
     RUN_TEST(test_remap_overwrite_replaces_old_value);
@@ -435,6 +483,7 @@ int main()
     RUN_TEST(test_remap_patterns_an_unpinned_topic);
     RUN_TEST(test_remap_to_absolute_ignores_namespace);
     RUN_TEST(test_remap_to_homeful_expands_home);
+    RUN_TEST(test_remap_specified_namespace_overrides_mapped);
     RUN_TEST(test_remap_to_pin_overrides_user_pin);
     RUN_TEST(test_remap_user_pin_discarded_on_match);
     RUN_TEST(test_remap_user_pin_passes_through_on_no_match);
