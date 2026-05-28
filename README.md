@@ -71,7 +71,7 @@ int main(void)
     // Set up the local Cyphal node instance.
     // Every node needs a home, which should be unique across the network.
     // The namespace and remapping configuration are optional.
-    cy_t* cy = cy_new(platform, cy_str("my_node_name"), cy_str(""), cy_str(""));
+    cy_t* cy = cy_new(platform, cy_str("my_node_name"), cy_str("my_namespace"), cy_str("old/topic/name=new/topic/name"));
     if (cy == NULL) { ... }
 
     // ... to be continued ...
@@ -297,6 +297,20 @@ cy_str_t remap_config = cy_str("camera/left=/head/camera/upper_left camera/right
 cy_t* cy = cy_new(platform, cy_str("my_node_name"), cy_str(""), remap_config);
 if (cy == NULL) { ... }
 ```
+
+Note: for embedded developers it might be useful to be able to set/remap both namespace and topic names together from a single string.
+This can be done by passing an empty namespace string and adding the namespace directly to the remap config string.
+The example below shows how to set the namespace to `sensors`, note that 
+- the namespace must always be specified first, before any topic remappings
+- the equal sign must be the first character of the line
+
+```c++
+cy_str_t remap_config = cy_str("=sensors temperature=/environment/temperature");
+cy_t* cy = cy_new(platform, cy_str("my_node_name"), cy_str(""), remap_config);
+if (cy == NULL) { ... }
+```
+
+If a namespace is specified in the input parameters and the remap config string, the namespace from the input parameters takes precedence.
 
 One environment variable convention is:
 
