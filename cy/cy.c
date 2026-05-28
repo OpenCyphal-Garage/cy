@@ -4230,11 +4230,52 @@ static bool is_valid_subject_id_modulus(const uint32_t modulus)
 
 static cy_us_t olga_now(olga_t* const sched) { return cy_now((cy_t*)sched->user); }
 
-static cy_err_t cy_remap_parse(cy_t* const cy, const cy_str_t spec_string);
-
 static bool remap_spec_is_whitespace(const char c)
 {
     return (c == ' ') || (c == '\t') || (c == '\n') || (c == '\r') || (c == '\x0b') || (c == '\x0c');
+}
+
+static cy_err_t remap_parse(cy_t* const cy, const cy_str_t spec_string)
+{
+    if (cy == NULL) {
+        return CY_ERR_ARGUMENT;
+    }
+    if (spec_string.str == NULL) {
+        return (spec_string.len == 0U) ? CY_OK : CY_ERR_ARGUMENT;
+    }
+    size_t i = 0U;
+    while (i < spec_string.len) {
+        while ((i < spec_string.len) && remap_spec_is_whitespace(spec_string.str[i])) {
+            i++;
+        }
+        if (i >= spec_string.len) {
+            break;
+        }
+        const size_t tok_start = i;
+        while ((i < spec_string.len) && !remap_spec_is_whitespace(spec_string.str[i])) {
+            i++;
+        }
+        const size_t tok_len = i - tok_start;
+        // Locate the first '=' within the token; skip the token if absent.
+        size_t eq_off = tok_len;
+        for (size_t j = 0U; j < tok_len; j++) {
+            if (spec_string.str[tok_start + j] == '=') {
+                eq_off = j;
+                break;
+            }
+        }
+        if (eq_off >= tok_len) {
+            continue; // Malformed: no '=', silently ignored per docs.
+        }
+        const cy_str_t from = { .len = eq_off, .str = &spec_string.str[tok_start] };
+        const cy_str_t to   = { .len = tok_len - eq_off - 1U, .str = &spec_string.str[tok_start + eq_off + 1U] };
+        const cy_err_t err  = cy_remap(cy, from, to);
+        if (err == CY_ERR_MEMORY) {
+            return err; // OOM is a hard stop; the table may be partially updated per the documented contract.
+        }
+        // CY_ERR_NAME / CY_ERR_ARGUMENT are treated as "invalid pair" and silently ignored.
+    }
+    return CY_OK;
 }
 
 typedef struct namespace_parse_t
@@ -4244,7 +4285,7 @@ typedef struct namespace_parse_t
     cy_str_t remap;
 } namespace_parse_t;
 
-static namespace_parse_t cy_namespace_parse(const cy_str_t spec_string)
+static namespace_parse_t namespace_parse(const cy_str_t spec_string)
 {
     const cy_str_t    none = { .len = 0U, .str = NULL };
     namespace_parse_t out  = { .found = false, .name_space = none, .remap = spec_string };
@@ -4291,7 +4332,7 @@ cy_t* cy_new(cy_platform_t* const platform, const cy_str_t home, const cy_str_t 
         return NULL;
     }
 
-    const namespace_parse_t parsed_ns    = cy_namespace_parse(remap);
+    const namespace_parse_t parsed_ns    = namespace_parse(remap);
     const bool              use_remap_ns = (name_space.len == 0U) && parsed_ns.found && (parsed_ns.name_space.len > 0U);
     const cy_str_t          effective_ns = use_remap_ns ? parsed_ns.name_space : name_space;
     const cy_str_t          remap_tail   = parsed_ns.found ? parsed_ns.remap : remap;
@@ -4343,7 +4384,7 @@ cy_t* cy_new(cy_platform_t* const platform, const cy_str_t home, const cy_str_t 
     cy->remap.sub_one = cy_name_one;
     cy->remap.sub_any = cy_name_any;
 
-    cy_err_t err = cy_remap_parse(cy, remap_tail);
+    cy_err_t err = remap_parse(cy, remap_tail);
     if (err != CY_OK) {
         cy_destroy(cy);
         return NULL;
@@ -4566,49 +4607,6 @@ cy_err_t cy_remap(cy_t* const cy, const cy_str_t from, const cy_str_t to)
     }
     mem_free(cy, node->value); // Overwrite the old value, if any; NULL is safe.
     node->value = new_to;
-    return CY_OK;
-}
-
-static cy_err_t cy_remap_parse(cy_t* const cy, const cy_str_t spec_string)
-{
-    if (cy == NULL) {
-        return CY_ERR_ARGUMENT;
-    }
-    if (spec_string.str == NULL) {
-        return (spec_string.len == 0U) ? CY_OK : CY_ERR_ARGUMENT;
-    }
-    size_t i = 0U;
-    while (i < spec_string.len) {
-        while ((i < spec_string.len) && remap_spec_is_whitespace(spec_string.str[i])) {
-            i++;
-        }
-        if (i >= spec_string.len) {
-            break;
-        }
-        const size_t tok_start = i;
-        while ((i < spec_string.len) && !remap_spec_is_whitespace(spec_string.str[i])) {
-            i++;
-        }
-        const size_t tok_len = i - tok_start;
-        // Locate the first '=' within the token; skip the token if absent.
-        size_t eq_off = tok_len;
-        for (size_t j = 0U; j < tok_len; j++) {
-            if (spec_string.str[tok_start + j] == '=') {
-                eq_off = j;
-                break;
-            }
-        }
-        if (eq_off >= tok_len) {
-            continue; // Malformed: no '=', silently ignored per docs.
-        }
-        const cy_str_t from = { .len = eq_off, .str = &spec_string.str[tok_start] };
-        const cy_str_t to   = { .len = tok_len - eq_off - 1U, .str = &spec_string.str[tok_start + eq_off + 1U] };
-        const cy_err_t err  = cy_remap(cy, from, to);
-        if (err == CY_ERR_MEMORY) {
-            return err; // OOM is a hard stop; the table may be partially updated per the documented contract.
-        }
-        // CY_ERR_NAME / CY_ERR_ARGUMENT are treated as "invalid pair" and silently ignored.
-    }
     return CY_OK;
 }
 

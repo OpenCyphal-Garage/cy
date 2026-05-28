@@ -571,7 +571,7 @@ cy_err_t cy_remap(cy_t* const cy, const cy_str_t from, const cy_str_t to);
 /// This is designed to support single-string configuration parameters storing all remappings in one place.
 /// Invalid pairs are ignored. The string does not have to survive after this call.
 /// On error, the node remap configuration may be left in an inconsistent state.
-// cy_err_t cy_remap_parse(cy_t* const cy, const cy_str_t spec_string);
+// cy_err_t remap_parse(cy_t* const cy, const cy_str_t spec_string);
 
 /// Models a fully resolved and normalized topic name. See cy_resolve() et al.
 typedef struct cy_resolved_t
