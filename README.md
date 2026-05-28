@@ -71,7 +71,8 @@ int main(void)
     // Set up the local Cyphal node instance.
     // Every node needs a home, which should be unique across the network.
     // The namespace and remapping configuration are optional.
-    cy_t* cy = cy_new(platform, cy_str("my_node_name"), cy_str("my_namespace"), cy_str("old/topic/name=new/topic/name"));
+    // The POSIX glue provides convenience functions for this.
+    cy_t* cy = cy_new(platform, cy_str("my_node_name"), cy_str(""), cy_str(""));  // platform, home, namespace and remap.
     if (cy == NULL) { ... }
 
     // ... to be continued ...
@@ -274,8 +275,8 @@ This can be done via namespacing as introduced earlier, and via name remapping.
 Readers familiar with ROS will feel right at home with these concepts.
 
 The namespace is specified once when the node is created, as shown in the very beginning of the tutorial.
-Name remappings are passed in when the node is created, before any topic can be joined, so names are resolved
-consistently.
+Name remappings are introduced after the node is created, and normally it should be done before the first
+topic is joined to ensure names are resolved consistently.
 
 ```c++
 // Map the hardcoded topic name "camera/left" to the actual topic name "/head/camera/upper_left" on the network.
@@ -302,7 +303,7 @@ Note: for embedded developers it might be useful to be able to set/remap both na
 This can be done by passing an empty namespace string and adding the namespace directly to the remap config string.
 The example below shows how to set the namespace to `sensors`, note that 
 - the namespace must always be specified first, before any topic remappings
-- the equal sign must be the first character of the line
+- the equal sign must be the first character of the line before the namespace
 
 ```c++
 cy_str_t remap_config = cy_str("=sensors temperature=/environment/temperature");
