@@ -20,7 +20,7 @@ void udp_test_node_init_manual(udp_test_node_t* const self,
     self->uid      = uid;
     self->platform = cy_udp_posix_new_manual(uid, iface_address, tx_queue_capacity);
     TEST_ASSERT_NOT_NULL(self->platform);
-    self->cy = cy_new(self->platform, cy_udp_posix_home(self->platform, home_prefix), cy_str(""));
+    self->cy = cy_new(self->platform, cy_udp_posix_home(self->platform, home_prefix), cy_str(""), cy_str(""));
     TEST_ASSERT_NOT_NULL(self->cy);
 }
 

@@ -526,9 +526,14 @@ cy_future_t* cy_respond_reliable(cy_breadcrumb_t* const breadcrumb, const cy_us_
 /// The new instance will be heap-allocated via the platform layer API.
 ///
 /// The home must be nonempty and should be unique in the network (a random suffix is one way to ensure this).
-/// The home and namespace will be normalized and copied; the original references don't need to persist.
+/// All names will be normalized and copied; the original string references don't need to persist.
+///
+/// If the name_space parameter is empty, the namespace can still be inferred from the remap string: if the first token
+/// starts with '=', the remainder (until whitespace) will be used as the namespace.
+/// The remap string is a whitespace-separated list of `from=to` pairs; it is parsed and copied during construction.
+/// Tokens without `=` and invalid pairs are ignored. Allocation failures cause construction to fail.
 /// See cy_name_... for details on name normalization and resolution.
-cy_t* cy_new(cy_platform_t* const platform, const cy_str_t home, const cy_str_t name_space);
+cy_t* cy_new(cy_platform_t* const platform, const cy_str_t home, const cy_str_t name_space, const cy_str_t remap);
 
 /// Cy will clean up all resources obtained from the platform, such as memory and readers/writers, but will not
 /// destroy the platform instance itself; the application is responsible for that.
@@ -560,14 +565,6 @@ cy_us_t cy_uptime(const cy_t* const cy);
 /// The effect is incremental. If a remapping for the same `from` already exists, it is replaced with the new `to`.
 /// On error, the node remap configuration is left unchanged.
 cy_err_t cy_remap(cy_t* const cy, const cy_str_t from, const cy_str_t to);
-
-/// Like cy_remap(), but the remappings are read from a string of the form "from1=to1 from2=to2 "...
-/// and applied sequentially via cy_remap(). The effect of multiple invocations is incremental.
-/// The from/to are separated with `=` (equals), and the pairs are separated with ASCII whitespaces ` \t\n\r\x0b\x0c`.
-/// This is designed to support single-string configuration parameters storing all remappings in one place.
-/// Invalid pairs are ignored. The string does not have to survive after this call.
-/// On error, the node remap configuration may be left in an inconsistent state.
-cy_err_t cy_remap_parse(cy_t* const cy, const cy_str_t spec_string);
 
 /// Models a fully resolved and normalized topic name. See cy_resolve() et al.
 typedef struct cy_resolved_t
@@ -664,12 +661,14 @@ cy_str_t cy_name_join(const cy_str_t left, const cy_str_t right, const size_t de
 /// When a rule matches, the user's pin is discarded; only the matching rule's pin (if any) is honoured.
 /// Behavior unstable if `from` contains a pinning expression.
 ///
-///     NAME        FROM    TO      NAMESPACE   HOME    RESOLVED    PINNING REMARK
-///     foo/bar     foo/bar zoo     ns          me      ns/zoo      -       relative remap
-///     foo/bar     foo/bar zoo#123 ns          me      ns/zoo      123     pinned relative remap
-///     foo/bar#456 foo/bar zoo     ns          me      ns/zoo      -       matched rule discards user pin
-///     foo/bar     foo/bar /zoo    ns          me      zoo         -       absolute remap (ns ignored)
-///     foo/bar     foo/bar ~/zoo   ns          me      me/zoo      -       homeful remap (home expanded)
+///     NAME        FROM        TO          NAMESPACE   HOME    RESOLVED    PINNING REMARK
+///     foo/bar     foo/bar     zoo         ns          me      ns/zoo      -       relative remap
+///     foo/bar     foo/bar     zoo#123     ns          me      ns/zoo      123     pinned relative remap
+///     foo/bar#456 foo/bar     zoo         ns          me      ns/zoo      -       matched rule discards user pin
+///     foo/bar     foo/bar     /zoo        ns          me      zoo         -       absolute remap (ns ignored)
+///     foo/bar     foo/bar     ~/zoo       ns          me      me/zoo      -       homeful remap (home expanded)
+///     ~/foo/bar   ~/foo/bar   /foo/bar    ns          me      foo/bar     -       FROM can target homeful names
+///     ~/foo/bar   ~/foo/bar   foo/bar     ns          me      ns/foo/bar  -       -
 ///
 /// Examples of invalid names leading to resolution failure:
 ///

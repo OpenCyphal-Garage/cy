@@ -51,13 +51,12 @@ int main(int argc, char* argv[])
     memcpy(req.path, argv[1], req.path_len);
 
     // SET UP THE NODE.
-    cy_t* const cy = cy_new(platform.platform, example_platform_home(), cy_str(getenv("CYPHAL_NAMESPACE")));
+    cy_t* const cy =
+      cy_new(platform.platform, example_platform_home(), example_platform_namespace(), example_platform_remap());
     if (cy == NULL) {
         (void)fprintf(stderr, "cy_new\n");
         return 1;
     }
-    // Allow the integrator to override hardcoded topic names from the environment.
-    (void)cy_remap_parse(cy, cy_str(getenv("CYPHAL_REMAP")));
 
     // SET UP THE FILE READ PUBLISHER.
     cy_publisher_t* const pub_file_read = cy_advertise_client(cy, cy_str("file/read"), sizeof(file_read_response_t));

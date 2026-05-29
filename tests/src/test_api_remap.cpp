@@ -1,5 +1,6 @@
-// Integration tests for cy_remap / cy_remap_parse and their interaction with cy_resolve.
+// Integration tests for cy_remap / constructor-time remap parsing and their interaction with cy_resolve.
 // These use a live cy_t (via cy_new) and a guarded heap so that leaks and OOM rollback are observable.
+#include <cassert>
 #include <cy_platform.h>
 #include <unity.h>
 #include "api_mock_platform_utils.hpp"
@@ -109,7 +110,10 @@ extern "C" std::uint64_t platform_random(cy_platform_t* const platform)
     return api_test::random_lcg<test_platform_t>(platform);
 }
 
-void platform_init(test_platform_t* const self)
+void platform_init(test_platform_t* const self,
+                   const cy_str_t         remap      = cy_str_t{ 0, nullptr },
+                   const cy_str_t         name_space = cy_str_t{ 0, nullptr },
+                   const cy_str_t         home       = cy_str("test"))
 {
     *self              = test_platform_t{};
     self->random_state = UINT64_C(0xD1CEB00BCAFEBEEF);
@@ -130,7 +134,7 @@ void platform_init(test_platform_t* const self)
     self->vtable.random                    = platform_random;
 
     api_test::init_platform_base(self->platform, self->vtable);
-    self->cy = cy_new(&self->platform, cy_str("test"), cy_str_t{ 0, nullptr });
+    self->cy = cy_new(&self->platform, home, name_space, remap);
     TEST_ASSERT_NOT_NULL(self->cy);
 }
 
@@ -143,7 +147,44 @@ void assert_resolved(const cy_resolved_t r, const char* const expected)
     TEST_ASSERT_EQUAL_STRING_LEN(expected, r.name.str, r.name.len);
 }
 
-// ---------- cy_remap + cy_resolve happy path ----------
+void assert_resolved(const cy_resolved_t r, const char* const expected, const std::uint16_t pin, const bool verbatim)
+{
+    assert_resolved(r, expected);
+    TEST_ASSERT_EQUAL_UINT16(pin, r.pin);
+    TEST_ASSERT_EQUAL(verbatim, r.verbatim);
+}
+
+void assert_namespace(const cy_str_t ns, const char* const expected)
+{
+    TEST_ASSERT_NOT_NULL(ns.str);
+    TEST_ASSERT_EQUAL_size_t(std::strlen(expected), ns.len);
+    TEST_ASSERT_EQUAL_STRING_LEN(expected, ns.str, ns.len);
+}
+
+// ---------- cy_namespace + cy_remap + cy_resolve happy path ----------
+void test_remap_namespace_with_equal_sign()
+{
+    test_platform_t p{};
+    platform_init(&p, cy_str("=a/b"));
+    assert_namespace(cy_namespace(p.cy), "a/b");
+    platform_deinit(&p);
+}
+
+void test_remap_namespace_without_equal_sign()
+{
+    test_platform_t p{};
+    platform_init(&p, cy_str("b"));
+    assert_namespace(cy_namespace(p.cy), "");
+    platform_deinit(&p);
+}
+
+void test_remap_namespace_with_multiple_equal_signs()
+{
+    test_platform_t p{};
+    platform_init(&p, cy_str("=a=b=/c"));
+    assert_namespace(cy_namespace(p.cy), "a=b=/c");
+    platform_deinit(&p);
+}
 
 void test_remap_insert_and_resolve_exact()
 {
@@ -244,6 +285,44 @@ void test_remap_patterns_an_unpinned_topic()
     platform_deinit(&p);
 }
 
+// Mirrors the "Examples with a remap" table in the cy_name_resolve docstring (cy.h) through the live cy_remap API.
+void test_remap_docstring_examples()
+{
+    test_platform_t p{};
+    platform_init(&p, cy_str(""), cy_str("ns"), cy_str("me"));
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+
+    // foo/bar     foo/bar     zoo         ns me ns/zoo     -   relative remap
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_remap(p.cy, cy_str("foo/bar"), cy_str("zoo")));
+    assert_resolved(cy_resolve(p.cy, cy_str("foo/bar"), buf.size(), buf.data()), "ns/zoo", UINT16_MAX, true);
+
+    // foo/bar     foo/bar     zoo#123     ns me ns/zoo     123 pinned relative remap
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_remap(p.cy, cy_str("foo/bar"), cy_str("zoo#123")));
+    assert_resolved(cy_resolve(p.cy, cy_str("foo/bar"), buf.size(), buf.data()), "ns/zoo", 123, true);
+
+    // foo/bar#456 foo/bar     zoo         ns me ns/zoo     -   matched rule discards user pin
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_remap(p.cy, cy_str("foo/bar"), cy_str("zoo")));
+    assert_resolved(cy_resolve(p.cy, cy_str("foo/bar#456"), buf.size(), buf.data()), "ns/zoo", UINT16_MAX, true);
+
+    // foo/bar     foo/bar     /zoo        ns me zoo        -   absolute remap (ns ignored)
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_remap(p.cy, cy_str("foo/bar"), cy_str("/zoo")));
+    assert_resolved(cy_resolve(p.cy, cy_str("foo/bar"), buf.size(), buf.data()), "zoo", UINT16_MAX, true);
+
+    // foo/bar     foo/bar     ~/zoo       ns me me/zoo     -   homeful remap (home expanded)
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_remap(p.cy, cy_str("foo/bar"), cy_str("~/zoo")));
+    assert_resolved(cy_resolve(p.cy, cy_str("foo/bar"), buf.size(), buf.data()), "me/zoo", UINT16_MAX, true);
+
+    // ~/foo/bar   ~/foo/bar   /foo/bar    ns me foo/bar    -   FROM can target homeful names
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_remap(p.cy, cy_str("~/foo/bar"), cy_str("/foo/bar")));
+    assert_resolved(cy_resolve(p.cy, cy_str("~/foo/bar"), buf.size(), buf.data()), "foo/bar", UINT16_MAX, true);
+
+    // ~/foo/bar   ~/foo/bar   foo/bar     ns me ns/foo/bar -   -
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_remap(p.cy, cy_str("~/foo/bar"), cy_str("foo/bar")));
+    assert_resolved(cy_resolve(p.cy, cy_str("~/foo/bar"), buf.size(), buf.data()), "ns/foo/bar", UINT16_MAX, true);
+
+    platform_deinit(&p);
+}
+
 // ---------- `to` resolution against ns/home ----------
 
 // An absolute `to` (`/...`) ignores the namespace.
@@ -269,6 +348,15 @@ void test_remap_to_homeful_expands_home()
     std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
     const cy_resolved_t                     r = cy_resolve(p.cy, cy_str("foo"), buf.size(), buf.data());
     assert_resolved(r, "test/zoo");
+    platform_deinit(&p);
+}
+
+// A specified namespace overrides a mapped one.
+void test_remap_specified_namespace_overrides_mapped()
+{
+    test_platform_t p{};
+    platform_init(&p, cy_str("foo"), cy_str("bar")); // "foo" is mapped to "bar" is namespace specified
+    assert_namespace(cy_namespace(p.cy), "bar");
     platform_deinit(&p);
 }
 
@@ -329,13 +417,12 @@ void test_remap_normalized_lookup()
     platform_deinit(&p);
 }
 
-// ---------- cy_remap_parse ----------
+// ---------- constructor-time remap parsing ----------
 
 void test_remap_parse_multiple_pairs()
 {
     test_platform_t p{};
-    platform_init(&p);
-    TEST_ASSERT_EQUAL_INT(CY_OK, cy_remap_parse(p.cy, cy_str("a=x b/c=y foo/bar=baz/qux")));
+    platform_init(&p, cy_str("a=x b/c=y foo/bar=baz/qux"));
 
     std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
     assert_resolved(cy_resolve(p.cy, cy_str("a"), buf.size(), buf.data()), "x");
@@ -347,9 +434,8 @@ void test_remap_parse_multiple_pairs()
 void test_remap_parse_whitespace_variants()
 {
     test_platform_t p{};
-    platform_init(&p);
     // Mix of space, tab, newline, carriage return, vertical tab, form feed.
-    TEST_ASSERT_EQUAL_INT(CY_OK, cy_remap_parse(p.cy, cy_str("\t\na=x\r\n  b=y\v\fc=z")));
+    platform_init(&p, cy_str("\t\na=x\r\n  b=y\v\fc=z"));
 
     std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
     assert_resolved(cy_resolve(p.cy, cy_str("a"), buf.size(), buf.data()), "x");
@@ -361,22 +447,30 @@ void test_remap_parse_whitespace_variants()
 void test_remap_parse_malformed_tokens_silently_ignored()
 {
     test_platform_t p{};
-    platform_init(&p);
-    // First token has no '=' (silently ignored). Second has a pinned `from` (invalid). Third is valid.
-    TEST_ASSERT_EQUAL_INT(CY_OK, cy_remap_parse(p.cy, cy_str("nosep x#42=bad good=ok")));
+    // First token has nothing before '=' (interpreted as a namespace).
+    // Second has a pinned `from` (invalid).
+    // Third is valid.
+    platform_init(&p, cy_str("=nosep x#42=bad good=ok"));
 
     std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
-    assert_resolved(cy_resolve(p.cy, cy_str("good"), buf.size(), buf.data()), "ok");
-    assert_resolved(cy_resolve(p.cy, cy_str("nosep"), buf.size(), buf.data()), "nosep");
+    assert_namespace(cy_namespace(p.cy), "nosep");
+    assert_resolved(cy_resolve(p.cy, cy_str("good"), buf.size(), buf.data()), "nosep/ok");
+    // QUESTION: is cy_resolve("nosep") expected to resolve to "nosep/nosep" or return nothing/error?
+    assert_resolved(cy_resolve(p.cy, cy_str("nosep"), buf.size(), buf.data()), "nosep/nosep");
     platform_deinit(&p);
 }
 
 void test_remap_parse_empty_string_is_ok()
 {
     test_platform_t p{};
-    platform_init(&p);
-    TEST_ASSERT_EQUAL_INT(CY_OK, cy_remap_parse(p.cy, cy_str("")));
-    TEST_ASSERT_EQUAL_INT(CY_OK, cy_remap_parse(p.cy, cy_str("   \t\n")));
+    platform_init(&p, cy_str(""));
+    platform_deinit(&p);
+}
+
+void test_remap_parse_whitespace_only_string_is_ok()
+{
+    test_platform_t p{};
+    platform_init(&p, cy_str("   \t\n"));
     platform_deinit(&p);
 }
 
@@ -423,6 +517,9 @@ extern "C" void tearDown() {}
 int main()
 {
     UNITY_BEGIN();
+    RUN_TEST(test_remap_namespace_with_equal_sign);
+    RUN_TEST(test_remap_namespace_without_equal_sign);
+    RUN_TEST(test_remap_namespace_with_multiple_equal_signs);
     RUN_TEST(test_remap_insert_and_resolve_exact);
     RUN_TEST(test_remap_no_prefix_match);
     RUN_TEST(test_remap_overwrite_replaces_old_value);
@@ -431,8 +528,10 @@ int main()
     RUN_TEST(test_remap_rejects_pinned_pattern_to);
     RUN_TEST(test_remap_pins_an_unpinned_topic);
     RUN_TEST(test_remap_patterns_an_unpinned_topic);
+    RUN_TEST(test_remap_docstring_examples);
     RUN_TEST(test_remap_to_absolute_ignores_namespace);
     RUN_TEST(test_remap_to_homeful_expands_home);
+    RUN_TEST(test_remap_specified_namespace_overrides_mapped);
     RUN_TEST(test_remap_to_pin_overrides_user_pin);
     RUN_TEST(test_remap_user_pin_discarded_on_match);
     RUN_TEST(test_remap_user_pin_passes_through_on_no_match);
@@ -441,6 +540,7 @@ int main()
     RUN_TEST(test_remap_parse_whitespace_variants);
     RUN_TEST(test_remap_parse_malformed_tokens_silently_ignored);
     RUN_TEST(test_remap_parse_empty_string_is_ok);
+    RUN_TEST(test_remap_parse_whitespace_only_string_is_ok);
     RUN_TEST(test_remap_oom_on_value_alloc_leaves_state_unchanged);
     RUN_TEST(test_remap_destroy_drains_all_entries);
     return UNITY_END();

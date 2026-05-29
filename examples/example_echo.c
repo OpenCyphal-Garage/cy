@@ -54,7 +54,8 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    cy_t* const cy = cy_new(platform.platform, example_platform_home(), example_platform_namespace());
+    cy_t* const cy =
+      cy_new(platform.platform, example_platform_home(), example_platform_namespace(), example_platform_remap());
     if (cy == NULL) {
         (void)fprintf(stderr, "cy_new\n");
         return 1;

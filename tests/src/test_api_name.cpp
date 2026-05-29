@@ -1553,6 +1553,20 @@ void test_name_resolve_docstring_remap_examples()
         r = cy_name_resolve(remap.get(), cy_str("foo/bar"), cy_str("ns"), cy_str("me"), buf.size(), buf.data());
         assert_resolved(r, "me/zoo", UINT16_MAX, true);
     }
+
+    // ~/foo/bar ~/foo/bar /foo/bar ns me foo/bar - FROM can target homeful names
+    {
+        RemapFixture remap{ { "~/foo/bar", "/foo/bar" } };
+        r = cy_name_resolve(remap.get(), cy_str("~/foo/bar"), cy_str("ns"), cy_str("me"), buf.size(), buf.data());
+        assert_resolved(r, "foo/bar", UINT16_MAX, true);
+    }
+
+    // ~/foo/bar ~/foo/bar foo/bar  ns me ns/foo/bar - -
+    {
+        RemapFixture remap{ { "~/foo/bar", "foo/bar" } };
+        r = cy_name_resolve(remap.get(), cy_str("~/foo/bar"), cy_str("ns"), cy_str("me"), buf.size(), buf.data());
+        assert_resolved(r, "ns/foo/bar", UINT16_MAX, true);
+    }
 }
 
 // ----- Basic sanity / no-op cases -----

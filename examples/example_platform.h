@@ -42,6 +42,9 @@ static inline cy_str_t example_platform_home(void)
 /// The returned string reference is valid until the environment is modified, otherwise static.
 static inline cy_str_t example_platform_namespace(void) { return cy_str(getenv("CYPHAL_NAMESPACE")); }
 
+/// The returned string reference is valid until the environment is modified, otherwise static.
+static inline cy_str_t example_platform_remap(void) { return cy_str(getenv("CYPHAL_REMAP")); }
+
 /// Consumes the argv elements starting with `iface=` and constructs the appropriate platform instance.
 /// The argc/argv will be modified in-place to remove the consumed arguments.
 /// Returns platform=NULL if the arguments are invalid.

@@ -201,7 +201,7 @@ static void fixture_init(fixture_t* const self)
     self->random_state                     = UINT64_C(0xA5A5A5A55A5A5A5A);
     self->now                              = (cy_us_t)(1000 * MEGA);
 
-    self->cy = cy_new(&self->platform, cy_str("test"), (cy_str_t){ 0, NULL });
+    self->cy = cy_new(&self->platform, cy_str("test"), (cy_str_t){ 0, NULL }, (cy_str_t){ 0, NULL });
     TEST_ASSERT_NOT_NULL(self->cy);
     self->diag = (cy_diag_t){ .next = NULL, .user_context = CY_USER_CONTEXT_EMPTY, .vtable = &fixture_diag_vtable };
     self->diag.user_context.ptr[0] = self;

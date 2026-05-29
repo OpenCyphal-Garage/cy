@@ -204,8 +204,8 @@ static void test_api_can_socketcan_e2e_smoke(void)
     TEST_ASSERT_NOT_NULL(platform_a);
     TEST_ASSERT_NOT_NULL(platform_b);
 
-    cy_a = cy_new(platform_a, cy_str("socketcan_a"), (cy_str_t){ 0U, NULL });
-    cy_b = cy_new(platform_b, cy_str("socketcan_b"), (cy_str_t){ 0U, NULL });
+    cy_a = cy_new(platform_a, cy_str("socketcan_a"), (cy_str_t){ 0U, NULL }, (cy_str_t){ 0U, NULL });
+    cy_b = cy_new(platform_b, cy_str("socketcan_b"), (cy_str_t){ 0U, NULL }, (cy_str_t){ 0U, NULL });
     TEST_ASSERT_NOT_NULL(cy_a);
     TEST_ASSERT_NOT_NULL(cy_b);
 
@@ -295,8 +295,8 @@ static void test_api_can_socketcan_e2e_gossip_classic_vxcan(void)
     TEST_ASSERT_NOT_NULL(platform_a);
     TEST_ASSERT_NOT_NULL(platform_b);
 
-    cy_a = cy_new(platform_a, cy_str("socketcan_classic_a"), (cy_str_t){ 0U, NULL });
-    cy_b = cy_new(platform_b, cy_str("socketcan_classic_b"), (cy_str_t){ 0U, NULL });
+    cy_a = cy_new(platform_a, cy_str("socketcan_classic_a"), (cy_str_t){ 0U, NULL }, (cy_str_t){ 0U, NULL });
+    cy_b = cy_new(platform_b, cy_str("socketcan_classic_b"), (cy_str_t){ 0U, NULL }, (cy_str_t){ 0U, NULL });
     TEST_ASSERT_NOT_NULL(cy_a);
     TEST_ASSERT_NOT_NULL(cy_b);
 
