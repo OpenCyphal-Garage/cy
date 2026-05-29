@@ -70,8 +70,7 @@ int main(void)
 
     // Set up the local Cyphal node instance.
     // Every node needs a home, which should be unique across the network.
-    // The namespace and remapping configuration are optional.
-    // The POSIX glue provides convenience functions for this.
+    // The namespace and remapping configuration are optional; the POSIX glue provides convenience functions for this.
     cy_t* cy = cy_new(platform, cy_str("my_node_name"), cy_str(""), cy_str(""));  // platform, home, namespace and remap.
     if (cy == NULL) { ... }
 
@@ -274,44 +273,37 @@ Integration of a node into a network requires some way of altering such names to
 This can be done via namespacing as introduced earlier, and via name remapping.
 Readers familiar with ROS will feel right at home with these concepts.
 
-The namespace is specified once when the node is created, as shown in the very beginning of the tutorial.
-Name remappings are introduced after the node is created, and normally it should be done before the first
-topic is joined to ensure names are resolved consistently.
+The namespace and the remappings are specified once when the node is created; both are optional.
+In the very beginning of this tutorial we created a node with neither; here's an expanded example:
 
 ```c++
-// Map the hardcoded topic name "camera/left" to the actual topic name "/head/camera/upper_left" on the network.
-cy_str_t remap_config = cy_str("camera/left=/head/camera/upper_left");
-cy_t* cy = cy_new(platform, cy_str("my_node_name"), cy_str(""), remap_config);
+// Map the hardcoded topic name "camera/left" to the actual topic name "/head/camera/upper_left" on the network, etc.
+cy_str_t remap_config = cy_str("camera/left=/head/camera/upper_left  camera/right=/head/camera/upper_right");
+cy_t* cy = cy_new(platform, cy_str("my_node_name"), cy_str("my_namespace"), remap_config);
 if (cy == NULL) { ... }
 ```
 
 The `from` name will be matched against the hardcoded names used in the application,
 and the `to` name can be arbitrary: relative, absolute (`/zoo`), homeful (`~/zoo`), etc.
+The remap string may contain an arbitrary number of such from-to pairs, separated with whitespace;
+topics created by the application will be checked against the remap arguments and if a match is found,
+the remap will be applied.
 
 The example above is not super useful because both names are hardcoded, but this is for illustration purposes only.
 Software nodes can read the remap string from a configuration file, CLI options, or an environment variable,
 while embedded nodes can read it from the non-volatile configuration memory.
-The string is simply a list of whitespace-separated `from=to` pairs (any whitespace goes, including newlines).
+
+It is also useful to be able to set/remap both namespace and topic names together from a single config string.
+This can be done by passing an empty namespace string and prepending the namespace to the remap string.
+The namespace must always be specified first, before any topic remappings,
+and it must be prepended with an equals sign.
 
 ```c++
-cy_str_t remap_config = cy_str("camera/left=/head/camera/upper_left camera/right=/head/camera/upper_right");
-cy_t* cy = cy_new(platform, cy_str("my_node_name"), cy_str(""), remap_config);
-if (cy == NULL) { ... }
-```
-
-Note: for embedded developers it might be useful to be able to set/remap both namespace and topic names together from a single string.
-This can be done by passing an empty namespace string and adding the namespace directly to the remap config string.
-The example below shows how to set the namespace to `sensors`, note that 
-- the namespace must always be specified first, before any topic remappings
-- the equal sign must be the first character of the line before the namespace
-
-```c++
+// Set the namespace to "sensors".
 cy_str_t remap_config = cy_str("=sensors temperature=/environment/temperature");
 cy_t* cy = cy_new(platform, cy_str("my_node_name"), cy_str(""), remap_config);
 if (cy == NULL) { ... }
 ```
-
-If a namespace is specified in the input parameters and the remap config string, the namespace from the input parameters takes precedence.
 
 One environment variable convention is:
 
