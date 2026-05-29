@@ -112,7 +112,8 @@ extern "C" std::uint64_t platform_random(cy_platform_t* const platform)
 
 void platform_init(test_platform_t* const self,
                    const cy_str_t         remap      = cy_str_t{ 0, nullptr },
-                   const cy_str_t         name_space = cy_str_t{ 0, nullptr })
+                   const cy_str_t         name_space = cy_str_t{ 0, nullptr },
+                   const cy_str_t         home       = cy_str("test"))
 {
     *self              = test_platform_t{};
     self->random_state = UINT64_C(0xD1CEB00BCAFEBEEF);
@@ -133,7 +134,7 @@ void platform_init(test_platform_t* const self,
     self->vtable.random                    = platform_random;
 
     api_test::init_platform_base(self->platform, self->vtable);
-    self->cy = cy_new(&self->platform, cy_str("test"), name_space, remap);
+    self->cy = cy_new(&self->platform, home, name_space, remap);
     TEST_ASSERT_NOT_NULL(self->cy);
 }
 
@@ -144,6 +145,13 @@ void assert_resolved(const cy_resolved_t r, const char* const expected)
     TEST_ASSERT_NOT_NULL(r.name.str);
     TEST_ASSERT_EQUAL_size_t(std::strlen(expected), r.name.len);
     TEST_ASSERT_EQUAL_STRING_LEN(expected, r.name.str, r.name.len);
+}
+
+void assert_resolved(const cy_resolved_t r, const char* const expected, const std::uint16_t pin, const bool verbatim)
+{
+    assert_resolved(r, expected);
+    TEST_ASSERT_EQUAL_UINT16(pin, r.pin);
+    TEST_ASSERT_EQUAL(verbatim, r.verbatim);
 }
 
 void assert_namespace(const cy_str_t ns, const char* const expected)
@@ -274,6 +282,44 @@ void test_remap_patterns_an_unpinned_topic()
     const cy_resolved_t                     r = cy_resolve(p.cy, cy_str("foo"), buf.size(), buf.data());
     assert_resolved(r, "foo/*/bar");
     TEST_ASSERT_FALSE(r.verbatim);
+    platform_deinit(&p);
+}
+
+// Mirrors the "Examples with a remap" table in the cy_name_resolve docstring (cy.h) through the live cy_remap API.
+void test_remap_docstring_examples()
+{
+    test_platform_t p{};
+    platform_init(&p, cy_str(""), cy_str("ns"), cy_str("me"));
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+
+    // foo/bar     foo/bar     zoo         ns me ns/zoo     -   relative remap
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_remap(p.cy, cy_str("foo/bar"), cy_str("zoo")));
+    assert_resolved(cy_resolve(p.cy, cy_str("foo/bar"), buf.size(), buf.data()), "ns/zoo", UINT16_MAX, true);
+
+    // foo/bar     foo/bar     zoo#123     ns me ns/zoo     123 pinned relative remap
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_remap(p.cy, cy_str("foo/bar"), cy_str("zoo#123")));
+    assert_resolved(cy_resolve(p.cy, cy_str("foo/bar"), buf.size(), buf.data()), "ns/zoo", 123, true);
+
+    // foo/bar#456 foo/bar     zoo         ns me ns/zoo     -   matched rule discards user pin
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_remap(p.cy, cy_str("foo/bar"), cy_str("zoo")));
+    assert_resolved(cy_resolve(p.cy, cy_str("foo/bar#456"), buf.size(), buf.data()), "ns/zoo", UINT16_MAX, true);
+
+    // foo/bar     foo/bar     /zoo        ns me zoo        -   absolute remap (ns ignored)
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_remap(p.cy, cy_str("foo/bar"), cy_str("/zoo")));
+    assert_resolved(cy_resolve(p.cy, cy_str("foo/bar"), buf.size(), buf.data()), "zoo", UINT16_MAX, true);
+
+    // foo/bar     foo/bar     ~/zoo       ns me me/zoo     -   homeful remap (home expanded)
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_remap(p.cy, cy_str("foo/bar"), cy_str("~/zoo")));
+    assert_resolved(cy_resolve(p.cy, cy_str("foo/bar"), buf.size(), buf.data()), "me/zoo", UINT16_MAX, true);
+
+    // ~/foo/bar   ~/foo/bar   /foo/bar    ns me foo/bar    -   FROM can target homeful names
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_remap(p.cy, cy_str("~/foo/bar"), cy_str("/foo/bar")));
+    assert_resolved(cy_resolve(p.cy, cy_str("~/foo/bar"), buf.size(), buf.data()), "foo/bar", UINT16_MAX, true);
+
+    // ~/foo/bar   ~/foo/bar   foo/bar     ns me ns/foo/bar -   -
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_remap(p.cy, cy_str("~/foo/bar"), cy_str("foo/bar")));
+    assert_resolved(cy_resolve(p.cy, cy_str("~/foo/bar"), buf.size(), buf.data()), "ns/foo/bar", UINT16_MAX, true);
+
     platform_deinit(&p);
 }
 
@@ -482,6 +528,7 @@ int main()
     RUN_TEST(test_remap_rejects_pinned_pattern_to);
     RUN_TEST(test_remap_pins_an_unpinned_topic);
     RUN_TEST(test_remap_patterns_an_unpinned_topic);
+    RUN_TEST(test_remap_docstring_examples);
     RUN_TEST(test_remap_to_absolute_ignores_namespace);
     RUN_TEST(test_remap_to_homeful_expands_home);
     RUN_TEST(test_remap_specified_namespace_overrides_mapped);

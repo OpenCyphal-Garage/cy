@@ -667,8 +667,8 @@ cy_str_t cy_name_join(const cy_str_t left, const cy_str_t right, const size_t de
 ///     foo/bar#456 foo/bar     zoo         ns          me      ns/zoo      -       matched rule discards user pin
 ///     foo/bar     foo/bar     /zoo        ns          me      zoo         -       absolute remap (ns ignored)
 ///     foo/bar     foo/bar     ~/zoo       ns          me      me/zoo      -       homeful remap (home expanded)
-///     ~foo/bar    ~foo/bar    /foo/bar    ns          me      foo/bar     -       FROM can target homeful names
-///     ~foo/bar    ~foo/bar    foo/bar     ns          me      ns/foo/bar  -       -
+///     ~/foo/bar   ~/foo/bar   /foo/bar    ns          me      foo/bar     -       FROM can target homeful names
+///     ~/foo/bar   ~/foo/bar   foo/bar     ns          me      ns/foo/bar  -       -
 ///
 /// Examples of invalid names leading to resolution failure:
 ///
