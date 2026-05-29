@@ -251,6 +251,11 @@ static int64_t random_int(const cy_t* const cy, const int64_t min, const int64_t
     return min;
 }
 
+static bool is_whitespace(const char c)
+{
+    return (c == ' ') || (c == '\t') || (c == '\n') || (c == '\r') || (c == '\x0b') || (c == '\x0c');
+}
+
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
 static void* wkv_realloc(wkv_t* const self, void* ptr, const size_t new_size)
 {
@@ -4230,11 +4235,6 @@ static bool is_valid_subject_id_modulus(const uint32_t modulus)
 
 static cy_us_t olga_now(olga_t* const sched) { return cy_now((cy_t*)sched->user); }
 
-static bool remap_spec_is_whitespace(const char c)
-{
-    return (c == ' ') || (c == '\t') || (c == '\n') || (c == '\r') || (c == '\x0b') || (c == '\x0c');
-}
-
 static cy_err_t remap_parse(cy_t* const cy, const cy_str_t spec_string)
 {
     if (cy == NULL) {
@@ -4245,14 +4245,14 @@ static cy_err_t remap_parse(cy_t* const cy, const cy_str_t spec_string)
     }
     size_t i = 0U;
     while (i < spec_string.len) {
-        while ((i < spec_string.len) && remap_spec_is_whitespace(spec_string.str[i])) {
+        while ((i < spec_string.len) && is_whitespace(spec_string.str[i])) {
             i++;
         }
         if (i >= spec_string.len) {
             break;
         }
         const size_t tok_start = i;
-        while ((i < spec_string.len) && !remap_spec_is_whitespace(spec_string.str[i])) {
+        while ((i < spec_string.len) && !is_whitespace(spec_string.str[i])) {
             i++;
         }
         const size_t tok_len = i - tok_start;
@@ -4294,7 +4294,7 @@ static namespace_parse_t namespace_parse(const cy_str_t spec_string)
     }
     size_t i = 0U;
     while (i < spec_string.len) {
-        while ((i < spec_string.len) && remap_spec_is_whitespace(spec_string.str[i])) {
+        while ((i < spec_string.len) && is_whitespace(spec_string.str[i])) {
             i++;
         }
         if (i >= spec_string.len) {
@@ -4303,7 +4303,7 @@ static namespace_parse_t namespace_parse(const cy_str_t spec_string)
         // If after removing whitespace, first char is '=', namespace is detected.
         if (spec_string.str[i] == '=') {
             const size_t ns_start = i + 1U;
-            while ((i < spec_string.len) && !remap_spec_is_whitespace(spec_string.str[i])) {
+            while ((i < spec_string.len) && !is_whitespace(spec_string.str[i])) {
                 i++;
             }
             out.found      = true;

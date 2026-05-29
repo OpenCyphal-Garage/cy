@@ -566,14 +566,6 @@ cy_us_t cy_uptime(const cy_t* const cy);
 /// On error, the node remap configuration is left unchanged.
 cy_err_t cy_remap(cy_t* const cy, const cy_str_t from, const cy_str_t to);
 
-/// Like cy_remap(), but the remappings are read from a string of the form "from1=to1 from2=to2 "...
-/// and applied sequentially via cy_remap(). The effect of multiple invocations is incremental.
-/// The from/to are separated with `=` (equals), and the pairs are separated with ASCII whitespaces ` \t\n\r\x0b\x0c`.
-/// This is designed to support single-string configuration parameters storing all remappings in one place.
-/// Invalid pairs are ignored. The string does not have to survive after this call.
-/// On error, the node remap configuration may be left in an inconsistent state.
-// cy_err_t remap_parse(cy_t* const cy, const cy_str_t spec_string);
-
 /// Models a fully resolved and normalized topic name. See cy_resolve() et al.
 typedef struct cy_resolved_t
 {

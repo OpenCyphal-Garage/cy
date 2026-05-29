@@ -8,7 +8,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <unity_internals.h>
 
 namespace {
 
