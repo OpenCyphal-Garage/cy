@@ -4289,11 +4289,9 @@ static namespace_parse_t namespace_parse(const cy_str_t spec_string)
 {
     const cy_str_t    none = { .len = 0U, .str = NULL };
     namespace_parse_t out  = { .found = false, .name_space = none, .remap = spec_string };
-
     if (spec_string.str == NULL) {
         return out;
     }
-
     size_t i = 0U;
     while (i < spec_string.len) {
         while ((i < spec_string.len) && remap_spec_is_whitespace(spec_string.str[i])) {
@@ -4319,7 +4317,6 @@ static namespace_parse_t namespace_parse(const cy_str_t spec_string)
         out.remap      = spec_string;
         return out;
     }
-
     return out;
 }
 

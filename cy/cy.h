@@ -526,12 +526,13 @@ cy_future_t* cy_respond_reliable(cy_breadcrumb_t* const breadcrumb, const cy_us_
 /// The new instance will be heap-allocated via the platform layer API.
 ///
 /// The home must be nonempty and should be unique in the network (a random suffix is one way to ensure this).
-/// The home and namespace will be normalized and copied; the original references don't need to persist.
-/// If namespace is input field empty, namespace can still be inferred from the remap string, the first token if it
-/// starts with '=' the remainder until whitespace will be used as the namespace.
-/// The remap string is a whitespace-separated list of `from=to` pairs; it is parsed and copied during
-/// construction. Tokens without `=` are ignored. Invalid pairs or allocation failures cause construction to fail. See
-/// cy_name_... for details on name normalization and resolution.
+/// All names will be normalized and copied; the original string references don't need to persist.
+///
+/// If the name_space parameter is empty, the namespace can still be inferred from the remap string: if the first token
+/// starts with '=', the remainder (until whitespace) will be used as the namespace.
+/// The remap string is a whitespace-separated list of `from=to` pairs; it is parsed and copied during construction.
+/// Tokens without `=` and invalid pairs are ignored. Allocation failures cause construction to fail.
+/// See cy_name_... for details on name normalization and resolution.
 cy_t* cy_new(cy_platform_t* const platform, const cy_str_t home, const cy_str_t name_space, const cy_str_t remap);
 
 /// Cy will clean up all resources obtained from the platform, such as memory and readers/writers, but will not
