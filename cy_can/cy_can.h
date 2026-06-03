@@ -39,16 +39,26 @@ typedef struct cy_can_rx_t
 /// All functions are non-blocking except rx(), which may block up to the specified deadline.
 typedef struct
 {
-    /// Transmit a classic CAN frame (up to 8 bytes) on the given interface.
+    /// Transmit a classic CAN frame (up to 8 bytes) on the given interface before the given deadline.
     /// Returns true if the frame should be removed from the upstream TX queue (i.e., if the frame was accepted
     /// for transmission or if it encountered a fatal failure and no further attempts are needed).
     /// Returns false if the underlying CAN controller is not ready to accept a new frame (e.g., no free TX mailbox);
     /// the caller will retry later.
-    bool (*tx_classic)(void* user, uint_least8_t iface_index, uint32_t can_id, const void* data, uint_least8_t len);
+    bool (*tx_classic)(void* user,
+                       canard_us_t deadline,
+                       uint_least8_t iface_index,
+                       uint32_t can_id,
+                       const void* data,
+                       uint_least8_t len);
 
-    /// Transmit a CAN FD frame (up to 64 bytes) on the given interface.
+    /// Transmit a CAN FD frame (up to 64 bytes) on the given interface before the given deadline.
     /// Set to NULL if the underlying driver does not support CAN FD; all interfaces share the same FD capability.
-    bool (*tx_fd)(void* user, uint_least8_t iface_index, uint32_t can_id, const void* data, uint_least8_t len);
+    bool (*tx_fd)(void* user,
+                  canard_us_t deadline,
+                  uint_least8_t iface_index,
+                  uint32_t can_id,
+                  const void* data,
+                  uint_least8_t len);
 
     /// Poll all redundant interfaces for a received frame. Returns true if a frame was received.
     /// The implementation may block up to the given deadline; baremetal implementations may ignore the deadline

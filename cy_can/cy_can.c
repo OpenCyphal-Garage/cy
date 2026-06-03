@@ -273,12 +273,11 @@ static bool v_canard_tx(canard_t* const      self,
     cy_can_t* const     owner = (cy_can_t*)self->user_context;
     const uint_least8_t len   = (uint_least8_t)can_data.size;
     (void)user_context;
-    (void)deadline;
     assert(iface_index < owner->iface_count);
     if (fd && (owner->vtable->tx_fd != NULL)) {
-        return owner->vtable->tx_fd(owner->user, iface_index, extended_can_id, can_data.data, len);
+        return owner->vtable->tx_fd(owner->user, deadline, iface_index, extended_can_id, can_data.data, len);
     }
-    return owner->vtable->tx_classic(owner->user, iface_index, extended_can_id, can_data.data, len);
+    return owner->vtable->tx_classic(owner->user, deadline, iface_index, extended_can_id, can_data.data, len);
 }
 
 static bool v_canard_filter(canard_t* const self, const size_t filter_count, const canard_filter_t* const filters)
