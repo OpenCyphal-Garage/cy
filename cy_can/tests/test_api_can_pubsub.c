@@ -142,7 +142,6 @@ static void test_api_can_pubsub_multiframe_extent_truncation(void)
 static void test_api_can_pubsub_fd_capable_uses_fd_frames(void)
 {
     uint8_t payload[20];
-    cy_us_t deadline;
 
     can_test_bus_t  bus;
     can_test_node_t node;
@@ -159,7 +158,7 @@ static void test_api_can_pubsub_fd_capable_uses_fd_frames(void)
     TEST_ASSERT_NOT_NULL(pub);
     can_test_spin_pair(&node, NULL, 4U, spin_slice_us);
     can_test_node_reset_history(&node);
-    deadline = cy_now(node.cy) + (40 * spin_slice_us);
+    const cy_us_t deadline = cy_now(node.cy) + (40 * spin_slice_us);
 
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_publish(pub, deadline, (cy_bytes_t){ sizeof(payload), payload, NULL }));
     spin_until_done(&node, sub);
@@ -186,7 +185,6 @@ static void test_api_can_pubsub_fd_capable_uses_fd_frames(void)
 static void test_api_can_pubsub_classic_only_emits_no_fd_frames(void)
 {
     uint8_t payload[48];
-    cy_us_t deadline;
 
     can_test_bus_t  bus;
     can_test_node_t node;
@@ -203,7 +201,7 @@ static void test_api_can_pubsub_classic_only_emits_no_fd_frames(void)
     TEST_ASSERT_NOT_NULL(pub);
     can_test_spin_pair(&node, NULL, 4U, spin_slice_us);
     can_test_node_reset_history(&node);
-    deadline = cy_now(node.cy) + (40 * spin_slice_us);
+    const cy_us_t deadline = cy_now(node.cy) + (40 * spin_slice_us);
 
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_publish(pub, deadline, (cy_bytes_t){ sizeof(payload), payload, NULL }));
     spin_until_done(&node, sub);
