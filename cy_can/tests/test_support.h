@@ -57,6 +57,8 @@ struct can_test_node_t
     size_t               tx_blocked[CAN_TEST_MAX_IFACES];
     size_t               tx_classic_calls;
     size_t               tx_fd_calls;
+    canard_us_t          last_tx_classic_deadline;
+    canard_us_t          last_tx_fd_deadline;
     size_t               rx_calls;
     uint_least8_t        last_tx_pending_iface_bitmap;
     size_t               filter_calls;

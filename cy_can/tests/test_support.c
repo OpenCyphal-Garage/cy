@@ -189,6 +189,7 @@ static bool tx_common(void* const         user,
 }
 
 static bool v_tx_classic(void* const         user,
+                         const canard_us_t   deadline,
                          const uint_least8_t iface_index,
                          const uint32_t      can_id,
                          const void* const   data,
@@ -198,10 +199,12 @@ static bool v_tx_classic(void* const         user,
     TEST_ASSERT_NOT_NULL(self);
     TEST_ASSERT_TRUE(len <= 8U);
     self->tx_classic_calls++;
+    self->last_tx_classic_deadline = deadline;
     return tx_common(user, iface_index, can_id, false, data, len);
 }
 
 static bool v_tx_fd(void* const         user,
+                    const canard_us_t   deadline,
                     const uint_least8_t iface_index,
                     const uint32_t      can_id,
                     const void* const   data,
@@ -211,6 +214,7 @@ static bool v_tx_fd(void* const         user,
     TEST_ASSERT_NOT_NULL(self);
     TEST_ASSERT_TRUE(len <= 64U);
     self->tx_fd_calls++;
+    self->last_tx_fd_deadline = deadline;
     return tx_common(user, iface_index, can_id, true, data, len);
 }
 
@@ -454,6 +458,8 @@ void can_test_node_reset_history(can_test_node_t* const self)
     self->tx_history_count             = 0U;
     self->tx_classic_calls             = 0U;
     self->tx_fd_calls                  = 0U;
+    self->last_tx_classic_deadline     = 0;
+    self->last_tx_fd_deadline          = 0;
     self->last_tx_pending_iface_bitmap = 0U;
 }
 

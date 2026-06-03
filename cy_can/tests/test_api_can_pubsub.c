@@ -158,11 +158,12 @@ static void test_api_can_pubsub_fd_capable_uses_fd_frames(void)
     TEST_ASSERT_NOT_NULL(pub);
     can_test_spin_pair(&node, NULL, 4U, spin_slice_us);
     can_test_node_reset_history(&node);
+    const cy_us_t deadline = cy_now(node.cy) + (40 * spin_slice_us);
 
-    TEST_ASSERT_EQUAL_INT(
-      CY_OK, cy_publish(pub, cy_now(node.cy) + (40 * spin_slice_us), (cy_bytes_t){ sizeof(payload), payload, NULL }));
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_publish(pub, deadline, (cy_bytes_t){ sizeof(payload), payload, NULL }));
     spin_until_done(&node, sub);
     TEST_ASSERT_TRUE(node.tx_fd_calls > 0U);
+    TEST_ASSERT_EQUAL_INT64(deadline, node.last_tx_fd_deadline);
 
     {
         uint8_t            received[32];
@@ -200,12 +201,13 @@ static void test_api_can_pubsub_classic_only_emits_no_fd_frames(void)
     TEST_ASSERT_NOT_NULL(pub);
     can_test_spin_pair(&node, NULL, 4U, spin_slice_us);
     can_test_node_reset_history(&node);
+    const cy_us_t deadline = cy_now(node.cy) + (40 * spin_slice_us);
 
-    TEST_ASSERT_EQUAL_INT(
-      CY_OK, cy_publish(pub, cy_now(node.cy) + (40 * spin_slice_us), (cy_bytes_t){ sizeof(payload), payload, NULL }));
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_publish(pub, deadline, (cy_bytes_t){ sizeof(payload), payload, NULL }));
     spin_until_done(&node, sub);
     TEST_ASSERT_EQUAL_size_t(0U, node.tx_fd_calls);
     TEST_ASSERT_TRUE(node.tx_classic_calls > 0U);
+    TEST_ASSERT_EQUAL_INT64(deadline, node.last_tx_classic_deadline);
 
     {
         const cy_arrival_t arrival = cy_arrival_move(sub);

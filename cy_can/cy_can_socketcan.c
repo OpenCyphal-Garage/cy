@@ -55,12 +55,14 @@ static cy_us_t socketcan_now(void)
 // VTABLE IMPLEMENTATION
 
 static bool v_tx_classic(void* const         user,
+                         const canard_us_t   deadline,
                          const uint_least8_t iface_index,
                          const uint32_t      can_id,
                          const void* const   data,
                          const uint_least8_t len)
 {
     const socketcan_t* const self = (const socketcan_t*)user;
+    (void)deadline;
     assert(iface_index < self->iface_count);
     struct can_frame frame = { .can_id = can_id | CAN_EFF_FLAG, .can_dlc = len };
     if ((data != NULL) && (len > 0)) {
@@ -71,12 +73,14 @@ static bool v_tx_classic(void* const         user,
 }
 
 static bool v_tx_fd(void* const         user,
+                    const canard_us_t   deadline,
                     const uint_least8_t iface_index,
                     const uint32_t      can_id,
                     const void* const   data,
                     const uint_least8_t len)
 {
     const socketcan_t* const self = (const socketcan_t*)user;
+    (void)deadline;
     assert(iface_index < self->iface_count);
     struct canfd_frame frame = { .can_id = can_id | CAN_EFF_FLAG, .len = len, .flags = CANFD_FDF };
     if ((data != NULL) && (len > 0)) {
