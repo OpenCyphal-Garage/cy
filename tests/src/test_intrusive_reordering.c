@@ -529,6 +529,71 @@ static void test_reordering_backward_underflow_is_late_drop(void)
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&env.fixture.heap));
 }
 
+static void test_reordering_backward_underflow_current_session_lag_is_late_drop(void)
+{
+    reorder_env_t env;
+    reorder_env_init(&env);
+    const uint64_t baseline = 1000U;
+
+    reordering_resequence(&env.rr, baseline + (REORDERING_CAPACITY / 2U));
+    env.rr.last_ejected_lin_tag = SESSION_COUNTER_MAX_BACKWARD_LAG - 10U;
+    env.rr.last_active_at       = 1234;
+
+    TEST_ASSERT_FALSE(push_message(&env, baseline - 10U, 2000, 0xB0U));
+    TEST_ASSERT_EQUAL_size_t(0, env.capture.count);
+    TEST_ASSERT_EQUAL_UINT64(baseline, env.rr.tag_baseline);
+    TEST_ASSERT_EQUAL_UINT64(SESSION_COUNTER_MAX_BACKWARD_LAG - 10U, env.rr.last_ejected_lin_tag);
+    TEST_ASSERT_EQUAL_INT64(1234, env.rr.last_active_at);
+    TEST_ASSERT_NULL(env.sub.list_reordering_by_recency.head);
+    TEST_ASSERT_NULL(env.sub.list_reordering_by_recency.tail);
+    TEST_ASSERT_EQUAL_size_t(0, env.rr.interned_count);
+
+    reorder_env_cleanup(&env);
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&env.fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&env.fixture.heap));
+}
+
+static void test_reordering_far_backward_restart_resequences(void)
+{
+    reorder_env_t env;
+    reorder_env_init(&env);
+    const uint64_t old_epoch_tag = UINT64_C(1) << 40U;
+    const uint64_t restart_tag   = 100U;
+    const uint64_t half          = (uint64_t)(REORDERING_CAPACITY / 2U);
+
+    reordering_resequence(&env.rr, old_epoch_tag + half);
+    TEST_ASSERT_EQUAL_UINT64(old_epoch_tag, env.rr.tag_baseline);
+
+    TEST_ASSERT_TRUE(push_message(&env, old_epoch_tag + 1U, 10, 0x11U));
+    TEST_ASSERT_EQUAL_size_t(1, env.capture.count);
+    TEST_ASSERT_EQUAL_UINT64(old_epoch_tag + 1U, env.capture.tags[0]);
+    TEST_ASSERT_EQUAL_UINT64(1U, env.rr.last_ejected_lin_tag);
+
+    TEST_ASSERT_TRUE(push_message(&env, old_epoch_tag + 3U, 11, 0x33U));
+    TEST_ASSERT_EQUAL_size_t(1, env.capture.count);
+    TEST_ASSERT_EQUAL_size_t(1, env.rr.interned_count);
+
+    TEST_ASSERT_TRUE(push_message(&env, restart_tag, 100, 0xAAU));
+    TEST_ASSERT_EQUAL_size_t(2, env.capture.count);
+    TEST_ASSERT_EQUAL_UINT64(old_epoch_tag + 3U, env.capture.tags[1]);
+    TEST_ASSERT_EQUAL_UINT64(restart_tag - half, env.rr.tag_baseline);
+    TEST_ASSERT_EQUAL_UINT64(0U, env.rr.last_ejected_lin_tag);
+    TEST_ASSERT_EQUAL_size_t(1, env.rr.interned_count);
+    TEST_ASSERT_TRUE(olga_is_pending(&env.fixture.cy.olga, &env.rr.timeout));
+
+    spin_to(&env, 119);
+    TEST_ASSERT_EQUAL_size_t(2, env.capture.count);
+
+    spin_to(&env, 121);
+    TEST_ASSERT_EQUAL_size_t(3, env.capture.count);
+    TEST_ASSERT_EQUAL_UINT64(restart_tag, env.capture.tags[2]);
+    TEST_ASSERT_EQUAL_size_t(0, env.rr.interned_count);
+
+    reorder_env_cleanup(&env);
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&env.fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&env.fixture.heap));
+}
+
 /// Capacity overflow triggers resequencing: if a message is too far ahead, all interned messages are ejected
 /// and the state is reset. The resequenced message must NOT be ejected immediately because we don't know
 /// whether older siblings are about to arrive (see the comment in reordering_resequence).
@@ -1147,6 +1212,8 @@ int main(void)
     RUN_TEST(test_reordering_head_of_line_change_rearms_timeout);
     RUN_TEST(test_reordering_late_after_timeout);
     RUN_TEST(test_reordering_backward_underflow_is_late_drop);
+    RUN_TEST(test_reordering_backward_underflow_current_session_lag_is_late_drop);
+    RUN_TEST(test_reordering_far_backward_restart_resequences);
     RUN_TEST(test_reordering_capacity_overflow_resequence);
     RUN_TEST(test_reordering_capacity_overflow_can_fast_path_after_eject_all);
     RUN_TEST(test_reordering_overflow_sparse_stepwise_shift_without_resequence);

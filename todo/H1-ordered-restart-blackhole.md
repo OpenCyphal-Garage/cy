@@ -3,7 +3,10 @@
 - **Severity:** 🔴 HIGH (report H-1 / S-F1)
 - **Confidence:** reproduced (repro test) + code trace
 - **Subsystem:** core (`cy/cy.c`, reordering machinery)
-- **Status:** OPEN
+- **Status:** RESOLVED
+
+Resolved by making ordered reordering treat far-backward tag jumps as remote session restarts: old buffered messages
+are force-ejected, the baseline is resequenced to the new tag, and late-drop recency is no longer refreshed.
 
 ## Summary
 An ordered subscriber (`cy_subscribe_ordered`) linearizes each remote's wire tags against a baseline frozen at first
