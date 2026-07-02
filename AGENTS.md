@@ -10,6 +10,8 @@ You must read all source and documentation files in their entirety instead of us
 
 Update docs/examples when public API behavior changes.
 
+Do not git commit unless explicitly asked to.
+
 When working with the CI, be aware that commits that contain `#yolo` run only the faster subset of CI jobs, which can be used to speed up the work.
 
 Do NOT start another build while one is still in progress. Building the full test suite with static analysis enabled may take about half an hour, wait for it to complete before starting another build. Parallelization within one build session is encouraged, use `-j$(nproc)`. You are NOT allowed to start another build UNLESS you have ascertained that ALL earlier build sessions have completed or have been explicitly terminated.
@@ -32,7 +34,8 @@ If you need a build directory, create one named with the `build` prefix. Do not 
 
 - Language targets: C99+ for Cy, C11 and C++20 for the test harness. Strict std only, compiler extensions not allowed.
 - Naming patterns: `cy_*` functions, `cy_*_t` types, `CY_*` macros. Internal definitions need no prefixing. Enums and constants are `lower_snake_case`. Uppercase only for macros.
-- Keep code compact and add brief comments before non-obvious logic.
+- Keep code very compact.
+- DO NOT COMMENT THE CODE unless comments add critical information that is impossible to infer from reading the code (design rationale, gotchas, etc), in which case extremely terse comments are allowed.
 - Treat warnings as errors and keep compatibility with strict warning flags.
 - Module entities are prefixed with the module name; e.g., `foo.h` contains `foo_bar`, `foo_baz_t`, `FOO_QUX`. Module-local statics must not be prefixed to keep things brief.
 
@@ -41,3 +44,8 @@ If you need a build directory, create one named with the `build` prefix. Do not 
 Practice an adversarial approach to testing: the purpose of a test case is not to provide coverage, but to empirically prove correctness of the tested code. Always treat the code as suspect; you will be rewarded for pointing out flaws in it. If the code does not appear to be correct, refuse to test it and provide evidence of its defects instead of proceeding with testing.
 
 When using subagents to implement tests, always instruct them to summarize their findings concerning the correctness of the tested code and its possible limitations at the end of their run. At the end of the turn, provide a summary of the findings.
+
+## Review loop
+
+Use `.claude/skills/review-loop` upon completion of each deliverable.
+Iterate until three consecutive no-major-findings iterations.

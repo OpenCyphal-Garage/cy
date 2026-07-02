@@ -1,0 +1,66 @@
+# M8 — False positive ACK for a reliable message no subscriber accepted
+
+- **Severity:** 🟠 MEDIUM standalone; 🔴 HIGH when compounded with H1 (report M-8 / S-F2)
+- **Confidence:** reproduced (repro test) + code trace
+- **Subsystem:** core (`cy/cy.c`, subscriber data path)
+- **Status:** OPEN
+
+## Summary
+`on_message` marks a reliable message's tag as received in the dedup filter **before** any subscriber accepts it. If
+acceptance fails for all subscribers on the first delivery, no ack is sent (correct) and the sender retransmits — but
+the retransmission is now a dedup "duplicate" and is **positively acknowledged** though the application never received
+the message. The sender records success for a lost message.
+
+## Location
+- `cy/cy.c:3467` — `dedup_update(...)` marks the tag seen, before the subscriber loop (3476-3529).
+- `cy/cy.c:3469` — duplicate path returns `true` (→ ACK) before touching any subscriber.
+- `cy/cy.c:4838-4839` — ACK is sent when `on_message` returned true.
+- Failure-to-accept paths: reordering slot OOM `cy.c:3324-3335` (returns false), reordering state OOM `cy.c:3518-3521`,
+  all-subscribers-disposed skip `cy.c:3482-3486`.
+- In-code comment acknowledging only the narrow disposed case: `cy.c:3462-3466`.
+
+## Mechanism
+Dedup state mutation precedes the acceptance decision. First delivery: acceptance fails for everyone → `acknowledge`
+stays false → no ACK (good). Retransmit: `dedup_update` returns "duplicate" → `on_message` returns true → ACK sent,
+subscribers never invoked → false success.
+
+## Trigger / repro
+Reliable publisher → subscriber under memory pressure (reordering alloc fails first attempt), or a subscriber
+disposed within the one-poll-cycle window a retransmit arrives.
+- Reference case (borrow-source, NOT built): `TODO/repro-tests-reference.c :: test_reliable_false_ack_after_failed_acceptance`.
+
+## Compounding (why it can be HIGH)
+With H1 on a reliable + ordered subscriber whose remote restarted, dedup accepts, reordering blackholes, and every
+retransmit false-ACKs — systematic, not just an OOM edge. Fixing H1 removes the systematic case; this fix removes
+the standalone OOM / disposed-subscriber cases.
+
+## Fix direction
+Split "consult" from "commit": only record the tag as received once at least one subscriber has actually accepted it.
+- Introduce `dedup_check(dedup, tag)` (already exists) for the up-front duplicate test, and defer the state-mutating
+  `dedup_update`/commit until after the subscriber loop reports `acknowledge == true`. On a genuine first-delivery
+  total failure, leave the dedup state unchanged so the retransmit retries real delivery.
+- Preserve the genuine-duplicate fast path: a tag already committed must still be recognized and ACKed without
+  re-delivery.
+
+## Regression test (required)
+- Author the regression in the canonical test file (see Fix direction), borrowing & flipping the reference case `test_reliable_false_ack_after_failed_acceptance` to assert the *fixed* behaviour: after a first-delivery
+  acceptance failure (OOM), the retransmit is **delivered** to the application (arrival count increments) and only
+  then ACKed — no ACK for an undelivered message.
+- Add a genuine-duplicate test: a truly re-received (already-delivered) reliable message is still ACKed without
+  double-delivery.
+- Wire into `ctest`; must fail on pre-fix code, pass after.
+
+## Acceptance criteria
+- [ ] A reliable message that no subscriber accepted on first delivery is not recorded as received; its retransmit is
+      delivered (or re-attempted), not silently ACKed.
+- [ ] Genuine duplicates are still deduplicated and ACKed without re-delivery (no regression to dedup).
+- [ ] Best-effort path and non-OOM normal path unchanged.
+- [ ] Full suite + `test_intrusive_dedup` green.
+
+## Verification notes (adversarial cross-check)
+- I will exercise all three non-acceptance triggers (slot OOM, state OOM, all-disposed) and confirm the retransmit is
+  delivered rather than false-ACKed.
+- I will confirm the commit-after-accept change does not break at-most-once for genuine duplicates (no double
+  delivery) and does not leak dedup state on the failure path.
+- I will run the compounded reliable+ordered restart scenario (with H1 fixed) and confirm zero false ACKs.
+- I will check multi-subscriber partial acceptance: if any subscriber accepts, commit+ACK; if none, no commit.
