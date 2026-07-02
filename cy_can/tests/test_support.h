@@ -61,6 +61,7 @@ struct can_test_node_t
     canard_us_t          last_tx_fd_deadline;
     size_t               rx_calls;
     uint_least8_t        last_tx_pending_iface_bitmap;
+    uint_least8_t        observed_tx_pending_iface_bitmap;
     size_t               filter_calls;
     size_t               filter_failures_remaining;
     size_t               last_filter_count;

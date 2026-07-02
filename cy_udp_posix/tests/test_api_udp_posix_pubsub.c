@@ -72,6 +72,8 @@ static void test_api_udp_posix_pubsub_best_effort_and_stats(void)
     cy_unadvertise(pub);
     cy_future_destroy(sub);
     udp_test_spin_pair(&a, &b, 6U, spin_slice_us);
+    udp_test_assert_no_inactive_iface_tx(&a);
+    udp_test_assert_no_inactive_iface_tx(&b);
 
     udp_test_node_deinit(&a);
     udp_test_node_deinit(&b);
@@ -118,6 +120,8 @@ static void test_api_udp_posix_pubsub_large_reliable_delivery(void)
     cy_unadvertise(pub);
     cy_future_destroy(sub);
     udp_test_spin_pair(&a, &b, 6U, spin_slice_us);
+    udp_test_assert_no_inactive_iface_tx(&a);
+    udp_test_assert_no_inactive_iface_tx(&b);
 
     udp_test_node_deinit(&a);
     udp_test_node_deinit(&b);

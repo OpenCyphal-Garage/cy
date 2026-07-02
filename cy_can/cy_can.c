@@ -855,9 +855,11 @@ cy_platform_t* cy_can_new(const uint_least8_t          iface_count,
 
     const bool                   filtering_enabled = (filter_count > 0U) && (vtable->filter != NULL);
     const canard_vtable_t* const canard_vtable     = filtering_enabled ? &canard_vtbl_filter : &canard_vtbl_no_filter;
+    const uint_least8_t          iface_bitmap      = (uint_least8_t)((1U << iface_count) - 1U);
     const bool                   ok                = canard_new(&self->canard,
                                canard_vtable,
                                make_mem_set(self),
+                               iface_bitmap,
                                tx_queue_capacity,
                                v_random(&self->base),
                                filtering_enabled ? filter_count : 0U);

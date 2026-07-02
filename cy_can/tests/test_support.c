@@ -228,6 +228,7 @@ static bool v_rx(void* const         user,
     TEST_ASSERT_NOT_NULL(out_frame);
     self->rx_calls++;
     self->last_tx_pending_iface_bitmap = tx_pending_iface_bitmap;
+    self->observed_tx_pending_iface_bitmap |= tx_pending_iface_bitmap;
     if (dequeue_rx(self, out_frame)) {
         if (self->now < out_frame->timestamp) {
             self->now = out_frame->timestamp;
@@ -455,12 +456,13 @@ bool can_test_spin_pair_until_condition(can_test_node_t* const a,
 void can_test_node_reset_history(can_test_node_t* const self)
 {
     TEST_ASSERT_NOT_NULL(self);
-    self->tx_history_count             = 0U;
-    self->tx_classic_calls             = 0U;
-    self->tx_fd_calls                  = 0U;
-    self->last_tx_classic_deadline     = 0;
-    self->last_tx_fd_deadline          = 0;
-    self->last_tx_pending_iface_bitmap = 0U;
+    self->tx_history_count                 = 0U;
+    self->tx_classic_calls                 = 0U;
+    self->tx_fd_calls                      = 0U;
+    self->last_tx_classic_deadline         = 0;
+    self->last_tx_fd_deadline              = 0;
+    self->last_tx_pending_iface_bitmap     = 0U;
+    self->observed_tx_pending_iface_bitmap = 0U;
 }
 
 size_t can_test_node_count_records_on_iface(const can_test_node_t* const self, const uint_least8_t iface_index)

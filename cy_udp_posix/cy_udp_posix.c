@@ -242,7 +242,6 @@ struct subject_writer_t
 {
     cy_subject_writer_t base;
     uint64_t            next_transfer_id; // Random-initialized at the time of creation.
-    udpard_udpip_ep_t   endpoints[UDPARD_IFACE_COUNT_MAX];
 };
 
 static cy_subject_writer_t* v_subject_writer_new(cy_platform_t* const base, const uint32_t subject_id)
@@ -252,13 +251,6 @@ static cy_subject_writer_t* v_subject_writer_new(cy_platform_t* const base, cons
     subject_writer_t* const self  = mem_alloc_zero(owner, sizeof(subject_writer_t));
     if (self != NULL) {
         self->next_transfer_id = prng64(&owner->prng_state, owner->udpard_tx.local_uid);
-        for (size_t i = 0; i < UDPARD_IFACE_COUNT_MAX; i++) {
-            if ((owner->iface_bitmap & (1U << i)) != 0) {
-                self->endpoints[i] = udpard_make_subject_endpoint(subject_id);
-            } else {
-                self->endpoints[i] = (udpard_udpip_ep_t){ 0 };
-            }
-        }
         owner->stats.subject_writer_count++;
     }
     CY_TRACE(owner->base.cy,
@@ -859,7 +851,13 @@ cy_platform_t* cy_udp_posix_new_manual(const uint64_t uid,
         return NULL;
     }
     static const udpard_tx_vtable_t tx_vtable = { .eject = v_tx_eject };
-    if (!udpard_tx_new(&self->udpard_tx, uid, prng64(&self->prng_state, uid), tx_queue_capacity, tx_mem, &tx_vtable)) {
+    if (!udpard_tx_new(&self->udpard_tx,
+                       uid,
+                       prng64(&self->prng_state, uid),
+                       tx_queue_capacity,
+                       self->iface_bitmap,
+                       tx_mem,
+                       &tx_vtable)) {
         free(self);
         return NULL;
     }

@@ -86,6 +86,17 @@ static bool two_responses_received(void* const context)
     return cap->count >= 2U;
 }
 
+static void assert_no_inactive_iface_tx(const can_test_node_t* const node)
+{
+    const uint_least8_t active   = (uint_least8_t)((1U << node->iface_count) - 1U);
+    const uint_least8_t inactive = (uint_least8_t)(CANARD_IFACE_BITMAP_ALL & (uint_least8_t)(~active));
+    TEST_ASSERT_EQUAL_UINT8(0U, node->last_tx_pending_iface_bitmap & inactive);
+    TEST_ASSERT_EQUAL_UINT8(0U, node->observed_tx_pending_iface_bitmap & inactive);
+    for (uint_least8_t i = node->iface_count; i < CAN_TEST_MAX_IFACES; i++) {
+        TEST_ASSERT_EQUAL_size_t(0U, can_test_node_count_records_on_iface(node, i));
+    }
+}
+
 static void test_api_can_reliable_publish_success(void)
 {
     const uint8_t payload[] = { 1U, 2U, 3U, 4U, 5U, 6U };
@@ -237,6 +248,8 @@ static void test_api_can_request_response_streaming_and_reliable_response(void)
     TEST_ASSERT_EQUAL_size_t(server_state.response_b_size, capture.size[1]);
     TEST_ASSERT_EQUAL_UINT8_ARRAY(server_state.response_a, capture.payload[0], server_state.response_a_size);
     TEST_ASSERT_EQUAL_UINT8_ARRAY(server_state.response_b, capture.payload[1], server_state.response_b_size);
+    assert_no_inactive_iface_tx(&client);
+    assert_no_inactive_iface_tx(&server);
 
     cy_future_destroy(server_state.reliable_future);
     cy_future_destroy(req);

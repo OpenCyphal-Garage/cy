@@ -99,6 +99,8 @@ static void test_api_udp_posix_rpc_request_response_reliable(void)
     cy_unadvertise(client_pub);
     cy_future_destroy(server_sub);
     udp_test_spin_pair(&client_node, &server_node, 6U, spin_slice_us);
+    udp_test_assert_no_inactive_iface_tx(&client_node);
+    udp_test_assert_no_inactive_iface_tx(&server_node);
 
     udp_test_node_deinit(&client_node);
     udp_test_node_deinit(&server_node);
@@ -143,6 +145,8 @@ static void test_api_udp_posix_lifecycle_subscriber_recreation_before_spin(void)
     cy_unadvertise(pub);
     cy_future_destroy(new_sub);
     udp_test_spin_pair(&a, &b, 6U, spin_slice_us);
+    udp_test_assert_no_inactive_iface_tx(&a);
+    udp_test_assert_no_inactive_iface_tx(&b);
 
     udp_test_node_deinit(&a);
     udp_test_node_deinit(&b);
