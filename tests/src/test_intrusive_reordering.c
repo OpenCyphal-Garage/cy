@@ -174,13 +174,9 @@ static bool push_message_rr(reorder_env_t* const self,
     return out;
 }
 
-static reordering_t* make_dynamic_reordering(reorder_env_t* const self,
-                                             const uint64_t       remote_id,
-                                             const uint64_t       tag,
-                                             const cy_us_t        now)
+static reordering_t* make_dynamic_reordering(reorder_env_t* const self, const uint64_t remote_id, const uint64_t tag)
 {
     reordering_context_t ctx = {
-        .now        = now,
         .lane       = { .id = remote_id, .ctx = { { 0 } }, .prio = cy_prio_nominal },
         .subscriber = &self->sub,
         .topic      = &self->topic,
@@ -887,7 +883,6 @@ static void test_reordering_cavl_compare(void)
     inner.interned_by_lin_tag  = NULL;
 
     reordering_context_t ctx = {
-        .now        = 0,
         .lane       = { .id = 42U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
         .subscriber = &env.sub,
         .topic      = &env.topic,
@@ -923,7 +918,6 @@ static void test_reordering_factory_out_of_memory(void)
     env.fixture.fail_alloc_count = 1;
 
     reordering_context_t ctx = {
-        .now        = 0,
         .lane       = { .id = 42U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
         .subscriber = &env.sub,
         .topic      = &env.topic,
@@ -1055,7 +1049,7 @@ static void test_reordering_drop_stale_keeps_recent(void)
     reorder_env_t env;
     reorder_env_init(&env);
 
-    reordering_t* const rr = make_dynamic_reordering(&env, 42U, 8U, 0);
+    reordering_t* const rr = make_dynamic_reordering(&env, 42U, 8U);
     TEST_ASSERT_NOT_NULL(rr);
     TEST_ASSERT_TRUE(push_message_rr(&env, rr, 8U, 100, 0x80U));
     TEST_ASSERT_EQUAL_size_t(1, rr->interned_count);
@@ -1080,7 +1074,7 @@ static void test_reordering_drop_stale_removes_old(void)
     reorder_env_t env;
     reorder_env_init(&env);
 
-    reordering_t* const rr = make_dynamic_reordering(&env, 42U, 8U, 0);
+    reordering_t* const rr = make_dynamic_reordering(&env, 42U, 8U);
     TEST_ASSERT_NOT_NULL(rr);
     TEST_ASSERT_TRUE(push_message_rr(&env, rr, 8U, 100, 0x80U));
     TEST_ASSERT_EQUAL_size_t(1, rr->interned_count);
@@ -1106,7 +1100,7 @@ static void test_topic_decouple_subscriber_root_drops_interned_messages(void)
     TEST_ASSERT_NOT_NULL(env.topic.couplings);
     TEST_ASSERT_FALSE(is_implicit(&env.topic));
 
-    reordering_t* const rr = make_dynamic_reordering(&env, 42U, 8U, 0);
+    reordering_t* const rr = make_dynamic_reordering(&env, 42U, 8U);
     TEST_ASSERT_NOT_NULL(rr);
     TEST_ASSERT_TRUE(push_message_rr(&env, rr, 8U, 100, 0x80U));
     TEST_ASSERT_EQUAL_size_t(1U, rr->interned_count);

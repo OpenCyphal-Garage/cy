@@ -165,6 +165,10 @@ cy_gen_test_intrusive_matrix(test_intrusive_dedup
         "src/test_intrusive_dedup.c"
         "src/helpers.c;platform_stubs/guarded_heap.c"
 )
+cy_gen_test_intrusive_matrix(test_intrusive_factory_uaf
+        "src/test_intrusive_factory_uaf.c"
+        "src/helpers.c;platform_stubs/guarded_heap.c;platform_stubs/message.c"
+)
 cy_gen_test_intrusive_matrix(test_intrusive_reordering
         "src/test_intrusive_reordering.c"
         "src/helpers.c;platform_stubs/guarded_heap.c;platform_stubs/message.c"

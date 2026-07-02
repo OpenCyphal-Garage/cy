@@ -31,12 +31,8 @@ iface-1 copies sit in the queue until `tx_expire` reclaims them at deadline. On 
 can occupy slots long enough to force sacrifices of real frames between expiries.
 
 ## Fix direction
-Choose one:
-1. In `cy_can_new`, require `iface_count == CANARD_IFACE_COUNT` (reject otherwise), making the runtime and
-   compile-time interface counts agree so no phantom spooling occurs. Simplest, but forces users to compile
-   `CANARD_IFACE_COUNT` to match their real interface count.
-2. Preferred if libcanard supports it: pass an interface bitmap to `canard_request`/`canard_respond` (or use a
-   variant) so service transfers spool only on `ibm`, matching the multicast paths. May require a libcanard change.
+Libcanard support required: pass an interface bitmap to `canard_request`/`canard_respond` (or use a
+variant) so service transfers spool only on `ibm`, matching the multicast paths. Requires libcanard change.
 
 ## Regression test (required)
 - Add a CAN test with a single runtime interface on a 2-iface build that issues several unicast/service transfers

@@ -18,6 +18,14 @@ the message. The sender records success for a lost message.
 - Failure-to-accept paths: reordering slot OOM `cy.c:3324-3335` (returns false), reordering state OOM `cy.c:3518-3521`,
   all-subscribers-disposed skip `cy.c:3482-3486`.
 - In-code comment acknowledging only the narrow disposed case: `cy.c:3462-3466`.
+- Reordering self-disposal vector (a distinct instance of this class): `reordering_drop_stale(sub, …)` at `cy.c:3488`
+  can eject a stale interned message whose delivery callback destroys its own subscriber (deferred → `sub->disposed`
+  becomes true but `sub` stays valid); the code then still runs `reordering_push` and sets `acknowledge = true`
+  (`cy.c:3504-3517`) for the current message, which `subscriber_notify` will drop because the sub is disposed
+  (`cy.c:2947`) → false ACK. **Widened by the C1 fix** (`todo/C1-cavl-factory-uaf.md`, now RESOLVED): the stale sweep
+  used to run inside `reordering_cavl_factory` only on a cache-miss; it now runs on **every** ordered receive, so this
+  trigger is far more reachable than before. It requires a stale reordering state that still holds interned slots
+  (i.e. a poll-starved window), so it is narrow, but no longer cache-miss-gated.
 
 ## Mechanism
 Dedup state mutation precedes the acceptance decision. First delivery: acceptance fails for everyone → `acknowledge`
@@ -41,6 +49,10 @@ Split "consult" from "commit": only record the tag as received once at least one
   total failure, leave the dedup state unchanged so the retransmit retries real delivery.
 - Preserve the genuine-duplicate fast path: a tag already committed must still be recognized and ACKed without
   re-delivery.
+- **Gap to close:** deferring `dedup_update` only fixes the *dedup/retransmit* half. The reordering self-disposal
+  vector above sets `acknowledge` directly from `reordering_push`, so it must be handled separately — e.g. re-check
+  `sub->disposed` after `reordering_drop_stale`/before `acknowledge = true`, or drive `acknowledge` from
+  actual delivery rather than from acceptance. Do not rely on the C1 change to cover it.
 
 ## Regression test (required)
 - Author the regression in the canonical test file (see Fix direction), borrowing & flipping the reference case `test_reliable_false_ack_after_failed_acceptance` to assert the *fixed* behaviour: after a first-delivery

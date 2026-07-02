@@ -2994,7 +2994,6 @@ typedef struct
     cy_topic_t* owner;
     uint64_t    remote_id;
     uint64_t    tag;
-    cy_us_t     now;
 } dedup_factory_context_t;
 
 // Returns true if duplicate. Does not alter the state.
@@ -3060,9 +3059,8 @@ static int32_t dedup_cavl_compare(const void* const user, const cy_tree_t* const
 
 static cy_tree_t* dedup_factory(void* const user)
 {
-    const dedup_factory_context_t* const ctx = (dedup_factory_context_t*)user;
-    dedup_drop_stale(ctx->owner, ctx->now); // A quick check that might free up some memory for the new entry.
-    dedup_t* const state = mem_alloc_zero(ctx->owner->cy, sizeof(dedup_t));
+    const dedup_factory_context_t* const ctx   = (dedup_factory_context_t*)user;
+    dedup_t* const                       state = mem_alloc_zero(ctx->owner->cy, sizeof(dedup_t));
     if (state != NULL) {
         state->remote_id = ctx->remote_id;
         state->tag       = ctx->tag; // Bitmap bit 0 is not set so it won't be rejected as duplicate.
@@ -3137,7 +3135,6 @@ typedef struct
 
 typedef struct
 {
-    cy_us_t       now;
     cy_lane_t     lane;
     subscriber_t* subscriber;
     cy_topic_t*   topic;
@@ -3395,8 +3392,7 @@ static int32_t reordering_cavl_compare(const void* const user, const cy_tree_t* 
 static cy_tree_t* reordering_cavl_factory(void* const user)
 {
     const reordering_context_t* const outer = (const reordering_context_t*)user;
-    reordering_drop_stale(outer->subscriber, outer->now); // Might free up some memory for the new entry.
-    reordering_t* const self = mem_alloc_zero(outer->subscriber->root->cy, sizeof(reordering_t));
+    reordering_t* const               self  = mem_alloc_zero(outer->subscriber->root->cy, sizeof(reordering_t));
     if (self != NULL) {
         self->timeout             = OLGA_EVENT_INIT;
         self->remote_id           = outer->lane.id;
@@ -3444,7 +3440,8 @@ static bool on_message(cy_t* const           cy,
         return false;
     }
     if (reliable) {
-        dedup_factory_context_t ctx = { .owner = topic, .remote_id = lane.id, .tag = tag, .now = message.timestamp };
+        dedup_drop_stale(topic, message.timestamp); // Sweep before insert; a factory must never mutate the target tree.
+        dedup_factory_context_t ctx = { .owner = topic, .remote_id = lane.id, .tag = tag };
         dedup_t* const dedup = CAVL2_TO_OWNER(cavl2_find_or_insert(&topic->sub_index_dedup_by_remote_id, // ------
                                                                    &lane.id,
                                                                    dedup_cavl_compare,
@@ -3486,8 +3483,8 @@ static bool on_message(cy_t* const           cy,
             }
             const bool use_reordering = (sub->params.reordering_window >= 0); // minimums enforced at API level
             if (use_reordering) {
+                reordering_drop_stale(sub, message.timestamp); // Sweep before insert; factory must not mutate the tree.
                 reordering_context_t ctx = {
-                    .now        = message.timestamp,
                     .lane       = lane,
                     .subscriber = sub,
                     .topic      = topic, // The topic and coupling references will be kept alive by the subscriber.

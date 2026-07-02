@@ -1195,8 +1195,8 @@ static void test_topic_destroy_clears_associations_and_dedup(void)
       &topic->assoc_by_remote_id, &fac2.remote_id, association_cavl_compare, &fac2, association_cavl_factory));
     TEST_ASSERT_EQUAL_size_t(2U, topic->assoc_count);
 
-    dedup_factory_context_t dctx1 = { .owner = topic, .remote_id = UINT64_C(11), .tag = UINT64_C(22), .now = 1000 };
-    dedup_factory_context_t dctx2 = { .owner = topic, .remote_id = UINT64_C(12), .tag = UINT64_C(23), .now = 1000 };
+    dedup_factory_context_t dctx1 = { .owner = topic, .remote_id = UINT64_C(11), .tag = UINT64_C(22) };
+    dedup_factory_context_t dctx2 = { .owner = topic, .remote_id = UINT64_C(12), .tag = UINT64_C(23) };
     TEST_ASSERT_NOT_NULL(cavl2_find_or_insert(
       &topic->sub_index_dedup_by_remote_id, &dctx1.remote_id, dedup_cavl_compare, &dctx1, dedup_factory));
     TEST_ASSERT_NOT_NULL(cavl2_find_or_insert(

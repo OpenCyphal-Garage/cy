@@ -44,12 +44,9 @@ static void dedup_owner_init(cy_topic_t* const owner, dedup_fixture_t* const fix
     owner->sub_list_dedup_by_recency    = LIST_EMPTY;
 }
 
-static dedup_t* dedup_make_state(cy_topic_t* const owner,
-                                 const uint64_t    remote_id,
-                                 const uint64_t    tag,
-                                 const cy_us_t     now)
+static dedup_t* dedup_make_state(cy_topic_t* const owner, const uint64_t remote_id, const uint64_t tag)
 {
-    dedup_factory_context_t ctx  = { .owner = owner, .remote_id = remote_id, .tag = tag, .now = now };
+    dedup_factory_context_t ctx  = { .owner = owner, .remote_id = remote_id, .tag = tag };
     cy_tree_t* const        tree = dedup_factory(&ctx);
     TEST_ASSERT_NOT_NULL(tree);
     owner->sub_index_dedup_by_remote_id = tree;
@@ -71,7 +68,7 @@ static void test_dedup_first_and_exact_duplicate(void)
     dedup_fixture_init(&fixture);
     dedup_owner_init(&owner, &fixture);
 
-    dedup_t* const dd = dedup_make_state(&owner, 123U, 100U, 1000);
+    dedup_t* const dd = dedup_make_state(&owner, 123U, 100U);
     TEST_ASSERT_FALSE(dedup_update(dd, &owner, 100U, 1000));
     TEST_ASSERT_TRUE(dedup_update(dd, &owner, 100U, 1001));
 
@@ -87,7 +84,7 @@ static void test_dedup_out_of_order_seen_once(void)
     dedup_fixture_init(&fixture);
     dedup_owner_init(&owner, &fixture);
 
-    dedup_t* const dd = dedup_make_state(&owner, 77U, 200U, 10);
+    dedup_t* const dd = dedup_make_state(&owner, 77U, 200U);
     TEST_ASSERT_FALSE(dedup_update(dd, &owner, 200U, 10));
     TEST_ASSERT_FALSE(dedup_update(dd, &owner, 199U, 11));
     TEST_ASSERT_TRUE(dedup_update(dd, &owner, 199U, 12));
@@ -104,7 +101,7 @@ static void test_dedup_wraparound(void)
     dedup_fixture_init(&fixture);
     dedup_owner_init(&owner, &fixture);
 
-    dedup_t* const dd = dedup_make_state(&owner, 9U, UINT64_MAX, 0);
+    dedup_t* const dd = dedup_make_state(&owner, 9U, UINT64_MAX);
     TEST_ASSERT_FALSE(dedup_update(dd, &owner, UINT64_MAX, 0));
     TEST_ASSERT_FALSE(dedup_update(dd, &owner, 0U, 1));
     TEST_ASSERT_TRUE(dedup_update(dd, &owner, 0U, 2));
@@ -121,7 +118,7 @@ static void test_dedup_drop_stale(void)
     dedup_fixture_init(&fixture);
     dedup_owner_init(&owner, &fixture);
 
-    dedup_t* const dd = dedup_make_state(&owner, 0xDEADU, 1234U, 100);
+    dedup_t* const dd = dedup_make_state(&owner, 0xDEADU, 1234U);
     TEST_ASSERT_FALSE(dedup_update(dd, &owner, 1234U, 100));
     dedup_drop_stale(&owner, 100 + SESSION_LIFETIME + 1);
     TEST_ASSERT_NULL(owner.sub_index_dedup_by_remote_id);
@@ -139,7 +136,7 @@ static void test_dedup_forward_small_step(void)
     dedup_fixture_init(&fixture);
     dedup_owner_init(&owner, &fixture);
 
-    dedup_t* const dd = dedup_make_state(&owner, 1U, 100U, 0);
+    dedup_t* const dd = dedup_make_state(&owner, 1U, 100U);
     TEST_ASSERT_FALSE(dedup_update(dd, &owner, 100U, 0)); // establish tag=100, bitmap=0
     // Advance by 1: fwd=1 < DEDUP_HISTORY, tag becomes 101.
     TEST_ASSERT_FALSE(dedup_update(dd, &owner, 101U, 1));
@@ -172,7 +169,7 @@ static void test_dedup_forward_exact_history(void)
     const uint64_t base_tag     = 100U;
     const uint64_t boundary_tag = base_tag + DEDUP_HISTORY;
 
-    dedup_t* const dd = dedup_make_state(&owner, 2U, base_tag, 0);
+    dedup_t* const dd = dedup_make_state(&owner, 2U, base_tag);
     TEST_ASSERT_FALSE(dedup_update(dd, &owner, base_tag, 0)); // establish current tag
     TEST_ASSERT_FALSE(dedup_update(dd, &owner, boundary_tag, 1));
     // Reset keeps only the new current tag; the old base tag is accepted once again.
@@ -195,7 +192,7 @@ static void test_dedup_forward_large_jump(void)
     const uint64_t base_tag = 100U;
     const uint64_t jump_tag = base_tag + DEDUP_HISTORY + 88U;
 
-    dedup_t* const dd = dedup_make_state(&owner, 3U, base_tag, 0);
+    dedup_t* const dd = dedup_make_state(&owner, 3U, base_tag);
     TEST_ASSERT_FALSE(dedup_update(dd, &owner, base_tag, 0)); // establish current tag
     // Set some bitmap bits first by visiting nearby tags.
     TEST_ASSERT_FALSE(dedup_update(dd, &owner, base_tag + 1U, 1)); // fwd=1 < DEDUP_HISTORY
@@ -220,7 +217,7 @@ static void test_dedup_factory_oom(void)
     dedup_owner_init(&owner, &fixture);
 
     fixture.oom                 = true;
-    dedup_factory_context_t ctx = { .owner = &owner, .remote_id = 42U, .tag = 10U, .now = 0 };
+    dedup_factory_context_t ctx = { .owner = &owner, .remote_id = 42U, .tag = 10U };
     TEST_ASSERT_NULL(dedup_factory(&ctx));
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&fixture.heap));
 }
@@ -233,7 +230,7 @@ static void test_dedup_drop_stale_not_yet(void)
     dedup_fixture_init(&fixture);
     dedup_owner_init(&owner, &fixture);
 
-    dedup_t* const dd = dedup_make_state(&owner, 50U, 500U, 100);
+    dedup_t* const dd = dedup_make_state(&owner, 50U, 500U);
     TEST_ASSERT_FALSE(dedup_update(dd, &owner, 500U, 100));
     // Exactly at the boundary: last_active_at(100) + SESSION_LIFETIME >= 100 + SESSION_LIFETIME → not stale.
     dedup_drop_stale(&owner, 100 + SESSION_LIFETIME);
@@ -255,11 +252,11 @@ static void test_dedup_drop_stale_multiple(void)
     dedup_owner_init(&owner, &fixture);
 
     // Create first entry (remote_id=10) at time 100.
-    dedup_t* const dd1 = dedup_make_state(&owner, 10U, 1U, 100);
+    dedup_t* const dd1 = dedup_make_state(&owner, 10U, 1U);
     TEST_ASSERT_FALSE(dedup_update(dd1, &owner, 1U, 100));
 
     // Create second entry (remote_id=20) at time 200 via cavl2_find_or_insert.
-    dedup_factory_context_t ctx2  = { .owner = &owner, .remote_id = 20U, .tag = 2U, .now = 200 };
+    dedup_factory_context_t ctx2  = { .owner = &owner, .remote_id = 20U, .tag = 2U };
     cy_tree_t* const        tree2 = cavl2_find_or_insert(
       &owner.sub_index_dedup_by_remote_id, &ctx2.remote_id, dedup_cavl_compare, &ctx2, dedup_factory);
     TEST_ASSERT_NOT_NULL(tree2);
@@ -290,14 +287,14 @@ static void test_dedup_cavl_compare_all_branches(void)
     dedup_owner_init(&owner, &fixture);
 
     // Insert three entries with remote_ids 10, 20, 30 to force compare in all directions.
-    dedup_factory_context_t ctx1       = { .owner = &owner, .remote_id = 20U, .tag = 1U, .now = 0 };
+    dedup_factory_context_t ctx1       = { .owner = &owner, .remote_id = 20U, .tag = 1U };
     owner.sub_index_dedup_by_remote_id = dedup_factory(&ctx1);
     TEST_ASSERT_NOT_NULL(owner.sub_index_dedup_by_remote_id);
     dedup_t* const dd1 = CAVL2_TO_OWNER(owner.sub_index_dedup_by_remote_id, dedup_t, index_remote_id);
     TEST_ASSERT_FALSE(dedup_update(dd1, &owner, 1U, 0)); // enlist and set last_active_at
 
     // Insert remote_id=10 (10 < 20, compare returns -1).
-    dedup_factory_context_t ctx2 = { .owner = &owner, .remote_id = 10U, .tag = 2U, .now = 0 };
+    dedup_factory_context_t ctx2 = { .owner = &owner, .remote_id = 10U, .tag = 2U };
     cy_tree_t* const        t2   = cavl2_find_or_insert(
       &owner.sub_index_dedup_by_remote_id, &ctx2.remote_id, dedup_cavl_compare, &ctx2, dedup_factory);
     TEST_ASSERT_NOT_NULL(t2);
@@ -305,7 +302,7 @@ static void test_dedup_cavl_compare_all_branches(void)
     TEST_ASSERT_FALSE(dedup_update(dd2, &owner, 2U, 0));
 
     // Insert remote_id=30 (30 > 20, compare returns +1).
-    dedup_factory_context_t ctx3 = { .owner = &owner, .remote_id = 30U, .tag = 3U, .now = 0 };
+    dedup_factory_context_t ctx3 = { .owner = &owner, .remote_id = 30U, .tag = 3U };
     cy_tree_t* const        t3   = cavl2_find_or_insert(
       &owner.sub_index_dedup_by_remote_id, &ctx3.remote_id, dedup_cavl_compare, &ctx3, dedup_factory);
     TEST_ASSERT_NOT_NULL(t3);
@@ -313,7 +310,7 @@ static void test_dedup_cavl_compare_all_branches(void)
     TEST_ASSERT_FALSE(dedup_update(dd3, &owner, 3U, 0));
 
     // Look up existing remote_id=20 (compare returns 0).
-    dedup_factory_context_t ctx4  = { .owner = &owner, .remote_id = 20U, .tag = 4U, .now = 0 };
+    dedup_factory_context_t ctx4  = { .owner = &owner, .remote_id = 20U, .tag = 4U };
     cy_tree_t* const        found = cavl2_find_or_insert(
       &owner.sub_index_dedup_by_remote_id, &ctx4.remote_id, dedup_cavl_compare, &ctx4, dedup_factory);
     TEST_ASSERT_NOT_NULL(found);

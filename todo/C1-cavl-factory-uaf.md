@@ -3,7 +3,7 @@
 - **Severity:** 🛑 CRITICAL (report C-1)
 - **Confidence:** reproduced under AddressSanitizer (SEGV) + code trace
 - **Subsystem:** core (`cy/cy.c`, depends on `lib/cavl2.h` contract)
-- **Status:** OPEN
+- **Status:** RESOLVED
 
 ## Summary
 Two cavl2 factory callbacks free nodes from the very AVL tree that `cavl2_find_or_insert` is in the middle of
