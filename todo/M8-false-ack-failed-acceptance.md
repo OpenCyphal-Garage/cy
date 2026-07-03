@@ -22,7 +22,7 @@ the message. The sender records success for a lost message.
   can eject a stale interned message whose delivery callback destroys its own subscriber (deferred → `sub->disposed`
   becomes true but `sub` stays valid); the code then still runs `reordering_push` and sets `acknowledge = true`
   (`cy.c:3504-3517`) for the current message, which `subscriber_notify` will drop because the sub is disposed
-  (`cy.c:2947`) → false ACK. **Widened by the C1 fix** (`todo/C1-cavl-factory-uaf.md`, now RESOLVED): the stale sweep
+  (`cy.c:2947`) → false ACK. **Widened by the C1 fix** (`resolved/C1-cavl-factory-uaf.md`, now RESOLVED): the stale sweep
   used to run inside `reordering_cavl_factory` only on a cache-miss; it now runs on **every** ordered receive, so this
   trigger is far more reachable than before. It requires a stale reordering state that still holds interned slots
   (i.e. a poll-starved window), so it is narrow, but no longer cache-miss-gated.
