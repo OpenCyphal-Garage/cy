@@ -713,7 +713,9 @@ static cy_err_t v_unicast_send(cy_platform_t* const   base,
 {
     cy_can_t* const     owner  = (cy_can_t*)base;
     const uint_least8_t remote = lane->ctx.state[0];
-    assert(remote <= CANARD_NODE_ID_MAX);
+    if ((remote > CANARD_NODE_ID_MAX) || (lane->id != remote)) {
+        return CY_ERR_ARGUMENT;
+    }
     const uint64_t      e_oom  = owner->canard.err.oom;
     const uint64_t      e_cap  = owner->canard.err.tx_capacity;
     const uint_least8_t tid    = owner->unicast_tid[remote];
@@ -855,9 +857,11 @@ cy_platform_t* cy_can_new(const uint_least8_t          iface_count,
 
     const bool                   filtering_enabled = (filter_count > 0U) && (vtable->filter != NULL);
     const canard_vtable_t* const canard_vtable     = filtering_enabled ? &canard_vtbl_filter : &canard_vtbl_no_filter;
+    const uint_least8_t          iface_bitmap      = (uint_least8_t)((1U << iface_count) - 1U);
     const bool                   ok                = canard_new(&self->canard,
                                canard_vtable,
                                make_mem_set(self),
+                               iface_bitmap,
                                tx_queue_capacity,
                                v_random(&self->base),
                                filtering_enabled ? filter_count : 0U);

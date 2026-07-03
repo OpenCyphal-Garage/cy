@@ -74,6 +74,16 @@ bool udp_test_spin_pair_until_condition(udp_test_node_t* const a,
     return condition(context);
 }
 
+void udp_test_assert_no_inactive_iface_tx(const udp_test_node_t* const node)
+{
+    TEST_ASSERT_NOT_NULL(node);
+    TEST_ASSERT_NOT_NULL(node->platform);
+    const cy_udp_posix_stats_t stats = cy_udp_posix_stats(node->platform);
+    for (size_t i = 1U; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
+        TEST_ASSERT_EQUAL_UINT64(0U, stats.sock_tx.error_count[i]);
+    }
+}
+
 size_t udp_test_message_read_all(const cy_message_t* const message, void* const out, const size_t capacity)
 {
     TEST_ASSERT_NOT_NULL(message);

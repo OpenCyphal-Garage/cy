@@ -174,13 +174,9 @@ static bool push_message_rr(reorder_env_t* const self,
     return out;
 }
 
-static reordering_t* make_dynamic_reordering(reorder_env_t* const self,
-                                             const uint64_t       remote_id,
-                                             const uint64_t       tag,
-                                             const cy_us_t        now)
+static reordering_t* make_dynamic_reordering(reorder_env_t* const self, const uint64_t remote_id, const uint64_t tag)
 {
     reordering_context_t ctx = {
-        .now        = now,
         .lane       = { .id = remote_id, .ctx = { { 0 } }, .prio = cy_prio_nominal },
         .subscriber = &self->sub,
         .topic      = &self->topic,
@@ -526,6 +522,71 @@ static void test_reordering_backward_underflow_is_late_drop(void)
     TEST_ASSERT_TRUE(push_message(&env, 16U, 201, 0xC0U));
     TEST_ASSERT_EQUAL_size_t(12, env.capture.count);
     TEST_ASSERT_EQUAL_UINT64(16U, env.capture.tags[11]);
+    TEST_ASSERT_EQUAL_size_t(0, env.rr.interned_count);
+
+    reorder_env_cleanup(&env);
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&env.fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&env.fixture.heap));
+}
+
+static void test_reordering_backward_underflow_current_session_lag_is_late_drop(void)
+{
+    reorder_env_t env;
+    reorder_env_init(&env);
+    const uint64_t baseline = 1000U;
+
+    reordering_resequence(&env.rr, baseline + (REORDERING_CAPACITY / 2U));
+    env.rr.last_ejected_lin_tag = SESSION_COUNTER_MAX_BACKWARD_LAG - 10U;
+    env.rr.last_active_at       = 1234;
+
+    TEST_ASSERT_FALSE(push_message(&env, baseline - 10U, 2000, 0xB0U));
+    TEST_ASSERT_EQUAL_size_t(0, env.capture.count);
+    TEST_ASSERT_EQUAL_UINT64(baseline, env.rr.tag_baseline);
+    TEST_ASSERT_EQUAL_UINT64(SESSION_COUNTER_MAX_BACKWARD_LAG - 10U, env.rr.last_ejected_lin_tag);
+    TEST_ASSERT_EQUAL_INT64(1234, env.rr.last_active_at);
+    TEST_ASSERT_NULL(env.sub.list_reordering_by_recency.head);
+    TEST_ASSERT_NULL(env.sub.list_reordering_by_recency.tail);
+    TEST_ASSERT_EQUAL_size_t(0, env.rr.interned_count);
+
+    reorder_env_cleanup(&env);
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&env.fixture.heap));
+    TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_bytes(&env.fixture.heap));
+}
+
+static void test_reordering_far_backward_restart_resequences(void)
+{
+    reorder_env_t env;
+    reorder_env_init(&env);
+    const uint64_t old_epoch_tag = UINT64_C(1) << 40U;
+    const uint64_t restart_tag   = 100U;
+    const uint64_t half          = (uint64_t)(REORDERING_CAPACITY / 2U);
+
+    reordering_resequence(&env.rr, old_epoch_tag + half);
+    TEST_ASSERT_EQUAL_UINT64(old_epoch_tag, env.rr.tag_baseline);
+
+    TEST_ASSERT_TRUE(push_message(&env, old_epoch_tag + 1U, 10, 0x11U));
+    TEST_ASSERT_EQUAL_size_t(1, env.capture.count);
+    TEST_ASSERT_EQUAL_UINT64(old_epoch_tag + 1U, env.capture.tags[0]);
+    TEST_ASSERT_EQUAL_UINT64(1U, env.rr.last_ejected_lin_tag);
+
+    TEST_ASSERT_TRUE(push_message(&env, old_epoch_tag + 3U, 11, 0x33U));
+    TEST_ASSERT_EQUAL_size_t(1, env.capture.count);
+    TEST_ASSERT_EQUAL_size_t(1, env.rr.interned_count);
+
+    TEST_ASSERT_TRUE(push_message(&env, restart_tag, 100, 0xAAU));
+    TEST_ASSERT_EQUAL_size_t(2, env.capture.count);
+    TEST_ASSERT_EQUAL_UINT64(old_epoch_tag + 3U, env.capture.tags[1]);
+    TEST_ASSERT_EQUAL_UINT64(restart_tag - half, env.rr.tag_baseline);
+    TEST_ASSERT_EQUAL_UINT64(0U, env.rr.last_ejected_lin_tag);
+    TEST_ASSERT_EQUAL_size_t(1, env.rr.interned_count);
+    TEST_ASSERT_TRUE(olga_is_pending(&env.fixture.cy.olga, &env.rr.timeout));
+
+    spin_to(&env, 119);
+    TEST_ASSERT_EQUAL_size_t(2, env.capture.count);
+
+    spin_to(&env, 121);
+    TEST_ASSERT_EQUAL_size_t(3, env.capture.count);
+    TEST_ASSERT_EQUAL_UINT64(restart_tag, env.capture.tags[2]);
     TEST_ASSERT_EQUAL_size_t(0, env.rr.interned_count);
 
     reorder_env_cleanup(&env);
@@ -887,7 +948,6 @@ static void test_reordering_cavl_compare(void)
     inner.interned_by_lin_tag  = NULL;
 
     reordering_context_t ctx = {
-        .now        = 0,
         .lane       = { .id = 42U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
         .subscriber = &env.sub,
         .topic      = &env.topic,
@@ -923,7 +983,6 @@ static void test_reordering_factory_out_of_memory(void)
     env.fixture.fail_alloc_count = 1;
 
     reordering_context_t ctx = {
-        .now        = 0,
         .lane       = { .id = 42U, .ctx = { { 0 } }, .prio = cy_prio_nominal },
         .subscriber = &env.sub,
         .topic      = &env.topic,
@@ -1055,7 +1114,7 @@ static void test_reordering_drop_stale_keeps_recent(void)
     reorder_env_t env;
     reorder_env_init(&env);
 
-    reordering_t* const rr = make_dynamic_reordering(&env, 42U, 8U, 0);
+    reordering_t* const rr = make_dynamic_reordering(&env, 42U, 8U);
     TEST_ASSERT_NOT_NULL(rr);
     TEST_ASSERT_TRUE(push_message_rr(&env, rr, 8U, 100, 0x80U));
     TEST_ASSERT_EQUAL_size_t(1, rr->interned_count);
@@ -1080,7 +1139,7 @@ static void test_reordering_drop_stale_removes_old(void)
     reorder_env_t env;
     reorder_env_init(&env);
 
-    reordering_t* const rr = make_dynamic_reordering(&env, 42U, 8U, 0);
+    reordering_t* const rr = make_dynamic_reordering(&env, 42U, 8U);
     TEST_ASSERT_NOT_NULL(rr);
     TEST_ASSERT_TRUE(push_message_rr(&env, rr, 8U, 100, 0x80U));
     TEST_ASSERT_EQUAL_size_t(1, rr->interned_count);
@@ -1106,7 +1165,7 @@ static void test_topic_decouple_subscriber_root_drops_interned_messages(void)
     TEST_ASSERT_NOT_NULL(env.topic.couplings);
     TEST_ASSERT_FALSE(is_implicit(&env.topic));
 
-    reordering_t* const rr = make_dynamic_reordering(&env, 42U, 8U, 0);
+    reordering_t* const rr = make_dynamic_reordering(&env, 42U, 8U);
     TEST_ASSERT_NOT_NULL(rr);
     TEST_ASSERT_TRUE(push_message_rr(&env, rr, 8U, 100, 0x80U));
     TEST_ASSERT_EQUAL_size_t(1U, rr->interned_count);
@@ -1153,6 +1212,8 @@ int main(void)
     RUN_TEST(test_reordering_head_of_line_change_rearms_timeout);
     RUN_TEST(test_reordering_late_after_timeout);
     RUN_TEST(test_reordering_backward_underflow_is_late_drop);
+    RUN_TEST(test_reordering_backward_underflow_current_session_lag_is_late_drop);
+    RUN_TEST(test_reordering_far_backward_restart_resequences);
     RUN_TEST(test_reordering_capacity_overflow_resequence);
     RUN_TEST(test_reordering_capacity_overflow_can_fast_path_after_eject_all);
     RUN_TEST(test_reordering_overflow_sparse_stepwise_shift_without_resequence);

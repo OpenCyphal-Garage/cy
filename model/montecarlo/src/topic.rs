@@ -49,7 +49,10 @@ impl Topic {
 }
 
 pub fn topic_subject_id(hash: u64, evictions: u16, modulus: u32) -> u32 {
-    ((hash + (evictions as u64).pow(2)) % (modulus as u64)) as u32
+    let modulus = modulus as u64;
+    let h = hash % modulus;
+    let e = (evictions as u64) % modulus;
+    ((h + ((e * e) % modulus)) % modulus) as u32
 }
 
 pub fn left_wins_collision(local: &Topic, now: Duration, remote_lage: i8, remote_hash: u64) -> bool {
@@ -173,5 +176,16 @@ mod tests {
         assert_eq!(4, topic_subject_id(3, 1, 11));
         assert_eq!(4, topic_subject_id(4, 0, 11));
         assert_eq!(5, topic_subject_id(12, 2, 11));
+    }
+
+    #[test]
+    fn topic_subject_id_is_overflow_independent() {
+        let modulus = 57203_u64;
+        let hash = u64::MAX;
+        let evictions = u16::MAX;
+        let old_wrapped = hash.wrapping_add((evictions as u64).pow(2)) % modulus;
+        let expected = ((hash % modulus) + (((evictions as u64) % modulus).pow(2) % modulus)) % modulus;
+        assert_ne!(old_wrapped, expected);
+        assert_eq!(expected as u32, topic_subject_id(hash, evictions, modulus as u32));
     }
 }

@@ -12,6 +12,13 @@
 #define PATH_MAX_LEN 2048
 #define DATA_MAX     4096
 
+static void future_destroy_when_done(cy_future_t* const future)
+{
+    if (cy_future_done(future)) {
+        cy_future_destroy(future);
+    }
+}
+
 // Request schema:
 //     uint64           read_offset
 //     utf8[<=PATH_MAX] file_path
@@ -76,7 +83,7 @@ static void on_file_read_msg(cy_future_t* const subscriber)
     // We want the stack to retransmit until the client acknowledges reception, but we don't care about the result.
     // If we simply destroy the future, the transmission will be cancelled, so instead we set up auto-destruction.
     if (future != NULL) {
-        cy_future_callback_set(future, &cy_future_destroy); // Will auto-destroy when done.
+        cy_future_callback_set(future, &future_destroy_when_done);
     } else {
         (void)fprintf(stderr, "FAILED TO RESPOND\n");
     }

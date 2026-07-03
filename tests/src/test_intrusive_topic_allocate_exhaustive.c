@@ -656,8 +656,8 @@ static void test_topic_allocate_same_subject_id_reallocation_near_uint32_max_exh
     fixture_init(&fix);
 
     const uint32_t    modulus = fix.cy->platform->subject_id_modulus;
-    const uint64_t    hash  = UINT32_MAX; // Keep hash low enough to avoid uint64 sum overflow at evictions=UINT32_MAX.
-    cy_topic_t* const topic = fixture_make_topic(&fix, "alloc/exh/same-subject-near-max", hash, 0U, LAGE_MIN);
+    const uint64_t    hash    = UINT32_MAX;
+    cy_topic_t* const topic   = fixture_make_topic(&fix, "alloc/exh/same-subject-near-max", hash, 0U, LAGE_MIN);
     TEST_ASSERT_NOT_NULL(topic);
 
     for (uint32_t i = 0U; i < 4096U; i++) {

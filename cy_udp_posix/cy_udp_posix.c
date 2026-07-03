@@ -7,6 +7,11 @@
 //
 // Copyright (c) Pavel Kirienko <pavel@opencyphal.org>
 
+// Feature test macros must come before any system headers.
+#ifndef _POSIX_C_SOURCE         // NOLINT(bugprone-reserved-identifier,cert-dcl37-c,cert-dcl51-cpp)
+#define _POSIX_C_SOURCE 200809L // NOLINT(bugprone-reserved-identifier,cert-dcl37-c,cert-dcl51-cpp)
+#endif
+
 // Blanket-disable the const ptr warning because we have a lot of vtable functions here.
 // ReSharper disable CppParameterMayBeConstPtrOrRef
 
@@ -20,9 +25,6 @@
 #define RAPIDHASH_COMPACT
 #include <rapidhash.h>
 
-#ifndef __USE_POSIX199309 // NOLINT(bugprone-reserved-identifier,cert-dcl37-c,cert-dcl51-cpp)
-#define __USE_POSIX199309 // NOLINT(bugprone-reserved-identifier,cert-dcl37-c,cert-dcl51-cpp)
-#endif
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
@@ -242,23 +244,16 @@ struct subject_writer_t
 {
     cy_subject_writer_t base;
     uint64_t            next_transfer_id; // Random-initialized at the time of creation.
-    udpard_udpip_ep_t   endpoints[UDPARD_IFACE_COUNT_MAX];
 };
 
 static cy_subject_writer_t* v_subject_writer_new(cy_platform_t* const base, const uint32_t subject_id)
 {
+    (void)subject_id;
     assert(subject_id <= UDPARD_IPv4_SUBJECT_ID_MAX);
     cy_udp_posix_t* const   owner = (cy_udp_posix_t*)base;
     subject_writer_t* const self  = mem_alloc_zero(owner, sizeof(subject_writer_t));
     if (self != NULL) {
         self->next_transfer_id = prng64(&owner->prng_state, owner->udpard_tx.local_uid);
-        for (size_t i = 0; i < UDPARD_IFACE_COUNT_MAX; i++) {
-            if ((owner->iface_bitmap & (1U << i)) != 0) {
-                self->endpoints[i] = udpard_make_subject_endpoint(subject_id);
-            } else {
-                self->endpoints[i] = (udpard_udpip_ep_t){ 0 };
-            }
-        }
         owner->stats.subject_writer_count++;
     }
     CY_TRACE(owner->base.cy,
@@ -619,10 +614,17 @@ static void read_socket(cy_udp_posix_t* const   self,
         return;
     }
 
+    if (dgram.size == 0U) {
+        self->mem.vtable->base.free(self->mem.context, CY_UDP_SOCKET_READ_BUFFER_SIZE, dgram.data);
+        return;
+    }
+
     // Realloc the buffer to fit the actual size of the datagram to avoid inner fragmentation.
-    void* const dgram_realloc = realloc(dgram.data, dgram.size);
-    if (dgram_realloc != NULL) { // Sensible realloc implementations always succeed when shrinking.
-        dgram.data = dgram_realloc;
+    if (dgram.size < CY_UDP_SOCKET_READ_BUFFER_SIZE) {
+        void* const dgram_realloc = realloc(dgram.data, dgram.size);
+        if (dgram_realloc != NULL) { // Sensible realloc implementations always succeed when shrinking.
+            dgram.data = dgram_realloc;
+        }
         self->stats.mem.allocated_bytes -= (CY_UDP_SOCKET_READ_BUFFER_SIZE - dgram.size);
     }
 
@@ -635,8 +637,9 @@ static void read_socket(cy_udp_posix_t* const   self,
                                             dgram,
                                             udpard_make_deleter(self->mem),
                                             iface_index);
-    assert(pushok); // Push can only fail on invalid arguments, which we validate, so it must never fail.
-    (void)pushok;
+    if (!pushok) {
+        self->mem.vtable->base.free(self->mem.context, dgram.size, dgram.data);
+    }
 }
 
 static cy_err_t spin_once_until(cy_udp_posix_t* const self, const cy_us_t deadline)
@@ -839,7 +842,14 @@ cy_platform_t* cy_udp_posix_new_manual(const uint64_t uid,
 
     // This PRNG state seed is only valid if a true RTC is available. Otherwise, use other sources of entropy.
     // Refer to cy_platform.h docs for some hints on how to make it work on an MCU without a TRNG nor RTC.
-    self->prng_state = (uint64_t)time(NULL);
+    {
+        struct timespec ts;
+        if (timespec_get(&ts, TIME_UTC) != TIME_UTC) {
+            free(self);
+            return NULL;
+        }
+        self->prng_state = (((uint64_t)ts.tv_sec) * UINT64_C(1000000000)) + (uint64_t)ts.tv_nsec;
+    }
 
     // Set up the TX and RX pipelines.
     self->iface_bitmap               = 0;
@@ -859,7 +869,13 @@ cy_platform_t* cy_udp_posix_new_manual(const uint64_t uid,
         return NULL;
     }
     static const udpard_tx_vtable_t tx_vtable = { .eject = v_tx_eject };
-    if (!udpard_tx_new(&self->udpard_tx, uid, prng64(&self->prng_state, uid), tx_queue_capacity, tx_mem, &tx_vtable)) {
+    if (!udpard_tx_new(&self->udpard_tx,
+                       uid,
+                       prng64(&self->prng_state, uid),
+                       tx_queue_capacity,
+                       self->iface_bitmap,
+                       tx_mem,
+                       &tx_vtable)) {
         free(self);
         return NULL;
     }

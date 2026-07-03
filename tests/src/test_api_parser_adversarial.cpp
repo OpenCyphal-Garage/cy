@@ -185,8 +185,9 @@ std::uint32_t subject_id_for_hash(const std::uint64_t hash, const std::uint32_t 
     if (evictions >= (UINT32_MAX - CY_SUBJECT_ID_PINNED_MAX)) { // is_pinned(evictions)
         return static_cast<std::uint32_t>(UINT32_MAX - evictions);
     }
-    const std::uint64_t offset =
-      (hash + (static_cast<std::uint64_t>(evictions) * static_cast<std::uint64_t>(evictions))) % modulus;
+    const std::uint64_t h      = hash % modulus;
+    const std::uint64_t e      = static_cast<std::uint64_t>(evictions) % modulus;
+    const std::uint64_t offset = (h + ((e * e) % modulus)) % modulus;
     return CY_SUBJECT_ID_PINNED_MAX + 1U + static_cast<std::uint32_t>(offset);
 }
 

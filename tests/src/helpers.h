@@ -13,7 +13,7 @@ void make_message_header(unsigned char out[24], uint8_t type, uint64_t tag, uint
 
 size_t make_gossip_header(unsigned char* out,
                           size_t         out_size,
-                          uint8_t        ttl,
+                          uint8_t        reserved,
                           int8_t         topic_log_age,
                           uint64_t       topic_hash,
                           uint32_t       topic_evictions,

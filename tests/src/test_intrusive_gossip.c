@@ -1020,6 +1020,39 @@ static void test_topic_subscribe_if_matching_pinned_low_wire_age_preserves_age(v
     fixture_deinit(&fix);
 }
 
+static void assert_topic_subscribe_if_matching_rejects(fixture_t* const fix, const cy_str_t name)
+{
+    const uint64_t hash = rapidhash(name.str, name.len);
+    TEST_ASSERT_NULL(topic_subscribe_if_matching(fix->cy, name, hash, 0U, 0));
+    TEST_ASSERT_NULL(cy_topic_find_by_hash(fix->cy, hash));
+}
+
+static void test_topic_subscribe_if_matching_rejects_invalid_gossip_names(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    cy_future_t* const sub = cy_subscribe(fix.cy, cy_str("gossip/invalid/>"), 64U);
+    TEST_ASSERT_NOT_NULL(sub);
+
+    const cy_str_t    valid      = cy_str("gossip/invalid/valid");
+    const uint64_t    valid_hash = rapidhash(valid.str, valid.len);
+    cy_topic_t* const topic      = topic_subscribe_if_matching(fix.cy, valid, valid_hash, 0U, 0);
+    TEST_ASSERT_NOT_NULL(topic);
+    TEST_ASSERT_TRUE(topic == cy_topic_find_by_hash(fix.cy, valid_hash));
+
+    assert_topic_subscribe_if_matching_rejects(&fix, cy_str("gossip/invalid/bad name"));
+    assert_topic_subscribe_if_matching_rejects(&fix, cy_str("gossip/invalid/a//b"));
+    assert_topic_subscribe_if_matching_rejects(&fix, cy_str("/gossip/invalid/leading"));
+    assert_topic_subscribe_if_matching_rejects(&fix, cy_str("gossip/invalid/trailing/"));
+    assert_topic_subscribe_if_matching_rejects(&fix, cy_str("gossip/invalid/*"));
+    assert_topic_subscribe_if_matching_rejects(&fix, cy_str("gossip/invalid/>"));
+
+    cy_future_destroy(sub);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(fix.cy));
+    fixture_deinit(&fix);
+}
+
 // Validate subscriber pattern index lifecycle through the gossip/subscriber infrastructure.
 // When a pattern subscriber is created (even if scouting fails), the pattern index must be
 // populated, and when the subscriber is destroyed, the pattern index must be cleaned up.
@@ -1187,6 +1220,7 @@ int main(void)
     RUN_TEST(test_on_gossip_known_topic_equal_lage_higher_evictions_win);
     RUN_TEST(test_on_gossip_unknown_topic_pinned_not_in_index_no_collision);
     RUN_TEST(test_topic_subscribe_if_matching_pinned_low_wire_age_preserves_age);
+    RUN_TEST(test_topic_subscribe_if_matching_rejects_invalid_gossip_names);
     RUN_TEST(test_subscriber_pattern_index_lifecycle_with_scout_failure);
     RUN_TEST(test_diag_topic_creation_reallocation_and_destruction);
     RUN_TEST(test_diag_gossip_processed_known_unknown_and_autocreate);

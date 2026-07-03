@@ -30,6 +30,7 @@ bool udp_test_spin_pair_until_condition(udp_test_node_t* a,
                                         void*   context,
                                         size_t  rounds,
                                         cy_us_t slice);
+void udp_test_assert_no_inactive_iface_tx(const udp_test_node_t* node);
 
 size_t   udp_test_message_read_all(const cy_message_t* message, void* out, size_t capacity);
 void     udp_test_assert_message_equals(const cy_message_t* message, const void* expected, size_t size);

@@ -27,14 +27,9 @@
 \* The eviction count is used as a Lamport clock and hence implementations ensure that it cannot overflow. Since
 \* evictions are static on a quiescent network, even relatively narrow representations (e.g., 32 bit) may suffice.
 \*
-\* The subject-ID assigned to a topic is defined as some function of its hash and eviction count. One possible way
-\* to define the function is, assuming 64-bit unsigned arithmetics:
-\*
-\*      subject_id = 8192 + ((hash + evictions**2) % 8380403)
-\*
-\* For the background on the subject of open addressing schemes and why the specific values were chosen this way, see:
-\* - https://en.wikipedia.org/wiki/Quadratic_probing
-\* - https://github.com/OpenCyphal-Garage/cy/issues/12
+\* The subject-ID assigned to a topic is defined as some function of its hash and eviction count.
+\* This model intentionally uses a minimal function below; it abstracts over the production open-addressing scheme
+\* without undermining the predictive power of the model, as demonstrated in the enclosed proofs.
 \*
 \* The eviction count of a topic is incremented whenever the topic is involved in a collision and loses arbitration.
 \* Arbitration is defined as two functions, defined here as LeftWinsCollision and LeftWinsDivergence.
@@ -99,7 +94,8 @@ LOCAL Check_FloorToPow2 ==
 
 \***********************************************************************************************************************
 \* Subject-ID mapping function. The ring size is the total number of distinct subject-IDs.
-\* TODO: Switch to quadratic probing: https://github.com/OpenCyphal-Garage/cy/issues/12
+\* The intentionally simple linear mapping differs from the production open-addressing scheme.
+\* The divergence is immaterial for the CRDT convergence properties exercised by this model.
 SubjectIDRing == 10
 SubjectID(hash, evictions) == (hash + evictions) % SubjectIDRing
 
@@ -358,6 +354,9 @@ Converged(node_topics) ==
     /\ FindCollisions(node_topics) = {}
 
 \***********************************************************************************************************************
+VARIABLE check_state
+Spec == (check_state = 0) /\ [][UNCHANGED check_state]_check_state
+
 Check_Core ==
     /\ Check_Log2Floor
     /\ Check_Pow2

@@ -168,7 +168,6 @@ void                 cy_future_callback_set(cy_future_t* const self, const cy_fu
 
 /// Every future must be destroyed. If the future is still pending, the associated action will be cancelled.
 /// A future may be destroyed from within its own callback.
-/// If the future outcome is not of interest, use this function as the future callback to ensure automatic destruction.
 /// Note: the actual memory deallocation may happen at a later time depending on the future implementation.
 void cy_future_destroy(cy_future_t* const self);
 

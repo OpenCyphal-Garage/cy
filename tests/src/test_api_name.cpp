@@ -464,15 +464,21 @@ void test_name_resolve_bare_pin()
 
 void test_name_resolve_bare_pin_with_namespace()
 {
-    // Bare pin with namespace: name "#123" stripped to "" with pin=123, then join(ns, "") -> "ns".
     std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
-    const cy_resolved_t                     r =
-      cy_name_resolve(nullptr, cy_str("#123"), cy_str("ns1"), cy_str("me"), buf.size(), buf.data());
-    TEST_ASSERT_NOT_NULL(r.name.str);
-    TEST_ASSERT_EQUAL_size_t(3, r.name.len);
-    TEST_ASSERT_EQUAL_STRING_LEN("ns1", r.name.str, r.name.len);
-    TEST_ASSERT_EQUAL_UINT16(123, r.pin);
-    TEST_ASSERT_TRUE(r.verbatim);
+    cy_resolved_t                           r{};
+
+    r = cy_name_resolve(nullptr, cy_str("#123"), cy_str("ns1"), cy_str("me"), buf.size(), buf.data());
+    TEST_ASSERT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, r.name.len);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, r.pin);
+
+    r = cy_name_resolve(nullptr, cy_str("#0"), cy_str("ns1"), cy_str("me"), buf.size(), buf.data());
+    TEST_ASSERT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, r.name.len);
+
+    r = cy_name_resolve(nullptr, cy_str("#8191"), cy_str("ns1"), cy_str("me"), buf.size(), buf.data());
+    TEST_ASSERT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, r.name.len);
 }
 
 void test_name_resolve_pin_with_namespace_pin()
@@ -1037,14 +1043,11 @@ void test_name_resolve_empty_namespace()
 
 void test_name_resolve_empty_name_with_namespace()
 {
-    // Empty name with namespace yields just the namespace.
     std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
     const cy_resolved_t r = cy_name_resolve(nullptr, cy_str(""), cy_str("ns"), cy_str("me"), buf.size(), buf.data());
-    TEST_ASSERT_NOT_NULL(r.name.str);
-    TEST_ASSERT_EQUAL_size_t(2, r.name.len);
-    TEST_ASSERT_EQUAL_STRING_LEN("ns", r.name.str, r.name.len);
+    TEST_ASSERT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, r.name.len);
     TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, r.pin);
-    TEST_ASSERT_TRUE(r.verbatim);
 }
 
 void test_name_resolve_empty_name_empty_ns()
@@ -1404,17 +1407,13 @@ void test_name_resolve_homeful_namespace_expanded()
     TEST_ASSERT_TRUE(r.verbatim);
 }
 
-/// cy_name_resolve with a homeful namespace and an empty relative name.
-/// This exercises the second cy_name_join() in the homeful-namespace branch with an empty right part.
 void test_name_resolve_homeful_namespace_empty_name()
 {
     std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
     const cy_resolved_t r = cy_name_resolve(nullptr, cy_str(""), cy_str("~/ns"), cy_str("me"), buf.size(), buf.data());
-    TEST_ASSERT_NOT_NULL(r.name.str);
-    TEST_ASSERT_EQUAL_size_t(5U, r.name.len);
-    TEST_ASSERT_EQUAL_STRING_LEN("me/ns", r.name.str, r.name.len);
+    TEST_ASSERT_NULL(r.name.str);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, r.name.len);
     TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, r.pin);
-    TEST_ASSERT_TRUE(r.verbatim);
 }
 
 /// cy_name_join with zero dest_size -- left is non-empty but buffer is zero-sized.
@@ -1729,6 +1728,20 @@ void test_name_resolve_remap_to_pin_overrides_user_pin()
     assert_resolved(r, "bar", 42, true);
 }
 
+void test_name_resolve_remap_empty_and_pin_only_to_rejected()
+{
+    static constexpr std::array targets = { "", "/", "#0", "#1234" };
+    for (const char* const target : targets) {
+        RemapFixture                            remap{ { "foo", target } };
+        std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+        const cy_resolved_t                     r =
+          cy_name_resolve(remap.get(), cy_str("foo"), cy_str("ns"), cy_str("me"), buf.size(), buf.data());
+        TEST_ASSERT_NULL(r.name.str);
+        TEST_ASSERT_EQUAL_size_t(SIZE_MAX, r.name.len);
+        TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, r.pin);
+    }
+}
+
 // ----- Pattern `to` -----
 
 // A `to` containing wildcards turns a literal subscription into a pattern subscription (verbatim=false).
@@ -1907,6 +1920,7 @@ int main()
     RUN_TEST(test_name_resolve_remap_query_pin_passes_through_on_no_match);
     RUN_TEST(test_name_resolve_remap_pinned_query_pin_discarded_on_match);
     RUN_TEST(test_name_resolve_remap_to_pin_overrides_user_pin);
+    RUN_TEST(test_name_resolve_remap_empty_and_pin_only_to_rejected);
     RUN_TEST(test_name_resolve_remap_to_has_wildcard);
     RUN_TEST(test_name_resolve_remap_post_remap_pattern_with_pin_rejected);
 

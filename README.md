@@ -152,11 +152,17 @@ A future may be destroyed from within its own callback.
 cy_future_destroy(future);
 ```
 
-If you don't care about the future outcome, you can set it up for auto-destruction upon materialization as shown below.
 Do not destroy unwanted futures right away because that cancels the associated operation.
+If you don't care about the outcome of a one-shot future, set up a callback that destroys it when done:
 
-```c++
-cy_future_callback_set(future, cy_future_destroy);  // Will destroy itself when done, no need to keep the reference.
+```c
+static void future_destroy_when_done(cy_future_t* const future)
+{
+    if (cy_future_done(future)) {
+        cy_future_destroy(future);
+    }
+}
+cy_future_callback_set(future, &future_destroy_when_done);
 ```
 
 The examples folder contains a simple publisher example `example_time_pub.c`.

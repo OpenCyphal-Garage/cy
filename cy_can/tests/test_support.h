@@ -61,6 +61,7 @@ struct can_test_node_t
     canard_us_t          last_tx_fd_deadline;
     size_t               rx_calls;
     uint_least8_t        last_tx_pending_iface_bitmap;
+    uint_least8_t        observed_tx_pending_iface_bitmap;
     size_t               filter_calls;
     size_t               filter_failures_remaining;
     size_t               last_filter_count;
@@ -89,6 +90,7 @@ void can_test_node_prepare(can_test_node_t* self,
 void can_test_node_make_platform(can_test_node_t* self, size_t tx_queue_capacity, size_t filter_count);
 void can_test_node_make_cy(can_test_node_t* self, const char* home);
 void can_test_node_destroy(can_test_node_t* self);
+void can_test_node_push_rx(can_test_node_t* self, const cy_can_rx_t* frame);
 
 void can_test_node_spin(can_test_node_t* self, cy_us_t slice);
 void can_test_spin_pair(can_test_node_t* a, can_test_node_t* b, size_t rounds, cy_us_t slice);
