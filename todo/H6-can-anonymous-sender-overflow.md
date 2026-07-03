@@ -3,7 +3,7 @@
 - **Severity:** 🔴 HIGH (report H-6 / CAN-F2)
 - **Confidence:** reproduced under ASan by the CAN agent; constants confirmed by orchestrator
 - **Subsystem:** `cy_can/cy_can.c`
-- **Status:** OPEN
+- **Status:** RESOLVED
 
 ## Summary
 Anonymous Cyphal/CAN v1.0 frames arrive with source node-ID 255. If the application responds on the resulting

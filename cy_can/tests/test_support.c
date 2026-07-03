@@ -400,6 +400,8 @@ void can_test_node_destroy(can_test_node_t* const self)
     TEST_ASSERT_EQUAL_size_t(0U, can_test_heap_allocated_bytes(&self->heap));
 }
 
+void can_test_node_push_rx(can_test_node_t* const self, const cy_can_rx_t* const frame) { enqueue_rx(self, frame); }
+
 void can_test_node_spin(can_test_node_t* const self, const cy_us_t slice)
 {
     TEST_ASSERT_NOT_NULL(self);

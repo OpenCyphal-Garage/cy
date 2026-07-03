@@ -79,7 +79,7 @@ function(cy_udp_posix_add_test name)
     set_target_properties(
             ${name}
             PROPERTIES
-            C_STANDARD 99
+            C_STANDARD 11
             C_STANDARD_REQUIRED ON
             C_EXTENSIONS OFF
             COMPILE_WARNING_AS_ERROR ON
@@ -91,4 +91,5 @@ cy_udp_posix_add_test(test_api_udp_posix_basic test_api_udp_posix_basic.c)
 cy_udp_posix_add_test(test_api_udp_posix_pubsub test_api_udp_posix_pubsub.c)
 cy_udp_posix_add_test(test_api_udp_posix_rpc_lifecycle test_api_udp_posix_rpc_lifecycle.c)
 cy_udp_posix_add_test(test_api_udp_posix_default_ctor test_api_udp_posix_default_ctor.c)
+cy_udp_posix_add_test(test_api_udp_posix_resilience test_api_udp_posix_resilience.c)
 set_tests_properties(run_test_api_udp_posix_default_ctor PROPERTIES SKIP_RETURN_CODE 77)

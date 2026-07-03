@@ -7,6 +7,11 @@
 //
 // Copyright (c) Pavel Kirienko <pavel@opencyphal.org>
 
+// Feature test macros must come before any system headers.
+#ifndef _POSIX_C_SOURCE         // NOLINT(bugprone-reserved-identifier,cert-dcl37-c,cert-dcl51-cpp)
+#define _POSIX_C_SOURCE 200809L // NOLINT(bugprone-reserved-identifier,cert-dcl37-c,cert-dcl51-cpp)
+#endif
+
 // Blanket-disable the const ptr warning because we have a lot of vtable functions here.
 // ReSharper disable CppParameterMayBeConstPtrOrRef
 
@@ -20,9 +25,6 @@
 #define RAPIDHASH_COMPACT
 #include <rapidhash.h>
 
-#ifndef __USE_POSIX199309 // NOLINT(bugprone-reserved-identifier,cert-dcl37-c,cert-dcl51-cpp)
-#define __USE_POSIX199309 // NOLINT(bugprone-reserved-identifier,cert-dcl37-c,cert-dcl51-cpp)
-#endif
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
@@ -611,10 +613,17 @@ static void read_socket(cy_udp_posix_t* const   self,
         return;
     }
 
+    if (dgram.size == 0U) {
+        self->mem.vtable->base.free(self->mem.context, CY_UDP_SOCKET_READ_BUFFER_SIZE, dgram.data);
+        return;
+    }
+
     // Realloc the buffer to fit the actual size of the datagram to avoid inner fragmentation.
-    void* const dgram_realloc = realloc(dgram.data, dgram.size);
-    if (dgram_realloc != NULL) { // Sensible realloc implementations always succeed when shrinking.
-        dgram.data = dgram_realloc;
+    if (dgram.size < CY_UDP_SOCKET_READ_BUFFER_SIZE) {
+        void* const dgram_realloc = realloc(dgram.data, dgram.size);
+        if (dgram_realloc != NULL) { // Sensible realloc implementations always succeed when shrinking.
+            dgram.data = dgram_realloc;
+        }
         self->stats.mem.allocated_bytes -= (CY_UDP_SOCKET_READ_BUFFER_SIZE - dgram.size);
     }
 
@@ -627,8 +636,9 @@ static void read_socket(cy_udp_posix_t* const   self,
                                             dgram,
                                             udpard_make_deleter(self->mem),
                                             iface_index);
-    assert(pushok); // Push can only fail on invalid arguments, which we validate, so it must never fail.
-    (void)pushok;
+    if (!pushok) {
+        self->mem.vtable->base.free(self->mem.context, dgram.size, dgram.data);
+    }
 }
 
 static cy_err_t spin_once_until(cy_udp_posix_t* const self, const cy_us_t deadline)
@@ -831,7 +841,14 @@ cy_platform_t* cy_udp_posix_new_manual(const uint64_t uid,
 
     // This PRNG state seed is only valid if a true RTC is available. Otherwise, use other sources of entropy.
     // Refer to cy_platform.h docs for some hints on how to make it work on an MCU without a TRNG nor RTC.
-    self->prng_state = (uint64_t)time(NULL);
+    {
+        struct timespec ts;
+        if (timespec_get(&ts, TIME_UTC) != TIME_UTC) {
+            free(self);
+            return NULL;
+        }
+        self->prng_state = (((uint64_t)ts.tv_sec) * UINT64_C(1000000000)) + (uint64_t)ts.tv_nsec;
+    }
 
     // Set up the TX and RX pipelines.
     self->iface_bitmap               = 0;

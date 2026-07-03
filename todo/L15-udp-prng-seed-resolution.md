@@ -3,7 +3,7 @@
 - **Severity:** 🟡 LOW (report L-15 / U-F3)
 - **Confidence:** verified (code trace)
 - **Subsystem:** `cy_udp_posix/cy_udp_posix.c`
-- **Status:** OPEN
+- **Status:** RESOLVED
 
 ## Summary
 The driver's PRNG state is seeded from `time(NULL)` (1 s resolution). With the manual constructor and a **fixed** UID,

@@ -713,7 +713,9 @@ static cy_err_t v_unicast_send(cy_platform_t* const   base,
 {
     cy_can_t* const     owner  = (cy_can_t*)base;
     const uint_least8_t remote = lane->ctx.state[0];
-    assert(remote <= CANARD_NODE_ID_MAX);
+    if ((remote > CANARD_NODE_ID_MAX) || (lane->id != remote)) {
+        return CY_ERR_ARGUMENT;
+    }
     const uint64_t      e_oom  = owner->canard.err.oom;
     const uint64_t      e_cap  = owner->canard.err.tx_capacity;
     const uint_least8_t tid    = owner->unicast_tid[remote];

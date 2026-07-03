@@ -3,7 +3,7 @@
 - **Severity:** 🟠 MEDIUM (report M-6 / U-F2)
 - **Confidence:** verified (code trace)
 - **Subsystem:** `cy_udp_posix/udp_wrapper.c`, `cy_udp_posix/cy_udp_posix.c`
-- **Status:** OPEN
+- **Status:** RESOLVED
 
 ## Summary
 If a signal interrupts `poll()`, it returns −1/EINTR; the driver maps that to `CY_ERR_MEDIA`, which `cy_spin_until`

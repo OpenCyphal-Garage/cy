@@ -4,12 +4,18 @@
 // SPDX-License-Identifier: MIT
 // Author: Pavel Kirienko <pavel@opencyphal.org>
 
-#include "udp_wrapper.h"
-
-// Enable SO_REUSEPORT.
+// Feature test macros must come before any system headers.
+#ifndef _POSIX_C_SOURCE         // NOLINT(*-reserved-identifier,*-dcl37-c,*-dcl51-cpp)
+#define _POSIX_C_SOURCE 200809L // NOLINT(*-reserved-identifier,*-dcl37-c,*-dcl51-cpp)
+#endif
 #ifndef _DEFAULT_SOURCE // NOLINT(*-reserved-identifier,*-dcl37-c,*-dcl51-cpp)
 #define _DEFAULT_SOURCE // NOLINT(*-reserved-identifier,*-dcl37-c,*-dcl51-cpp)
 #endif
+#ifndef _DARWIN_C_SOURCE // NOLINT(*-reserved-identifier,*-dcl37-c,*-dcl51-cpp)
+#define _DARWIN_C_SOURCE // NOLINT(*-reserved-identifier,*-dcl37-c,*-dcl51-cpp)
+#endif
+
+#include "udp_wrapper.h"
 
 #include <assert.h>
 #include <fcntl.h>
@@ -30,12 +36,14 @@
 #define DSCP_MAX 63
 
 #ifndef __APPLE__
-struct in_pktinfo
+typedef struct
 {
     unsigned ipi_ifindex;  // incoming ifindex
     uint32_t ipi_spec_dst; // local destination address
     uint32_t ipi_addr;     // header source address
-};
+} udp_wrapper_pktinfo_t;
+#else
+typedef struct in_pktinfo udp_wrapper_pktinfo_t;
 #endif
 
 static bool is_multicast(const uint32_t address)
@@ -226,7 +234,7 @@ int16_t udp_wrapper_receive(udp_wrapper_t* const self,
     if ((self != NULL) && (self->fd >= 0) && (inout_payload_size != NULL) && (out_payload != NULL)) {
         struct sockaddr_in src = { 0 };
         struct iovec       iov = { .iov_base = out_payload, .iov_len = *inout_payload_size };
-        char               cbuf[CMSG_SPACE(sizeof(struct in_pktinfo))];
+        char               cbuf[CMSG_SPACE(sizeof(udp_wrapper_pktinfo_t))];
         struct msghdr      msg = { .msg_name       = &src,
                                    .msg_namelen    = sizeof(src),
                                    .msg_iov        = &iov,
@@ -242,16 +250,16 @@ int16_t udp_wrapper_receive(udp_wrapper_t* const self,
                 *out_src_port = ntohs(src.sin_port);
             }
             // locate IP_PKTINFO
-            const struct in_pktinfo* pi = NULL;
+            const udp_wrapper_pktinfo_t* pi = NULL;
             for (struct cmsghdr* c = CMSG_FIRSTHDR(&msg); c; c = CMSG_NXTHDR(&msg, c)) {
                 if (c->cmsg_level == IPPROTO_IP && c->cmsg_type == IP_PKTINFO) {
-                    pi = (struct in_pktinfo*)CMSG_DATA(c);
+                    pi = (udp_wrapper_pktinfo_t*)CMSG_DATA(c);
                     break;
                 }
             }
             if (pi == NULL) {
                 res = -EIO;
-            } else if (pi->ipi_ifindex != self->iface_index) { // NOLINT(*-branch-clone)
+            } else if (((size_t)pi->ipi_ifindex) != self->iface_index) { // NOLINT(*-branch-clone)
                 res = 0; // wrong iface -- ignore; relevant for multicast sockets only
             } else {
                 *inout_payload_size = (size_t)n;
@@ -272,9 +280,8 @@ int16_t udp_wrapper_wait(const int64_t         timeout_us,
                          const size_t          rx_count,
                          udp_wrapper_t** const rx)
 {
-    int16_t       res         = -EINVAL;
-    const size_t  total_count = tx_count + rx_count;
-    struct pollfd fds[total_count]; // Violates MISRA-C:2012 Rule 18.8; replace with a fixed limit.
+    int16_t      res         = -EINVAL;
+    const size_t total_count = tx_count + rx_count;
     // IEEE Std 1003.1 requires:
     //
     //  The implementation shall support one or more programming environments in which the width of nfds_t is
@@ -283,19 +290,26 @@ int16_t udp_wrapper_wait(const int64_t         timeout_us,
     // Per C99, the minimum size of "long" is 32 bits, hence we compare against INT32_MAX.
     // OPEN_MAX is not used because it is not guaranteed to be defined nor the limit has to be static.
     if ((tx != NULL) && (rx != NULL) && (total_count > 0) && (total_count <= INT32_MAX)) {
+        struct pollfd fds[total_count]; // Violates MISRA-C:2012 Rule 18.8; replace with a fixed limit.
         {
             size_t idx = 0;
             for (; idx < tx_count; idx++) {
-                fds[idx].fd     = tx[idx]->fd;
-                fds[idx].events = POLLOUT;
+                fds[idx].fd      = tx[idx]->fd;
+                fds[idx].events  = POLLOUT;
+                fds[idx].revents = 0;
             }
             for (; idx < tx_count + rx_count; idx++) {
-                fds[idx].fd     = rx[idx - tx_count]->fd;
-                fds[idx].events = POLLIN;
+                fds[idx].fd      = rx[idx - tx_count]->fd;
+                fds[idx].events  = POLLIN;
+                fds[idx].revents = 0;
             }
         }
         const int64_t timeout_ms = timeout_us / 1000;
-        const int poll_result    = poll(fds, (nfds_t)total_count, (int)((timeout_ms > INT_MAX) ? INT_MAX : timeout_ms));
+        int       poll_result    = poll(fds, (nfds_t)total_count, (int)((timeout_ms > INT_MAX) ? INT_MAX : timeout_ms));
+        const int poll_errno     = (poll_result < 0) ? errno : 0;
+        if ((poll_result < 0) && (poll_errno == EINTR)) {
+            poll_result = 0;
+        }
         if (poll_result >= 0) {
             res        = 0;
             size_t idx = 0;
@@ -310,7 +324,7 @@ int16_t udp_wrapper_wait(const int64_t         timeout_us,
                 }
             }
         } else {
-            res = (int16_t)-errno;
+            res = (int16_t)-poll_errno;
         }
     }
     return res;

@@ -3,7 +3,7 @@
 - **Severity:** 🔴 HIGH (borderline critical) (report H-4 / U-F1)
 - **Confidence:** reproduced end-to-end by the UDP review agent; glibc `realloc(ptr,0)→NULL` confirmed on host
 - **Subsystem:** `cy_udp_posix/cy_udp_posix.c`, `cy_udp_posix/udp_wrapper.c`
-- **Status:** OPEN
+- **Status:** RESOLVED
 
 ## Summary
 A single valid zero-length UDP datagram to the broadcast-subject multicast group (which every Cy/UDP node joins)
