@@ -327,7 +327,7 @@ void dispatch_raw(test_platform_t&                      platform,
 void dispatch_gossip(test_platform_t&           platform,
                      const cy_lane_t&           lane,
                      const cy_subject_reader_t* reader,
-                     const std::uint8_t         ttl,
+                     const std::uint8_t         reserved,
                      const std::int8_t          lage,
                      const std::uint64_t        hash,
                      const std::uint32_t        evictions,
@@ -335,7 +335,8 @@ void dispatch_gossip(test_platform_t&           platform,
                      const cy_us_t              ts)
 {
     std::array<unsigned char, 256> wire{};
-    const std::size_t size = make_gossip_header(wire.data(), wire.size(), ttl, lage, hash, evictions, cy_str(name));
+    const std::size_t              size =
+      make_gossip_header(wire.data(), wire.size(), reserved, lage, hash, evictions, cy_str(name));
     TEST_ASSERT_TRUE(size > 0U);
     dispatch_raw(platform, wire, size, lane, reader, ts);
 }
@@ -803,7 +804,7 @@ void test_api_scout_match_triggers_gossip_response_and_fields_are_correct()
     TEST_ASSERT_TRUE(c.unicast);
     TEST_ASSERT_EQUAL_UINT8(header_gossip, capture_type(c));
     TEST_ASSERT_EQUAL_UINT64(cy_topic_hash(topic), capture_u64(c, 8U));
-    TEST_ASSERT_EQUAL_UINT8(0U, c.data[2]); // scout response TTL is zero
+    TEST_ASSERT_EQUAL_UINT8(0U, c.data[2]);
 
     cy_unadvertise(pub);
     platform_deinit(p);

@@ -3,7 +3,7 @@
 - **Severity:** 🟡 LOW (report L-14 / N-F4)
 - **Confidence:** verified (code trace + existing tests assert the wrong behaviour)
 - **Subsystem:** core (`cy/cy.c`, name resolution) + tests
-- **Status:** OPEN
+- **Status:** RESOLVED
 
 ## Maintainer decision (2026-07-02)
 This finding's original framing is **reversed**: the documentation in `cy.h` is **correct** — an empty name and a

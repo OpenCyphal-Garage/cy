@@ -1310,9 +1310,11 @@ static uint32_t topic_subject_id_impl(const uint64_t hash, const uint64_t evicti
         return (uint32_t)(UINT32_MAX - (uint32_t)evictions);
     }
     assert(subject_id_modulus > 0);
-    assert(evictions <= UINT32_MAX); // otherwise we'd have to use long-form mul_mod algorithm
+    assert(evictions <= UINT32_MAX);
+    const uint64_t h = hash % subject_id_modulus;
+    const uint64_t e = evictions % subject_id_modulus;
     const uint64_t subject_id =
-      CY_SUBJECT_ID_PINNED_MAX + 1ULL + ((hash + (evictions * evictions)) % subject_id_modulus);
+      CY_SUBJECT_ID_PINNED_MAX + 1ULL + ((h + ((e * e) % subject_id_modulus)) % subject_id_modulus);
     assert((subject_id > CY_SUBJECT_ID_PINNED_MAX) && (subject_id <= CY_SUBJECT_ID_MAX(subject_id_modulus)));
     assert(subject_id <= UINT32_MAX);
     return (uint32_t)subject_id;
@@ -1719,7 +1721,8 @@ static cy_topic_t* topic_subscribe_if_matching(cy_t* const       cy,
                                                const int_fast8_t lage)
 {
     assert((cy != NULL) && (resolved_name.str != NULL));
-    if ((resolved_name.len == 0) || (rapidhash(resolved_name.str, resolved_name.len) != hash)) {
+    if ((resolved_name.len == 0) || (name_normalized_len(resolved_name) != resolved_name.len) ||
+        !name_is_verbatim(resolved_name) || (rapidhash(resolved_name.str, resolved_name.len) != hash)) {
         return NULL; // Ensure the remote is not trying to feed us a bad name.
     }
     if (NULL == wkv_route(&cy->subscribers_by_pattern, resolved_name, NULL, wkv_cb_first)) {
@@ -2025,18 +2028,8 @@ static void on_gossip(cy_t* const          cy,
         mine = topic_subscribe_if_matching(cy, name, hash, evictions, lage);
     }
     if (mine != NULL) {
-        // We have this topic! Check for divergence, i.e., if we have consensus on the subject-ID.
-        // If there is a divergence and we win arbitration, the gossip can no longer be forwarded -- it is obsolete;
-        // instead, we will send our new urgent gossip. This resets TTL but this is natural since it's a new gossip.
-        // If we lose arbitration, we likewise send an urgent gossip right away from within topic_allocate(),
-        // so forwarding must not be done to avoid redundancy.
         on_gossip_known_topic(cy, ts, mine, evictions, lage, scope);
     } else {
-        // We don't know this topic; check for a subject-ID collision.
-        // If there is a collision and we win arbitration, the gossip can no longer be forwarded -- it is obsolete;
-        // instead, we will send our new urgent gossip. This resets TTL but this is natural since it's a new gossip.
-        // If we lose, the gossip is still valid but since we would have moved our own topic that means that we will
-        // urgent-gossip it too, meaning that we will emit two gossips this cycle: own and forward.
         on_gossip_unknown_topic(cy, ts, hash, evictions, lage);
     }
     diag_gossip_processed(cy, mine, name, hash);
@@ -3869,6 +3862,7 @@ static void subscriber_destroy(subscriber_t* const self)
     subscriber_root_t* const root = self->root;
     assert((root != NULL) && (root->cy == cy));
     assert(self->base.callback == NULL); // Must have been reset beforehand by the future framework.
+    future_deadline_disarm(&self->base);
 #if CY_CONFIG_TRACE
     char name[CY_TOPIC_NAME_MAX + 1];
     cy_subscriber_name(&self->base, name);
@@ -4245,7 +4239,33 @@ static bool is_prime_u32(const uint32_t n)
 
 static bool is_valid_subject_id_modulus(const uint32_t modulus)
 {
-    return (modulus >= CY_SUBJECT_ID_MODULUS_16bit) && is_prime_u32(modulus) && (modulus % 4U == 3U);
+    if ((modulus < CY_SUBJECT_ID_MODULUS_16bit) || (modulus > (UINT32_MAX - (uint32_t)CY_SUBJECT_ID_PINNED_MAX)) ||
+        !is_prime_u32(modulus) || (modulus % 4U != 3U)) {
+        return false;
+    }
+    const uint32_t max_subject_id       = CY_SUBJECT_ID_MAX(modulus);
+    const uint64_t broadcast_subject_id = (UINT64_C(1) << ((uint_fast8_t)log2_floor(max_subject_id) + 1U)) - 1U;
+    const uint64_t shard_min_subject_id = (uint64_t)max_subject_id + 1U;
+    if (broadcast_subject_id <= shard_min_subject_id) {
+        return false;
+    }
+    return (broadcast_subject_id - shard_min_subject_id) < modulus;
+}
+
+static void destroy_disposed_subscribers(cy_t* const cy)
+{
+    while (!wkv_is_empty(&cy->subscribers_by_name)) {
+        const wkv_node_t* const node = wkv_at(&cy->subscribers_by_name, 0);
+        assert((node != NULL) && (node->value != NULL));
+        subscriber_root_t* const root = (subscriber_root_t*)node->value;
+        assert((root != NULL) && (root->head != NULL));
+        subscriber_t* const sub = root->head;
+        assert(sub->disposed);
+        if (!sub->disposed) {
+            break;
+        }
+        subscriber_destroy(sub);
+    }
 }
 
 static cy_us_t olga_now(olga_t* const sched) { return cy_now((cy_t*)sched->user); }
@@ -4456,6 +4476,8 @@ void cy_destroy(cy_t* const cy)
         return;
     }
 
+    destroy_disposed_subscribers(cy);
+
     // Ensure the user has cleaned up beforehand.
     // We are unable to destroy user-owner objects like publishers/subscribers/futures because we don't own them.
     assert(wkv_is_empty(&cy->subscribers_by_name));
@@ -4589,16 +4611,19 @@ cy_err_t cy_remap(cy_t* const cy, const cy_str_t from, const cy_str_t to)
     // paths are preserved for the apply-time `name_resolve_construct` substitution.
     // Char-set validation is done via `name_normalized_len`; we discard the normalized length itself.
     // Pinned patterns are rejected here because cy_name_resolve would reject them at apply time anyway.
-    if (name_normalized_len(to) == SIZE_MAX) {
-        return CY_ERR_NAME;
-    }
+    uint16_t       to_pin      = UINT16_MAX;
+    const cy_str_t to_unpinned = name_consume_pin_suffix(to, &to_pin);
     {
-        uint16_t   to_pin   = UINT16_MAX;
-        const bool verbatim = name_is_verbatim(name_consume_pin_suffix(to, &to_pin));
-        const bool pinned   = to_pin <= CY_SUBJECT_ID_PINNED_MAX;
-        if (pinned && !verbatim) {
+        char           to_buf[CY_TOPIC_NAME_MAX + 1U];
+        const cy_str_t to_norm = name_normalize(to_unpinned, sizeof(to_buf), to_buf);
+        if ((to_norm.str == NULL) || (to_norm.len == 0U)) {
             return CY_ERR_NAME;
         }
+    }
+    const bool verbatim = name_is_verbatim(to_unpinned);
+    const bool pinned   = to_pin <= CY_SUBJECT_ID_PINNED_MAX;
+    if (pinned && !verbatim) {
+        return CY_ERR_NAME;
     }
 
     // Allocate the verbatim copy of `to` before touching the wkv so an OOM can be rolled back cleanly.
@@ -5199,6 +5224,9 @@ cy_resolved_t cy_name_resolve(const wkv_t* const remap,
     const cy_str_t name_unpinned  = name_consume_pin_suffix(name, &user_pin);
     cy_str_t       effective_name = name_unpinned;
     uint16_t       effective_pin  = user_pin;
+    if (name_normalized_len(name_unpinned) == 0U) {
+        return (cy_resolved_t){ .name = str_invalid, .pin = UINT16_MAX };
+    }
     if ((remap != NULL) && !wkv_is_empty(remap)) {
         // Normalize the lookup key so the integrator's `from` matches the user's input regardless of minor
         // syntactic variations (extra slashes, leading/trailing slashes). Stored `from` keys are normalized too.
@@ -5215,6 +5243,9 @@ cy_resolved_t cy_name_resolve(const wkv_t* const remap,
             }
         }
     }
+    if (name_normalized_len(effective_name) == 0U) {
+        return (cy_resolved_t){ .name = str_invalid, .pin = UINT16_MAX };
+    }
 
     // Run the standard ns/home expansion on whatever name we ended up with (user's input or matched `to`).
     // The `to` may itself be absolute (`/...`), homeful (`~/...`), or relative — name_resolve_construct
@@ -5223,7 +5254,6 @@ cy_resolved_t cy_name_resolve(const wkv_t* const remap,
     if ((res.str == NULL) || (res.len == 0U) || (res.len > CY_TOPIC_NAME_MAX)) {
         return (cy_resolved_t){ .name = str_invalid, .pin = UINT16_MAX };
     }
-
     // Pinned topic names cannot be patterns. This catches both an unfortunate user input (e.g. `foo/*#42`)
     // and a remap rule whose stored `to` is a pinned pattern (reachable if wkv_t is populated manually).
     const bool pinned   = effective_pin <= CY_SUBJECT_ID_PINNED_MAX;

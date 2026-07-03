@@ -76,7 +76,7 @@ static void check_subject_id_threshold_repeat_exhaustive(const uint32_t modulus)
 static uint32_t expected_subject_id_no_overflow(const uint64_t hash, const uint32_t evictions, const uint32_t modulus)
 {
     TEST_ASSERT(hash > CY_SUBJECT_ID_PINNED_MAX);
-    TEST_ASSERT(hash <= UINT32_MAX); // Avoid uint64 addition overflow in reference expression below.
+    TEST_ASSERT(hash <= UINT32_MAX);
     const uint64_t h = hash % modulus;
     const uint64_t e = ((uint64_t)evictions) % modulus;
     return (uint32_t)(CY_SUBJECT_ID_PINNED_MAX + 1ULL + ((h + ((e * e) % modulus)) % modulus));
@@ -86,7 +86,7 @@ static uint32_t expected_subject_id_wrap_u64_add(const uint64_t hash, const uint
 {
     TEST_ASSERT(hash > CY_SUBJECT_ID_PINNED_MAX);
     const uint64_t square = (uint64_t)evictions * (uint64_t)evictions;
-    const uint64_t sum    = hash + square; // Deliberately relies on unsigned wraparound modulo 2**64.
+    const uint64_t sum    = hash + square;
     return (uint32_t)(CY_SUBJECT_ID_PINNED_MAX + 1ULL + (sum % modulus));
 }
 
@@ -98,6 +98,39 @@ static uint32_t expected_subject_id_without_u64_wrap(const uint64_t hash,
     const uint64_t square_mod = ((uint64_t)evictions * (uint64_t)evictions) % modulus;
     const uint64_t sum_mod    = (hash % modulus) + square_mod;
     return (uint32_t)(CY_SUBJECT_ID_PINNED_MAX + 1ULL + (sum_mod % modulus));
+}
+
+static uint32_t largest_prime_3mod4_at_or_below(const uint64_t limit)
+{
+    TEST_ASSERT_TRUE(limit <= UINT32_MAX);
+    for (uint64_t candidate = limit; candidate >= 3U; candidate--) {
+        if (((candidate % 4U) == 3U) && is_prime_u32((uint32_t)candidate)) {
+            return (uint32_t)candidate;
+        }
+    }
+    TEST_FAIL_MESSAGE("no modulus found");
+    return 0U;
+}
+
+static void check_documented_modulus_rule(const uint8_t  subject_id_bits,
+                                          const uint32_t reserved_gossip_shards,
+                                          const uint32_t modulus)
+{
+    const uint64_t broadcast_subject_id = (UINT64_C(1) << subject_id_bits) - 1U;
+    const uint64_t limit                = broadcast_subject_id - CY_SUBJECT_ID_PINNED_MAX - 1U - reserved_gossip_shards;
+    TEST_ASSERT_TRUE(modulus <= (UINT32_MAX - (uint32_t)CY_SUBJECT_ID_PINNED_MAX));
+    TEST_ASSERT_TRUE(is_prime_u32(modulus));
+    TEST_ASSERT_EQUAL_UINT32(3U, modulus % 4U);
+    TEST_ASSERT_EQUAL_UINT32(largest_prime_3mod4_at_or_below(limit), modulus);
+    TEST_ASSERT_EQUAL_UINT32(reserved_gossip_shards,
+                             (uint32_t)(broadcast_subject_id - CY_SUBJECT_ID_MAX(modulus) - 1U));
+}
+
+static void test_subject_id_moduli_match_documented_rule(void)
+{
+    check_documented_modulus_rule(16U, 140U, (uint32_t)CY_SUBJECT_ID_MODULUS_16bit);
+    check_documented_modulus_rule(23U, 1984U, (uint32_t)CY_SUBJECT_ID_MODULUS_23bit);
+    check_documented_modulus_rule(32U, 4440U, (uint32_t)CY_SUBJECT_ID_MODULUS_32bit);
 }
 
 static void check_subject_id_near_uint32_max(const uint32_t modulus)
@@ -116,7 +149,7 @@ static void check_subject_id_near_uint32_max(const uint32_t modulus)
     }
 }
 
-static void check_subject_id_u64_wrap_semantics(const uint32_t modulus)
+static void check_subject_id_no_u64_wrap_semantics(const uint32_t modulus)
 {
     static const uint64_t hashes[] = {
         UINT64_MAX,
@@ -124,8 +157,6 @@ static void check_subject_id_u64_wrap_semantics(const uint32_t modulus)
         UINT64_C(0xFFFFFFFFF0000000),
         UINT64_C(0xFFFFFFFF00000000),
     };
-    // Use eviction values just below the pinned threshold; large enough to still trigger uint64 overflow
-    // when squared and added to the large hashes above.
     static const uint32_t evictions[] = {
         EVICTIONS_PINNED_MIN - 1U,
         EVICTIONS_PINNED_MIN - 2U,
@@ -141,11 +172,11 @@ static void check_subject_id_u64_wrap_semantics(const uint32_t modulus)
             const uint32_t eviction   = evictions[ei];
             const uint64_t square     = (uint64_t)eviction * (uint64_t)eviction;
             const bool     overflow   = hash > (UINT64_MAX - square);
-            const uint32_t expected   = expected_subject_id_wrap_u64_add(hash, eviction, modulus);
-            const uint32_t no_wrap    = expected_subject_id_without_u64_wrap(hash, eviction, modulus);
+            const uint32_t wrapped    = expected_subject_id_wrap_u64_add(hash, eviction, modulus);
+            const uint32_t expected   = expected_subject_id_without_u64_wrap(hash, eviction, modulus);
             const uint32_t actual     = topic_subject_id_impl(hash, eviction, modulus);
             saw_overflow              = saw_overflow || overflow;
-            saw_overflow_wrap_obvious = saw_overflow_wrap_obvious || (overflow && (expected != no_wrap));
+            saw_overflow_wrap_obvious = saw_overflow_wrap_obvious || (overflow && (wrapped != expected));
             TEST_ASSERT_EQUAL_UINT32(expected, actual);
         }
     }
@@ -159,7 +190,7 @@ static void test_subject_id_math_modulus_16bit(void)
     check_subject_id_unique_until_half_modulus(modulus);
     check_subject_id_threshold_repeat_exhaustive(modulus);
     check_subject_id_near_uint32_max(modulus);
-    check_subject_id_u64_wrap_semantics(modulus);
+    check_subject_id_no_u64_wrap_semantics(modulus);
 }
 
 static void test_subject_id_math_modulus_23bit(void)
@@ -168,12 +199,12 @@ static void test_subject_id_math_modulus_23bit(void)
     check_subject_id_unique_until_half_modulus(modulus);
     check_subject_id_threshold_repeat_exhaustive(modulus);
     check_subject_id_near_uint32_max(modulus);
-    check_subject_id_u64_wrap_semantics(modulus);
+    check_subject_id_no_u64_wrap_semantics(modulus);
 }
 
-static void test_subject_id_wrap_semantics_modulus_32bit(void)
+static void test_subject_id_no_u64_wrap_semantics_modulus_32bit(void)
 {
-    check_subject_id_u64_wrap_semantics((uint32_t)CY_SUBJECT_ID_MODULUS_32bit);
+    check_subject_id_no_u64_wrap_semantics((uint32_t)CY_SUBJECT_ID_MODULUS_32bit);
 }
 
 static void test_subject_id_pinned_identity(void)
@@ -238,9 +269,10 @@ void tearDown(void) {}
 int main(void)
 {
     UNITY_BEGIN();
+    RUN_TEST(test_subject_id_moduli_match_documented_rule);
     RUN_TEST(test_subject_id_math_modulus_16bit);
     RUN_TEST(test_subject_id_math_modulus_23bit);
-    RUN_TEST(test_subject_id_wrap_semantics_modulus_32bit);
+    RUN_TEST(test_subject_id_no_u64_wrap_semantics_modulus_32bit);
     RUN_TEST(test_subject_id_pinned_identity);
     RUN_TEST(test_subject_id_pinned_range_exhaustive);
     RUN_TEST(test_subject_id_auto_never_in_pinned_range);

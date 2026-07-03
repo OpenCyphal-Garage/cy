@@ -88,12 +88,14 @@ struct cy_platform_t
     /// All nodes in the network shall share the same value.
     /// If heterogeneously redundant transports are used, then the smallest modulus shall be used.
     ///
-    /// The full range of used subject-ID values is [0, CY_SUBJECT_ID_PINNED_MAX+modulus],
+    /// The normal topic subject-ID values are in [0, CY_SUBJECT_ID_PINNED_MAX+modulus],
     /// where the values below or equal to CY_SUBJECT_ID_PINNED_MAX are used for pinned topics only.
+    /// The modulus must not exceed (UINT32_MAX-CY_SUBJECT_ID_PINNED_MAX).
+    /// The gossip shard count below the broadcast subject must be in [1, modulus).
     ///
     /// The modulus shall be a prime number because the subject-ID function uses a quadratic probing strategy:
-    ///     subject_id = CY_SUBJECT_ID_PINNED_MAX + 1 + ((hash + evictions^2) mod modulus)
-    /// Where 64-bit unsigned arithmetics is assumed (in particular, (hash + evictions^2) must wrap at 2**64).
+    ///     subject_id = CY_SUBJECT_ID_PINNED_MAX + 1
+    ///                  + (((hash mod modulus) + ((evictions mod modulus)^2 mod modulus)) mod modulus)
     /// Further, to enable fast reconstruction of the eviction count from the subject-ID, we impose an additional
     /// constraint that subject_id_modulus mod 4 == 3.
     ///

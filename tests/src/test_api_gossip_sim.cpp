@@ -484,7 +484,7 @@ void network_run(sim_network_t& net, const cy_us_t start, const cy_us_t end, con
 
 void inject_gossip(sim_node_t&         node,
                    const std::uint64_t remote_id,
-                   const std::uint8_t  ttl,
+                   const std::uint8_t  reserved,
                    const std::int8_t   lage,
                    const std::uint64_t hash,
                    const std::uint32_t evictions,
@@ -492,7 +492,8 @@ void inject_gossip(sim_node_t&         node,
                    const cy_us_t       timestamp)
 {
     std::array<unsigned char, max_wire_size> wire{};
-    const std::size_t size = make_gossip_header(wire.data(), wire.size(), ttl, lage, hash, evictions, cy_str(name));
+    const std::size_t                        size =
+      make_gossip_header(wire.data(), wire.size(), reserved, lage, hash, evictions, cy_str(name));
     TEST_ASSERT_TRUE(size > 0U);
     cy_message_t* const msg = cy_test_message_make(&node.message_heap, wire.data(), size);
     TEST_ASSERT_NOT_NULL(msg);

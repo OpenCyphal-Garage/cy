@@ -871,6 +871,23 @@ void test_api_core_publish_and_request_argument_guards()
     platform_deinit(&platform);
 }
 
+void test_api_core_rejects_empty_and_pin_only_topic_names()
+{
+    test_platform_t platform{};
+    platform_prepare(&platform);
+    platform.cy = cy_new(&platform.platform, cy_str("test"), cy_str("ns"), cy_str_t{ 0, nullptr });
+    TEST_ASSERT_NOT_NULL(platform.cy);
+
+    TEST_ASSERT_NULL(cy_advertise(platform.cy, cy_str("")));
+    TEST_ASSERT_NULL(cy_advertise(platform.cy, cy_str("#0")));
+    TEST_ASSERT_NULL(cy_advertise(platform.cy, cy_str("#1234")));
+    TEST_ASSERT_NULL(cy_subscribe(platform.cy, cy_str(""), 128U));
+    TEST_ASSERT_NULL(cy_subscribe(platform.cy, cy_str("#0"), 128U));
+    TEST_ASSERT_NULL(cy_subscribe(platform.cy, cy_str("#1234"), 128U));
+
+    platform_deinit(&platform);
+}
+
 void test_api_core_message_contract_and_future_callback_getter()
 {
     test_platform_t platform{};
@@ -936,6 +953,36 @@ void test_api_core_message_contract_and_future_callback_getter()
     platform_deinit(&platform);
 }
 
+void test_api_core_destroy_after_subscriber_destroy_without_spin()
+{
+    test_platform_t platform{};
+    platform_init(&platform);
+
+    cy_future_t* const sub = cy_subscribe(platform.cy, cy_str("core/destroy/no-spin"), 128U);
+    TEST_ASSERT_NOT_NULL(sub);
+    TEST_ASSERT_NOT_NULL(cy_topic_find_by_name(platform.cy, cy_str("core/destroy/no-spin")));
+
+    cy_future_destroy(sub);
+    platform_deinit(&platform);
+}
+
+void test_api_core_destroy_after_pattern_subscriber_destroy_without_spin()
+{
+    test_platform_t platform{};
+    platform_init(&platform);
+
+    cy_future_t* const sub = cy_subscribe(platform.cy, cy_str("core/destroy/pattern/*"), 128U);
+    TEST_ASSERT_NOT_NULL(sub);
+
+    const char* const   topic_name = "core/destroy/pattern/topic";
+    const std::uint64_t topic_hash = rapidhash(topic_name, std::strlen(topic_name));
+    dispatch_gossip_unicast(&platform, topic_hash, 0U, 0, cy_str(topic_name), UINT64_C(0xD157), platform.now);
+    TEST_ASSERT_NOT_NULL(cy_topic_find_by_name(platform.cy, cy_str(topic_name)));
+
+    cy_future_destroy(sub);
+    platform_deinit(&platform);
+}
+
 void test_api_core_cy_new_validation_and_failure_paths()
 {
     const cy_str_t h     = cy_str("h");
@@ -962,6 +1009,10 @@ void test_api_core_cy_new_validation_and_failure_paths()
     platform.platform.subject_id_modulus = 24573U; // odd composite
     TEST_ASSERT_NULL(cy_new(&platform.platform, h, ns, remap));
     platform.platform.subject_id_modulus = 65537U; // prime but mod 4 != 3
+    TEST_ASSERT_NULL(cy_new(&platform.platform, h, ns, remap));
+    platform.platform.subject_id_modulus = 253951U; // valid-looking prime but no gossip shard subjects
+    TEST_ASSERT_NULL(cy_new(&platform.platform, h, ns, remap));
+    platform.platform.subject_id_modulus = UINT32_C(4294967291); // prime 3 mod 4 but CY_SUBJECT_ID_MAX would wrap
     TEST_ASSERT_NULL(cy_new(&platform.platform, h, ns, remap));
     platform.platform.subject_id_modulus = static_cast<std::uint32_t>(CY_SUBJECT_ID_MODULUS_16bit);
 
@@ -1687,7 +1738,10 @@ int main()
     RUN_TEST(test_api_core_priority_ack_and_topic_metadata);
     RUN_TEST(test_api_core_diag_listener_contracts);
     RUN_TEST(test_api_core_publish_and_request_argument_guards);
+    RUN_TEST(test_api_core_rejects_empty_and_pin_only_topic_names);
     RUN_TEST(test_api_core_message_contract_and_future_callback_getter);
+    RUN_TEST(test_api_core_destroy_after_subscriber_destroy_without_spin);
+    RUN_TEST(test_api_core_destroy_after_pattern_subscriber_destroy_without_spin);
     RUN_TEST(test_api_core_cy_new_validation_and_failure_paths);
     RUN_TEST(test_subscriber_name_returns_pin_stripped_name);
     RUN_TEST(test_publisher_topic_for_pinned_has_correct_hash);

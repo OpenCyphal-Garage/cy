@@ -3,7 +3,7 @@
 - **Severity:** 🟡 LOW (documentation only) (report L-8 / CRDT-F3)
 - **Confidence:** verified (code trace; behaviour is intentional)
 - **Subsystem:** docs (`model/DESIGN.md`) — **no code change**
-- **Status:** OPEN
+- **Status:** RESOLVED
 
 ## Maintainer note
 The **implementation is correct/intentional**; this is a **documentation fix**. Do not change code.

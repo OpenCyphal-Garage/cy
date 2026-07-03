@@ -233,6 +233,17 @@ void test_remap_rejects_empty_from()
     platform_deinit(&p);
 }
 
+void test_remap_rejects_empty_and_pin_only_to()
+{
+    test_platform_t p{};
+    platform_init(&p);
+    TEST_ASSERT_EQUAL_INT(CY_ERR_NAME, cy_remap(p.cy, cy_str("foo"), cy_str("")));
+    TEST_ASSERT_EQUAL_INT(CY_ERR_NAME, cy_remap(p.cy, cy_str("foo"), cy_str("/")));
+    TEST_ASSERT_EQUAL_INT(CY_ERR_NAME, cy_remap(p.cy, cy_str("foo"), cy_str("#0")));
+    TEST_ASSERT_EQUAL_INT(CY_ERR_NAME, cy_remap(p.cy, cy_str("foo"), cy_str("#1234")));
+    platform_deinit(&p);
+}
+
 // Pins are allowed in `to` — this is the motivating "pin via remap" use case.
 void test_remap_accepts_pinned_to()
 {
@@ -524,6 +535,7 @@ int main()
     RUN_TEST(test_remap_no_prefix_match);
     RUN_TEST(test_remap_overwrite_replaces_old_value);
     RUN_TEST(test_remap_rejects_empty_from);
+    RUN_TEST(test_remap_rejects_empty_and_pin_only_to);
     RUN_TEST(test_remap_accepts_pinned_to);
     RUN_TEST(test_remap_rejects_pinned_pattern_to);
     RUN_TEST(test_remap_pins_an_unpinned_topic);

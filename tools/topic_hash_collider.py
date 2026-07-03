@@ -3,7 +3,7 @@
 This utility is used to generate a topic name whose preferred subject-ID allocation is identical to that
 of the given topic name.
 Usage:
-    ./topic_hash_collider.py 8380403 /abc/def
+    ./topic_hash_collider.py 8378431 abc/def
 """
 
 import random
@@ -14,6 +14,8 @@ from rapidhash import rapidhash  # The package published on PyPI is NOT COMPATIB
 
 ALPHABET = string.ascii_letters + string.digits
 PINNED_SUBJECT_ID_MAX = 2 ** 13 - 1
+SUBJECT_ID_MODULUS_MIN = 57203
+SUBJECT_ID_MODULUS_MAX = 2 ** 32 - 1 - PINNED_SUBJECT_ID_MAX
 
 
 def topic_hash(topic_name: str) -> int:
@@ -55,7 +57,15 @@ def is_prime(n: int) -> bool:
 
 
 def is_valid_subject_id_modulus(modulus: int) -> bool:
-    return is_prime(modulus) and (modulus % 4 == 3)
+    max_subject_id = PINNED_SUBJECT_ID_MAX + modulus
+    broadcast_subject_id = (1 << max_subject_id.bit_length()) - 1
+    shard_count = broadcast_subject_id - (max_subject_id + 1)
+    return (
+        (SUBJECT_ID_MODULUS_MIN <= modulus <= SUBJECT_ID_MODULUS_MAX)
+        and is_prime(modulus)
+        and (modulus % 4 == 3)
+        and (0 < shard_count < modulus)
+    )
 
 
 def main() -> None:

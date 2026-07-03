@@ -3,12 +3,12 @@
 - **Severity:** 🟠 MEDIUM (hygiene/interop) (report M-7 / N-F3, L-F9)
 - **Confidence:** verified (code trace); ASan-clean (no memory unsafety)
 - **Subsystem:** core (`cy/cy.c`, gossip receive / implicit topic creation)
-- **Status:** OPEN
+- **Status:** RESOLVED
 
 ## Summary
 A received gossip name is accepted on length (≤200) and `rapidhash(name) == hash` only. A malfunctioning or malicious
-remote can gossip names containing spaces, control bytes, wildcard tokens, pin-like suffixes, or non-normalized
-separators; if one matches a local pattern, an implicit topic with that raw name is created, indexed, and re-gossiped
+remote can gossip names containing spaces, control bytes, wildcard tokens, or non-normalized separators; if one
+matches a local pattern, an implicit topic with that raw name is created, indexed, and re-gossiped
 once — violating the wire contract "the name is normalized" on the enforcement side.
 
 ## Location

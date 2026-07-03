@@ -3,7 +3,7 @@
 - **Severity:** 🟠 MEDIUM (spec/interop hazard) (report M-3 / CRDT-F2)
 - **Confidence:** verified (arithmetic reproduced by orchestrator)
 - **Subsystem:** model/docs (`model/DESIGN.md`, `model/tlaplus/Core.tla`) vs `cy/cy_platform.h`
-- **Status:** OPEN
+- **Status:** RESOLVED
 
 ## Summary
 DESIGN.md defines the modulus as "the largest prime ≤ (max subject-ID − 8191) with modulus mod 4 = 3." That rule

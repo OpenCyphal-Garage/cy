@@ -3,7 +3,7 @@
 - **Severity:** 🟡 LOW (maintainability) (report L-16 / CRDT-F13)
 - **Confidence:** verified (code trace)
 - **Subsystem:** core (`cy/cy.c`) + `model/DESIGN.md` — comments/docs only
-- **Status:** OPEN
+- **Status:** RESOLVED
 
 ## Summary
 Comments reason about gossip TTL resets and multi-hop forwarding, but the wire format has **no** TTL field (the

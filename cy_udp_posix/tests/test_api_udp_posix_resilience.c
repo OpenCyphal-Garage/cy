@@ -181,6 +181,9 @@ static void test_api_udp_posix_rx_drops_malformed_datagrams_without_leak(void)
     cy_future_t* const sub = cy_subscribe(node.cy, cy_str("udp/malformed#402"), 64U);
     TEST_ASSERT_NOT_NULL(sub);
     udp_test_spin(&node, spin_slice_us);
+    for (size_t i = 0U; i < 12U; i++) {
+        udp_test_spin(&node, spin_slice_us);
+    }
 
     const cy_udp_posix_stats_t baseline = cy_udp_posix_stats(node.platform);
     send_subject_datagram(subject_id, one, 0U);

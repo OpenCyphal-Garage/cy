@@ -3,7 +3,7 @@
 - **Severity:** 🟠 MEDIUM (report M-1; found by 3 reviewers)
 - **Confidence:** reproduced (repro test) + code trace
 - **Subsystem:** core (`cy/cy.c`, subscriber/teardown lifecycle)
-- **Status:** OPEN
+- **Status:** RESOLVED
 
 ## Summary
 `cy_future_destroy` on a subscriber only marks it disposed and arms a 0-deadline timer; the real teardown

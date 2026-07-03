@@ -36,7 +36,7 @@ void make_message_header(unsigned char out[24], const uint8_t type, const uint64
 
 size_t make_gossip_header(unsigned char* const out,
                           const size_t         out_size,
-                          const uint8_t        ttl,
+                          const uint8_t        reserved,
                           const int8_t         topic_log_age,
                           const uint64_t       topic_hash,
                           const uint32_t       topic_evictions,
@@ -49,11 +49,9 @@ size_t make_gossip_header(unsigned char* const out,
     if ((out_size < total_size) || (topic_name.len > UINT8_MAX)) {
         return 0U;
     }
-    // Test helper gossip header layout:
-    // [0] type, [2] ttl, [3] log-age, [8..15] topic hash, [16..19] evictions, [23] name length.
     out[0] = 8U;
     out[1] = 0U;
-    out[2] = ttl;
+    out[2] = reserved;
     out[3] = (unsigned char)topic_log_age;
     memset(&out[4], 0, TEST_HEADER_BYTES - 4U);
     serialize_u64(&out[8], topic_hash);

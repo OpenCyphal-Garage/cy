@@ -43,7 +43,7 @@ We need to handle the case of one topic overtaking another in age.
 
 The variable aging rate proposed in the original RFC, where the topic age increases faster with higher traffic, was found to be a potential cause of ping-pong eviction, slowing down convergence. While it does not *prevent* convergence, it is still undesirable. Slow progress issues can be resurfaced by artificially limiting the maximum number of steps the network is allowed to take before requiring convergence. In this case, TLA+ will find counterexamples when the network takes longer to converge than the allotted time, and the corresponding state traces will reveal the specific conditions.
 
-Given a simple subject-ID function `SubjectID(hash, evictions) == (hash + evictions) % 10` and two nodes with the following initial topic states (hash, evictions, age):
+Given the intentionally simple linear subject-ID function used by the formal model, `SubjectID(hash, evictions) == (hash + evictions) % 10`, and two nodes with the following initial topic states (hash, evictions, age):
 
 1. (1, 0, 0), (11, 1, 0). The second topic has evictions = 1 to avoid conflict with local topic 1, which wins arbitration due to the lower hash value.
 2. (2, 0, 0), (11, 0, 0). Notice the initial divergence (topic 11 maps to subject-ID 1 while in the other node it maps to 2) and the two collisions on subject-IDs 1 and 2.
