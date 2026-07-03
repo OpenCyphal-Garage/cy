@@ -248,6 +248,7 @@ struct subject_writer_t
 
 static cy_subject_writer_t* v_subject_writer_new(cy_platform_t* const base, const uint32_t subject_id)
 {
+    (void)subject_id;
     assert(subject_id <= UDPARD_IPv4_SUBJECT_ID_MAX);
     cy_udp_posix_t* const   owner = (cy_udp_posix_t*)base;
     subject_writer_t* const self  = mem_alloc_zero(owner, sizeof(subject_writer_t));
