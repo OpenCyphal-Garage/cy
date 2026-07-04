@@ -150,6 +150,23 @@ void assert_ordered_strictly_increasing(const arrival_capture_t& capture, const 
     }
 }
 
+// Reliable feedback: a future resolves CY_OK iff its message was delivered (sequence in the capture); a message the
+// reordering window dropped is never acked, hence CY_ERR_DELIVERY. futures[i] carries sequence first_seq + i.
+void assert_reliable_delivery(const std::vector<cy_future_t*>& futures,
+                              const std::uint64_t              first_seq,
+                              const arrival_capture_t&         capture,
+                              const std::uint32_t              pub_id)
+{
+    const std::vector<std::uint64_t>        delivered = sequences_for(capture, pub_id);
+    const std::unordered_set<std::uint64_t> got(delivered.begin(), delivered.end());
+    for (std::size_t i = 0U; i < futures.size(); i++) {
+        TEST_ASSERT_NOT_NULL(futures.at(i));
+        TEST_ASSERT_TRUE(cy_future_done(futures.at(i)));
+        const cy_err_t expected = (got.count(first_seq + i) != 0U) ? CY_OK : CY_ERR_DELIVERY;
+        TEST_ASSERT_EQUAL_INT(expected, cy_future_error(futures.at(i)));
+    }
+}
+
 void test_api_pubsub_e2e_c01_ack_loss_retransmit_duplicate_rejected_unordered()
 {
     constexpr std::uint32_t hot_pub_id  = 301U;
@@ -576,7 +593,7 @@ void test_api_pubsub_e2e_c06_late_older_frame_after_timeout_rejected()
     assert_unordered_complete_unique(cold_capture, cold_pub_id, 1U, 2U);
     assert_ordered_strictly_increasing(hot_capture, hot_pub_id);
     assert_ordered_strictly_increasing(cold_capture, cold_pub_id);
-    e2e::assert_future_error(hot_futures, CY_OK);
+    assert_reliable_delivery(hot_futures, 1U, hot_capture, hot_pub_id); // seq 1 window-dropped -> CY_ERR_DELIVERY
     e2e::assert_future_error(cold_futures, CY_OK);
 
     std::vector<cy_future_t*> all_futures = hot_futures;
@@ -650,7 +667,7 @@ void test_api_pubsub_e2e_c07_ordered_buffer_capacity_stress_large_jump_backfill(
 
     assert_unordered_complete_unique(cold_capture, cold_pub_id, 1U, 12U);
     assert_ordered_strictly_increasing(cold_capture, cold_pub_id);
-    e2e::assert_future_error(hot_futures, CY_OK);
+    assert_reliable_delivery(hot_futures, 1U, hot_capture, hot_pub_id); // large-jump backfill drops some -> mixed
     e2e::assert_future_error(cold_futures, CY_OK);
 
     std::vector<cy_future_t*> all_futures = hot_futures;
@@ -727,8 +744,8 @@ void test_api_pubsub_e2e_c08_high_jitter_moderate_loss_ordered_monotonicity()
     assert_ordered_strictly_increasing(cold_capture, cold_pub_id);
     TEST_ASSERT_TRUE(sequences_for(hot_capture, hot_pub_id).size() >= 10U);
     TEST_ASSERT_TRUE(sequences_for(cold_capture, cold_pub_id).size() >= 10U);
-    e2e::assert_future_error(hot_futures, CY_OK);
-    e2e::assert_future_error(cold_futures, CY_OK);
+    assert_reliable_delivery(hot_futures, 1U, hot_capture, hot_pub_id); // jitter/loss window-drops some -> mixed
+    assert_reliable_delivery(cold_futures, 1U, cold_capture, cold_pub_id);
 
     std::vector<cy_future_t*> all_futures = hot_futures;
     all_futures.insert(all_futures.end(), cold_futures.begin(), cold_futures.end());
@@ -876,8 +893,8 @@ void test_api_pubsub_e2e_c10_reordering_window_boundary_behavior()
     assert_ordered_strictly_increasing(cold_capture, cold_pub_id);
     assert_unordered_unique_only(hot_capture, hot_pub_id);
     assert_unordered_unique_only(cold_capture, cold_pub_id);
-    e2e::assert_future_error(hot_futures, CY_OK);
-    e2e::assert_future_error(cold_futures, CY_OK);
+    e2e::assert_future_error(hot_futures, CY_OK); // hot seq 1 delayed within window -> delivered
+    assert_reliable_delivery(cold_futures, 1U, cold_capture, cold_pub_id); // cold seq 1 past window -> CY_ERR_DELIVERY
 
     std::vector<cy_future_t*> all_futures = hot_futures;
     all_futures.insert(all_futures.end(), cold_futures.begin(), cold_futures.end());

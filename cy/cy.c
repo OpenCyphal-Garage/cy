@@ -2927,10 +2927,12 @@ static cy_arrival_t make_arrival(const cy_topic_t* const topic,
     return (cy_arrival_t){ .message = message, .breadcrumb = bread };
 }
 
-static void subscriber_notify(subscriber_t* const self, const cy_arrival_t arrival)
+// Returns false if the message was dropped because the subscriber was already disposed when called; the caller must
+// then not acknowledge it. Disposal from within the callback itself returns true: the application did see the message.
+static bool subscriber_notify(subscriber_t* const self, const cy_arrival_t arrival)
 {
     if (self->disposed) {
-        return;
+        return false;
     }
     cy_message_refcount_dec(self->last_arrival.message.content); // NULL-safe
     self->last_arrival = arrival;                                // overwrite last message -- queue message deep
@@ -2941,6 +2943,7 @@ static void subscriber_notify(subscriber_t* const self, const cy_arrival_t arriv
     }
     assert(self->base.vtable->done(&self->base));
     subscriber_notify_error(self, CY_OK);
+    return true;
 }
 
 static void subscriber_notify_error(subscriber_t* const self, const cy_err_t error)
@@ -2988,20 +2991,21 @@ static bool dedup_check(const dedup_t* const self, const uint64_t tag)
     return (rev < DEDUP_HISTORY) && bitmap_test(self->bitmap, (size_t)rev);
 }
 
-// Returns true if duplicate. Automatically marks the message as received.
-static bool dedup_update(dedup_t* const self, cy_topic_t* const owner, const uint64_t tag, const cy_us_t now)
+// Enlist/refresh recency so an entry whose tag was not committed is still reaped by dedup_drop_stale, not leaked.
+static void dedup_touch(dedup_t* const self, cy_topic_t* const owner, const cy_us_t now)
 {
-    // Update the recency information.
     self->last_active_at = now;
     enlist_head(&owner->sub_list_dedup_by_recency, &self->list_recency);
+}
 
-    // Consult with the bitmap for duplication and update its state.
+// Record a not-yet-seen tag (caller checked via dedup_check). Deferred until acceptance, else a message nobody
+// accepted would be mistaken for a duplicate and falsely acked on retransmit.
+static void dedup_commit(dedup_t* const self, const uint64_t tag)
+{
     const uint64_t fwd = tag - self->tag; // Wrapping arithmetic.
     const uint64_t rev = self->tag - tag; // Wrapping arithmetic.
-    if (rev < DEDUP_HISTORY) {            // Either duplicate or out-of-order; bit already in the bitmap.
-        if (bitmap_test(self->bitmap, (size_t)rev)) {
-            return true; // This is a duplicate.
-        }
+    if (rev < DEDUP_HISTORY) {            // Out-of-order but within the window.
+        assert(!bitmap_test(self->bitmap, (size_t)rev));
         bitmap_set(self->bitmap, (size_t)rev);
     } else { // Push the frontier or reset.
         if (fwd < DEDUP_HISTORY) {
@@ -3012,7 +3016,6 @@ static bool dedup_update(dedup_t* const self, cy_topic_t* const owner, const uin
         self->tag = tag;
         bitmap_set(self->bitmap, 0);
     }
-    return false;
 }
 
 static void dedup_destroy(dedup_t* const self, cy_topic_t* const owner)
@@ -3157,7 +3160,7 @@ static void reordering_eject(reordering_t* const self, reordering_slot_t* const 
     mem_free(cy, slot); // Free the slot before the callback to give the application more memory to work with.
 
     // Store the message and notify the client.
-    subscriber_notify(self->subscriber, arrival);
+    (void)subscriber_notify(self->subscriber, arrival);
     cy_message_refcount_dec(arrival.message.content);
 }
 
@@ -3238,6 +3241,12 @@ static bool reordering_push(reordering_t* const   self,
     uint64_t     lin_tag  = tag - self->tag_baseline;
     const size_t capacity = REORDERING_CAPACITY;
 
+    // Late drops must refresh recency too: while the remote keeps retransmitting a window-dropped tag, the state must
+    // survive, or its reaping would let the retransmit be resequenced as a fresh session -- delivered out of order and
+    // falsely acked.
+    self->last_active_at = message.timestamp;
+    enlist_head(&self->subscriber->list_reordering_by_recency, &self->list_recency);
+
     // Late arrival or duplicate, the gap is already closed and the application has moved on, cannot accept.
     // Note that this check does not detect possible duplicates that are currently interned; this is checked below.
     if (lin_tag <= self->last_ejected_lin_tag) {
@@ -3250,7 +3259,6 @@ static bool reordering_push(reordering_t* const   self,
         return false;
     }
 
-    bool far_backward_restart = false;
     if (lin_tag > INT64_MAX) {
         const uint64_t backward_distance = self->last_ejected_lin_tag - lin_tag; // Wrapping arithmetic.
         if (backward_distance <= SESSION_COUNTER_MAX_BACKWARD_LAG) {
@@ -3262,14 +3270,6 @@ static bool reordering_push(reordering_t* const   self,
                      (uintmax_t)self->last_ejected_lin_tag);
             return false;
         }
-        far_backward_restart = true;
-    }
-
-    // Update the recency information to keep the state alive.
-    self->last_active_at = message.timestamp;
-    enlist_head(&self->subscriber->list_reordering_by_recency, &self->list_recency);
-
-    if (far_backward_restart) {
         CY_TRACE(cy,
                  "🔢 RESEQUENCING/BACKWARD: N%016jx tag=%016jx lin_tag=%016jx last_ejected_lin_tag=%016jx",
                  (uintmax_t)self->remote_id,
@@ -3287,15 +3287,21 @@ static bool reordering_push(reordering_t* const   self,
     while ((self->interned_count > 0) && (lin_tag > (self->last_ejected_lin_tag + capacity))) {
         reordering_scan(self, true);
     }
+    // Any callback that ran before this point (the stale sweep in on_message, the forced ejects above) may have
+    // disposed this sub; the current message is not delivered yet, so refuse it rather than falsely ack it.
+    // Disposal by the current message's own delivery happens below and stays acked (see subscriber_notify).
+    if (self->subscriber->disposed) {
+        return false;
+    }
 
     const cy_lane_t lane = { .id = self->remote_id, .ctx = self->unicast_ctx, .prio = priority };
 
     // The next expected message can be ejected immediately. No need to allocate state, happy fast path, most common.
     if (lin_tag == self->last_ejected_lin_tag + 1U) {
         self->last_ejected_lin_tag = lin_tag;
-        subscriber_notify(self->subscriber, make_arrival(self->topic, lane, tag, message));
+        const bool delivered       = subscriber_notify(self->subscriber, make_arrival(self->topic, lane, tag, message));
         reordering_scan(self, false); // The just-ejected message may have closed an earlier gap.
-        return true;
+        return delivered;
     }
 
     // If we are still too far ahead, the remote has probably restarted or the gap is too large to swallow.
@@ -3425,10 +3431,8 @@ static bool on_message(cy_t* const           cy,
 
     // Reliable transfers may be duplicated in case of ACK loss.
     // Non-reliable transfers are deduplicated by the transport, which makes them much more efficient.
-    // Normally we automatically mark messages as received here in the dedup cache; however, if no local subscribers
-    // exist, we don't need to mutate the dedup cache but rather we can only passively consult with it to check
-    // if any messages have been confirmed earlier in case our acks got lost. This matters if we receive messages
-    // we didn't subscribe to like from a collided subject, or if the sender attempts to unicast etc.
+    // With no local subscribers we cannot accept, so we only passively consult the dedup filter (never mutate it) to
+    // re-ack messages already accepted earlier in case our acks got lost.
     if (topic->couplings == NULL) { // Subscribers do not exist. Do not accept the message.
         if (reliable) {
             const dedup_t* const dedup =
@@ -3439,16 +3443,18 @@ static bool on_message(cy_t* const           cy,
         }
         return false;
     }
+    // Consult the dedup filter now; commit is deferred to the tail, after acceptance (see dedup_commit).
+    dedup_t* dedup = NULL;
     if (reliable) {
         dedup_drop_stale(topic, message.timestamp); // Sweep before insert; a factory must never mutate the target tree.
         dedup_factory_context_t ctx = { .owner = topic, .remote_id = lane.id, .tag = tag };
-        dedup_t* const dedup = CAVL2_TO_OWNER(cavl2_find_or_insert(&topic->sub_index_dedup_by_remote_id, // ------
-                                                                   &lane.id,
-                                                                   dedup_cavl_compare,
-                                                                   &ctx,
-                                                                   dedup_factory),
-                                              dedup_t,
-                                              index_remote_id);
+        dedup = CAVL2_TO_OWNER(cavl2_find_or_insert(&topic->sub_index_dedup_by_remote_id, // ------
+                                                    &lane.id,
+                                                    dedup_cavl_compare,
+                                                    &ctx,
+                                                    dedup_factory),
+                               dedup_t,
+                               index_remote_id);
         if (dedup == NULL) {
             ON_ASYNC_ERROR(cy, topic, CY_ERR_MEMORY);
             // We could notify subscribers about the error, but the value of that notification is rather low.
@@ -3456,12 +3462,8 @@ static bool on_message(cy_t* const           cy,
             return false; // The remote will retransmit and we might be able to accept it then.
         }
         assert(dedup->remote_id == lane.id);
-        // NOTE: If all subscribers are pending disposal and none saw the original message that has been duplicated,
-        // we will be acknowledging it here even though no subscribers have actually received it. This is not very
-        // significant practically because for this to happen we have to keep disposed subscribers alive for longer
-        // than the duplicate retransmit interval, but it should ideally be fixed by slightly restructuring the flow.
-        // One solution is to remove the reordering feature from the core.
-        if (dedup_update(dedup, topic, tag, message.timestamp)) {
+        dedup_touch(dedup, topic, message.timestamp);
+        if (dedup_check(dedup, tag)) {
             CY_TRACE(cy, "🍒 Dup N%016jx tag=%016jx", (uintmax_t)lane.id, (uintmax_t)tag);
             return true; // Already received, ack but don't process.
         }
@@ -3516,13 +3518,18 @@ static bool on_message(cy_t* const           cy,
                     ON_ASYNC_ERROR(cy, topic, CY_ERR_MEMORY);
                     subscriber_notify_error(sub, CY_ERR_MEMORY);
                 }
-            } else {
-                subscriber_notify(sub, make_arrival(topic, lane, tag, message));
+            } else if (subscriber_notify(sub, make_arrival(topic, lane, tag, message))) {
                 acknowledge = true;
             }
             sub = next_sub;
         }
         cpl = next_cpl;
+    }
+    // The entry cannot have been reaped since dedup_touch: the library is non-reentrant.
+    if (reliable && acknowledge) {
+        assert(dedup != NULL);
+        assert(dedup->remote_id == lane.id); // Still the entry we touched; the subscriber loop cannot have reaped it.
+        dedup_commit(dedup, tag);
     }
     return acknowledge;
 }

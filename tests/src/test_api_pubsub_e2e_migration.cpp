@@ -699,6 +699,17 @@ d_case_result_t run_d_case(const d_case_config_t& cfg)
         TEST_ASSERT_TRUE(result.log.count.at(e2e::sim_node_b).at(t).at(slot) > 0U);
     }
 
+    // Reliable feedback correlation: a future resolves CY_OK iff its message reached the remote subscriber
+    // (no false acks) and CY_ERR_DELIVERY iff it never did (no false nacks). Checked here rather than right after
+    // wait_futures because an acked message may still sit interned in the ordered receiver's reordering buffer.
+    for (const future_state_t& item : futures) {
+        TEST_ASSERT_NOT_NULL(item.future);
+        TEST_ASSERT_TRUE(cy_future_done(item.future));
+        const bool     delivered = log_contains(result.log, e2e::sim_node_b, item.topic_index, item.pub_id, item.seq);
+        const cy_err_t expected  = delivered ? CY_OK : CY_ERR_DELIVERY;
+        TEST_ASSERT_EQUAL_INT(expected, cy_future_error(item.future));
+    }
+
     destroy_futures(futures);
     destroy_all_handles(net, handles, cfg.topic_count, now);
 
@@ -780,7 +791,10 @@ void test_api_pubsub_e2e_d06_d05_ordered_subscriber_variant()
     cfg.drop_ack         = true;
     cfg.reorder          = true;
     cfg.ordered_receiver = true;
-    cfg.seed             = 0xD06U;
+    // An ordered receiver drops messages that arrive past the reordering window; those are never acked, so their
+    // reliable futures resolve CY_ERR_DELIVERY (unlike the unordered variant D07, which delivers everything).
+    cfg.allow_future_failures = true;
+    cfg.seed                  = 0xD06U;
 
     const d_case_result_t res = run_d_case(cfg);
     TEST_ASSERT_TRUE(res.success_futures > 0U);

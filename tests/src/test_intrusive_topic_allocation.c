@@ -1246,8 +1246,8 @@ static void test_topic_destroy_clears_associations_and_dedup(void)
       cavl2_find(topic->sub_index_dedup_by_remote_id, &dctx2.remote_id, dedup_cavl_compare), dedup_t, index_remote_id);
     TEST_ASSERT_NOT_NULL(dd1);
     TEST_ASSERT_NOT_NULL(dd2);
-    dedup_update(dd1, topic, dctx1.tag, 1000);
-    dedup_update(dd2, topic, dctx2.tag, 1001);
+    dedup_touch(dd1, topic, 1000); // enlist so the destroy path exercises delisting
+    dedup_touch(dd2, topic, 1001);
     TEST_ASSERT_NOT_NULL(topic->sub_list_dedup_by_recency.head);
     TEST_ASSERT_NOT_NULL(topic->sub_index_dedup_by_remote_id);
 
