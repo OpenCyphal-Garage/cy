@@ -486,7 +486,7 @@ e_case_result_t run_e_case(const e_case_config_t& cfg)
     for (std::size_t round = 0U; round < cfg.rounds; round++) {
         if (cfg.destroy_publisher_midstream && !publisher_destroyed && (round >= (cfg.rounds / 2U))) {
             if (handles.pub.at(e2e::sim_node_a).at(0U) != nullptr) {
-                // Some implementations invalidate publisher-owned futures on unadvertise.
+                // Contract: all futures created via a publisher must be destroyed before unadvertising it.
                 destroy_futures_for_topic(futures, 0U);
                 compact_futures(futures);
                 cy_unadvertise(handles.pub.at(e2e::sim_node_a).at(0U));

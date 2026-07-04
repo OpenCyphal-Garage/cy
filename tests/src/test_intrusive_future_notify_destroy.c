@@ -804,6 +804,86 @@ static void test_request_notify_timeout_with_remote_destroy(void)
     fixture_deinit(&fixture);
 }
 
+// Regression (L4): destroy a still-pending reliable publish future, then unadvertise, then spin past the
+// deadline -- the contract-compliant order must be leak-/UAF-free. Guards release/coverage builds where the
+// library's own dispose asserts are compiled out.
+static void test_publish_pending_future_destroy_then_unadvertise_clean(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+
+    cy_publisher_t* const pub = cy_advertise(fixture.cy, cy_str("cleanup/publish/pending"));
+    TEST_ASSERT_NOT_NULL(pub);
+    cy_priority_set(pub, cy_prio_exceptional);
+
+    // Far deadline so the future is retransmission-eligible and dups the payload on the heap.
+    const cy_us_t      deadline = fixture.now + 120000;
+    const cy_bytes_t   msg      = { .size = 1U, .data = "R", .next = NULL };
+    cy_future_t* const fut      = cy_publish_reliable(pub, deadline, msg);
+    TEST_ASSERT_NOT_NULL(fut);
+
+    cy_topic_t* const topic = cy_publisher_topic(pub);
+    TEST_ASSERT_NOT_NULL(topic);
+    TEST_ASSERT_NOT_NULL(topic->pub_futures_by_tag);
+
+    // Destroy the future before unadvertising, per contract.
+    cy_future_destroy(fut);
+    TEST_ASSERT_NULL(topic->pub_futures_by_tag);
+    const size_t multicast_before = fixture.multicast_count;
+    cy_unadvertise(pub);
+
+    // No stray retransmit and no freed-memory access when the original deadline elapses.
+    fixture_spin_to(&fixture, deadline + 1);
+    TEST_ASSERT_EQUAL_size_t(multicast_before, fixture.multicast_count);
+    TEST_ASSERT_EQUAL_size_t(0U, fixture.async_error_count);
+
+    fixture_deinit(&fixture);
+}
+
+// Regression (L5): destroying a request future that acked a reliable response leaves a finalized "zombie"
+// in request_futures_by_tag (to absorb duplicate retransmits). Tearing the node down while it is still pending
+// must let topic_destroy reap it -- exercising the retained library-owned cleanup via cy_destroy, not a timeout.
+static void test_request_zombie_reaped_by_cy_destroy_after_unadvertise(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+
+    cy_publisher_t* const pub = cy_advertise_client(fixture.cy, cy_str("cleanup/request/zombie"), 16U);
+    TEST_ASSERT_NOT_NULL(pub);
+    cy_priority_set(pub, cy_prio_exceptional);
+
+    const cy_bytes_t   msg = { .size = 1U, .data = "S", .next = NULL };
+    cy_future_t* const fut = cy_request(pub, fixture.now + 150000, 60000, msg);
+    TEST_ASSERT_NOT_NULL(fut);
+
+    // Reliable response so the request future acks it and records the remote -- this is what spawns the zombie.
+    dispatch_response_message(&fixture,
+                              UINT64_C(0xB010),
+                              header_rsp_rel,
+                              0x21U,
+                              0U,
+                              last_outgoing_hash_multicast(&fixture),
+                              last_outgoing_tag_multicast(&fixture),
+                              0xAEU,
+                              fixture.now + 1);
+    TEST_ASSERT_TRUE(cy_future_done(fut));
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_future_error(fut));
+
+    cy_topic_t* const topic = cy_publisher_topic(pub);
+    TEST_ASSERT_NOT_NULL(topic);
+
+    // Destroying the future leaves a finalized zombie behind.
+    cy_future_destroy(fut);
+    TEST_ASSERT_NOT_NULL(topic->request_futures_by_tag);
+    const request_future_t* const zombie = (const request_future_t*)topic->request_futures_by_tag;
+    TEST_ASSERT_TRUE(zombie->finalized);
+
+    // Reaped by cy_destroy -> topic_destroy without waiting for the zombie's timeout; deinit checks heaps clean.
+    cy_unadvertise(pub);
+    TEST_ASSERT_EQUAL_size_t(0U, fixture.async_error_count);
+    fixture_deinit(&fixture);
+}
+
 static void test_request_callback_set_after_done_immediate_destroy(void)
 {
     fixture_t fixture;
@@ -1164,6 +1244,8 @@ int main(void)
     RUN_TEST(test_request_notify_on_response_reliable_oom_destroy);
     RUN_TEST(test_request_notify_timeout_no_remote_destroy);
     RUN_TEST(test_request_notify_timeout_with_remote_destroy);
+    RUN_TEST(test_publish_pending_future_destroy_then_unadvertise_clean);
+    RUN_TEST(test_request_zombie_reaped_by_cy_destroy_after_unadvertise);
     RUN_TEST(test_request_callback_set_after_done_immediate_destroy);
     RUN_TEST(test_subscriber_notify_arrival_unordered_destroy);
     RUN_TEST(test_subscriber_notify_arrival_ordered_ejection_destroy);

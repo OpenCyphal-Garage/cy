@@ -3,7 +3,25 @@
 - **Severity:** 🟡 LOW (contract-guarded; diagnosability gap) (report L-5 / C-F4)
 - **Confidence:** verified (code trace)
 - **Subsystem:** core (`cy/cy.c`, publisher/request lifecycle)
-- **Status:** OPEN
+- **Status:** RESOLVED — by override: incomplete detector removed, no per-publisher assertion added.
+
+## Resolution
+The suggested fix (add a debug assertion over `request_futures_by_tag` in `cy_unadvertise`) is
+intentionally **overridden** by maintainer directive. A request future keys on its topic, not on a
+specific publisher, and a topic may host several publishers, so a live request future cannot be
+attributed back to the `pub` being unadvertised — the early per-publisher check is infeasible.
+Instead the whole incomplete `cy_unadvertise` scan is removed (see L4). Detection instead happens later,
+at teardown rather than at the offending call: `topic_destroy` asserts every `request_futures_by_tag`
+entry is `finalized` (`cy/cy.c`), which fires if the application forgot to destroy a live request future. The `cy.h` contract on
+`cy_unadvertise` already requires destroying all publisher-created futures first (which covers request
+futures), so no wording change was needed.
+Regression coverage added in `tests/src/test_intrusive_future_notify_destroy.c`
+(`test_request_zombie_reaped_by_cy_destroy_after_unadvertise`: request future acks a reliable response →
+destroyed into a zombie → unadvertise → `cy_destroy` while the zombie is still pending → the
+`topic_destroy` zombie loop reaps it, heaps clean, no UAF).
+Note: like L4, the "must fail on pre-fix code" bar below is not applicable — this fix removes an incomplete
+detector rather than a behavior. The test instead guards the retained library-owned cleanup on the
+contract-compliant path (mutation-verified: deleting the `topic_destroy` zombie loop makes it leak two fragments).
 
 ## Summary
 `cy_unadvertise`'s debug scan only inspects `pub_futures_by_tag`. A live `cy_request` future, once its inner publish

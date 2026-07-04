@@ -131,7 +131,6 @@ struct cy_t
     cy_tree_t* topics_by_hash;       // ditto
     cy_tree_t* topics_by_subject_id; // Non-pinned only. Pinned topics are excluded because
                                      // multiple topics may share a pinned subject-ID (non-unique mapping).
-    size_t topic_count;
 
     cy_list_t list_implicit; // Most recently animated topic is at the head.
 
@@ -1633,7 +1632,6 @@ static cy_err_t topic_new(cy_t* const        cy,
     // (no subject-ID index insertion since multiple pinned topics may share a subject-ID).
     // For non-pinned topics, this may displace another local topic through collision arbitration.
     topic_allocate(topic, topic->evictions, now);
-    cy->topic_count++;
     if (out_topic != NULL) {
         *out_topic = topic;
     }
@@ -2072,7 +2070,6 @@ struct cy_publisher_t
 {
     cy_topic_t* topic; // Many-to-one relationship, never NULL; the topic is reference counted.
     cy_prio_t   priority;
-    cy_list_t   publish_futures; // For cancellation when the publisher is destroyed.
     cy_us_t     ack_baseline_timeout;
 };
 
@@ -2094,7 +2091,6 @@ cy_publisher_t* cy_advertise_client(cy_t* const cy, const cy_str_t name, const s
     }
     const cy_err_t res        = topic_ensure(cy, &pub->topic, resolved);
     pub->priority             = cy_prio_nominal;
-    pub->publish_futures      = LIST_EMPTY;
     pub->ack_baseline_timeout = cy->ack_baseline_timeout;
     if (res == CY_OK) {
         assert(pub->topic != NULL);
@@ -2816,13 +2812,6 @@ void cy_unadvertise(cy_publisher_t* const pub)
         return;
     }
     cy_topic_t* const topic = pub->topic;
-
-#ifndef NDEBUG // Ensure the application did not forget to destroy publisher futures first. This is optional.
-    for (publish_future_t* fut = (publish_future_t*)cavl2_min(topic->pub_futures_by_tag); fut != NULL;
-         fut                   = (publish_future_t*)cavl2_next_greater((cy_tree_t*)fut)) {
-        assert(fut->owner != pub);
-    }
-#endif
 
     // Dereference the topic.
     assert(!is_implicit(topic));
@@ -4216,7 +4205,6 @@ static void topic_destroy(cy_topic_t* const topic)
         wkv_del(&cy->topics_by_name, topic->index_name);
         topic->index_name = NULL;
     }
-    cy->topic_count--;
 
     // Free the memory.
     mem_free(cy, topic->name);
