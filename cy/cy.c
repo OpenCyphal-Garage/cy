@@ -4432,8 +4432,7 @@ cy_t* cy_new(cy_platform_t* const platform, const cy_str_t home, const cy_str_t 
     cy->broad_reader =
       cy->platform->vtable->subject_reader_new(cy->platform, broadcast_subject_id, CY_AUX_SUBJECT_EXTENT);
     if (cy->broad_reader == NULL) {
-        mem_free(cy, cy); // Home and ns are embedded in the same allocation, no separate free needed.
-        platform->cy = NULL;
+        cy_destroy(cy);
         return NULL;
     }
     cy->broad_reader->subject_id = broadcast_subject_id;
@@ -4441,9 +4440,7 @@ cy_t* cy_new(cy_platform_t* const platform, const cy_str_t home, const cy_str_t 
 
     cy->broad_writer = cy->platform->vtable->subject_writer_new(cy->platform, broadcast_subject_id);
     if (cy->broad_writer == NULL) {
-        cy->platform->vtable->subject_reader_destroy(cy->platform, cy->broad_reader);
-        mem_free(cy, cy);
-        platform->cy = NULL;
+        cy_destroy(cy);
         return NULL;
     }
     cy->broad_writer->subject_id = broadcast_subject_id;

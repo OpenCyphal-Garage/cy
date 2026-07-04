@@ -164,7 +164,7 @@ static const cy_diag_vtable_t fixture_diag_vtable = {
     .async_error = fixture_diag_async_error,
 };
 
-static void fixture_init(fixture_t* const self)
+static void fixture_init_platform(fixture_t* const self)
 {
     memset(self, 0, sizeof(*self));
     guarded_heap_init(&self->heap, UINT64_C(0xCAFEBABE12345678));
@@ -182,6 +182,11 @@ static void fixture_init(fixture_t* const self)
     self->vtable.now                       = fixture_now;
     self->vtable.realloc                   = fixture_realloc;
     self->vtable.random                    = fixture_random;
+}
+
+static void fixture_init(fixture_t* const self)
+{
+    fixture_init_platform(self);
     self->cy = cy_new(&self->platform, cy_str("test"), (cy_str_t){ 0, NULL }, (cy_str_t){ 0, NULL });
     TEST_ASSERT_NOT_NULL(self->cy);
     self->diag = (cy_diag_t){ .next = NULL, .user_context = CY_USER_CONTEXT_EMPTY, .vtable = &fixture_diag_vtable };
@@ -317,6 +322,40 @@ static void test_cy_destroy_handles_missing_broadcast_handles(void)
     TEST_ASSERT_EQUAL_size_t(1U, fix.subject_reader_destroy_count);
     TEST_ASSERT_EQUAL_size_t(1U, fix.subject_writer_destroy_count);
     fixture_deinit(&fix);
+}
+
+static void test_cy_new_broadcast_reader_oom_drains_remap(void)
+{
+    fixture_t fix;
+    fixture_init_platform(&fix);
+
+    fix.fail_subject_reader_new = true;
+    TEST_ASSERT_NULL(cy_new(&fix.platform, cy_str("test"), (cy_str_t){ 0, NULL }, cy_str("a=b c=/d")));
+
+    TEST_ASSERT_NULL(fix.platform.cy);
+    TEST_ASSERT_EQUAL_size_t(0U, fix.active_readers.count);
+    TEST_ASSERT_EQUAL_size_t(0U, fix.active_writers.count);
+    TEST_ASSERT_EQUAL_size_t(0U, fix.subject_reader_destroy_count);
+    TEST_ASSERT_EQUAL_size_t(0U, fix.subject_writer_destroy_count);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&fix.heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&fix.heap));
+}
+
+static void test_cy_new_broadcast_writer_oom_drains_remap(void)
+{
+    fixture_t fix;
+    fixture_init_platform(&fix);
+
+    fix.fail_subject_writer_new = true;
+    TEST_ASSERT_NULL(cy_new(&fix.platform, cy_str("test"), (cy_str_t){ 0, NULL }, cy_str("a=b c=/d")));
+
+    TEST_ASSERT_NULL(fix.platform.cy);
+    TEST_ASSERT_EQUAL_size_t(0U, fix.active_readers.count);
+    TEST_ASSERT_EQUAL_size_t(0U, fix.active_writers.count);
+    TEST_ASSERT_EQUAL_size_t(1U, fix.subject_reader_destroy_count);
+    TEST_ASSERT_EQUAL_size_t(0U, fix.subject_writer_destroy_count);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&fix.heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&fix.heap));
 }
 
 static void test_cy_advertise_client_validation_oom_and_extent_growth(void)
@@ -1829,6 +1868,8 @@ int main(void)
     RUN_TEST(test_cy_destroy_empty_instance_cleans_all_resources);
     RUN_TEST(test_cy_destroy_after_user_unsubscribes_and_spins);
     RUN_TEST(test_cy_destroy_handles_missing_broadcast_handles);
+    RUN_TEST(test_cy_new_broadcast_reader_oom_drains_remap);
+    RUN_TEST(test_cy_new_broadcast_writer_oom_drains_remap);
     RUN_TEST(test_cy_advertise_client_validation_oom_and_extent_growth);
     RUN_TEST(test_topic_new_rejects_invalid_name);
     RUN_TEST(test_topic_new_error_oom_topic_object);
