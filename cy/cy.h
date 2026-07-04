@@ -208,7 +208,8 @@ cy_err_t cy_publish(cy_publisher_t* const pub, const cy_us_t deadline, const cy_
 /// Newer errors override older ones; to handle every error, callback is needed.
 /// Platform errors encountered on send are forwarded as-is. Other possible errors include:
 /// CY_OK: Message delivered successfully.
-/// CY_ERR_DELIVERY: Message not delivered.
+/// CY_ERR_DELIVERY: Message not delivered: connectivity issue, remote is down, or transient resource exhaustion
+///                  prevented acknowledgment.
 /// CY_ERR_LAG: Strong scheduler lag prevented full ack timeout utilization; reachability information incomplete.
 ///
 /// TODO API for querying the tracked associations and per-remote delivery success may be added in the future since it
@@ -506,7 +507,7 @@ cy_err_t cy_respond(cy_breadcrumb_t* const breadcrumb, const cy_us_t deadline, c
 /// This is especially useful for streamed RPC responses where the server (the sender) needs to know whether the
 /// client (original message publisher) is still listening or has gone away (in which case streaming should be ceased).
 ///
-/// The client session layer will respond with a positive ACK as long as the application is still receiving the
+/// The client session layer normally responds with a positive ACK as long as the application is still receiving the
 /// responses (in the specific implementation of Cy it means that the corresponding future is still alive).
 /// If the application is no longer listening (in Cy, future is destroyed), the session layer will respond with a NACK,
 /// indicating that response could not be delivered to the application, and further responses will not be useful.
@@ -515,7 +516,8 @@ cy_err_t cy_respond(cy_breadcrumb_t* const breadcrumb, const cy_us_t deadline, c
 /// using cy_future_error():
 /// CY_OK: ACK received, remote application accepted the response.
 /// CY_ERR_NACK: Remote replied with NACK; application did not accept the response.
-/// CY_ERR_DELIVERY: Remote did not respond before the timeout: network connectivity issue or remote is down.
+/// CY_ERR_DELIVERY: Remote did not respond before the timeout: connectivity issue, remote is down, or transient
+///                  resource exhaustion prevented acknowledgment.
 cy_future_t* cy_respond_reliable(cy_breadcrumb_t* const breadcrumb, const cy_us_t deadline, const cy_bytes_t message);
 
 // =====================================================================================================================

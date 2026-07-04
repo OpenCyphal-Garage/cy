@@ -2557,13 +2557,19 @@ static void request_publish_callback(cy_future_t* const fut)
     }
 }
 
-// Returns true if the reception is acknowledged, false otherwise.
+typedef enum
+{
+    response_rx_ack,
+    response_rx_nack,
+    response_rx_silent, // Transient local drop: no ACK/NACK, keep the future pending.
+} response_rx_t;
+
 // Invalidates the future because it may be destroyed.
-static bool request_on_response(request_future_t* const self,
-                                const uint64_t          seqno,
-                                const cy_message_ts_t   message,
-                                const bool              reliable,
-                                const cy_lane_t         lane)
+static response_rx_t request_on_response(request_future_t* const self,
+                                         const uint64_t          seqno,
+                                         const cy_message_ts_t   message,
+                                         const bool              reliable,
+                                         const cy_lane_t         lane)
 {
     assert(seqno <= SEQNO48_MASK);
     assert(message.timestamp >= 0);
@@ -2577,10 +2583,12 @@ static bool request_on_response(request_future_t* const self,
             const request_future_remote_t* const remote =
               (request_future_remote_t*)cavl2_find(self->remote_by_id, &lane.id, request_future_remote_cavl_compare);
             if ((remote != NULL) && (seqno <= remote->seqno_top)) {
-                return bitmap_test_bounded(remote->seqno_acked, REQUEST_FUTURE_HISTORY, remote->seqno_top - seqno);
+                return bitmap_test_bounded(remote->seqno_acked, REQUEST_FUTURE_HISTORY, remote->seqno_top - seqno)
+                         ? response_rx_ack
+                         : response_rx_nack;
             }
         }
-        return false; // Do not proceed to the acceptance path, we're already dead.
+        return response_rx_nack; // Do not proceed to the acceptance path, we're already dead.
     }
 
     // The transport deduplicates messages, meaning that at this level only reliable responses require deduplication,
@@ -2594,11 +2602,8 @@ static bool request_on_response(request_future_t* const self,
                                                          &factory_ctx,
                                                          request_future_remote_cavl_factory);
         if (remote == NULL) {
-            self->error = CY_ERR_MEMORY;
             ON_ASYNC_ERROR(cy, self->topic, CY_ERR_MEMORY);
-            future_deadline_disarm(&self->base); // Unlikely to succeed, fail early.
-            future_notify(&self->base);          // Invalidates the future.
-            return false;                        // Cannot accept, tell the sender about that.
+            return response_rx_silent;
         }
         if (seqno > remote->seqno_top) { // Pushes the frontier, need to shift the bitmap.
             bitmap_shift(remote->seqno_acked, REQUEST_FUTURE_HISTORY, (intmax_t)(seqno - remote->seqno_top));
@@ -2607,10 +2612,10 @@ static bool request_on_response(request_future_t* const self,
         } else { // earlier seqno below the frontier, which might be new if delivered out of order
             const uint64_t dist = remote->seqno_top - seqno;
             if (dist >= REQUEST_FUTURE_HISTORY) {
-                return false; // too old, exceeds history, probably sender misbehaving, do not accept
+                return response_rx_nack; // too old, exceeds history, probably sender misbehaving, do not accept
             }
             if (bitmap_test(remote->seqno_acked, (size_t)dist)) {
-                return true; // seen that, probably lost ack, tell the sender again that we have this one already
+                return response_rx_ack; // duplicate, probably lost ack
             }
             bitmap_set(remote->seqno_acked, (size_t)dist); // genuinely new response just arrived out of order
         }
@@ -2631,7 +2636,7 @@ static bool request_on_response(request_future_t* const self,
     // Notify the application that a new response is available.
     self->error = CY_OK;
     future_notify(&self->base); // Invalidates self; expect finalization.
-    return true;
+    return response_rx_ack;
 }
 
 static void request_future_destroy(request_future_t* const self)
@@ -4908,7 +4913,7 @@ void cy_on_message(cy_platform_t* const  platform,
             const uint64_t seqno       = deserialize_u48(&header[2]);
             const uint64_t hash        = deserialize_u64(&header[8]);
             const uint64_t message_tag = deserialize_u64(&header[16]);
-            // If the future is available (and topic), let it decide how the response should be acknowledged.
+            // If the future is available (and topic), let it decide whether to ACK, NACK, or stay silent.
             // A naive solution would destroy futures immediately when the application no longer needs them
             // and nack all responses for which no live future is found, but this is not correct because in the
             // edge case when we ack a response and destroy the future immediately afterward with the subsequent loss
@@ -4919,17 +4924,24 @@ void cy_on_message(cy_platform_t* const  platform,
             // the simplest solution with minimal state keeping. Note that futures that acknowledged no responses
             // do not need to be retained since the outcome is always the same -- always nack.
             // This is an implementation detail that does not affect wire semantics of course.
-            bool              ack   = false;
-            cy_topic_t* const topic = cy_topic_find_by_hash(cy, hash);
+            response_rx_t     response = response_rx_nack;
+            cy_topic_t* const topic    = cy_topic_find_by_hash(cy, hash);
             if (topic != NULL) {
                 request_future_t* const future =
                   (request_future_t*)future_index_lookup(topic->request_futures_by_tag, message_tag);
                 if (future != NULL) {
-                    ack = request_on_response(future, seqno, message, reliable, lane);
+                    response = request_on_response(future, seqno, message, reliable, lane);
                 }
             }
-            if (reliable) {
-                send_response_ack(cy, lane, message_tag, seqno, tag, hash, ack, message.timestamp + ACK_TX_TIMEOUT);
+            if (reliable && (response != response_rx_silent)) {
+                send_response_ack(cy,
+                                  lane,
+                                  message_tag,
+                                  seqno,
+                                  tag,
+                                  hash,
+                                  response == response_rx_ack,
+                                  message.timestamp + ACK_TX_TIMEOUT);
             }
             break;
         }

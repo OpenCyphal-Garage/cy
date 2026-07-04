@@ -705,7 +705,7 @@ static void test_request_notify_on_response_reliable_destroy(void)
     fixture_deinit(&fixture);
 }
 
-static void test_request_notify_on_response_reliable_oom_destroy(void)
+static void test_request_notify_on_response_reliable_oom_silent(void)
 {
     fixture_t fixture;
     fixture_init(&fixture);
@@ -730,12 +730,14 @@ static void test_request_notify_on_response_reliable_oom_destroy(void)
                               0xADU,
                               fixture.now + 1);
 
-    TEST_ASSERT_EQUAL_size_t(1U, cap.calls);
-    TEST_ASSERT_TRUE(cap.saw_done);
-    TEST_ASSERT_EQUAL_INT(CY_ERR_MEMORY, cap.last_error);
+    TEST_ASSERT_EQUAL_size_t(0U, cap.calls);
+    TEST_ASSERT_FALSE(cy_future_done(fut));
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_future_error(fut));
+    TEST_ASSERT_EQUAL_size_t(0U, fixture.unicast_count);
     TEST_ASSERT_TRUE(fixture.async_error_count > 0U);
     TEST_ASSERT_EQUAL_INT(CY_ERR_MEMORY, fixture.last_async_error);
 
+    cy_future_destroy(fut);
     cy_unadvertise(pub);
     fixture_deinit(&fixture);
 }
@@ -1241,7 +1243,7 @@ int main(void)
     RUN_TEST(test_request_notify_publish_done_fatal_destroy);
     RUN_TEST(test_request_notify_on_response_best_effort_destroy);
     RUN_TEST(test_request_notify_on_response_reliable_destroy);
-    RUN_TEST(test_request_notify_on_response_reliable_oom_destroy);
+    RUN_TEST(test_request_notify_on_response_reliable_oom_silent);
     RUN_TEST(test_request_notify_timeout_no_remote_destroy);
     RUN_TEST(test_request_notify_timeout_with_remote_destroy);
     RUN_TEST(test_publish_pending_future_destroy_then_unadvertise_clean);
