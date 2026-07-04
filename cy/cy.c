@@ -3543,28 +3543,17 @@ static bool on_message(cy_t* const           cy,
 // The returned value is at least large enough for the header.
 static size_t subscription_extent_w_overhead(const cy_topic_t* const topic)
 {
-    size_t total = 0;
-    // Go over all couplings and all subscribers in each coupling.
-    // A coupling corresponds to a particular name that matched the topic.
-    // Each coupling has a list of subscribers under its root sharing that name.
-    const cy_topic_coupling_t* cpl = topic->couplings;
+    size_t                     total = 0;
+    const cy_topic_coupling_t* cpl   = topic->couplings;
     assert(cpl != NULL);
     while (cpl != NULL) {
-        const bool          verbatim = cpl->root->index_pattern == NULL; // no substitution tokens in the name
-        const subscriber_t* sub      = cpl->root->head;
-        size_t              agg      = sub->params.extent_pure;
-        sub                          = sub->next;
+        const subscriber_t* sub = cpl->root->head;
+        assert(sub != NULL);
         while (sub != NULL) {
-            agg = larger(agg, sub->params.extent_pure);
-            sub = sub->next;
+            total = larger(total, sub->params.extent_pure);
+            sub   = sub->next;
         }
-        if (verbatim) {
-            total = agg;
-            break; // Verbatim subscription takes precedence, ignore the rest.
-        }
-        // If only pattern subscriptions exist, merge them all.
-        total = larger(total, agg);
-        cpl   = cpl->next;
+        cpl = cpl->next;
     }
     CY_TRACE(topic->cy, "📬 %s extent=%zu", topic_repr(topic).str, total);
     return total + HEADER_BYTES;

@@ -3,7 +3,7 @@
 - **Severity:** 🟠 MEDIUM (report M-2; found by 2 reviewers)
 - **Confidence:** reproduced (repro test) + code trace
 - **Subsystem:** core (`cy/cy.c`, subscription extent computation)
-- **Status:** OPEN
+- **Status:** RESOLVED
 
 ## Summary
 When a topic is matched by both a verbatim and a pattern subscriber, `subscription_extent_w_overhead` takes the
@@ -30,22 +30,12 @@ non-monotonic shrink across a subject-ID reallocation.
 Remove the `break` and the verbatim override; compute `total = larger(total, agg)` unconditionally across all
 couplings so the reader extent is the maximum requested by any subscriber (verbatim or pattern).
 
-## Regression test (required)
-- Author the regression in the canonical test file (see Fix direction), borrowing & flipping the reference case `test_pattern_extent_starved_by_verbatim` to assert the reader extent grows to ≥ the largest subscriber's
-  extent (pattern 4096 + HEADER_BYTES), regardless of coupling order (test both verbatim-first and pattern-first).
-- Add a delivery test: a message larger than the verbatim extent but within the pattern extent is delivered
-  untruncated to the pattern subscriber.
-- Wire into `ctest`; must fail on pre-fix code, pass after.
+## Resolution
+`subscription_extent_w_overhead()` now computes the maximum `extent_pure` across every subscriber in every coupling
+and adds `HEADER_BYTES` once. The fix is covered by:
+- `test_subscription_extent_uses_pattern_max_after_verbatim_first`.
+- `test_subscription_extent_reallocate_keeps_pattern_max_after_verbatim`.
+- `test_subscription_extent_delivery_not_truncated_by_verbatim`.
 
-## Acceptance criteria
-- [ ] Reader extent = max over all couplings/subscribers on the topic, independent of coupling order.
-- [ ] A pattern subscriber requesting a larger extent than a co-resident verbatim subscriber receives untruncated data.
-- [ ] Extent does not shrink spuriously after a subject-ID reallocation (ties to L17).
-- [ ] Full suite green.
-
-## Verification notes (adversarial cross-check)
-- I will test both orders and confirm the reader extent and actual delivered payload size for a mid-size message.
-- I will confirm removing the `break` doesn't over-grow (extent should be the max, not the sum).
-- I will check the interaction with L17 (reallocation): after a subject move the recomputed extent must still be the
-  max, not a shrink.
-- I will verify multiple pattern subscribers with differing extents all get the max.
+Pre-fix targeted intrusive tests failed on the three M2 regressions. After the fix, targeted intrusive tests passed for
+x64/x32 and C99/C11, and the full Debug suite passed with static analysis enabled.
