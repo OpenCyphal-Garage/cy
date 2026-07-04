@@ -146,6 +146,17 @@ static size_t uint_to_decimal(uint32_t value, char* const buf)
     return len;
 }
 
+/// The topic hash imputed to a headerless Cyphal/CAN v1.0 (13-bit) subject: rapidhash of the subject-ID's
+/// decimal spelling (the N#N compat idiom). TX (topic_is_compat_named) detects the idiom by it; RX
+/// (build_phony_header) bakes it into the fabricated header. The two MUST agree, or pinned best-effort
+/// traffic silently vanishes at the receiver -- so they share this single definition.
+static uint64_t compat_topic_hash(const uint32_t subject_id)
+{
+    char         decimal[11];
+    const size_t dlen = uint_to_decimal(subject_id, decimal);
+    return rapidhash(decimal, dlen);
+}
+
 // =====================================================================================================================
 // MESSAGE BUFFER
 //
@@ -461,6 +472,14 @@ static void v_subject_writer_destroy(cy_platform_t* const platform, cy_subject_w
     owner->vtable->realloc(owner->user, self, 0);
 }
 
+/// True iff the outgoing message's topic hash is the compat hash for its subject-ID -- the N#N idiom.
+static bool topic_is_compat_named(const uint32_t sid, const void* const header)
+{
+    uint_least8_t want[8];
+    le_serialize_u64(want, compat_topic_hash(sid));
+    return memcmp((const uint_least8_t*)header + 8U, want, sizeof(want)) == 0;
+}
+
 static cy_err_t v_subject_writer_send(cy_platform_t* const       platform,
                                       cy_subject_writer_t* const base,
                                       const cy_us_t              deadline,
@@ -475,7 +494,7 @@ static cy_err_t v_subject_writer_send(cy_platform_t* const       platform,
     assert((message.data != NULL) && (message.size >= HEADER_BYTES));
     const bool     pinned      = (sid <= CY_SUBJECT_ID_PINNED_MAX);
     const bool     best_effort = (((const uint_least8_t*)message.data)[0] == 0); // header_msg_be
-    const bool     use_13b     = pinned && best_effort;
+    const bool     use_13b     = pinned && best_effort && topic_is_compat_named(sid, message.data);
     const uint64_t e_oom       = owner->canard.err.oom;
     const uint64_t e_cap       = owner->canard.err.tx_capacity;
 
@@ -526,9 +545,7 @@ static void build_phony_header(subject_reader_pinned_t* const self, const uint32
     (void)memset(self->phony_header, 0, HEADER_BYTES);
     self->phony_header[3] = 0xFFU; // lage = -1 (int8_t)
     le_serialize_u32(&self->phony_header[4], (uint32_t)(UINT32_MAX - subject_id));
-    char         decimal[11];
-    const size_t dlen = uint_to_decimal(subject_id, decimal);
-    le_serialize_u64(&self->phony_header[8], rapidhash(decimal, dlen));
+    le_serialize_u64(&self->phony_header[8], compat_topic_hash(subject_id));
 }
 
 static void reader_set_extent(subject_reader_t* const self, const size_t extent)
