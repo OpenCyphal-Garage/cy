@@ -1206,6 +1206,121 @@ static void test_topic_allocate_destroys_existing_pub_writer_without_displacemen
     fixture_deinit(&fix);
 }
 
+static void test_topic_allocate_same_subject_reallocation_keeps_handles(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    static const char* const topic_name = "alloc/same-subject/handles";
+    cy_future_t* const       sub        = cy_subscribe(fix.cy, cy_str(topic_name), 64U);
+    TEST_ASSERT_NOT_NULL(sub);
+    cy_topic_t* const topic = cy_topic_find_by_name(fix.cy, cy_str(topic_name));
+    TEST_ASSERT_NOT_NULL(topic);
+    TEST_ASSERT_NOT_NULL(topic->sub_reader);
+
+    topic_allocate(topic, 1U, 240 * MEGA);
+    TEST_ASSERT_EQUAL_UINT32(1U, topic->evictions);
+    TEST_ASSERT_NOT_NULL(topic->sub_reader);
+    const uint32_t sid = topic_subject_id(topic);
+
+    TEST_ASSERT_EQUAL_INT(CY_OK, topic_sync_subject_writer(topic));
+    TEST_ASSERT_NOT_NULL(topic->pub_writer);
+    reader_t* const reader                 = topic->sub_reader;
+    writer_t* const writer                 = topic->pub_writer;
+    const size_t    reader_refcount        = reader->refcount;
+    const size_t    writer_refcount        = writer->refcount;
+    const size_t    reader_destroy_count   = fix.subject_reader_destroy_count;
+    const size_t    writer_destroy_count   = fix.subject_writer_destroy_count;
+    const uint32_t  same_subject_evictions = fix.platform.subject_id_modulus - 1U;
+    TEST_ASSERT_EQUAL_UINT32(
+      sid, topic_subject_id_impl(topic->hash, same_subject_evictions, fix.platform.subject_id_modulus));
+
+    topic_allocate(topic, same_subject_evictions, 250 * MEGA);
+
+    TEST_ASSERT_EQUAL_UINT32(same_subject_evictions, topic->evictions);
+    TEST_ASSERT_EQUAL_UINT32(sid, topic_subject_id(topic));
+    TEST_ASSERT_EQUAL_PTR(reader, topic->sub_reader);
+    TEST_ASSERT_EQUAL_PTR(writer, topic->pub_writer);
+    TEST_ASSERT_EQUAL_size_t(reader_destroy_count, fix.subject_reader_destroy_count);
+    TEST_ASSERT_EQUAL_size_t(writer_destroy_count, fix.subject_writer_destroy_count);
+    TEST_ASSERT_EQUAL_size_t(reader_refcount, topic->sub_reader->refcount);
+    TEST_ASSERT_EQUAL_size_t(writer_refcount, topic->pub_writer->refcount);
+    TEST_ASSERT_EQUAL_UINT32(sid, topic->sub_reader->handle->subject_id);
+    TEST_ASSERT_EQUAL_UINT32(sid, topic->pub_writer->handle->subject_id);
+    TEST_ASSERT_TRUE(topic_find_by_subject_id(fix.cy, sid) == topic);
+    subject_tracker_assert_contains(&fix.active_readers, sid);
+    subject_tracker_assert_contains(&fix.active_writers, sid);
+    assert_subject_index_unique(fix.cy);
+
+    cy_future_destroy(sub);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(fix.cy));
+    fixture_deinit(&fix);
+}
+
+static void test_topic_allocate_recursive_same_subject_reallocation_keeps_handles(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    static const char* const topic_name = "alloc/same-subject/recursive/handles";
+    cy_future_t* const       sub        = cy_subscribe(fix.cy, cy_str(topic_name), 64U);
+    TEST_ASSERT_NOT_NULL(sub);
+    cy_topic_t* const topic = cy_topic_find_by_name(fix.cy, cy_str(topic_name));
+    TEST_ASSERT_NOT_NULL(topic);
+    TEST_ASSERT_NOT_NULL(topic->sub_reader);
+
+    topic_allocate(topic, 1U, 260 * MEGA);
+    TEST_ASSERT_EQUAL_UINT32(1U, topic->evictions);
+    const uint32_t sid = topic_subject_id(topic);
+
+    const uint64_t p                   = fix.platform.subject_id_modulus;
+    const uint32_t losing_evictions    = fix.platform.subject_id_modulus - 2U;
+    const uint32_t same_subject_evicts = fix.platform.subject_id_modulus - 1U;
+    const uint32_t blocked_sid = topic_subject_id_impl(topic->hash, losing_evictions, fix.platform.subject_id_modulus);
+    const uint64_t blocked_residue = (uint64_t)(blocked_sid - (CY_SUBJECT_ID_PINNED_MAX + 1U));
+    uint64_t       blocker_hash    = (topic->hash - (topic->hash % p)) + blocked_residue;
+    if (blocker_hash == topic->hash) {
+        blocker_hash += p;
+    }
+    cy_topic_t* const blocker =
+      fixture_make_topic(&fix, "alloc/same-subject/recursive/blocker", blocker_hash, 0U, LAGE_MIN);
+    topic_merge_lage(blocker, 270 * MEGA, 10);
+    TEST_ASSERT_EQUAL_UINT32(blocked_sid, topic_subject_id(blocker));
+    TEST_ASSERT_TRUE(topic_subject_id(blocker) != sid);
+    TEST_ASSERT_FALSE(left_wins(topic, 270 * MEGA, topic_lage(blocker, 270 * MEGA), blocker->hash));
+
+    TEST_ASSERT_EQUAL_INT(CY_OK, topic_sync_subject_writer(topic));
+    TEST_ASSERT_NOT_NULL(topic->pub_writer);
+    reader_t* const reader               = topic->sub_reader;
+    writer_t* const writer               = topic->pub_writer;
+    const size_t    reader_refcount      = reader->refcount;
+    const size_t    writer_refcount      = writer->refcount;
+    const size_t    reader_destroy_count = fix.subject_reader_destroy_count;
+    const size_t    writer_destroy_count = fix.subject_writer_destroy_count;
+    TEST_ASSERT_EQUAL_UINT32(sid,
+                             topic_subject_id_impl(topic->hash, same_subject_evicts, fix.platform.subject_id_modulus));
+
+    topic_allocate(topic, losing_evictions, 270 * MEGA);
+
+    TEST_ASSERT_EQUAL_UINT32(same_subject_evicts, topic->evictions);
+    TEST_ASSERT_EQUAL_UINT32(sid, topic_subject_id(topic));
+    TEST_ASSERT_EQUAL_PTR(reader, topic->sub_reader);
+    TEST_ASSERT_EQUAL_PTR(writer, topic->pub_writer);
+    TEST_ASSERT_EQUAL_size_t(reader_destroy_count, fix.subject_reader_destroy_count);
+    TEST_ASSERT_EQUAL_size_t(writer_destroy_count, fix.subject_writer_destroy_count);
+    TEST_ASSERT_EQUAL_size_t(reader_refcount, topic->sub_reader->refcount);
+    TEST_ASSERT_EQUAL_size_t(writer_refcount, topic->pub_writer->refcount);
+    TEST_ASSERT_TRUE(topic_find_by_subject_id(fix.cy, sid) == topic);
+    TEST_ASSERT_TRUE(topic_find_by_subject_id(fix.cy, blocked_sid) == blocker);
+    subject_tracker_assert_contains(&fix.active_readers, sid);
+    subject_tracker_assert_contains(&fix.active_writers, sid);
+    assert_subject_index_unique(fix.cy);
+
+    cy_future_destroy(sub);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(fix.cy));
+    fixture_deinit(&fix);
+}
+
 static void test_on_gossip_known_topic_divergence_paths(void)
 {
     fixture_t fix;
@@ -2004,6 +2119,8 @@ int main(void)
     RUN_TEST(test_topic_allocate_reader_recovery_after_subject_reader_oom);
     RUN_TEST(test_topic_sync_subject_writer_reports_oom);
     RUN_TEST(test_topic_allocate_destroys_existing_pub_writer_without_displacement);
+    RUN_TEST(test_topic_allocate_same_subject_reallocation_keeps_handles);
+    RUN_TEST(test_topic_allocate_recursive_same_subject_reallocation_keeps_handles);
     RUN_TEST(test_on_gossip_known_topic_divergence_paths);
     RUN_TEST(test_on_gossip_unknown_topic_collision_paths);
     RUN_TEST(test_topic_allocate_recursive_chain_converges_and_writer_transfers);

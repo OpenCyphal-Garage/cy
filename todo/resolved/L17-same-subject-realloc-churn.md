@@ -3,7 +3,7 @@
 - **Severity:** 🟡 LOW (report L-17 / CRDT-F14, L-F weaker)
 - **Confidence:** verified (code trace)
 - **Subsystem:** core (`cy/cy.c`, `topic_allocate` victory branch)
-- **Status:** OPEN
+- **Status:** RESOLVED
 
 ## Summary
 When a topic's probe sequence cycles back to its *current* subject-ID (possible because `subject_id(hash, e)` is
@@ -30,10 +30,10 @@ subject-ID should not tear down transport state.
 - Wire into `ctest` (extend `test_intrusive_topic_allocation`).
 
 ## Acceptance criteria
-- [ ] A reallocation that keeps the same subject-ID does not destroy/recreate the platform reader/writer.
-- [ ] Allocation results and diagnostics are otherwise unchanged (CRDT equivalence preserved).
-- [ ] No refcount imbalance or OOM window introduced.
-- [ ] Full suite, incl. `test_intrusive_topic_allocation` / `_exhaustive`, green.
+- [x] A reallocation that keeps the same subject-ID does not destroy/recreate the platform reader/writer.
+- [x] Allocation results and diagnostics are otherwise unchanged (CRDT equivalence preserved).
+- [x] No refcount imbalance or OOM window introduced.
+- [x] Full suite, incl. `test_intrusive_topic_allocation` / `_exhaustive`, green.
 
 ## Verification notes (adversarial cross-check)
 - I will confirm the handle survives via the subject-tracker (no destroy event) for a same-subject reallocation, and
