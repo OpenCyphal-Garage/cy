@@ -3929,7 +3929,8 @@ static cy_err_t do_respond(cy_breadcrumb_t* const breadcrumb,
 cy_err_t cy_respond(cy_breadcrumb_t* const breadcrumb, const cy_us_t deadline, const cy_bytes_t message)
 {
     cy_err_t err = CY_ERR_ARGUMENT;
-    if ((breadcrumb != NULL) && (breadcrumb->cy != NULL) && (deadline >= 0)) {
+    if ((breadcrumb != NULL) && (breadcrumb->cy != NULL) && (CY_PRIO_COUNT > (size_t)breadcrumb->priority) &&
+        (deadline >= 0) && !((message.data == NULL) && (message.size > 0))) {
         err = do_respond(breadcrumb, deadline, message, header_rsp_be, 0xFF); // arbitrary tag value
         breadcrumb->seqno++; // Increment always in case of partial send success.
     }
