@@ -61,6 +61,17 @@ static void dedup_cleanup(cy_topic_t* const owner)
     }
 }
 
+// Combined consult+commit, as the removed dedup_update() did.
+static bool dedup_seen(dedup_t* const dd, cy_topic_t* const owner, const uint64_t tag, const cy_us_t now)
+{
+    dedup_touch(dd, owner, now);
+    if (dedup_check(dd, tag)) {
+        return true;
+    }
+    dedup_commit(dd, tag);
+    return false;
+}
+
 static void test_dedup_first_and_exact_duplicate(void)
 {
     dedup_fixture_t fixture;
@@ -69,8 +80,8 @@ static void test_dedup_first_and_exact_duplicate(void)
     dedup_owner_init(&owner, &fixture);
 
     dedup_t* const dd = dedup_make_state(&owner, 123U, 100U);
-    TEST_ASSERT_FALSE(dedup_update(dd, &owner, 100U, 1000));
-    TEST_ASSERT_TRUE(dedup_update(dd, &owner, 100U, 1001));
+    TEST_ASSERT_FALSE(dedup_seen(dd, &owner, 100U, 1000));
+    TEST_ASSERT_TRUE(dedup_seen(dd, &owner, 100U, 1001));
 
     dedup_cleanup(&owner);
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&fixture.heap));
@@ -85,9 +96,9 @@ static void test_dedup_out_of_order_seen_once(void)
     dedup_owner_init(&owner, &fixture);
 
     dedup_t* const dd = dedup_make_state(&owner, 77U, 200U);
-    TEST_ASSERT_FALSE(dedup_update(dd, &owner, 200U, 10));
-    TEST_ASSERT_FALSE(dedup_update(dd, &owner, 199U, 11));
-    TEST_ASSERT_TRUE(dedup_update(dd, &owner, 199U, 12));
+    TEST_ASSERT_FALSE(dedup_seen(dd, &owner, 200U, 10));
+    TEST_ASSERT_FALSE(dedup_seen(dd, &owner, 199U, 11));
+    TEST_ASSERT_TRUE(dedup_seen(dd, &owner, 199U, 12));
 
     dedup_cleanup(&owner);
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&fixture.heap));
@@ -102,9 +113,9 @@ static void test_dedup_wraparound(void)
     dedup_owner_init(&owner, &fixture);
 
     dedup_t* const dd = dedup_make_state(&owner, 9U, UINT64_MAX);
-    TEST_ASSERT_FALSE(dedup_update(dd, &owner, UINT64_MAX, 0));
-    TEST_ASSERT_FALSE(dedup_update(dd, &owner, 0U, 1));
-    TEST_ASSERT_TRUE(dedup_update(dd, &owner, 0U, 2));
+    TEST_ASSERT_FALSE(dedup_seen(dd, &owner, UINT64_MAX, 0));
+    TEST_ASSERT_FALSE(dedup_seen(dd, &owner, 0U, 1));
+    TEST_ASSERT_TRUE(dedup_seen(dd, &owner, 0U, 2));
 
     dedup_cleanup(&owner);
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&fixture.heap));
@@ -119,7 +130,7 @@ static void test_dedup_drop_stale(void)
     dedup_owner_init(&owner, &fixture);
 
     dedup_t* const dd = dedup_make_state(&owner, 0xDEADU, 1234U);
-    TEST_ASSERT_FALSE(dedup_update(dd, &owner, 1234U, 100));
+    TEST_ASSERT_FALSE(dedup_seen(dd, &owner, 1234U, 100));
     dedup_drop_stale(&owner, 100 + SESSION_LIFETIME + 1);
     TEST_ASSERT_NULL(owner.sub_index_dedup_by_remote_id);
     TEST_ASSERT_NULL(owner.sub_list_dedup_by_recency.head);
@@ -137,21 +148,21 @@ static void test_dedup_forward_small_step(void)
     dedup_owner_init(&owner, &fixture);
 
     dedup_t* const dd = dedup_make_state(&owner, 1U, 100U);
-    TEST_ASSERT_FALSE(dedup_update(dd, &owner, 100U, 0)); // establish tag=100, bitmap=0
+    TEST_ASSERT_FALSE(dedup_seen(dd, &owner, 100U, 0)); // establish tag=100, bitmap=0
     // Advance by 1: fwd=1 < DEDUP_HISTORY, tag becomes 101.
-    TEST_ASSERT_FALSE(dedup_update(dd, &owner, 101U, 1));
+    TEST_ASSERT_FALSE(dedup_seen(dd, &owner, 101U, 1));
     // The old tag=100 should be marked as seen (bit 0 of bitmap); re-receiving it is a duplicate.
-    TEST_ASSERT_TRUE(dedup_update(dd, &owner, 100U, 2));
+    TEST_ASSERT_TRUE(dedup_seen(dd, &owner, 100U, 2));
     // Advance by 2 more: fwd=2, tag becomes 103.
-    TEST_ASSERT_FALSE(dedup_update(dd, &owner, 103U, 3));
+    TEST_ASSERT_FALSE(dedup_seen(dd, &owner, 103U, 3));
     // tag=100 is now at rev=3, bit 2 set → duplicate.
-    TEST_ASSERT_TRUE(dedup_update(dd, &owner, 100U, 4));
+    TEST_ASSERT_TRUE(dedup_seen(dd, &owner, 100U, 4));
     // tag=101 is now at rev=2, bit 1 set → duplicate.
-    TEST_ASSERT_TRUE(dedup_update(dd, &owner, 101U, 5));
+    TEST_ASSERT_TRUE(dedup_seen(dd, &owner, 101U, 5));
     // tag=99 was never seen → not duplicate (rev=4, bit 3 not set).
-    TEST_ASSERT_FALSE(dedup_update(dd, &owner, 99U, 6));
+    TEST_ASSERT_FALSE(dedup_seen(dd, &owner, 99U, 6));
     // tag=99 now set in bitmap; re-receiving is duplicate.
-    TEST_ASSERT_TRUE(dedup_update(dd, &owner, 99U, 7));
+    TEST_ASSERT_TRUE(dedup_seen(dd, &owner, 99U, 7));
 
     dedup_cleanup(&owner);
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&fixture.heap));
@@ -170,11 +181,11 @@ static void test_dedup_forward_exact_history(void)
     const uint64_t boundary_tag = base_tag + DEDUP_HISTORY;
 
     dedup_t* const dd = dedup_make_state(&owner, 2U, base_tag);
-    TEST_ASSERT_FALSE(dedup_update(dd, &owner, base_tag, 0)); // establish current tag
-    TEST_ASSERT_FALSE(dedup_update(dd, &owner, boundary_tag, 1));
+    TEST_ASSERT_FALSE(dedup_seen(dd, &owner, base_tag, 0)); // establish current tag
+    TEST_ASSERT_FALSE(dedup_seen(dd, &owner, boundary_tag, 1));
     // Reset keeps only the new current tag; the old base tag is accepted once again.
-    TEST_ASSERT_FALSE(dedup_update(dd, &owner, base_tag, 2));
-    TEST_ASSERT_TRUE(dedup_update(dd, &owner, base_tag, 3));
+    TEST_ASSERT_FALSE(dedup_seen(dd, &owner, base_tag, 2));
+    TEST_ASSERT_TRUE(dedup_seen(dd, &owner, base_tag, 3));
 
     dedup_cleanup(&owner);
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&fixture.heap));
@@ -193,15 +204,15 @@ static void test_dedup_forward_large_jump(void)
     const uint64_t jump_tag = base_tag + DEDUP_HISTORY + 88U;
 
     dedup_t* const dd = dedup_make_state(&owner, 3U, base_tag);
-    TEST_ASSERT_FALSE(dedup_update(dd, &owner, base_tag, 0)); // establish current tag
+    TEST_ASSERT_FALSE(dedup_seen(dd, &owner, base_tag, 0)); // establish current tag
     // Set some bitmap bits first by visiting nearby tags.
-    TEST_ASSERT_FALSE(dedup_update(dd, &owner, base_tag + 1U, 1)); // fwd=1 < DEDUP_HISTORY
+    TEST_ASSERT_FALSE(dedup_seen(dd, &owner, base_tag + 1U, 1)); // fwd=1 < DEDUP_HISTORY
     // Now jump far ahead: fwd > DEDUP_HISTORY -> bitmap reset.
-    TEST_ASSERT_FALSE(dedup_update(dd, &owner, jump_tag, 2));
+    TEST_ASSERT_FALSE(dedup_seen(dd, &owner, jump_tag, 2));
     // Previous tags should NOT be remembered (bitmap was reset).
-    TEST_ASSERT_FALSE(dedup_update(dd, &owner, jump_tag - 1U, 3)); // rev=1, bit 1 was clear -> new
+    TEST_ASSERT_FALSE(dedup_seen(dd, &owner, jump_tag - 1U, 3)); // rev=1, bit 1 was clear -> new
     // But jump_tag-1 is now set; re-receiving is duplicate.
-    TEST_ASSERT_TRUE(dedup_update(dd, &owner, jump_tag - 1U, 4));
+    TEST_ASSERT_TRUE(dedup_seen(dd, &owner, jump_tag - 1U, 4));
 
     dedup_cleanup(&owner);
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&fixture.heap));
@@ -231,7 +242,7 @@ static void test_dedup_drop_stale_not_yet(void)
     dedup_owner_init(&owner, &fixture);
 
     dedup_t* const dd = dedup_make_state(&owner, 50U, 500U);
-    TEST_ASSERT_FALSE(dedup_update(dd, &owner, 500U, 100));
+    TEST_ASSERT_FALSE(dedup_seen(dd, &owner, 500U, 100));
     // Exactly at the boundary: last_active_at(100) + SESSION_LIFETIME >= 100 + SESSION_LIFETIME → not stale.
     dedup_drop_stale(&owner, 100 + SESSION_LIFETIME);
     TEST_ASSERT_NOT_NULL(owner.sub_index_dedup_by_remote_id);
@@ -253,7 +264,7 @@ static void test_dedup_drop_stale_multiple(void)
 
     // Create first entry (remote_id=10) at time 100.
     dedup_t* const dd1 = dedup_make_state(&owner, 10U, 1U);
-    TEST_ASSERT_FALSE(dedup_update(dd1, &owner, 1U, 100));
+    TEST_ASSERT_FALSE(dedup_seen(dd1, &owner, 1U, 100));
 
     // Create second entry (remote_id=20) at time 200 via cavl2_find_or_insert.
     dedup_factory_context_t ctx2  = { .owner = &owner, .remote_id = 20U, .tag = 2U };
@@ -261,7 +272,7 @@ static void test_dedup_drop_stale_multiple(void)
       &owner.sub_index_dedup_by_remote_id, &ctx2.remote_id, dedup_cavl_compare, &ctx2, dedup_factory);
     TEST_ASSERT_NOT_NULL(tree2);
     dedup_t* const dd2 = CAVL2_TO_OWNER(tree2, dedup_t, index_remote_id);
-    TEST_ASSERT_FALSE(dedup_update(dd2, &owner, 2U, 200));
+    TEST_ASSERT_FALSE(dedup_seen(dd2, &owner, 2U, 200));
 
     TEST_ASSERT_EQUAL_size_t(2, guarded_heap_allocated_fragments(&fixture.heap));
     // At time 100 + SESSION_LIFETIME + 1, the first entry (last_active=100) is stale; the second (200) is not.
@@ -291,7 +302,7 @@ static void test_dedup_cavl_compare_all_branches(void)
     owner.sub_index_dedup_by_remote_id = dedup_factory(&ctx1);
     TEST_ASSERT_NOT_NULL(owner.sub_index_dedup_by_remote_id);
     dedup_t* const dd1 = CAVL2_TO_OWNER(owner.sub_index_dedup_by_remote_id, dedup_t, index_remote_id);
-    TEST_ASSERT_FALSE(dedup_update(dd1, &owner, 1U, 0)); // enlist and set last_active_at
+    TEST_ASSERT_FALSE(dedup_seen(dd1, &owner, 1U, 0)); // enlist and set last_active_at
 
     // Insert remote_id=10 (10 < 20, compare returns -1).
     dedup_factory_context_t ctx2 = { .owner = &owner, .remote_id = 10U, .tag = 2U };
@@ -299,7 +310,7 @@ static void test_dedup_cavl_compare_all_branches(void)
       &owner.sub_index_dedup_by_remote_id, &ctx2.remote_id, dedup_cavl_compare, &ctx2, dedup_factory);
     TEST_ASSERT_NOT_NULL(t2);
     dedup_t* const dd2 = CAVL2_TO_OWNER(t2, dedup_t, index_remote_id);
-    TEST_ASSERT_FALSE(dedup_update(dd2, &owner, 2U, 0));
+    TEST_ASSERT_FALSE(dedup_seen(dd2, &owner, 2U, 0));
 
     // Insert remote_id=30 (30 > 20, compare returns +1).
     dedup_factory_context_t ctx3 = { .owner = &owner, .remote_id = 30U, .tag = 3U };
@@ -307,7 +318,7 @@ static void test_dedup_cavl_compare_all_branches(void)
       &owner.sub_index_dedup_by_remote_id, &ctx3.remote_id, dedup_cavl_compare, &ctx3, dedup_factory);
     TEST_ASSERT_NOT_NULL(t3);
     dedup_t* const dd3 = CAVL2_TO_OWNER(t3, dedup_t, index_remote_id);
-    TEST_ASSERT_FALSE(dedup_update(dd3, &owner, 3U, 0));
+    TEST_ASSERT_FALSE(dedup_seen(dd3, &owner, 3U, 0));
 
     // Look up existing remote_id=20 (compare returns 0).
     dedup_factory_context_t ctx4  = { .owner = &owner, .remote_id = 20U, .tag = 4U };

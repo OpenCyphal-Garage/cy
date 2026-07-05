@@ -3,7 +3,20 @@
 - **Severity:** 🔴 HIGH (report H-5 / CAN-F1)
 - **Confidence:** reproduced by the CAN agent (control vs affected topic)
 - **Subsystem:** `cy_can/cy_can.c`
-- **Status:** OPEN
+- **Status:** RESOLVED
+
+## Resolution
+Chose option 1 with automatic detection (no new API, no user config). `v_subject_writer_send` now takes the
+headerless v1.0 13-bit plane for a pinned best-effort publish **only** when the message's topic hash (header
+byte offset 8) equals `rapidhash(decimal(sid))` — i.e. the `N#N` compat idiom. This is exactly the condition
+the receiver's fabricated phony header (`build_phony_header`) matches, so when the 13-bit plane is used the
+message is delivered rather than silently dropped; every other name (e.g. `foo/bar#611`) falls through to the
+16-bit plane with the real header and is delivered. The TX detector (`topic_is_compat_named`) and the RX
+fabricator share one `compat_topic_hash()` helper so they cannot drift. Regression tests (both fail pre-fix,
+pass after): `test_api_can_pubsub_pinned_best_effort_custom_name_uses_v11_plane` (custom-named delivery on the
+16-bit plane) and `test_api_can_pubsub_multitenant_pinned_best_effort_delivers_and_filters` (`foo#1234` +
+`bar#1234` on one shared subject-ID, each delivered and hash-filtered). README "Compatibility with Cyphal/CAN
+v1.0" documents the `N#N`-selects-13-bit-plane behaviour.
 
 ## Summary
 For a pinned subject (`sid ≤ 8191`) published best-effort, the CAN driver strips Cy's header and sends on the

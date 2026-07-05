@@ -3,7 +3,22 @@
 - **Severity:** 🟠 MEDIUM standalone; 🔴 HIGH when compounded with H1 (report M-8 / S-F2)
 - **Confidence:** reproduced (repro test) + code trace
 - **Subsystem:** core (`cy/cy.c`, subscriber data path)
-- **Status:** OPEN
+- **Status:** RESOLVED (2026-07-04)
+
+## Resolution
+Split the dedup primitive into `dedup_touch` (recency/enlist, always) + `dedup_check` (read-only duplicate test) +
+`dedup_commit` (bitmap mutation), and deferred the commit in `on_message` to the tail, gated on `reliable &&
+acknowledge` — so a message no subscriber accepted is never recorded, and its retransmit is re-attempted (or, for a
+window-late ordered drop, correctly resolves the publisher future with `CY_ERR_DELIVERY`) instead of being
+false-ACKed. Closed the reordering self-disposal vector by driving `acknowledge` from delivery: `subscriber_notify`
+returns false when the subscriber was already disposed, and `reordering_push` refuses the current message via a
+single `sub->disposed` guard after its forced-eject sites (covers both the capacity-overflow and far-backward-restart
+ejections). Chosen public semantics: window-dropped reliable+ordered messages report `CY_ERR_DELIVERY` (cy.h docs
+intentionally kept high-level; E2E reordering/migration tests updated). Regression suite:
+`tests/src/test_intrusive_false_ack.c` (10 tests) — the false-ack and late-retransmit vector tests fail pre-fix and
+pass post-fix; the rest are behavior-preservation guards that pass both — plus
+`test_intrusive_dedup.c`/`test_intrusive_topic_allocation.c` updated for the API split. Full suite green under static
+analysis across x64/x32 × c99/c11.
 
 ## Summary
 `on_message` marks a reliable message's tag as received in the dedup filter **before** any subscriber accepts it. If
@@ -63,11 +78,11 @@ Split "consult" from "commit": only record the tag as received once at least one
 - Wire into `ctest`; must fail on pre-fix code, pass after.
 
 ## Acceptance criteria
-- [ ] A reliable message that no subscriber accepted on first delivery is not recorded as received; its retransmit is
+- [x] A reliable message that no subscriber accepted on first delivery is not recorded as received; its retransmit is
       delivered (or re-attempted), not silently ACKed.
-- [ ] Genuine duplicates are still deduplicated and ACKed without re-delivery (no regression to dedup).
-- [ ] Best-effort path and non-OOM normal path unchanged.
-- [ ] Full suite + `test_intrusive_dedup` green.
+- [x] Genuine duplicates are still deduplicated and ACKed without re-delivery (no regression to dedup).
+- [x] Best-effort path and non-OOM normal path unchanged.
+- [x] Full suite + `test_intrusive_dedup` green.
 
 ## Verification notes (adversarial cross-check)
 - I will exercise all three non-acceptance triggers (slot OOM, state OOM, all-disposed) and confirm the retransmit is

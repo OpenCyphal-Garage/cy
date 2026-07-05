@@ -1,7 +1,9 @@
 #include <cy.c> // NOLINT(bugprone-suspicious-include)
 #include <unity.h>
 #include "guarded_heap.h"
+#include "helpers.h"
 #include "intrusive_fixture_utils.h"
+#include "message.h"
 #include <string.h>
 
 typedef struct
@@ -164,7 +166,7 @@ static const cy_diag_vtable_t fixture_diag_vtable = {
     .async_error = fixture_diag_async_error,
 };
 
-static void fixture_init(fixture_t* const self)
+static void fixture_init_platform(fixture_t* const self)
 {
     memset(self, 0, sizeof(*self));
     guarded_heap_init(&self->heap, UINT64_C(0xCAFEBABE12345678));
@@ -182,6 +184,11 @@ static void fixture_init(fixture_t* const self)
     self->vtable.now                       = fixture_now;
     self->vtable.realloc                   = fixture_realloc;
     self->vtable.random                    = fixture_random;
+}
+
+static void fixture_init(fixture_t* const self)
+{
+    fixture_init_platform(self);
     self->cy = cy_new(&self->platform, cy_str("test"), (cy_str_t){ 0, NULL }, (cy_str_t){ 0, NULL });
     TEST_ASSERT_NOT_NULL(self->cy);
     self->diag = (cy_diag_t){ .next = NULL, .user_context = CY_USER_CONTEXT_EMPTY, .vtable = &fixture_diag_vtable };
@@ -317,6 +324,40 @@ static void test_cy_destroy_handles_missing_broadcast_handles(void)
     TEST_ASSERT_EQUAL_size_t(1U, fix.subject_reader_destroy_count);
     TEST_ASSERT_EQUAL_size_t(1U, fix.subject_writer_destroy_count);
     fixture_deinit(&fix);
+}
+
+static void test_cy_new_broadcast_reader_oom_drains_remap(void)
+{
+    fixture_t fix;
+    fixture_init_platform(&fix);
+
+    fix.fail_subject_reader_new = true;
+    TEST_ASSERT_NULL(cy_new(&fix.platform, cy_str("test"), (cy_str_t){ 0, NULL }, cy_str("a=b c=/d")));
+
+    TEST_ASSERT_NULL(fix.platform.cy);
+    TEST_ASSERT_EQUAL_size_t(0U, fix.active_readers.count);
+    TEST_ASSERT_EQUAL_size_t(0U, fix.active_writers.count);
+    TEST_ASSERT_EQUAL_size_t(0U, fix.subject_reader_destroy_count);
+    TEST_ASSERT_EQUAL_size_t(0U, fix.subject_writer_destroy_count);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&fix.heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&fix.heap));
+}
+
+static void test_cy_new_broadcast_writer_oom_drains_remap(void)
+{
+    fixture_t fix;
+    fixture_init_platform(&fix);
+
+    fix.fail_subject_writer_new = true;
+    TEST_ASSERT_NULL(cy_new(&fix.platform, cy_str("test"), (cy_str_t){ 0, NULL }, cy_str("a=b c=/d")));
+
+    TEST_ASSERT_NULL(fix.platform.cy);
+    TEST_ASSERT_EQUAL_size_t(0U, fix.active_readers.count);
+    TEST_ASSERT_EQUAL_size_t(0U, fix.active_writers.count);
+    TEST_ASSERT_EQUAL_size_t(1U, fix.subject_reader_destroy_count);
+    TEST_ASSERT_EQUAL_size_t(0U, fix.subject_writer_destroy_count);
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_fragments(&fix.heap));
+    TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&fix.heap));
 }
 
 static void test_cy_advertise_client_validation_oom_and_extent_growth(void)
@@ -604,6 +645,108 @@ static void test_subscribe_existing_root_refreshes_reader_extent(void)
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(fix.cy));
     topic->pub_count = 0U;
     topic_sync_implicit(topic);
+    fixture_deinit(&fix);
+}
+
+static void test_subscription_extent_uses_pattern_max_after_verbatim_first(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    static const char* const topic_name = "alloc/sub/m2/verbatim-first";
+    cy_future_t* const       sub_small  = cy_subscribe(fix.cy, cy_str(topic_name), 16U);
+    TEST_ASSERT_NOT_NULL(sub_small);
+    cy_topic_t* const topic = cy_topic_find_by_name(fix.cy, cy_str(topic_name));
+    TEST_ASSERT_NOT_NULL(topic);
+    TEST_ASSERT_NOT_NULL(topic->sub_reader);
+    TEST_ASSERT_EQUAL_size_t(16U + HEADER_BYTES, topic->sub_reader->handle->extent);
+
+    cy_future_t* const sub_large = cy_subscribe(fix.cy, cy_str("alloc/sub/m2/*"), 4096U);
+    TEST_ASSERT_NOT_NULL(sub_large);
+    TEST_ASSERT_NOT_NULL(topic->sub_reader);
+    TEST_ASSERT_EQUAL_size_t(4096U + HEADER_BYTES, topic->sub_reader->handle->extent);
+
+    cy_future_destroy(sub_small);
+    cy_future_destroy(sub_large);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(fix.cy));
+    fixture_deinit(&fix);
+}
+
+static void test_subscription_extent_reallocate_keeps_pattern_max_after_verbatim(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    static const char* const topic_name = "alloc/sub/m2/reallocate";
+    const cy_str_t           name_str   = cy_str(topic_name);
+    cy_topic_t* const topic = fixture_make_explicit_topic(&fix, topic_name, rapidhash(name_str.str, name_str.len));
+
+    cy_future_t* const sub_large = cy_subscribe(fix.cy, cy_str("alloc/sub/m2/*"), 4096U);
+    TEST_ASSERT_NOT_NULL(sub_large);
+    TEST_ASSERT_NOT_NULL(topic->sub_reader);
+    TEST_ASSERT_EQUAL_size_t(4096U + HEADER_BYTES, topic->sub_reader->handle->extent);
+
+    cy_future_t* const sub_small = cy_subscribe(fix.cy, name_str, 16U);
+    TEST_ASSERT_NOT_NULL(sub_small);
+    TEST_ASSERT_NOT_NULL(topic->sub_reader);
+    TEST_ASSERT_EQUAL_size_t(4096U + HEADER_BYTES, topic->sub_reader->handle->extent);
+
+    topic_allocate(topic, topic->evictions, 250 * MEGA);
+    TEST_ASSERT_NOT_NULL(topic->sub_reader);
+    TEST_ASSERT_EQUAL_size_t(4096U + HEADER_BYTES, topic->sub_reader->handle->extent);
+
+    cy_future_destroy(sub_small);
+    cy_future_destroy(sub_large);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(fix.cy));
+    topic->pub_count = 0U;
+    topic_sync_implicit(topic);
+    fixture_deinit(&fix);
+}
+
+static void test_subscription_extent_delivery_not_truncated_by_verbatim(void)
+{
+    fixture_t fix;
+    fixture_init(&fix);
+
+    static const char* const topic_name = "alloc/sub/m2/delivery";
+    cy_future_t* const       sub_small  = cy_subscribe(fix.cy, cy_str(topic_name), 16U);
+    TEST_ASSERT_NOT_NULL(sub_small);
+    cy_future_t* const sub_large = cy_subscribe(fix.cy, cy_str("alloc/sub/m2/*"), 4096U);
+    TEST_ASSERT_NOT_NULL(sub_large);
+
+    cy_topic_t* const topic = cy_topic_find_by_name(fix.cy, cy_str(topic_name));
+    TEST_ASSERT_NOT_NULL(topic);
+    TEST_ASSERT_NOT_NULL(topic->sub_reader);
+
+    unsigned char payload[64];
+    for (size_t i = 0U; i < sizeof(payload); i++) {
+        payload[i] = (unsigned char)(0xA0U + i);
+    }
+    unsigned char wire[HEADER_BYTES + sizeof(payload)];
+    make_message_header(wire, header_msg_be, UINT64_C(0xBADC0FFEE0DDF00D), topic->hash);
+    memcpy(&wire[HEADER_BYTES], payload, sizeof(payload));
+
+    const size_t truncated_size =
+      (sizeof(wire) < topic->sub_reader->handle->extent) ? sizeof(wire) : topic->sub_reader->handle->extent;
+    cy_message_t* const msg = cy_test_message_make(&fix.heap, wire, truncated_size);
+    TEST_ASSERT_NOT_NULL(msg);
+    const uint32_t sid = topic_subject_id(topic);
+    cy_on_message(&fix.platform,
+                  (cy_lane_t){ .id = UINT64_C(0x1111222233334444), .prio = cy_prio_nominal },
+                  &sid,
+                  (cy_message_ts_t){ .timestamp = 251 * MEGA, .content = msg });
+
+    TEST_ASSERT_TRUE(cy_future_done(sub_large));
+    const cy_arrival_t arrival = cy_arrival_borrow(sub_large);
+    TEST_ASSERT_NOT_NULL(arrival.message.content);
+    TEST_ASSERT_EQUAL_size_t(sizeof(payload), cy_message_size(arrival.message.content));
+    unsigned char received[sizeof(payload)] = { 0 };
+    TEST_ASSERT_EQUAL_size_t(sizeof(payload), cy_message_read(arrival.message.content, 0U, sizeof(received), received));
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(payload, received, sizeof(payload));
+
+    cy_future_destroy(sub_small);
+    cy_future_destroy(sub_large);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(fix.cy));
     fixture_deinit(&fix);
 }
 
@@ -1207,8 +1350,8 @@ static void test_topic_destroy_clears_associations_and_dedup(void)
       cavl2_find(topic->sub_index_dedup_by_remote_id, &dctx2.remote_id, dedup_cavl_compare), dedup_t, index_remote_id);
     TEST_ASSERT_NOT_NULL(dd1);
     TEST_ASSERT_NOT_NULL(dd2);
-    dedup_update(dd1, topic, dctx1.tag, 1000);
-    dedup_update(dd2, topic, dctx2.tag, 1001);
+    dedup_touch(dd1, topic, 1000); // enlist so the destroy path exercises delisting
+    dedup_touch(dd2, topic, 1001);
     TEST_ASSERT_NOT_NULL(topic->sub_list_dedup_by_recency.head);
     TEST_ASSERT_NOT_NULL(topic->sub_index_dedup_by_remote_id);
 
@@ -1829,6 +1972,8 @@ int main(void)
     RUN_TEST(test_cy_destroy_empty_instance_cleans_all_resources);
     RUN_TEST(test_cy_destroy_after_user_unsubscribes_and_spins);
     RUN_TEST(test_cy_destroy_handles_missing_broadcast_handles);
+    RUN_TEST(test_cy_new_broadcast_reader_oom_drains_remap);
+    RUN_TEST(test_cy_new_broadcast_writer_oom_drains_remap);
     RUN_TEST(test_cy_advertise_client_validation_oom_and_extent_growth);
     RUN_TEST(test_topic_new_rejects_invalid_name);
     RUN_TEST(test_topic_new_error_oom_topic_object);
@@ -1841,6 +1986,9 @@ int main(void)
     RUN_TEST(test_ensure_subscriber_root_pattern_index_oom);
     RUN_TEST(test_subscribe_pattern_coupling_oom_rolls_back);
     RUN_TEST(test_subscribe_existing_root_refreshes_reader_extent);
+    RUN_TEST(test_subscription_extent_uses_pattern_max_after_verbatim_first);
+    RUN_TEST(test_subscription_extent_reallocate_keeps_pattern_max_after_verbatim);
+    RUN_TEST(test_subscription_extent_delivery_not_truncated_by_verbatim);
     RUN_TEST(test_pattern_root_scout_retry_paths);
     RUN_TEST(test_topic_new_error_duplicate_name);
     RUN_TEST(test_topic_new_error_duplicate_hash_rolls_back_name_index);

@@ -3,7 +3,28 @@
 - **Severity:** 🟡 LOW (contract-guarded; release-build UAF only on contract violation) (report L-4 / RP-F1)
 - **Confidence:** verified (code trace)
 - **Subsystem:** core (`cy/cy.c`, publisher lifecycle)
-- **Status:** OPEN
+- **Status:** RESOLVED — fix direction (2): dead field/comment removed; explicit manual-cleanup contract kept.
+
+## Resolution
+Per maintainer directive, the abandoned auto-cancel design is removed rather than completed:
+- Deleted the dead `cy_publisher_t::publish_futures` field and its `LIST_EMPTY` init (provably never
+  populated or read).
+- Deleted the incomplete `cy_unadvertise` debug scan (it could never detect request futures nor
+  already-materialized publish futures, so it could not be made complete).
+- Kept the existing `cy.h` contract as-is (it already requires destroying all publisher-created futures
+  before unadvertising); a terse rationale comment in `cy.c` replaces the removed scan. Note the detection
+  tradeoff: a forgotten *pending* future is still caught by the topic-level asserts in
+  `topic_destroy`/`cy_destroy`, but now only at teardown, not at the offending `cy_unadvertise` call; and if
+  a spin intervenes first, its timer UAFs the freed owner before teardown. An already-materialized-but-
+  undestroyed publish future is a pure app-side leak that no assert catches — as was already the case, since
+  the removed scan only inspected `pub_futures_by_tag`.
+Regression coverage added in `tests/src/test_intrusive_future_notify_destroy.c`
+(`test_publish_pending_future_destroy_then_unadvertise_clean`: destroy a pending reliable future →
+unadvertise → spin past deadline → heaps clean, no stray retransmit, no UAF).
+Note: the "must fail on pre-fix code" bar in the section below does not apply to this fix class — removing
+provably-dead code and documenting the violation as UB has no failing-test signature, and the fault only
+manifests on the (UB) contract-violation path, which cannot be safely exercised. The added test is instead a
+contract-compliant-path leak/UAF guard (mutation-verified: dropping the payload `bytes_undup` makes it leak).
 
 ## Summary
 `cy_publisher_t::publish_futures` is declared "for cancellation when the publisher is destroyed," initialized, and

@@ -131,7 +131,6 @@ struct cy_t
     cy_tree_t* topics_by_hash;       // ditto
     cy_tree_t* topics_by_subject_id; // Non-pinned only. Pinned topics are excluded because
                                      // multiple topics may share a pinned subject-ID (non-unique mapping).
-    size_t topic_count;
 
     cy_list_t list_implicit; // Most recently animated topic is at the head.
 
@@ -1633,7 +1632,6 @@ static cy_err_t topic_new(cy_t* const        cy,
     // (no subject-ID index insertion since multiple pinned topics may share a subject-ID).
     // For non-pinned topics, this may displace another local topic through collision arbitration.
     topic_allocate(topic, topic->evictions, now);
-    cy->topic_count++;
     if (out_topic != NULL) {
         *out_topic = topic;
     }
@@ -2072,7 +2070,6 @@ struct cy_publisher_t
 {
     cy_topic_t* topic; // Many-to-one relationship, never NULL; the topic is reference counted.
     cy_prio_t   priority;
-    cy_list_t   publish_futures; // For cancellation when the publisher is destroyed.
     cy_us_t     ack_baseline_timeout;
 };
 
@@ -2094,7 +2091,6 @@ cy_publisher_t* cy_advertise_client(cy_t* const cy, const cy_str_t name, const s
     }
     const cy_err_t res        = topic_ensure(cy, &pub->topic, resolved);
     pub->priority             = cy_prio_nominal;
-    pub->publish_futures      = LIST_EMPTY;
     pub->ack_baseline_timeout = cy->ack_baseline_timeout;
     if (res == CY_OK) {
         assert(pub->topic != NULL);
@@ -2561,13 +2557,19 @@ static void request_publish_callback(cy_future_t* const fut)
     }
 }
 
-// Returns true if the reception is acknowledged, false otherwise.
+typedef enum
+{
+    response_rx_ack,
+    response_rx_nack,
+    response_rx_silent, // Transient local drop: no ACK/NACK, keep the future pending.
+} response_rx_t;
+
 // Invalidates the future because it may be destroyed.
-static bool request_on_response(request_future_t* const self,
-                                const uint64_t          seqno,
-                                const cy_message_ts_t   message,
-                                const bool              reliable,
-                                const cy_lane_t         lane)
+static response_rx_t request_on_response(request_future_t* const self,
+                                         const uint64_t          seqno,
+                                         const cy_message_ts_t   message,
+                                         const bool              reliable,
+                                         const cy_lane_t         lane)
 {
     assert(seqno <= SEQNO48_MASK);
     assert(message.timestamp >= 0);
@@ -2581,10 +2583,12 @@ static bool request_on_response(request_future_t* const self,
             const request_future_remote_t* const remote =
               (request_future_remote_t*)cavl2_find(self->remote_by_id, &lane.id, request_future_remote_cavl_compare);
             if ((remote != NULL) && (seqno <= remote->seqno_top)) {
-                return bitmap_test_bounded(remote->seqno_acked, REQUEST_FUTURE_HISTORY, remote->seqno_top - seqno);
+                return bitmap_test_bounded(remote->seqno_acked, REQUEST_FUTURE_HISTORY, remote->seqno_top - seqno)
+                         ? response_rx_ack
+                         : response_rx_nack;
             }
         }
-        return false; // Do not proceed to the acceptance path, we're already dead.
+        return response_rx_nack; // Do not proceed to the acceptance path, we're already dead.
     }
 
     // The transport deduplicates messages, meaning that at this level only reliable responses require deduplication,
@@ -2598,11 +2602,8 @@ static bool request_on_response(request_future_t* const self,
                                                          &factory_ctx,
                                                          request_future_remote_cavl_factory);
         if (remote == NULL) {
-            self->error = CY_ERR_MEMORY;
             ON_ASYNC_ERROR(cy, self->topic, CY_ERR_MEMORY);
-            future_deadline_disarm(&self->base); // Unlikely to succeed, fail early.
-            future_notify(&self->base);          // Invalidates the future.
-            return false;                        // Cannot accept, tell the sender about that.
+            return response_rx_silent;
         }
         if (seqno > remote->seqno_top) { // Pushes the frontier, need to shift the bitmap.
             bitmap_shift(remote->seqno_acked, REQUEST_FUTURE_HISTORY, (intmax_t)(seqno - remote->seqno_top));
@@ -2611,10 +2612,10 @@ static bool request_on_response(request_future_t* const self,
         } else { // earlier seqno below the frontier, which might be new if delivered out of order
             const uint64_t dist = remote->seqno_top - seqno;
             if (dist >= REQUEST_FUTURE_HISTORY) {
-                return false; // too old, exceeds history, probably sender misbehaving, do not accept
+                return response_rx_nack; // too old, exceeds history, probably sender misbehaving, do not accept
             }
             if (bitmap_test(remote->seqno_acked, (size_t)dist)) {
-                return true; // seen that, probably lost ack, tell the sender again that we have this one already
+                return response_rx_ack; // duplicate, probably lost ack
             }
             bitmap_set(remote->seqno_acked, (size_t)dist); // genuinely new response just arrived out of order
         }
@@ -2635,7 +2636,7 @@ static bool request_on_response(request_future_t* const self,
     // Notify the application that a new response is available.
     self->error = CY_OK;
     future_notify(&self->base); // Invalidates self; expect finalization.
-    return true;
+    return response_rx_ack;
 }
 
 static void request_future_destroy(request_future_t* const self)
@@ -2817,13 +2818,6 @@ void cy_unadvertise(cy_publisher_t* const pub)
     }
     cy_topic_t* const topic = pub->topic;
 
-#ifndef NDEBUG // Ensure the application did not forget to destroy publisher futures first. This is optional.
-    for (publish_future_t* fut = (publish_future_t*)cavl2_min(topic->pub_futures_by_tag); fut != NULL;
-         fut                   = (publish_future_t*)cavl2_next_greater((cy_tree_t*)fut)) {
-        assert(fut->owner != pub);
-    }
-#endif
-
     // Dereference the topic.
     assert(!is_implicit(topic));
     assert(topic->pub_count > 0);
@@ -2938,10 +2932,12 @@ static cy_arrival_t make_arrival(const cy_topic_t* const topic,
     return (cy_arrival_t){ .message = message, .breadcrumb = bread };
 }
 
-static void subscriber_notify(subscriber_t* const self, const cy_arrival_t arrival)
+// Returns false if the message was dropped because the subscriber was already disposed when called; the caller must
+// then not acknowledge it. Disposal from within the callback itself returns true: the application did see the message.
+static bool subscriber_notify(subscriber_t* const self, const cy_arrival_t arrival)
 {
     if (self->disposed) {
-        return;
+        return false;
     }
     cy_message_refcount_dec(self->last_arrival.message.content); // NULL-safe
     self->last_arrival = arrival;                                // overwrite last message -- queue message deep
@@ -2952,6 +2948,7 @@ static void subscriber_notify(subscriber_t* const self, const cy_arrival_t arriv
     }
     assert(self->base.vtable->done(&self->base));
     subscriber_notify_error(self, CY_OK);
+    return true;
 }
 
 static void subscriber_notify_error(subscriber_t* const self, const cy_err_t error)
@@ -2999,20 +2996,21 @@ static bool dedup_check(const dedup_t* const self, const uint64_t tag)
     return (rev < DEDUP_HISTORY) && bitmap_test(self->bitmap, (size_t)rev);
 }
 
-// Returns true if duplicate. Automatically marks the message as received.
-static bool dedup_update(dedup_t* const self, cy_topic_t* const owner, const uint64_t tag, const cy_us_t now)
+// Enlist/refresh recency so an entry whose tag was not committed is still reaped by dedup_drop_stale, not leaked.
+static void dedup_touch(dedup_t* const self, cy_topic_t* const owner, const cy_us_t now)
 {
-    // Update the recency information.
     self->last_active_at = now;
     enlist_head(&owner->sub_list_dedup_by_recency, &self->list_recency);
+}
 
-    // Consult with the bitmap for duplication and update its state.
+// Record a not-yet-seen tag (caller checked via dedup_check). Deferred until acceptance, else a message nobody
+// accepted would be mistaken for a duplicate and falsely acked on retransmit.
+static void dedup_commit(dedup_t* const self, const uint64_t tag)
+{
     const uint64_t fwd = tag - self->tag; // Wrapping arithmetic.
     const uint64_t rev = self->tag - tag; // Wrapping arithmetic.
-    if (rev < DEDUP_HISTORY) {            // Either duplicate or out-of-order; bit already in the bitmap.
-        if (bitmap_test(self->bitmap, (size_t)rev)) {
-            return true; // This is a duplicate.
-        }
+    if (rev < DEDUP_HISTORY) {            // Out-of-order but within the window.
+        assert(!bitmap_test(self->bitmap, (size_t)rev));
         bitmap_set(self->bitmap, (size_t)rev);
     } else { // Push the frontier or reset.
         if (fwd < DEDUP_HISTORY) {
@@ -3023,7 +3021,6 @@ static bool dedup_update(dedup_t* const self, cy_topic_t* const owner, const uin
         self->tag = tag;
         bitmap_set(self->bitmap, 0);
     }
-    return false;
 }
 
 static void dedup_destroy(dedup_t* const self, cy_topic_t* const owner)
@@ -3168,7 +3165,7 @@ static void reordering_eject(reordering_t* const self, reordering_slot_t* const 
     mem_free(cy, slot); // Free the slot before the callback to give the application more memory to work with.
 
     // Store the message and notify the client.
-    subscriber_notify(self->subscriber, arrival);
+    (void)subscriber_notify(self->subscriber, arrival);
     cy_message_refcount_dec(arrival.message.content);
 }
 
@@ -3249,6 +3246,12 @@ static bool reordering_push(reordering_t* const   self,
     uint64_t     lin_tag  = tag - self->tag_baseline;
     const size_t capacity = REORDERING_CAPACITY;
 
+    // Late drops must refresh recency too: while the remote keeps retransmitting a window-dropped tag, the state must
+    // survive, or its reaping would let the retransmit be resequenced as a fresh session -- delivered out of order and
+    // falsely acked.
+    self->last_active_at = message.timestamp;
+    enlist_head(&self->subscriber->list_reordering_by_recency, &self->list_recency);
+
     // Late arrival or duplicate, the gap is already closed and the application has moved on, cannot accept.
     // Note that this check does not detect possible duplicates that are currently interned; this is checked below.
     if (lin_tag <= self->last_ejected_lin_tag) {
@@ -3261,7 +3264,6 @@ static bool reordering_push(reordering_t* const   self,
         return false;
     }
 
-    bool far_backward_restart = false;
     if (lin_tag > INT64_MAX) {
         const uint64_t backward_distance = self->last_ejected_lin_tag - lin_tag; // Wrapping arithmetic.
         if (backward_distance <= SESSION_COUNTER_MAX_BACKWARD_LAG) {
@@ -3273,14 +3275,6 @@ static bool reordering_push(reordering_t* const   self,
                      (uintmax_t)self->last_ejected_lin_tag);
             return false;
         }
-        far_backward_restart = true;
-    }
-
-    // Update the recency information to keep the state alive.
-    self->last_active_at = message.timestamp;
-    enlist_head(&self->subscriber->list_reordering_by_recency, &self->list_recency);
-
-    if (far_backward_restart) {
         CY_TRACE(cy,
                  "🔢 RESEQUENCING/BACKWARD: N%016jx tag=%016jx lin_tag=%016jx last_ejected_lin_tag=%016jx",
                  (uintmax_t)self->remote_id,
@@ -3298,15 +3292,21 @@ static bool reordering_push(reordering_t* const   self,
     while ((self->interned_count > 0) && (lin_tag > (self->last_ejected_lin_tag + capacity))) {
         reordering_scan(self, true);
     }
+    // Any callback that ran before this point (the stale sweep in on_message, the forced ejects above) may have
+    // disposed this sub; the current message is not delivered yet, so refuse it rather than falsely ack it.
+    // Disposal by the current message's own delivery happens below and stays acked (see subscriber_notify).
+    if (self->subscriber->disposed) {
+        return false;
+    }
 
     const cy_lane_t lane = { .id = self->remote_id, .ctx = self->unicast_ctx, .prio = priority };
 
     // The next expected message can be ejected immediately. No need to allocate state, happy fast path, most common.
     if (lin_tag == self->last_ejected_lin_tag + 1U) {
         self->last_ejected_lin_tag = lin_tag;
-        subscriber_notify(self->subscriber, make_arrival(self->topic, lane, tag, message));
+        const bool delivered       = subscriber_notify(self->subscriber, make_arrival(self->topic, lane, tag, message));
         reordering_scan(self, false); // The just-ejected message may have closed an earlier gap.
-        return true;
+        return delivered;
     }
 
     // If we are still too far ahead, the remote has probably restarted or the gap is too large to swallow.
@@ -3436,10 +3436,8 @@ static bool on_message(cy_t* const           cy,
 
     // Reliable transfers may be duplicated in case of ACK loss.
     // Non-reliable transfers are deduplicated by the transport, which makes them much more efficient.
-    // Normally we automatically mark messages as received here in the dedup cache; however, if no local subscribers
-    // exist, we don't need to mutate the dedup cache but rather we can only passively consult with it to check
-    // if any messages have been confirmed earlier in case our acks got lost. This matters if we receive messages
-    // we didn't subscribe to like from a collided subject, or if the sender attempts to unicast etc.
+    // With no local subscribers we cannot accept, so we only passively consult the dedup filter (never mutate it) to
+    // re-ack messages already accepted earlier in case our acks got lost.
     if (topic->couplings == NULL) { // Subscribers do not exist. Do not accept the message.
         if (reliable) {
             const dedup_t* const dedup =
@@ -3450,16 +3448,18 @@ static bool on_message(cy_t* const           cy,
         }
         return false;
     }
+    // Consult the dedup filter now; commit is deferred to the tail, after acceptance (see dedup_commit).
+    dedup_t* dedup = NULL;
     if (reliable) {
         dedup_drop_stale(topic, message.timestamp); // Sweep before insert; a factory must never mutate the target tree.
         dedup_factory_context_t ctx = { .owner = topic, .remote_id = lane.id, .tag = tag };
-        dedup_t* const dedup = CAVL2_TO_OWNER(cavl2_find_or_insert(&topic->sub_index_dedup_by_remote_id, // ------
-                                                                   &lane.id,
-                                                                   dedup_cavl_compare,
-                                                                   &ctx,
-                                                                   dedup_factory),
-                                              dedup_t,
-                                              index_remote_id);
+        dedup = CAVL2_TO_OWNER(cavl2_find_or_insert(&topic->sub_index_dedup_by_remote_id, // ------
+                                                    &lane.id,
+                                                    dedup_cavl_compare,
+                                                    &ctx,
+                                                    dedup_factory),
+                               dedup_t,
+                               index_remote_id);
         if (dedup == NULL) {
             ON_ASYNC_ERROR(cy, topic, CY_ERR_MEMORY);
             // We could notify subscribers about the error, but the value of that notification is rather low.
@@ -3467,12 +3467,8 @@ static bool on_message(cy_t* const           cy,
             return false; // The remote will retransmit and we might be able to accept it then.
         }
         assert(dedup->remote_id == lane.id);
-        // NOTE: If all subscribers are pending disposal and none saw the original message that has been duplicated,
-        // we will be acknowledging it here even though no subscribers have actually received it. This is not very
-        // significant practically because for this to happen we have to keep disposed subscribers alive for longer
-        // than the duplicate retransmit interval, but it should ideally be fixed by slightly restructuring the flow.
-        // One solution is to remove the reordering feature from the core.
-        if (dedup_update(dedup, topic, tag, message.timestamp)) {
+        dedup_touch(dedup, topic, message.timestamp);
+        if (dedup_check(dedup, tag)) {
             CY_TRACE(cy, "🍒 Dup N%016jx tag=%016jx", (uintmax_t)lane.id, (uintmax_t)tag);
             return true; // Already received, ack but don't process.
         }
@@ -3527,13 +3523,18 @@ static bool on_message(cy_t* const           cy,
                     ON_ASYNC_ERROR(cy, topic, CY_ERR_MEMORY);
                     subscriber_notify_error(sub, CY_ERR_MEMORY);
                 }
-            } else {
-                subscriber_notify(sub, make_arrival(topic, lane, tag, message));
+            } else if (subscriber_notify(sub, make_arrival(topic, lane, tag, message))) {
                 acknowledge = true;
             }
             sub = next_sub;
         }
         cpl = next_cpl;
+    }
+    // The entry cannot have been reaped since dedup_touch: the library is non-reentrant.
+    if (reliable && acknowledge) {
+        assert(dedup != NULL);
+        assert(dedup->remote_id == lane.id); // Still the entry we touched; the subscriber loop cannot have reaped it.
+        dedup_commit(dedup, tag);
     }
     return acknowledge;
 }
@@ -3542,28 +3543,17 @@ static bool on_message(cy_t* const           cy,
 // The returned value is at least large enough for the header.
 static size_t subscription_extent_w_overhead(const cy_topic_t* const topic)
 {
-    size_t total = 0;
-    // Go over all couplings and all subscribers in each coupling.
-    // A coupling corresponds to a particular name that matched the topic.
-    // Each coupling has a list of subscribers under its root sharing that name.
-    const cy_topic_coupling_t* cpl = topic->couplings;
+    size_t                     total = 0;
+    const cy_topic_coupling_t* cpl   = topic->couplings;
     assert(cpl != NULL);
     while (cpl != NULL) {
-        const bool          verbatim = cpl->root->index_pattern == NULL; // no substitution tokens in the name
-        const subscriber_t* sub      = cpl->root->head;
-        size_t              agg      = sub->params.extent_pure;
-        sub                          = sub->next;
+        const subscriber_t* sub = cpl->root->head;
+        assert(sub != NULL);
         while (sub != NULL) {
-            agg = larger(agg, sub->params.extent_pure);
-            sub = sub->next;
+            total = larger(total, sub->params.extent_pure);
+            sub   = sub->next;
         }
-        if (verbatim) {
-            total = agg;
-            break; // Verbatim subscription takes precedence, ignore the rest.
-        }
-        // If only pattern subscriptions exist, merge them all.
-        total = larger(total, agg);
-        cpl   = cpl->next;
+        cpl = cpl->next;
     }
     CY_TRACE(topic->cy, "📬 %s extent=%zu", topic_repr(topic).str, total);
     return total + HEADER_BYTES;
@@ -4216,7 +4206,6 @@ static void topic_destroy(cy_topic_t* const topic)
         wkv_del(&cy->topics_by_name, topic->index_name);
         topic->index_name = NULL;
     }
-    cy->topic_count--;
 
     // Free the memory.
     mem_free(cy, topic->name);
@@ -4444,8 +4433,7 @@ cy_t* cy_new(cy_platform_t* const platform, const cy_str_t home, const cy_str_t 
     cy->broad_reader =
       cy->platform->vtable->subject_reader_new(cy->platform, broadcast_subject_id, CY_AUX_SUBJECT_EXTENT);
     if (cy->broad_reader == NULL) {
-        mem_free(cy, cy); // Home and ns are embedded in the same allocation, no separate free needed.
-        platform->cy = NULL;
+        cy_destroy(cy);
         return NULL;
     }
     cy->broad_reader->subject_id = broadcast_subject_id;
@@ -4453,9 +4441,7 @@ cy_t* cy_new(cy_platform_t* const platform, const cy_str_t home, const cy_str_t 
 
     cy->broad_writer = cy->platform->vtable->subject_writer_new(cy->platform, broadcast_subject_id);
     if (cy->broad_writer == NULL) {
-        cy->platform->vtable->subject_reader_destroy(cy->platform, cy->broad_reader);
-        mem_free(cy, cy);
-        platform->cy = NULL;
+        cy_destroy(cy);
         return NULL;
     }
     cy->broad_writer->subject_id = broadcast_subject_id;
@@ -4916,7 +4902,7 @@ void cy_on_message(cy_platform_t* const  platform,
             const uint64_t seqno       = deserialize_u48(&header[2]);
             const uint64_t hash        = deserialize_u64(&header[8]);
             const uint64_t message_tag = deserialize_u64(&header[16]);
-            // If the future is available (and topic), let it decide how the response should be acknowledged.
+            // If the future is available (and topic), let it decide whether to ACK, NACK, or stay silent.
             // A naive solution would destroy futures immediately when the application no longer needs them
             // and nack all responses for which no live future is found, but this is not correct because in the
             // edge case when we ack a response and destroy the future immediately afterward with the subsequent loss
@@ -4927,17 +4913,24 @@ void cy_on_message(cy_platform_t* const  platform,
             // the simplest solution with minimal state keeping. Note that futures that acknowledged no responses
             // do not need to be retained since the outcome is always the same -- always nack.
             // This is an implementation detail that does not affect wire semantics of course.
-            bool              ack   = false;
-            cy_topic_t* const topic = cy_topic_find_by_hash(cy, hash);
+            response_rx_t     response = response_rx_nack;
+            cy_topic_t* const topic    = cy_topic_find_by_hash(cy, hash);
             if (topic != NULL) {
                 request_future_t* const future =
                   (request_future_t*)future_index_lookup(topic->request_futures_by_tag, message_tag);
                 if (future != NULL) {
-                    ack = request_on_response(future, seqno, message, reliable, lane);
+                    response = request_on_response(future, seqno, message, reliable, lane);
                 }
             }
-            if (reliable) {
-                send_response_ack(cy, lane, message_tag, seqno, tag, hash, ack, message.timestamp + ACK_TX_TIMEOUT);
+            if (reliable && (response != response_rx_silent)) {
+                send_response_ack(cy,
+                                  lane,
+                                  message_tag,
+                                  seqno,
+                                  tag,
+                                  hash,
+                                  response == response_rx_ack,
+                                  message.timestamp + ACK_TX_TIMEOUT);
             }
             break;
         }

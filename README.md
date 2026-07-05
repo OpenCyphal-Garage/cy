@@ -401,8 +401,8 @@ as reliable messages inform the server whether the remote side is accepting the 
   indicating that streaming may proceed.
 - If the remote client application is no longer interested in the responses, it will destroy the future, causing all
   subsequent responses to be NACK-ed by the client, and the server's future will materialize with `CY_ERR_NACK`.
-- If the remote client node is not reachable due to being down or disconnected, the server's future will
-  materialize with `CY_ERR_DELIVERY` after the delivery deadline expires.
+- If the remote client node does not acknowledge before the delivery deadline due to being down, disconnected, or
+  transiently unable to accept the response, the server's future will materialize with `CY_ERR_DELIVERY`.
 
 ### ⚙ Event loop
 

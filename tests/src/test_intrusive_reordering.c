@@ -543,9 +543,10 @@ static void test_reordering_backward_underflow_current_session_lag_is_late_drop(
     TEST_ASSERT_EQUAL_size_t(0, env.capture.count);
     TEST_ASSERT_EQUAL_UINT64(baseline, env.rr.tag_baseline);
     TEST_ASSERT_EQUAL_UINT64(SESSION_COUNTER_MAX_BACKWARD_LAG - 10U, env.rr.last_ejected_lin_tag);
-    TEST_ASSERT_EQUAL_INT64(1234, env.rr.last_active_at);
-    TEST_ASSERT_NULL(env.sub.list_reordering_by_recency.head);
-    TEST_ASSERT_NULL(env.sub.list_reordering_by_recency.tail);
+    // A late drop must still refresh the recency, else the state is reaped while the remote retransmits the
+    // dropped tag, and the retransmit is then resequenced as a fresh session (out-of-order delivery, false ack).
+    TEST_ASSERT_EQUAL_INT64(2000, env.rr.last_active_at);
+    TEST_ASSERT_EQUAL_PTR(&env.rr.list_recency, env.sub.list_reordering_by_recency.head);
     TEST_ASSERT_EQUAL_size_t(0, env.rr.interned_count);
 
     reorder_env_cleanup(&env);

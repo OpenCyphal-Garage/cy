@@ -12,8 +12,8 @@ typedef struct
     cy_t                 cy;
     guarded_heap_t       heap;
 
-    size_t fail_after;      ///< Fail N-th new allocation if new_alloc_count >= fail_after.
-    size_t new_alloc_count; ///< Counts new allocations only, excludes realloc/free.
+    size_t fail_size;
+    size_t fail_size_count;
 
     cy_us_t   now;
     uint64_t  random_state;
@@ -47,10 +47,10 @@ static void* fixture_realloc(cy_platform_t* const platform, void* const ptr, con
 {
     fixture_t* const self = (fixture_t*)platform;
     if ((ptr == NULL) && (size > 0U)) {
-        if (self->new_alloc_count >= self->fail_after) {
+        if ((self->fail_size_count > 0U) && (self->fail_size == size)) {
+            self->fail_size_count--;
             return NULL;
         }
-        self->new_alloc_count++;
     }
     return guarded_heap_realloc(&self->heap, ptr, size);
 }
@@ -137,8 +137,6 @@ static void fixture_init(fixture_t* const self)
     cy_diag_add(&self->cy, &self->diag);
     olga_init(&self->cy.olga, &self->cy, olga_now);
     self->cy.ack_baseline_timeout = ACK_BASELINE_DEFAULT_TIMEOUT_us;
-    self->fail_after              = SIZE_MAX;
-    self->new_alloc_count         = 0U;
     self->now                     = 10000;
     self->random_state            = UINT64_C(0x123456789ABCDEF0);
     self->unicast_send_result     = CY_OK;
@@ -148,10 +146,10 @@ static void fixture_init(fixture_t* const self)
     self->async_error_count       = 0U;
 }
 
-static void fixture_set_fail_after(fixture_t* const self, const size_t fail_after)
+static void fixture_fail_alloc_size(fixture_t* const self, const size_t size, const size_t count)
 {
-    self->fail_after      = fail_after;
-    self->new_alloc_count = 0U;
+    self->fail_size       = size;
+    self->fail_size_count = count;
 }
 
 static void fixture_advance_to(fixture_t* const self, const cy_us_t now)
@@ -209,6 +207,25 @@ static request_future_t* make_request_future(fixture_t* const  fixture,
     TEST_ASSERT_TRUE(insert_ok);
     future_deadline_arm(&out->base, fixture->now + liveness_timeout);
     return out;
+}
+
+static request_future_t* make_indexed_request_future(fixture_t* const  fixture,
+                                                     cy_topic_t* const topic,
+                                                     const uint64_t    key,
+                                                     const cy_us_t     liveness_timeout,
+                                                     const uint64_t    topic_hash)
+{
+    request_future_t* const out     = make_request_future(fixture, topic, key, liveness_timeout);
+    topic->hash                     = topic_hash;
+    const cy_tree_t* const inserted = cavl2_find_or_insert(
+      &fixture->cy.topics_by_hash, &topic->hash, cavl_comp_topic_hash, topic, cavl2_trivial_factory);
+    TEST_ASSERT_EQUAL_PTR(&topic->index_hash, inserted);
+    return out;
+}
+
+static void unindex_request_topic(fixture_t* const fixture, cy_topic_t* const topic)
+{
+    cavl2_remove_if(&fixture->cy.topics_by_hash, &topic->index_hash);
 }
 
 static bool dummy_publish_done(const cy_future_t* const base)
@@ -693,7 +710,7 @@ static void test_request_on_response_best_effort_overwrite_and_callback(void)
     const cy_lane_t lane_b = make_lane(99U);
 
     const cy_message_ts_t first = make_message(&fixture, fixture.now + 10U, 1U);
-    TEST_ASSERT_TRUE(request_on_response(fut, 7U, first, false, lane_a));
+    TEST_ASSERT_EQUAL_INT(response_rx_ack, request_on_response(fut, 7U, first, false, lane_a));
     TEST_ASSERT_EQUAL_size_t(callback_base + 1U, cap.count);
     TEST_ASSERT_TRUE(cap.last_done);
     TEST_ASSERT_EQUAL_INT(CY_OK, cap.last_error);
@@ -706,7 +723,7 @@ static void test_request_on_response_best_effort_overwrite_and_callback(void)
     assert_message_counters(0U, 1U);
 
     const cy_message_ts_t second = make_message(&fixture, fixture.now + 20U, 2U);
-    TEST_ASSERT_TRUE(request_on_response(fut, 0U, second, false, lane_b));
+    TEST_ASSERT_EQUAL_INT(response_rx_ack, request_on_response(fut, 0U, second, false, lane_b));
     TEST_ASSERT_EQUAL_size_t(callback_base + 2U, cap.count);
     TEST_ASSERT_TRUE(cap.last_done);
     TEST_ASSERT_EQUAL_INT(CY_OK, cap.last_error);
@@ -739,7 +756,7 @@ static void test_request_future_destroy_releases_last_response(void)
     const cy_lane_t   lane = make_lane(77U);
 
     const cy_message_ts_t msg = make_message(&fixture, fixture.now + 5U, 0x31U);
-    TEST_ASSERT_TRUE(request_on_response(fut, 1U, msg, false, lane));
+    TEST_ASSERT_EQUAL_INT(response_rx_ack, request_on_response(fut, 1U, msg, false, lane));
     cy_message_refcount_dec(msg.content); // release local copy
     assert_message_counters(0U, 1U);
 
@@ -759,8 +776,8 @@ static void test_request_future_dispose_zombie_releases_last_response_early(void
     const cy_lane_t   lane = make_lane(88U);
 
     const cy_message_ts_t msg = make_message(&fixture, fixture.now + 6U, 0x41U);
-    TEST_ASSERT_TRUE(request_on_response(fut, 9U, msg, true, lane)); // reliable creates remote state.
-    cy_message_refcount_dec(msg.content);                            // release local copy
+    TEST_ASSERT_EQUAL_INT(response_rx_ack, request_on_response(fut, 9U, msg, true, lane)); // creates remote state.
+    cy_message_refcount_dec(msg.content);                                                  // release local copy
     assert_message_counters(0U, 1U);
 
     cy_future_destroy(&fut->base);
@@ -785,7 +802,7 @@ static void test_request_on_response_reliable_dedup_and_ordering(void)
     const cy_lane_t   lane = make_lane(123U);
 
     cy_message_ts_t msg = make_message(&fixture, fixture.now + 1U, 10U);
-    TEST_ASSERT_TRUE(request_on_response(fut, 300U, msg, true, lane));
+    TEST_ASSERT_EQUAL_INT(response_rx_ack, request_on_response(fut, 300U, msg, true, lane));
     cy_message_refcount_dec(msg.content);
     TEST_ASSERT_EQUAL_UINT64(1U, fut->response_count);
 
@@ -795,23 +812,23 @@ static void test_request_on_response_reliable_dedup_and_ordering(void)
     TEST_ASSERT_TRUE(bitmap_test(remote->seqno_acked, 0U));
 
     msg = make_message(&fixture, fixture.now + 2U, 11U);
-    TEST_ASSERT_TRUE(request_on_response(fut, 300U, msg, true, lane)); // duplicate
+    TEST_ASSERT_EQUAL_INT(response_rx_ack, request_on_response(fut, 300U, msg, true, lane)); // duplicate
     cy_message_refcount_dec(msg.content);
     TEST_ASSERT_EQUAL_UINT64(1U, fut->response_count);
 
     msg = make_message(&fixture, fixture.now + 3U, 12U);
-    TEST_ASSERT_TRUE(request_on_response(fut, 299U, msg, true, lane)); // out-of-order new
+    TEST_ASSERT_EQUAL_INT(response_rx_ack, request_on_response(fut, 299U, msg, true, lane)); // out-of-order new
     cy_message_refcount_dec(msg.content);
     TEST_ASSERT_EQUAL_UINT64(2U, fut->response_count);
     TEST_ASSERT_TRUE(bitmap_test(remote->seqno_acked, 1U));
 
     msg = make_message(&fixture, fixture.now + 4U, 13U);
-    TEST_ASSERT_TRUE(request_on_response(fut, 299U, msg, true, lane)); // duplicate
+    TEST_ASSERT_EQUAL_INT(response_rx_ack, request_on_response(fut, 299U, msg, true, lane)); // duplicate
     cy_message_refcount_dec(msg.content);
     TEST_ASSERT_EQUAL_UINT64(2U, fut->response_count);
 
     msg = make_message(&fixture, fixture.now + 5U, 14U);
-    TEST_ASSERT_FALSE(request_on_response(fut, 108U, msg, true, lane)); // too old for history window
+    TEST_ASSERT_EQUAL_INT(response_rx_nack, request_on_response(fut, 108U, msg, true, lane)); // too old
     cy_message_refcount_dec(msg.content);
     TEST_ASSERT_EQUAL_UINT64(2U, fut->response_count);
 
@@ -832,7 +849,7 @@ static void test_request_on_response_zombie_ack_seen_nack_unseen(void)
     const cy_lane_t   lane = make_lane(555U);
 
     cy_message_ts_t msg = make_message(&fixture, fixture.now + 1U, 20U);
-    TEST_ASSERT_TRUE(request_on_response(fut, 5U, msg, true, lane));
+    TEST_ASSERT_EQUAL_INT(response_rx_ack, request_on_response(fut, 5U, msg, true, lane));
     cy_message_refcount_dec(msg.content);
 
     cy_future_destroy(&fut->base);
@@ -842,19 +859,19 @@ static void test_request_on_response_zombie_ack_seen_nack_unseen(void)
     TEST_ASSERT_TRUE(future_deadline_armed(&fut->base));
 
     msg = make_message(&fixture, fixture.now + 2U, 21U);
-    TEST_ASSERT_TRUE(request_on_response(fut, 5U, msg, true, lane)); // seen -> ack
+    TEST_ASSERT_EQUAL_INT(response_rx_ack, request_on_response(fut, 5U, msg, true, lane)); // seen -> ack
     cy_message_refcount_dec(msg.content);
 
     msg = make_message(&fixture, fixture.now + 3U, 22U);
-    TEST_ASSERT_FALSE(request_on_response(fut, 6U, msg, true, lane)); // unseen -> nack
+    TEST_ASSERT_EQUAL_INT(response_rx_nack, request_on_response(fut, 6U, msg, true, lane)); // unseen -> nack
     cy_message_refcount_dec(msg.content);
 
     msg = make_message(&fixture, fixture.now + 4U, 23U);
-    TEST_ASSERT_FALSE(request_on_response(fut, 4U, msg, true, lane)); // unseen older -> nack
+    TEST_ASSERT_EQUAL_INT(response_rx_nack, request_on_response(fut, 4U, msg, true, lane)); // unseen older -> nack
     cy_message_refcount_dec(msg.content);
 
     msg = make_message(&fixture, fixture.now + 5U, 24U);
-    TEST_ASSERT_FALSE(request_on_response(fut, 0U, msg, false, lane)); // best-effort in zombie mode -> reject
+    TEST_ASSERT_EQUAL_INT(response_rx_nack, request_on_response(fut, 0U, msg, false, lane)); // zombie reject
     cy_message_refcount_dec(msg.content);
 
     fixture_advance_to(&fixture, fixture.now + (SESSION_LIFETIME / 2) + 1);
@@ -862,7 +879,7 @@ static void test_request_on_response_zombie_ack_seen_nack_unseen(void)
     fixture_assert_clean(&fixture);
 }
 
-static void test_request_on_response_reliable_oom_escalates_failure(void)
+static void test_request_on_response_reliable_oom_stays_pending_silent(void)
 {
     fixture_t fixture;
     fixture_init(&fixture);
@@ -874,23 +891,135 @@ static void test_request_on_response_reliable_oom_escalates_failure(void)
     cy_future_callback_set(&fut->base, request_callback);
     future_deadline_arm(&fut->base, fixture.now + 500000);
     TEST_ASSERT_TRUE(future_deadline_armed(&fut->base));
+    const size_t  callback_base = cap.count;
+    const cy_us_t deadline_base = fut->base.timeout.deadline;
 
     cy_message_ts_t msg = make_message(&fixture, fixture.now + 10U, 30U);
-    fixture_set_fail_after(&fixture, 0U); // first new allocation fails (remote state)
-    TEST_ASSERT_FALSE(request_on_response(fut, 0U, msg, true, make_lane(1000U)));
+    fixture_fail_alloc_size(&fixture, sizeof(request_future_remote_t), 1U);
+    TEST_ASSERT_EQUAL_INT(response_rx_silent, request_on_response(fut, 0U, msg, true, make_lane(1000U)));
     cy_message_refcount_dec(msg.content);
 
-    TEST_ASSERT_EQUAL_size_t(1U, cap.count);
-    TEST_ASSERT_TRUE(cap.last_done);
-    TEST_ASSERT_EQUAL_INT(CY_ERR_MEMORY, cap.last_error);
-    TEST_ASSERT_FALSE(future_deadline_armed(&fut->base));
+    TEST_ASSERT_EQUAL_size_t(callback_base, cap.count);
+    TEST_ASSERT_TRUE(future_deadline_armed(&fut->base));
+    TEST_ASSERT_EQUAL_INT64(deadline_base, fut->base.timeout.deadline);
+    TEST_ASSERT_EQUAL_UINT64(0U, fut->response_count);
+    TEST_ASSERT_NULL(fut->remote_by_id);
     TEST_ASSERT_EQUAL_size_t(1U, fixture.async_error_count);
     TEST_ASSERT_EQUAL_INT(CY_ERR_MEMORY, fixture.last_async_error);
-    TEST_ASSERT_TRUE(cy_future_done(&fut->base));
-    TEST_ASSERT_EQUAL_INT(CY_ERR_MEMORY, cy_future_error(&fut->base));
+    TEST_ASSERT_FALSE(cy_future_done(&fut->base));
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_future_error(&fut->base));
 
     cy_future_destroy(&fut->base);
     TEST_ASSERT_NULL(topic.request_futures_by_tag);
+    fixture_assert_clean(&fixture);
+}
+
+static void test_response_wire_reliable_oom_silent_then_retransmit(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+
+    const uint64_t topic_hash  = UINT64_C(0xABCD123456789ABC);
+    const uint64_t message_tag = UINT64_C(0x1122334455667788);
+    const uint64_t remote_id   = UINT64_C(0xA5A5000000000001);
+    const byte_t   tag         = 0x6CU;
+    const uint64_t seqno       = 0U;
+
+    cy_topic_t         topic;
+    request_future_t*  fut = make_indexed_request_future(&fixture, &topic, message_tag, 20000, topic_hash);
+    callback_capture_t cap = { 0 };
+    cy_future_context_set(&fut->base, (cy_user_context_t){ { &cap } });
+    cy_future_callback_set(&fut->base, request_callback);
+    const size_t  callback_base = cap.count;
+    const cy_us_t deadline_base = fut->base.timeout.deadline;
+
+    fixture_fail_alloc_size(&fixture, sizeof(request_future_remote_t), 1U);
+    dispatch_response_control(
+      &fixture, (byte_t)header_rsp_rel, tag, seqno, topic_hash, message_tag, remote_id, fixture.now + 10U, false);
+    TEST_ASSERT_EQUAL_size_t(0U, fixture.unicast_send_count);
+    TEST_ASSERT_EQUAL_size_t(callback_base, cap.count);
+    TEST_ASSERT_EQUAL_UINT64(0U, fut->response_count);
+    TEST_ASSERT_NULL(fut->remote_by_id);
+    TEST_ASSERT_TRUE(future_deadline_armed(&fut->base));
+    TEST_ASSERT_EQUAL_INT64(deadline_base, fut->base.timeout.deadline);
+    TEST_ASSERT_FALSE(cy_future_done(&fut->base));
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_future_error(&fut->base));
+    TEST_ASSERT_EQUAL_size_t(1U, fixture.async_error_count);
+    TEST_ASSERT_EQUAL_INT(CY_ERR_MEMORY, fixture.last_async_error);
+
+    dispatch_response_control(
+      &fixture, (byte_t)header_rsp_rel, tag, seqno, topic_hash, message_tag, remote_id, fixture.now + 20U, false);
+    TEST_ASSERT_EQUAL_size_t(1U, fixture.unicast_send_count);
+    TEST_ASSERT_EQUAL_UINT8(header_rsp_ack, fixture.last_unicast[0]);
+    TEST_ASSERT_EQUAL_UINT8(tag, fixture.last_unicast[1]);
+    TEST_ASSERT_EQUAL_UINT64(seqno, deserialize_u48(&fixture.last_unicast[2]));
+    TEST_ASSERT_EQUAL_UINT64(topic_hash, deserialize_u64(&fixture.last_unicast[8]));
+    TEST_ASSERT_EQUAL_UINT64(message_tag, deserialize_u64(&fixture.last_unicast[16]));
+    TEST_ASSERT_EQUAL_size_t(callback_base + 1U, cap.count);
+    TEST_ASSERT_TRUE(cy_future_done(&fut->base));
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_future_error(&fut->base));
+    TEST_ASSERT_EQUAL_UINT64(1U, fut->response_count);
+
+    cy_response_t moved = cy_response_move(&fut->base);
+    TEST_ASSERT_EQUAL_UINT64(remote_id, moved.remote_id);
+    TEST_ASSERT_EQUAL_UINT64(seqno, moved.seqno);
+    TEST_ASSERT_NOT_NULL(moved.message.content);
+    TEST_ASSERT_EQUAL_size_t(0U, cy_message_size(moved.message.content));
+    cy_message_refcount_dec(moved.message.content);
+
+    cy_future_destroy(&fut->base);
+    TEST_ASSERT_NOT_NULL(topic.request_futures_by_tag);
+
+    dispatch_response_control(
+      &fixture, (byte_t)header_rsp_rel, tag, seqno, topic_hash, message_tag, remote_id, fixture.now + 30U, false);
+    TEST_ASSERT_EQUAL_size_t(2U, fixture.unicast_send_count);
+    TEST_ASSERT_EQUAL_UINT8(header_rsp_ack, fixture.last_unicast[0]);
+    TEST_ASSERT_EQUAL_UINT8(tag, fixture.last_unicast[1]);
+    TEST_ASSERT_EQUAL_UINT64(seqno, deserialize_u48(&fixture.last_unicast[2]));
+    TEST_ASSERT_EQUAL_UINT64(topic_hash, deserialize_u64(&fixture.last_unicast[8]));
+    TEST_ASSERT_EQUAL_UINT64(message_tag, deserialize_u64(&fixture.last_unicast[16]));
+
+    dispatch_response_control(
+      &fixture, (byte_t)header_rsp_rel, tag, seqno + 1U, topic_hash, message_tag, remote_id, fixture.now + 40U, false);
+    TEST_ASSERT_EQUAL_size_t(3U, fixture.unicast_send_count);
+    TEST_ASSERT_EQUAL_UINT8(header_rsp_nack, fixture.last_unicast[0]);
+    TEST_ASSERT_EQUAL_UINT8(tag, fixture.last_unicast[1]);
+    TEST_ASSERT_EQUAL_UINT64(seqno + 1U, deserialize_u48(&fixture.last_unicast[2]));
+    TEST_ASSERT_EQUAL_UINT64(topic_hash, deserialize_u64(&fixture.last_unicast[8]));
+    TEST_ASSERT_EQUAL_UINT64(message_tag, deserialize_u64(&fixture.last_unicast[16]));
+
+    fixture_advance_to(&fixture, fixture.now + (SESSION_LIFETIME / 2) + 1);
+    TEST_ASSERT_NULL(topic.request_futures_by_tag);
+    unindex_request_topic(&fixture, &topic);
+    fixture_assert_clean(&fixture);
+}
+
+static void test_response_wire_reliable_client_gone_nacks(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+
+    const uint64_t topic_hash  = UINT64_C(0x0102030405060708);
+    const uint64_t message_tag = UINT64_C(0x8877665544332211);
+    const uint64_t remote_id   = UINT64_C(0xA5A5000000000002);
+    const byte_t   tag         = 0x7DU;
+    const uint64_t seqno       = 0U;
+
+    cy_topic_t        topic;
+    request_future_t* fut = make_indexed_request_future(&fixture, &topic, message_tag, 20000, topic_hash);
+    cy_future_destroy(&fut->base);
+    TEST_ASSERT_NULL(topic.request_futures_by_tag);
+
+    dispatch_response_control(
+      &fixture, (byte_t)header_rsp_rel, tag, seqno, topic_hash, message_tag, remote_id, fixture.now + 10U, false);
+    TEST_ASSERT_EQUAL_size_t(1U, fixture.unicast_send_count);
+    TEST_ASSERT_EQUAL_UINT8(header_rsp_nack, fixture.last_unicast[0]);
+    TEST_ASSERT_EQUAL_UINT8(tag, fixture.last_unicast[1]);
+    TEST_ASSERT_EQUAL_UINT64(seqno, deserialize_u48(&fixture.last_unicast[2]));
+    TEST_ASSERT_EQUAL_UINT64(topic_hash, deserialize_u64(&fixture.last_unicast[8]));
+    TEST_ASSERT_EQUAL_UINT64(message_tag, deserialize_u64(&fixture.last_unicast[16]));
+
+    unindex_request_topic(&fixture, &topic);
     fixture_assert_clean(&fixture);
 }
 
@@ -1008,7 +1137,9 @@ int main(void)
     RUN_TEST(test_request_future_dispose_zombie_releases_last_response_early);
     RUN_TEST(test_request_on_response_reliable_dedup_and_ordering);
     RUN_TEST(test_request_on_response_zombie_ack_seen_nack_unseen);
-    RUN_TEST(test_request_on_response_reliable_oom_escalates_failure);
+    RUN_TEST(test_request_on_response_reliable_oom_stays_pending_silent);
+    RUN_TEST(test_response_wire_reliable_oom_silent_then_retransmit);
+    RUN_TEST(test_response_wire_reliable_client_gone_nacks);
     RUN_TEST(test_request_future_dispose_destroys_publish_and_removes_index);
     RUN_TEST(test_request_publish_callback_pending_update_noop);
     RUN_TEST(test_send_response_ack_serialization);
