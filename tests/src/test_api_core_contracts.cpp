@@ -89,6 +89,7 @@ struct test_platform_t final : api_test::test_platform_base_t
     std::size_t fail_alloc_size{ 0U };
     std::size_t fail_after_n_allocs{ SIZE_MAX }; // Succeed for N allocations, then fail all subsequent.
     std::size_t alloc_counter{ 0U };
+    std::size_t async_error_count{ 0U };
     bool        fail_subject_writer_new{ false };
     bool        fail_subject_reader_new{ false };
 };
@@ -240,10 +241,12 @@ extern "C" void platform_diag_async_error(cy_diag_t* const    diag,
                                           const cy_err_t      error,
                                           const std::uint16_t line_number)
 {
-    (void)diag;
     (void)topic;
     (void)error;
     (void)line_number;
+    auto* const self = static_cast<test_platform_t*>(diag->user_context.ptr[0]);
+    TEST_ASSERT_NOT_NULL(self);
+    self->async_error_count++;
 }
 
 extern "C" void on_done_capture(cy_future_t* const future)
@@ -445,6 +448,7 @@ void platform_init(test_platform_t* const self)
     TEST_ASSERT_NOT_NULL(self->cy);
     self->async_diag =
       cy_diag_t{ .next = nullptr, .user_context = CY_USER_CONTEXT_EMPTY, .vtable = &platform_async_diag_vtable };
+    self->async_diag.user_context.ptr[0] = self;
     cy_diag_add(self->cy, &self->async_diag);
 }
 
@@ -756,7 +760,6 @@ void test_api_core_diag_listener_contracts()
     platform_init(&platform);
 
     diag_collector_t collector{};
-    platform.async_diag.user_context.ptr[0] = &platform;
 
     cy_diag_t listener_one{ .next         = nullptr,
                             .user_context = CY_USER_CONTEXT_EMPTY,
@@ -1422,14 +1425,16 @@ void test_api_core_subscribe_larger_extent_grows_reader()
     platform_deinit(&platform);
 }
 
-/// Topic creation OOM in wkv_route for coupling new topic to subscribers.
-/// This covers lines 1754-1756 (the wkv_route failure path after topic_new succeeds).
+/// Topic creation OOM around the wkv_route pattern coupling performed by topic_ensure after topic_new succeeds:
+/// a failed advertise leaves no topic behind; a coupling OOM keeps the topic alive and reports an async error.
 void test_api_core_subscribe_then_advertise_oom_sweep()
 {
-    for (std::size_t n = 0U; n < 100U; n++) {
+    bool saw_coupling_oom = false;
+    bool saw_clean_run    = false;
+    for (std::size_t n = 0U; (n < 100U) && !saw_clean_run; n++) {
         test_platform_t platform{};
         platform_init(&platform);
-        // Create a pattern subscriber first -- this populates subscriber_by_pattern.
+        // Create a pattern subscriber first -- this populates subscribers_by_pattern.
         cy_future_t* const sub = cy_subscribe(platform.cy, cy_str("oom/*/coupling"), 128U);
         TEST_ASSERT_NOT_NULL(sub);
 
@@ -1437,21 +1442,30 @@ void test_api_core_subscribe_then_advertise_oom_sweep()
         // and the subsequent wkv_route to couple the new topic with existing pattern subscribers.
         platform.alloc_counter       = 0U;
         platform.fail_after_n_allocs = n;
-
-        cy_publisher_t* const pub = cy_advertise(platform.cy, cy_str("oom/test/coupling"));
-        if (pub != nullptr) {
-            cy_unadvertise(pub);
-            platform.fail_after_n_allocs = SIZE_MAX;
-            cy_future_destroy(sub);
-            TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
-            platform_deinit(&platform);
-            break;
-        }
+        cy_publisher_t* const pub    = cy_advertise(platform.cy, cy_str("oom/test/coupling"));
         platform.fail_after_n_allocs = SIZE_MAX;
+
+        cy_topic_t* const topic = cy_topic_find_by_name(platform.cy, cy_str("oom/test/coupling"));
+        if (pub != nullptr) {
+            TEST_ASSERT_NOT_NULL(topic); // Coupling OOM must not destroy a locally requested topic.
+            const cy_substitution_set_t subs = cy_subscriber_substitutions(sub, topic);
+            if (subs.substitutions == nullptr) { // Not coupled: only permitted with an async error report.
+                TEST_ASSERT_TRUE(platform.async_error_count > 0U);
+                saw_coupling_oom = true;
+            } else {
+                TEST_ASSERT_EQUAL_size_t(1U, subs.count);
+                saw_clean_run = platform.async_error_count == 0U;
+            }
+            cy_unadvertise(pub);
+        } else {
+            TEST_ASSERT_NULL(topic); // Clean rollback.
+        }
         cy_future_destroy(sub);
         TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(platform.cy));
         platform_deinit(&platform);
     }
+    TEST_ASSERT_TRUE(saw_coupling_oom);
+    TEST_ASSERT_TRUE(saw_clean_run);
 }
 
 /// Test dedup OOM during on_message for reliable messages.
