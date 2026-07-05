@@ -339,6 +339,46 @@ static void request_callback(cy_future_t* const fut)
     cap->last_error = cy_future_error(fut);
 }
 
+static void test_respond_argument_validation(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+
+    const cy_bytes_t ok  = { .size = 0U, .data = NULL, .next = NULL };
+    const cy_bytes_t bad = { .size = 4U, .data = NULL, .next = NULL };
+    cy_breadcrumb_t  breadcrumb =
+      make_test_breadcrumb(&fixture, UINT64_C(0xAA00), cy_prio_nominal, UINT64_C(0x1234), UINT64_C(0x5678), 11U);
+
+    TEST_ASSERT_EQUAL_INT(CY_ERR_ARGUMENT, cy_respond(NULL, fixture.now + 1, ok));
+    TEST_ASSERT_EQUAL_INT(CY_ERR_ARGUMENT, cy_respond(&breadcrumb, -1, ok));
+
+    cy_breadcrumb_t invalid = breadcrumb;
+    invalid.cy              = NULL;
+    TEST_ASSERT_EQUAL_INT(CY_ERR_ARGUMENT, cy_respond(&invalid, fixture.now + 1, ok));
+
+    invalid = breadcrumb;
+    {
+        const uint8_t bad_priority = UINT8_MAX;
+        memset(&invalid.priority, 0, sizeof(invalid.priority));
+        memcpy(&invalid.priority, &bad_priority, sizeof(bad_priority));
+    }
+    TEST_ASSERT_EQUAL_INT(CY_ERR_ARGUMENT, cy_respond(&invalid, fixture.now + 1, ok));
+    TEST_ASSERT_EQUAL_size_t(0U, fixture.unicast_send_count);
+    TEST_ASSERT_EQUAL_UINT64(11U, invalid.seqno);
+
+    TEST_ASSERT_EQUAL_INT(CY_ERR_ARGUMENT, cy_respond(&breadcrumb, fixture.now + 1, bad));
+    TEST_ASSERT_EQUAL_size_t(0U, fixture.unicast_send_count);
+    TEST_ASSERT_EQUAL_UINT64(11U, breadcrumb.seqno);
+
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_respond(&breadcrumb, fixture.now + 2, ok));
+    TEST_ASSERT_EQUAL_size_t(1U, fixture.unicast_send_count);
+    TEST_ASSERT_EQUAL_UINT64(12U, breadcrumb.seqno);
+    TEST_ASSERT_EQUAL_UINT8(header_rsp_be, fixture.last_unicast[0]);
+    TEST_ASSERT_EQUAL_UINT64(11U, deserialize_u48(&fixture.last_unicast[2]));
+
+    fixture_assert_clean(&fixture);
+}
+
 static void test_respond_reliable_argument_validation(void)
 {
     fixture_t fixture;
@@ -1120,6 +1160,7 @@ void tearDown(void) { TEST_ASSERT_EQUAL_size_t(0U, cy_test_message_live_count())
 int main(void)
 {
     UNITY_BEGIN();
+    RUN_TEST(test_respond_argument_validation);
     RUN_TEST(test_respond_reliable_argument_validation);
     RUN_TEST(test_respond_reliable_initial_send_failure_returns_null);
     RUN_TEST(test_respond_reliable_ack_success);

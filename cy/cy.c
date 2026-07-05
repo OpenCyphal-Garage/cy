@@ -995,10 +995,10 @@ struct cy_topic_t
     // The tag counter is random-initialized when topic created, then incremented with each publish.
     //
     // The subject writer is created lazily when the application attempts to publish on the topic;
-    // it is not destroyed until the topic is reallocated or destroyed to avoid losing transport-related states,
-    // whatever they may be (e.g., the transfer-ID counter etc, depending on the transport implementation).
-    // When the topic is reallocated, the old writer is destroyed unless we take over an occupied subject-ID and
-    // inherit the displaced topic's existing writer; otherwise the new writer is created on the next publication.
+    // same-subject reallocations retain it to avoid losing transport-related states, whatever they may be (e.g., the
+    // transfer-ID counter etc, depending on the transport implementation).
+    // When the topic moves to another subject, the old writer is destroyed unless we take over an occupied subject-ID
+    // and inherit the displaced topic's existing writer; otherwise the new writer is created on the next publication.
     uint64_t   pub_tag_baseline; // Randomly chosen once when topic created.
     uint64_t   pub_seqno;        // Grows from zero, added to the tag baseline to obtain the tag.
     size_t     pub_count;        // Number of active advertisements; counted for garbage collection.
@@ -1346,8 +1346,8 @@ static cy_topic_t* topic_find_by_subject_id(const cy_t* const cy, const uint32_t
     return topic;
 }
 
-// Subject writers are created lazily via the writer registry and never released until the topic is reallocated
-// or destroyed. This avoids state loss on the platform side if the application opts to publish intermittently.
+// Subject writers are created lazily via the writer registry and retained across same-subject reallocations.
+// This avoids state loss on the platform side if the application opts to publish intermittently.
 static cy_err_t topic_sync_subject_writer(cy_topic_t* const topic)
 {
     if (topic->pub_writer == NULL) {
@@ -1420,6 +1420,8 @@ static void topic_allocate(cy_topic_t* const topic, const uint32_t new_evictions
              (void*)topic->couplings);
 #endif
 
+    const uint32_t old_sid = topic_subject_id(topic);
+
     // We're not allowed to alter the eviction counter as long as the topic remains in the tree! So we remove it first.
     // We use _if() version because the topic is not in the index if it's new or if we're re-entering recursively.
     cavl2_remove_if(&cy->topics_by_subject_id, &topic->index_subject_id);
@@ -1443,13 +1445,12 @@ static void topic_allocate(cy_topic_t* const topic, const uint32_t new_evictions
     }
 
     // This mirrors the formal specification of AllocateTopic(t, topics) given in Core.tla.
-    // Note that it is possible that subject_id(hash,old_evictions) == subject_id(hash,new_evictions),
-    // meaning that we stay with the same subject-ID. No special case is required to handle this.
     const uint32_t    new_sid = topic_subject_id_impl(topic->hash, new_evictions, cy->platform->subject_id_modulus);
     cy_topic_t* const that    = CAVL2_TO_OWNER(
       cavl2_find(cy->topics_by_subject_id, &new_sid, &cavl_comp_topic_subject_id), cy_topic_t, index_subject_id);
     assert((that == NULL) || (topic->hash != that->hash)); // This would mean that we inserted the same topic twice
-    const bool victory = (that == NULL) || left_wins(topic, now, topic_lage(that, now), that->hash);
+    const bool same_subject = new_sid == old_sid;
+    const bool victory      = (that == NULL) || left_wins(topic, now, topic_lage(that, now), that->hash);
 
 #if CY_CONFIG_TRACE
     if (that != NULL) {
@@ -1464,13 +1465,15 @@ static void topic_allocate(cy_topic_t* const topic, const uint32_t new_evictions
 #endif
 
     if (victory) { // Allocation done. Every affected topic will end up here eventually.
-        // Release old handles for the subject we're leaving.
-        if (topic->sub_reader != NULL) {
+        // Release old handles only for the subject we're leaving.
+        assert((topic->sub_reader == NULL) || (topic->sub_reader->handle->subject_id == old_sid));
+        assert((topic->pub_writer == NULL) || (topic->pub_writer->handle->subject_id == old_sid));
+        if (!same_subject && (topic->sub_reader != NULL)) {
             assert(topic->couplings != NULL);
             reader_release(cy, topic->sub_reader);
             topic->sub_reader = NULL;
         }
-        if (topic->pub_writer != NULL) {
+        if (!same_subject && (topic->pub_writer != NULL)) {
             writer_release(cy, topic->pub_writer);
             topic->pub_writer = NULL;
         }
@@ -2142,8 +2145,8 @@ static cy_err_t do_publish_impl(cy_publisher_t* const  pub,
         return vt->unicast(cy->platform, lane, deadline, headed_message);
     }
 
-    // Lazy creation is the simplest option because we have to drop the subject writer on topic reallocation,
-    // and it may fail to be created at the time of reallocation, so we'd have to retry anyway.
+    // Lazy creation is the simplest option because a subject move may drop the writer, and reacquisition may fail,
+    // so we'd have to retry anyway.
     // The subject writer is a very lightweight entity that is super cheap to construct (constant complexity expected)
     // so this is not expected to be a problem.
     const cy_err_t err = topic_sync_subject_writer(topic);
@@ -3929,7 +3932,8 @@ static cy_err_t do_respond(cy_breadcrumb_t* const breadcrumb,
 cy_err_t cy_respond(cy_breadcrumb_t* const breadcrumb, const cy_us_t deadline, const cy_bytes_t message)
 {
     cy_err_t err = CY_ERR_ARGUMENT;
-    if ((breadcrumb != NULL) && (breadcrumb->cy != NULL) && (deadline >= 0)) {
+    if ((breadcrumb != NULL) && (breadcrumb->cy != NULL) && (CY_PRIO_COUNT > (size_t)breadcrumb->priority) &&
+        (deadline >= 0) && !((message.data == NULL) && (message.size > 0))) {
         err = do_respond(breadcrumb, deadline, message, header_rsp_be, 0xFF); // arbitrary tag value
         breadcrumb->seqno++; // Increment always in case of partial send success.
     }

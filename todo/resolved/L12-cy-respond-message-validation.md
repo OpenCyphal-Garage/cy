@@ -3,7 +3,7 @@
 - **Severity:** 🟡 LOW (report L-12 / L-F5)
 - **Confidence:** verified (code trace)
 - **Subsystem:** core (`cy/cy.c`, RPC response)
-- **Status:** OPEN
+- **Status:** RESOLVED
 
 ## Summary
 `cy_publish`, `cy_publish_reliable`, `cy_request`, and `cy_respond_reliable` all reject a message with
