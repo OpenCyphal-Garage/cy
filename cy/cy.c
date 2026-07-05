@@ -134,13 +134,13 @@ struct cy_t
 
     cy_list_t list_implicit; // Most recently animated topic is at the head.
 
-    // When a gossip is received, its topic name will be compared against the patterns,
-    // and if a match is found, a new subscription will be constructed automatically; if a new topic instance
-    // has to be created for that, such instance is called implicit. Implicit instances are retired automatically
-    // when there are no explicit counterparts left and there is no traffic on the topic for a while.
+    // Every newly created topic name is routed against the patterns here, whether learned from a gossip or created
+    // locally; on a match, a subscription is constructed automatically. If a new topic instance has to be created for
+    // a gossip-learned match, such instance is called implicit; implicit instances are retired automatically when
+    // there are no explicit counterparts left and there is no traffic on the topic for a while.
     // The values of these tree nodes point to instances of subscriber_root_t.
     wkv_t subscribers_by_name;    // Both explicit and patterns.
-    wkv_t subscribers_by_pattern; // Only patterns for implicit subscriptions on gossips.
+    wkv_t subscribers_by_pattern; // Only patterns; routed against every newly created topic.
 
     // Pending network state indexes. Removal is guided by remote nodes and by deadline (via olga).
     cy_tree_t* respond_futures_by_tag;
@@ -1655,22 +1655,8 @@ fail:
     return err;
 }
 
-static cy_err_t topic_ensure(cy_t* const cy, cy_topic_t** const out_topic, const cy_resolved_t resolved)
-{
-    cy_topic_t* const topic = cy_topic_find_by_name(cy, resolved.name);
-    if (topic != NULL) {
-        if (out_topic != NULL) {
-            *out_topic = topic;
-        }
-        return CY_OK;
-    }
-    const uint64_t hash      = rapidhash(resolved.name.str, resolved.name.len);
-    const uint32_t evictions = (resolved.pin <= CY_SUBJECT_ID_PINNED_MAX) ? (UINT32_MAX - (uint32_t)resolved.pin) : 0U;
-    return topic_new(cy, out_topic, resolved.name, hash, evictions, LAGE_MIN);
-}
-
 // Create a new coupling between a topic and a subscriber. Allocates new memory for the coupling, which may fail.
-// Don't forget topic_ensure_subscribed() afterward if necessary. The substitutions must outlive the topic.
+// Don't forget topic_sync_subject_reader() afterward if necessary. The substitutions must outlive the topic.
 static cy_err_t topic_couple(cy_topic_t* const         topic,
                              subscriber_root_t* const  subr,
                              const size_t              substitution_count,
@@ -1711,6 +1697,33 @@ static void* wkv_cb_couple_new_topic(const wkv_event_t evt)
     subscriber_root_t* const subr  = (subscriber_root_t*)evt.node->value;
     const cy_err_t           res   = topic_couple(topic, subr, evt.substitution_count, evt.substitutions);
     return (0 == res) ? NULL : "";
+}
+
+static cy_err_t topic_ensure(cy_t* const cy, cy_topic_t** const out_topic, const cy_resolved_t resolved)
+{
+    if (out_topic != NULL) {
+        *out_topic = NULL;
+    }
+    cy_topic_t* topic = cy_topic_find_by_name(cy, resolved.name);
+    if (topic == NULL) {
+        const uint64_t hash = rapidhash(resolved.name.str, resolved.name.len);
+        const uint32_t evictions =
+          (resolved.pin <= CY_SUBJECT_ID_PINNED_MAX) ? (UINT32_MAX - (uint32_t)resolved.pin) : 0U;
+        const cy_err_t res = topic_new(cy, &topic, resolved.name, hash, evictions, LAGE_MIN);
+        if (res != CY_OK) {
+            return res;
+        }
+        // Couple pre-existing pattern subscribers, routing the topic-owned name to keep substitutions stable.
+        // Unlike the gossip path, coupling OOM does not destroy the topic because it was explicitly requested.
+        if (NULL != wkv_route(&cy->subscribers_by_pattern, cy_topic_name(topic), topic, wkv_cb_couple_new_topic)) {
+            ON_ASYNC_ERROR(cy, topic, CY_ERR_MEMORY);
+        }
+        topic_sync_subject_reader(topic);
+    }
+    if (out_topic != NULL) {
+        *out_topic = topic;
+    }
+    return CY_OK;
 }
 
 // If there is a pattern subscriber matching the name of this topic, attempt to create a new subscription.

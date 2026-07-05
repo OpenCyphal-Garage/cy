@@ -205,6 +205,10 @@ cy_gen_test_intrusive_matrix(test_intrusive_topic_allocation
         "src/test_intrusive_topic_allocation.c"
         "src/helpers.c;platform_stubs/guarded_heap.c;platform_stubs/message.c"
 )
+cy_gen_test_intrusive_matrix(test_intrusive_pattern_coupling
+        "src/test_intrusive_pattern_coupling.c"
+        "src/helpers.c;platform_stubs/guarded_heap.c;platform_stubs/message.c"
+)
 cy_gen_test_intrusive_matrix(test_intrusive_topic_allocate_exhaustive
         "src/test_intrusive_topic_allocate_exhaustive.c"
         "src/helpers.c;platform_stubs/guarded_heap.c"

@@ -1557,6 +1557,50 @@ void test_api_ordered_reordering_duplicate_interned()
     TEST_ASSERT_EQUAL_size_t(0U, guarded_heap_allocated_bytes(&platform.message_heap));
 }
 
+/// H2 regression: topics created locally AFTER a matching pattern subscription (via cy_advertise or a verbatim
+/// cy_subscribe) must couple to the pre-existing pattern roots and deliver, exactly like gossip-learned topics.
+void test_api_pattern_subscriber_hears_later_local_topics()
+{
+    test_platform_t platform{};
+    platform_init(&platform);
+    cy_test_message_reset_counters();
+
+    cy_future_t* const pat = cy_subscribe(platform.cy, cy_str("rx/h2/*"), 256U);
+    TEST_ASSERT_NOT_NULL(pat);
+
+    // Topic created by a local advertisement: substitutions are recorded and remote traffic is delivered.
+    cy_publisher_t* const pub = cy_advertise(platform.cy, cy_str("rx/h2/adv"));
+    TEST_ASSERT_NOT_NULL(pub);
+    const cy_topic_t* const topic_adv = cy_publisher_topic(pub);
+    TEST_ASSERT_NOT_NULL(topic_adv);
+    const cy_substitution_set_t subs = cy_subscriber_substitutions(pat, topic_adv);
+    TEST_ASSERT_EQUAL_size_t(1U, subs.count);
+    TEST_ASSERT_NOT_NULL(subs.substitutions);
+    TEST_ASSERT_EQUAL_size_t(0U, subs.substitutions[0].ordinal);
+    TEST_ASSERT_EQUAL_size_t(3U, subs.substitutions[0].str.len);
+    TEST_ASSERT_EQUAL_MEMORY("adv", subs.substitutions[0].str.str, 3U);
+    dispatch_message(&platform, topic_adv, header_msg_best_effort, UINT64_C(0x501), UINT64_C(0xE1), 100, 0x11U);
+    TEST_ASSERT_EQUAL_UINT64(1U, cy_arrival_count(pat));
+
+    // Topic created by a later verbatim subscription: both subscribers hear each message exactly once.
+    cy_future_t* const verb = cy_subscribe(platform.cy, cy_str("rx/h2/verb"), 64U);
+    TEST_ASSERT_NOT_NULL(verb);
+    const cy_topic_t* const topic_verb = cy_topic_find_by_name(platform.cy, cy_str("rx/h2/verb"));
+    TEST_ASSERT_NOT_NULL(topic_verb);
+    dispatch_message(&platform, topic_verb, header_msg_best_effort, UINT64_C(0x502), UINT64_C(0xE1), 110, 0x22U);
+    TEST_ASSERT_EQUAL_UINT64(2U, cy_arrival_count(pat));
+    TEST_ASSERT_EQUAL_UINT64(1U, cy_arrival_count(verb));
+    dispatch_message(&platform, topic_verb, header_msg_best_effort, UINT64_C(0x503), UINT64_C(0xE1), 120, 0x33U);
+    TEST_ASSERT_EQUAL_UINT64(3U, cy_arrival_count(pat));
+    TEST_ASSERT_EQUAL_UINT64(2U, cy_arrival_count(verb));
+
+    cy_unadvertise(pub);
+    cy_future_destroy(pat);
+    cy_future_destroy(verb);
+    TEST_ASSERT_EQUAL_UINT8(CY_OK, cy_spin_once(platform.cy));
+    platform_deinit(&platform);
+}
+
 } // namespace
 
 extern "C" void setUp()
@@ -1601,5 +1645,6 @@ int main()
     RUN_TEST(test_api_ordered_resequencing_on_large_tag_gap);
     RUN_TEST(test_api_ordered_reordering_slot_alloc_oom);
     RUN_TEST(test_api_ordered_reordering_duplicate_interned);
+    RUN_TEST(test_api_pattern_subscriber_hears_later_local_topics);
     return UNITY_END();
 }

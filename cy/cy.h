@@ -744,7 +744,9 @@ struct cy_diag_vtable_t
     /// Normally, the listener does not need to do anything specific aside from perhaps logging the error or updating
     /// relevant performance counters. Cy will keep attempting to repeat the failing operation continuously until it
     /// succeeds or the condition requiring the operation is lifted, unless the operation is not mandatory for
-    /// correctness.
+    /// correctness. One exception is coupling a locally created topic (via cy_advertise or a verbatim cy_subscribe)
+    /// to a pre-existing pattern subscription: if that coupling fails due to lack of memory, it is not retried
+    /// automatically; re-subscribing the pattern repairs it.
     ///
     /// Since Cy is a single-file library, the line number uniquely identifies the error site.
     /// The topic pointer may be NULL depending on the nature of the error.

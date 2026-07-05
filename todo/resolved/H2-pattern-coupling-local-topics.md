@@ -3,7 +3,15 @@
 - **Severity:** 🔴 HIGH (report H-2; independently found by 3 reviewers)
 - **Confidence:** reproduced (repro test) + code trace
 - **Subsystem:** core (`cy/cy.c`, topic creation / subscriber coupling)
-- **Status:** OPEN
+- **Status:** RESOLVED — `topic_ensure` now routes newly created topics through `subscribers_by_pattern` and couples
+  matches (same `wkv_cb_couple_new_topic` as the gossip path), then syncs the subject reader. Unlike the gossip path,
+  a coupling OOM keeps the topic (it was explicitly requested locally) and reports `ON_ASYNC_ERROR`. Accepted
+  limitation (documented in the `cy_diag_vtable_t::async_error` doc): a coupling lost to OOM is not retried
+  automatically; with several matching patterns a partial subset may be coupled. It self-heals only when the affected
+  pattern is subscribed again (which re-runs the idempotent `wkv_match` coupling scan) or when the topic is recreated.
+  Regression tests: `tests/src/test_intrusive_pattern_coupling.c` (multi-root, pinned, partial-OOM, lifecycle),
+  `test_api_rx.cpp::test_api_pattern_subscriber_hears_later_local_topics`, and the strengthened
+  `test_api_core_contracts.cpp::test_api_core_subscribe_then_advertise_oom_sweep`.
 
 ## Summary
 Three code paths create a topic, but only the gossip-driven one (for network-learned *unknown* topics) routes the new
