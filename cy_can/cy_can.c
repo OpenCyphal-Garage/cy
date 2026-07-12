@@ -28,6 +28,13 @@
 /// Service-ID reserved for v1.1 unicast transfers over Cyphal/CAN.
 #define UNICAST_SERVICE_ID 511U
 
+#ifndef CY_CAN_NONBLOCKING_SPIN_LIMIT
+#define CY_CAN_NONBLOCKING_SPIN_LIMIT 100
+#endif
+#if (CY_CAN_NONBLOCKING_SPIN_LIMIT < 1) || (CY_CAN_NONBLOCKING_SPIN_LIMIT > SIZE_MAX)
+#error "Invalid CY_CAN_NONBLOCKING_SPIN_LIMIT"
+#endif
+
 /// Default extent for incoming unicast messages; will grow as needed.
 #define UNICAST_EXTENT_INITIAL (HEADER_BYTES + 1024U)
 
@@ -806,33 +813,38 @@ static void v_unicast_extent_set(cy_platform_t* const base, const size_t extent)
 static void deliver_pending_v1(cy_can_t* owner, pending_v1_t* pending);
 static void deliver_pending_v0(cy_can_t* owner, pending_v0_t* pending);
 
-static cy_err_t v_spin(cy_platform_t* const base, const cy_us_t deadline)
+static void ingest_frame(cy_can_t* const owner, const cy_can_rx_t* const frame)
 {
-    cy_can_t* const     owner = (cy_can_t*)base;
-    const uint_least8_t ibm   = (uint_least8_t)((1U << owner->iface_count) - 1U);
+    const canard_bytes_t can_data   = { .size = frame->len, .data = frame->data };
+    pending_v1_t         pending_v1 = { 0 };
+    pending_v0_t         pending_v0 = { 0 };
+    assert((owner->pending_v1 == NULL) && (owner->pending_v0 == NULL));
+    owner->pending_v1 = &pending_v1;
+    owner->pending_v0 = &pending_v0;
+    (void)canard_ingest_frame(&owner->canard, frame->timestamp, frame->iface_index, frame->can_id, can_data);
+    owner->pending_v1 = NULL;
+    owner->pending_v0 = NULL;
+    deliver_pending_v0(owner, &pending_v0);
+    deliver_pending_v1(owner, &pending_v1);
+}
+
+static void poll(cy_can_t* const owner, const uint_least8_t iface_bitmap)
+{
+    canard_poll(&owner->canard, iface_bitmap);
+    subject_reader_t* const rd = tombstone_pop(owner);
+    if (rd != NULL) {
+        reader_finalize(owner, rd);
+    }
+}
+
+static void spin_blocking(cy_can_t* const owner, const uint_least8_t iface_bitmap, const cy_us_t deadline)
+{
     while (true) {
-        canard_poll(&owner->canard, ibm);
-        {
-            subject_reader_t* const rd = tombstone_pop(owner);
-            if (rd != NULL) {
-                reader_finalize(owner, rd);
-            }
-        }
+        poll(owner, iface_bitmap);
         const uint_least8_t tx_pending = canard_pending_ifaces(&owner->canard);
         cy_can_rx_t         frame      = { 0 };
         if (owner->vtable->rx(owner->user, &frame, deadline, tx_pending)) {
-            const canard_bytes_t can_data   = { .size = frame.len, .data = frame.data };
-            pending_v1_t         pending_v1 = { 0 };
-            pending_v0_t         pending_v0 = { 0 };
-            assert((owner->pending_v1 == NULL) && (owner->pending_v0 == NULL));
-            // ReSharper disable once CppDFALocalValueEscapesFunction
-            owner->pending_v1 = &pending_v1;
-            owner->pending_v0 = &pending_v0;
-            (void)canard_ingest_frame(&owner->canard, frame.timestamp, frame.iface_index, frame.can_id, can_data);
-            owner->pending_v1 = NULL;
-            owner->pending_v0 = NULL;
-            deliver_pending_v0(owner, &pending_v0);
-            deliver_pending_v1(owner, &pending_v1);
+            ingest_frame(owner, &frame);
             if (frame.timestamp > deadline) {
                 break;
             }
@@ -842,6 +854,35 @@ static cy_err_t v_spin(cy_platform_t* const base, const cy_us_t deadline)
             }
         }
     }
+}
+
+static void spin_nonblocking(cy_can_t* const owner, const uint_least8_t iface_bitmap, const cy_us_t watermark)
+{
+    for (size_t i = 0; i < CY_CAN_NONBLOCKING_SPIN_LIMIT; i++) {
+        poll(owner, iface_bitmap);
+        const uint_least8_t tx_pending = canard_pending_ifaces(&owner->canard);
+        cy_can_rx_t         frame      = { 0 };
+        if (!owner->vtable->rx(owner->user, &frame, watermark, tx_pending)) {
+            return;
+        }
+        ingest_frame(owner, &frame);
+        if (frame.timestamp > watermark) {
+            return;
+        }
+    }
+}
+
+static cy_err_t v_spin(cy_platform_t* const base, const cy_us_t deadline)
+{
+    cy_can_t* const     owner        = (cy_can_t*)base;
+    const uint_least8_t iface_bitmap = (uint_least8_t)((1U << owner->iface_count) - 1U);
+    const cy_us_t       now          = owner->vtable->now(owner->user);
+    if (deadline > now) {
+        spin_blocking(owner, iface_bitmap, deadline);
+    } else {
+        spin_nonblocking(owner, iface_bitmap, now);
+    }
+    canard_poll(&owner->canard, iface_bitmap);
     return CY_OK;
 }
 
