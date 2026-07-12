@@ -33,6 +33,25 @@
 
 typedef struct
 {
+    cy_lane_t       lane;
+    uint32_t        subject_id;
+    bool            has_subject_id;
+    cy_message_ts_t message;
+} pending_v1_t;
+
+typedef struct
+{
+    cy_can_v0_subscription_t* subscription;
+    canard_us_t               timestamp;
+    canard_prio_t             priority;
+    uint_least8_t             source_node_id;
+    uint_least8_t             transfer_id;
+    canard_payload_t          payload;
+    uint_least8_t             single_frame_data[CANARD_MTU_CAN_FD];
+} pending_v0_t;
+
+typedef struct
+{
     cy_platform_t base; // Must be first (upcast pattern).
     uint64_t      prng_state;
     uint_least8_t iface_count;
@@ -48,6 +67,9 @@ typedef struct
     struct subject_reader_t* tombstone_tail;
 
     uint64_t oom_count; // cy_can-level OOM (message wrapper allocation failures, etc.).
+
+    pending_v1_t* pending_v1;
+    pending_v0_t* pending_v0;
 
     const cy_can_vtable_t* vtable;
     void*                  user;
@@ -304,20 +326,14 @@ static const canard_vtable_t canard_vtbl_filter = { .now = v_canard_now, .tx = v
 // =====================================================================================================================
 // SUBSCRIPTION CALLBACKS
 
-static void deliver(cy_can_t* const       owner,
-                    const uint32_t* const subject_id,
-                    const uint_least8_t   source_node_id,
-                    const canard_prio_t   priority,
-                    const canard_us_t     timestamp,
-                    can_message_t* const  msg)
+static cy_lane_t make_lane(const uint_least8_t source_node_id, const canard_prio_t priority)
 {
     cy_lane_t lane;
     (void)memset(&lane, 0, sizeof(lane));
-    lane.id                   = source_node_id;
-    lane.prio                 = (cy_prio_t)priority;
-    lane.ctx.state[0]         = (unsigned char)source_node_id;
-    const cy_message_ts_t mts = { .timestamp = timestamp, .content = &msg->base };
-    cy_on_message(&owner->base, lane, subject_id, mts);
+    lane.id           = source_node_id;
+    lane.prio         = (cy_prio_t)priority;
+    lane.ctx.state[0] = (unsigned char)source_node_id;
+    return lane;
 }
 
 /// 16-bit subscription callback. Payload already contains the Cy session header.
@@ -329,9 +345,13 @@ static void v_on_msg_16b(canard_subscription_t* const self,
                          const canard_payload_t       payload)
 {
     (void)transfer_id;
-    subject_reader_t* const reader     = (subject_reader_t*)self->user_context;
-    cy_can_t* const         owner      = reader->owner;
-    const bool              multiframe = (payload.origin.data != NULL);
+    subject_reader_t* const reader = (subject_reader_t*)self->user_context;
+    assert(reader != NULL);
+    cy_can_t* const owner = reader->owner;
+    assert(owner != NULL);
+    pending_v1_t* const pending = owner->pending_v1;
+    assert((pending != NULL) && (pending->message.content == NULL));
+    const bool multiframe = (payload.origin.data != NULL);
 
     can_message_t* const msg = make_message(owner, multiframe ? 0 : payload.view.size);
     if (msg == NULL) {
@@ -354,8 +374,10 @@ static void v_on_msg_16b(canard_subscription_t* const self,
         (void)memcpy(msg->seg0, payload.view.data, payload.view.size);
         msg->seg0_len = payload.view.size;
     }
-    const uint32_t sid = reader->base.subject_id;
-    deliver(owner, &sid, source_node_id, priority, timestamp, msg);
+    pending->lane           = make_lane(source_node_id, priority);
+    pending->subject_id     = reader->base.subject_id;
+    pending->has_subject_id = true;
+    pending->message        = (cy_message_ts_t){ .timestamp = timestamp, .content = &msg->base };
 }
 
 /// 13-bit subscription callback. Must prepend a precomputed phony Cy session header.
@@ -369,9 +391,11 @@ static void v_on_msg_13b(canard_subscription_t* const self,
     (void)transfer_id;
     subject_reader_t* const reader = (subject_reader_t*)self->user_context;
     assert(reader != NULL);
-    cy_can_t* const                owner  = reader->owner;
-    subject_reader_pinned_t* const pinned = as_pinned(reader);
-    assert((pinned != NULL) && (owner != NULL));
+    cy_can_t* const owner = reader->owner;
+    assert(owner != NULL);
+    pending_v1_t* const            pending = owner->pending_v1;
+    subject_reader_pinned_t* const pinned  = as_pinned(reader);
+    assert((pinned != NULL) && (pending != NULL) && (pending->message.content == NULL));
     const bool multiframe = (payload.origin.data != NULL);
 
     const size_t         inline_size = HEADER_BYTES + (multiframe ? 0 : payload.view.size);
@@ -404,7 +428,10 @@ static void v_on_msg_13b(canard_subscription_t* const self,
         }
         msg->seg0_len += payload.view.size;
     }
-    deliver(owner, &reader->base.subject_id, source_node_id, priority, timestamp, msg);
+    pending->lane           = make_lane(source_node_id, priority);
+    pending->subject_id     = reader->base.subject_id;
+    pending->has_subject_id = true;
+    pending->message        = (cy_message_ts_t){ .timestamp = timestamp, .content = &msg->base };
 }
 
 /// Service-ID 511 subscription callback for unicast transfers.
@@ -416,8 +443,11 @@ static void v_on_msg_unicast(canard_subscription_t* const self,
                              const canard_payload_t       payload)
 {
     (void)transfer_id;
-    cy_can_t* const owner      = (cy_can_t*)self->user_context;
-    const bool      multiframe = (payload.origin.data != NULL);
+    cy_can_t* const owner = (cy_can_t*)self->user_context;
+    assert(owner != NULL);
+    pending_v1_t* const pending = owner->pending_v1;
+    assert((pending != NULL) && (pending->message.content == NULL));
+    const bool multiframe = (payload.origin.data != NULL);
 
     can_message_t* const msg = make_message(owner, multiframe ? 0 : payload.view.size);
     if (msg == NULL) {
@@ -440,7 +470,9 @@ static void v_on_msg_unicast(canard_subscription_t* const self,
         (void)memcpy(msg->seg0, payload.view.data, payload.view.size);
         msg->seg0_len = payload.view.size;
     }
-    deliver(owner, NULL, source_node_id, priority, timestamp, msg);
+    pending->lane           = make_lane(source_node_id, priority);
+    pending->has_subject_id = false;
+    pending->message        = (cy_message_ts_t){ .timestamp = timestamp, .content = &msg->base };
 }
 
 static const canard_subscription_vtable_t sub_vtable_16b     = { .on_message = v_on_msg_16b };
@@ -771,6 +803,9 @@ static void v_unicast_extent_set(cy_platform_t* const base, const size_t extent)
 // =====================================================================================================================
 // EVENT LOOP
 
+static void deliver_pending_v1(cy_can_t* owner, pending_v1_t* pending);
+static void deliver_pending_v0(cy_can_t* owner, pending_v0_t* pending);
+
 static cy_err_t v_spin(cy_platform_t* const base, const cy_us_t deadline)
 {
     cy_can_t* const     owner = (cy_can_t*)base;
@@ -786,8 +821,18 @@ static cy_err_t v_spin(cy_platform_t* const base, const cy_us_t deadline)
         const uint_least8_t tx_pending = canard_pending_ifaces(&owner->canard);
         cy_can_rx_t         frame      = { 0 };
         if (owner->vtable->rx(owner->user, &frame, deadline, tx_pending)) {
-            const canard_bytes_t can_data = { .size = frame.len, .data = frame.data };
+            const canard_bytes_t can_data   = { .size = frame.len, .data = frame.data };
+            pending_v1_t         pending_v1 = { 0 };
+            pending_v0_t         pending_v0 = { 0 };
+            assert((owner->pending_v1 == NULL) && (owner->pending_v0 == NULL));
+            // ReSharper disable once CppDFALocalValueEscapesFunction
+            owner->pending_v1 = &pending_v1;
+            owner->pending_v0 = &pending_v0;
             (void)canard_ingest_frame(&owner->canard, frame.timestamp, frame.iface_index, frame.can_id, can_data);
+            owner->pending_v1 = NULL;
+            owner->pending_v0 = NULL;
+            deliver_pending_v0(owner, &pending_v0);
+            deliver_pending_v1(owner, &pending_v1);
             if (frame.timestamp > deadline) {
                 break;
             }
@@ -916,6 +961,7 @@ void cy_can_destroy(cy_platform_t* const base)
     if (owner == NULL) {
         return;
     }
+    assert((owner->pending_v1 == NULL) && (owner->pending_v0 == NULL));
     while (owner->tombstone_head != NULL) {
         subject_reader_t* const rd = tombstone_pop(owner);
         assert(rd != NULL);
@@ -947,18 +993,60 @@ static void v_on_msg_v0(canard_subscription_t* const self,
 {
     cy_can_v0_subscription_t* const sub = (cy_can_v0_subscription_t*)self->user_context;
     assert((sub != NULL) && (sub->owner != NULL));
-    cy_can_t* const               owner = sub->owner;
-    const cy_bytes_t              data  = { .size = payload.view.size, .data = payload.view.data, .next = NULL };
-    const cy_can_v0_on_transfer_t cb    = sub->callback;
-    if (cb != NULL) {
-        cb(sub, timestamp, (cy_prio_t)priority, source_node_id, transfer_id, data);
-    }
-    if (payload.origin.data != NULL) {
-        owner->vtable->realloc(owner->user, payload.origin.data, 0);
+    cy_can_t* const     owner   = sub->owner;
+    pending_v0_t* const pending = owner->pending_v0;
+    assert((pending != NULL) && (pending->payload.view.data == NULL));
+    pending->subscription   = sub;
+    pending->timestamp      = timestamp;
+    pending->priority       = priority;
+    pending->source_node_id = source_node_id;
+    pending->transfer_id    = transfer_id;
+    pending->payload        = payload;
+    if (payload.origin.data == NULL) {
+        assert(payload.view.size <= sizeof(pending->single_frame_data));
+        (void)memcpy(pending->single_frame_data, payload.view.data, payload.view.size);
+        pending->payload.view.data = pending->single_frame_data;
     }
 }
 
 static const canard_subscription_vtable_t sub_vtable_v0 = { .on_message = v_on_msg_v0 };
+
+static void deliver_pending_v1(cy_can_t* const owner, pending_v1_t* const pending)
+{
+    if (pending->message.content != NULL) {
+        const cy_lane_t       lane           = pending->lane;
+        const uint32_t        subject_id     = pending->subject_id;
+        const bool            has_subject_id = pending->has_subject_id;
+        const cy_message_ts_t message        = pending->message;
+        pending->message.content             = NULL;
+        cy_on_message(&owner->base, lane, has_subject_id ? &subject_id : NULL, message);
+    }
+}
+
+static void deliver_pending_v0(cy_can_t* const owner, pending_v0_t* const pending)
+{
+    if (pending->payload.view.data != NULL) {
+        const cy_can_v0_subscription_t* const sub            = pending->subscription;
+        const canard_us_t                     timestamp      = pending->timestamp;
+        const canard_prio_t                   priority       = pending->priority;
+        const uint_least8_t                   source_node_id = pending->source_node_id;
+        const uint_least8_t                   transfer_id    = pending->transfer_id;
+        const canard_payload_t                payload        = pending->payload;
+        const cy_can_v0_on_transfer_t         cb             = sub->callback;
+        pending->payload.view.data                           = NULL;
+        if (cb != NULL) {
+            cb((cy_can_v0_subscription_t*)sub,
+               timestamp,
+               (cy_prio_t)priority,
+               source_node_id,
+               transfer_id,
+               (cy_bytes_t){ .size = payload.view.size, .data = payload.view.data, .next = NULL });
+        }
+        if (payload.origin.data != NULL) {
+            owner->vtable->realloc(owner->user, payload.origin.data, 0);
+        }
+    }
+}
 
 cy_can_v0_subscription_t* cy_can_v0_subscribe(cy_platform_t* const base,
                                               const uint16_t       data_type_id,

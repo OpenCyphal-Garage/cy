@@ -22,6 +22,14 @@ typedef struct
 
 typedef struct
 {
+    cy_platform_t* platform;
+    cy_t*          cy;
+    size_t         count;
+    cy_err_t       publish_error;
+} v0_publish_from_callback_t;
+
+typedef struct
+{
     const v0_capture_t* capture;
     size_t              count;
 } capture_goal_t;
@@ -39,6 +47,35 @@ static bool capture_goal_reached(void* const context)
 {
     const capture_goal_t* const goal = (const capture_goal_t*)context;
     return (goal->capture != NULL) && (goal->capture->count >= goal->count);
+}
+
+static uint16_t transfer_crc(uint16_t crc, const uint8_t* const data, const size_t size)
+{
+    for (size_t i = 0U; i < size; i++) {
+        crc = (uint16_t)(crc ^ (uint16_t)((uint16_t)data[i] << 8U));
+        for (size_t bit = 0U; bit < 8U; bit++) {
+            const uint16_t shifted = (uint16_t)(crc << 1U);
+            crc                    = ((crc & 0x8000U) != 0U) ? (uint16_t)(shifted ^ 0x1021U) : shifted;
+        }
+    }
+    return crc;
+}
+
+static void push_rx_frame(can_test_node_t* const node,
+                          const uint32_t         can_id,
+                          const cy_us_t          timestamp,
+                          const uint8_t* const   payload,
+                          const size_t           payload_size,
+                          const uint8_t          tail)
+{
+    cy_can_rx_t frame = { .timestamp = timestamp, .can_id = can_id };
+    TEST_ASSERT_TRUE(payload_size < sizeof(frame.data));
+    frame.len = (uint_least8_t)(payload_size + 1U);
+    if (payload_size > 0U) {
+        (void)memcpy(frame.data, payload, payload_size);
+    }
+    frame.data[payload_size] = tail;
+    can_test_node_push_rx(node, &frame);
 }
 
 static void spin_until_capture(can_test_node_t* const    a,
@@ -81,6 +118,32 @@ static void on_v0_transfer(cy_can_v0_subscription_t* const subscription,
     if (payload.size > 0U) {
         (void)memcpy(capture->payload, payload.data, payload.size);
     }
+}
+
+static void on_v0_transfer_publish(cy_can_v0_subscription_t* const subscription,
+                                   const cy_us_t                   timestamp,
+                                   const cy_prio_t                 priority,
+                                   const uint_least8_t             source_node_id,
+                                   const uint_least8_t             transfer_id,
+                                   const cy_bytes_t                payload)
+{
+    static const uint8_t              response[] = { 0xA5U, 0x5AU };
+    v0_publish_from_callback_t* const state =
+      (v0_publish_from_callback_t*)cy_can_v0_subscription_context(subscription).ptr[0];
+    (void)timestamp;
+    (void)priority;
+    (void)source_node_id;
+    (void)transfer_id;
+    (void)payload;
+    TEST_ASSERT_NOT_NULL(state);
+    state->count++;
+    state->publish_error = cy_can_v0_publish(state->platform,
+                                             cy_now(state->cy) + spin_slice_us,
+                                             cy_prio_high,
+                                             902U,
+                                             0U,
+                                             0U,
+                                             (cy_bytes_t){ .size = sizeof(response), .data = response, .next = NULL });
 }
 
 static void test_api_can_v0_single_frame_no_topic_side_effects_and_cy_coexistence(void)
@@ -131,6 +194,18 @@ static void test_api_can_v0_single_frame_no_topic_side_effects_and_cy_coexistenc
     TEST_ASSERT_EQUAL_UINT8(5U, capture.transfer_id);
     TEST_ASSERT_EQUAL_INT(cy_prio_high, capture.priority);
     TEST_ASSERT_TRUE(capture.source_node_id != CANARD_NODE_ID_ANONYMOUS);
+
+    TEST_ASSERT_EQUAL_INT(CY_OK,
+                          cy_can_v0_publish(tx_node.platform,
+                                            cy_now(tx_node.cy) + (20 * spin_slice_us),
+                                            cy_prio_high,
+                                            341U,
+                                            0xBADC,
+                                            6U,
+                                            (cy_bytes_t){ .size = 0U, .data = NULL, .next = NULL }));
+    spin_until_capture(&tx_node, &rx_node, &capture, 2U, 64U);
+    TEST_ASSERT_EQUAL_size_t(0U, capture.payload_size);
+    TEST_ASSERT_EQUAL_UINT8(6U, capture.transfer_id);
 
     TEST_ASSERT_EQUAL_size_t(0U, count_topics(tx_node.cy));
     TEST_ASSERT_EQUAL_size_t(0U, count_topics(rx_node.cy));
@@ -314,6 +389,107 @@ static void test_api_can_v0_null_callback_is_safe(void)
     can_test_node_destroy(&node);
 }
 
+static void test_api_can_v0_callback_can_publish_and_transmit(void)
+{
+    static const uint8_t request[] = { 0x13U, 0x37U };
+
+    can_test_bus_t             bus;
+    can_test_node_t            node;
+    v0_publish_from_callback_t state = { 0 };
+    can_test_bus_init(&bus);
+    can_test_node_prepare(&node, &bus, 1U, false, false);
+    node.self_loopback = true;
+    can_test_node_make_platform(&node, 256U, 0U);
+    can_test_node_make_cy(&node, "v0_publish_callback");
+
+    cy_can_v0_subscription_t* const sub = cy_can_v0_subscribe(node.platform, 901U, 0U, 64U, -1);
+    TEST_ASSERT_NOT_NULL(sub);
+    state.platform = node.platform;
+    state.cy       = node.cy;
+    cy_can_v0_subscription_context_set(sub, (cy_user_context_t){ .ptr = { &state, NULL } });
+    cy_can_v0_subscription_callback_set(sub, on_v0_transfer_publish);
+
+    can_test_node_reset_history(&node);
+    TEST_ASSERT_EQUAL_INT(CY_OK,
+                          cy_can_v0_publish(node.platform,
+                                            cy_now(node.cy) + (20 * spin_slice_us),
+                                            cy_prio_nominal,
+                                            901U,
+                                            0U,
+                                            0U,
+                                            (cy_bytes_t){ .size = sizeof(request), .data = request, .next = NULL }));
+    can_test_node_spin(&node, 20 * spin_slice_us);
+    TEST_ASSERT_EQUAL_size_t(1U, state.count);
+    TEST_ASSERT_EQUAL_INT(CY_OK, state.publish_error);
+    TEST_ASSERT_TRUE(node.tx_classic_calls >= 2U);
+
+    cy_can_v0_unsubscribe(sub);
+    can_test_node_spin(&node, spin_slice_us);
+    can_test_node_destroy(&node);
+}
+
+static void test_api_can_v0_and_v1_completions_from_same_frame_are_both_delivered(void)
+{
+    static const uint16_t subject_id   = 321U;
+    static const uint8_t  v1_payload[] = { 0x11U, 0x22U, 0x33U, 0x44U, 0x55U, 0x66U, 0x77U };
+    static const uint8_t  v0_middle[]  = { 0x81U, 0x82U, 0x83U, 0x84U, 0x85U, 0x86U, 0x87U };
+    uint8_t               v0_head[]    = { 0U, 0U, 0x71U, 0x72U, 0x73U, 0x74U, 0x75U };
+    uint8_t               shared_end[2];
+    uint8_t               v0_expected[14];
+
+    const uint16_t v1_crc = transfer_crc(UINT16_MAX, v1_payload, sizeof(v1_payload));
+    shared_end[0]         = (uint8_t)(v1_crc >> 8U);
+    shared_end[1]         = (uint8_t)(v1_crc & 0xFFU);
+    uint16_t v0_crc       = transfer_crc(UINT16_MAX, &v0_head[2], sizeof(v0_head) - 2U);
+    v0_crc                = transfer_crc(v0_crc, v0_middle, sizeof(v0_middle));
+    v0_crc                = transfer_crc(v0_crc, shared_end, sizeof(shared_end));
+    v0_head[0]            = (uint8_t)(v0_crc & 0xFFU);
+    v0_head[1]            = (uint8_t)(v0_crc >> 8U);
+    (void)memcpy(v0_expected, &v0_head[2], sizeof(v0_head) - 2U);
+    (void)memcpy(&v0_expected[sizeof(v0_head) - 2U], v0_middle, sizeof(v0_middle));
+    (void)memcpy(&v0_expected[(sizeof(v0_head) - 2U) + sizeof(v0_middle)], shared_end, sizeof(shared_end));
+
+    can_test_bus_t  bus;
+    can_test_node_t node;
+    v0_capture_t    capture = { 0 };
+    can_test_bus_init(&bus);
+    can_test_node_prepare(&node, &bus, 1U, false, false);
+    can_test_node_make_platform(&node, 256U, 0U);
+    can_test_node_make_cy(&node, "mixed_v0_v1");
+
+    cy_future_t* const              v1_sub       = cy_subscribe(node.cy, cy_str("321#321"), 64U);
+    const uint16_t                  data_type_id = (uint16_t)(0x6000U | (uint32_t)subject_id);
+    cy_can_v0_subscription_t* const v0_sub = cy_can_v0_subscribe(node.platform, data_type_id, UINT16_MAX, 64U, -1);
+    TEST_ASSERT_NOT_NULL(v1_sub);
+    TEST_ASSERT_NOT_NULL(v0_sub);
+    cy_can_v0_subscription_context_set(v0_sub, (cy_user_context_t){ .ptr = { &capture, NULL } });
+    cy_can_v0_subscription_callback_set(v0_sub, on_v0_transfer);
+
+    const uint32_t can_id =
+      ((uint32_t)cy_prio_nominal << 26U) | (UINT32_C(3) << 21U) | ((uint32_t)subject_id << 8U) | UINT32_C(42);
+    push_rx_frame(&node, can_id, 1001, v0_head, sizeof(v0_head), UINT8_C(0x80));
+    push_rx_frame(&node, can_id, 1002, v1_payload, sizeof(v1_payload), UINT8_C(0xA0));
+    push_rx_frame(&node, can_id, 1003, v0_middle, sizeof(v0_middle), UINT8_C(0x20));
+    push_rx_frame(&node, can_id, 1004, shared_end, sizeof(shared_end), UINT8_C(0x40));
+    can_test_node_spin(&node, spin_slice_us);
+
+    TEST_ASSERT_EQUAL_size_t(1U, capture.count);
+    TEST_ASSERT_EQUAL_size_t(sizeof(v0_expected), capture.payload_size);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(v0_expected, capture.payload, sizeof(v0_expected));
+    TEST_ASSERT_TRUE(cy_future_done(v1_sub));
+    {
+        const cy_arrival_t arrival = cy_arrival_move(v1_sub);
+        TEST_ASSERT_NOT_NULL(arrival.message.content);
+        can_test_assert_message_equals(arrival.message.content, v1_payload, sizeof(v1_payload));
+        cy_message_refcount_dec(arrival.message.content);
+    }
+
+    cy_can_v0_unsubscribe(v0_sub);
+    cy_future_destroy(v1_sub);
+    can_test_node_spin(&node, spin_slice_us);
+    can_test_node_destroy(&node);
+}
+
 void setUp(void) {}
 
 void tearDown(void) {}
@@ -325,5 +501,7 @@ int main(void)
     RUN_TEST(test_api_can_v0_multiframe_extent_truncation_uses_classic_frames);
     RUN_TEST(test_api_can_v0_duplicate_subscribe_rejected_and_negative_timeout_defaults);
     RUN_TEST(test_api_can_v0_null_callback_is_safe);
+    RUN_TEST(test_api_can_v0_callback_can_publish_and_transmit);
+    RUN_TEST(test_api_can_v0_and_v1_completions_from_same_frame_are_both_delivered);
     return UNITY_END();
 }
