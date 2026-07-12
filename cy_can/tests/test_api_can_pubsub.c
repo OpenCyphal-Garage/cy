@@ -6,6 +6,33 @@
 
 static const cy_us_t spin_slice_us = (cy_us_t)10000;
 
+typedef struct
+{
+    size_t  count;
+    uint8_t payload[2];
+} recursive_capture_t;
+
+static void on_recursive_arrival(cy_future_t* const future)
+{
+    recursive_capture_t* const capture = (recursive_capture_t*)cy_future_context(future).ptr[0];
+    TEST_ASSERT_NOT_NULL(capture);
+    if (!cy_future_done(future)) {
+        return;
+    }
+    {
+        const cy_arrival_t arrival = cy_arrival_move(future);
+        TEST_ASSERT_NOT_NULL(arrival.message.content);
+        TEST_ASSERT_TRUE(capture->count < sizeof(capture->payload));
+        TEST_ASSERT_EQUAL_size_t(
+          1U, can_test_message_read_all(arrival.message.content, &capture->payload[capture->count], 1U));
+        capture->count++;
+        if (capture->count == 1U) {
+            TEST_ASSERT_EQUAL_INT(CY_OK, cy_spin_once(arrival.breadcrumb.cy));
+        }
+        cy_message_refcount_dec(arrival.message.content);
+    }
+}
+
 static void spin_until_done(can_test_node_t* const node, cy_future_t* const future)
 {
     TEST_ASSERT_NOT_NULL(node);
@@ -96,6 +123,58 @@ static void test_api_can_pubsub_pinned_best_effort_uses_shorter_legacy_path(void
     }
 
     TEST_ASSERT_TRUE(verbatim_frames > pinned_frames);
+}
+
+static void test_api_can_pubsub_recursive_spin_delivers_each_transfer_once(void)
+{
+    const uint8_t first[]  = { 0x1AU };
+    const uint8_t second[] = { 0x2BU };
+
+    can_test_bus_t      bus;
+    can_test_node_t     tx;
+    can_test_node_t     rx;
+    recursive_capture_t capture = { 0 };
+    can_test_bus_init(&bus);
+    can_test_node_prepare(&tx, &bus, 1U, false, false);
+    can_test_node_prepare(&rx, &bus, 1U, false, false);
+    can_test_node_make_platform(&tx, 256U, 0U);
+    can_test_node_make_platform(&rx, 256U, 0U);
+    can_test_node_make_cy(&tx, "recursive_tx");
+    can_test_node_make_cy(&rx, "recursive_rx");
+
+    cy_publisher_t* const pub = cy_advertise(tx.cy, cy_str("345#345"));
+    cy_future_t* const    sub = cy_subscribe(rx.cy, cy_str("345#345"), 64U);
+    TEST_ASSERT_NOT_NULL(pub);
+    TEST_ASSERT_NOT_NULL(sub);
+    {
+        cy_user_context_t context = CY_USER_CONTEXT_EMPTY;
+        context.ptr[0]            = &capture;
+        cy_future_context_set(sub, context);
+        cy_future_callback_set(sub, on_recursive_arrival);
+    }
+    can_test_spin_pair(&tx, &rx, 4U, spin_slice_us);
+
+    TEST_ASSERT_EQUAL_INT(CY_OK,
+                          cy_publish(pub,
+                                     cy_now(tx.cy) + (20 * spin_slice_us),
+                                     (cy_bytes_t){ .size = sizeof(first), .data = first, .next = NULL }));
+    TEST_ASSERT_EQUAL_INT(CY_OK,
+                          cy_publish(pub,
+                                     cy_now(tx.cy) + (20 * spin_slice_us),
+                                     (cy_bytes_t){ .size = sizeof(second), .data = second, .next = NULL }));
+    can_test_node_spin(&tx, spin_slice_us);
+    TEST_ASSERT_EQUAL_size_t(2U, rx.rx_count);
+    can_test_node_spin(&rx, spin_slice_us);
+    TEST_ASSERT_EQUAL_size_t(2U, capture.count);
+    TEST_ASSERT_EQUAL_UINT8(first[0], capture.payload[0]);
+    TEST_ASSERT_EQUAL_UINT8(second[0], capture.payload[1]);
+    TEST_ASSERT_EQUAL_UINT64(2U, cy_arrival_count(sub));
+
+    cy_unadvertise(pub);
+    cy_future_destroy(sub);
+    can_test_spin_pair(&tx, &rx, 1U, spin_slice_us);
+    can_test_node_destroy(&tx);
+    can_test_node_destroy(&rx);
 }
 
 // Regression for H5: a pinned subject (sid <= 8191) published best-effort must not be forced onto the
@@ -336,6 +415,7 @@ int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_api_can_pubsub_pinned_best_effort_uses_shorter_legacy_path);
+    RUN_TEST(test_api_can_pubsub_recursive_spin_delivers_each_transfer_once);
     RUN_TEST(test_api_can_pubsub_pinned_best_effort_custom_name_uses_v11_plane);
     RUN_TEST(test_api_can_pubsub_multitenant_pinned_best_effort_delivers_and_filters);
     RUN_TEST(test_api_can_pubsub_multiframe_extent_truncation);
