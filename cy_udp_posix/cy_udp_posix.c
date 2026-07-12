@@ -77,6 +77,7 @@ typedef struct cy_udp_posix_t
     // Doubly-linked unordered list of all live subject readers.
     subject_reader_t* reader_head;
     subject_reader_t* reader_tail;
+    bool              rx_reverse; // Flips ready-RX traversal each round to avoid persistent descriptor bias.
 } cy_udp_posix_t;
 
 static size_t  smaller(const size_t a, const size_t b) { return (a < b) ? a : b; }
@@ -701,11 +702,19 @@ static cy_err_t spin_once_until(cy_udp_posix_t* const self, const cy_us_t deadli
     const cy_us_t wait_timeout = deadline - min_i64(cy_udp_posix_now(), deadline);
     cy_err_t      res = err_from_udp_wrapper(udp_wrapper_wait(wait_timeout, tx_count, tx_await, rx_count, rx_await));
     if (res == CY_OK) {
-        const cy_us_t now = cy_udp_posix_now(); // after unblocking
-        for (size_t i = 0; i < rx_count; i++) {
-            if ((rx_await[i] != NULL) && ((rx_readers[i] == NULL) || !rx_readers[i]->tombstone)) {
-                read_socket(self, now, rx_readers[i], rx_await[i], rx_iface_indexes[i]);
+        const cy_us_t now      = cy_udp_posix_now(); // after unblocking
+        bool          rx_ready = false;
+        for (size_t n = 0; n < rx_count; n++) {
+            const size_t i = self->rx_reverse ? (rx_count - n - 1U) : n;
+            if (rx_await[i] != NULL) {
+                rx_ready = true;
+                if ((rx_readers[i] == NULL) || !rx_readers[i]->tombstone) {
+                    read_socket(self, now, rx_readers[i], rx_await[i], rx_iface_indexes[i]);
+                }
             }
+        }
+        if (rx_ready) {
+            self->rx_reverse = !self->rx_reverse;
         }
         assert(res == CY_OK);
         // While handling the events, we could have generated additional TX items, so we need to process them again.
