@@ -2,15 +2,38 @@
 
 #include "example_platform.h"
 
-#include <errno.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define MEGA 1000000LL
 
-#define PATH_MAX_LEN 2048
-#define DATA_MAX     4096
+#define PATH_MAX_LEN 1024U
+#define DATA_MAX     2036U
+#define SEEK_MASK    UINT64_C(0x0000FFFFFFFFFFFF)
+
+// zubax.file.Read.0.1, manually serialized for little-endian hosts.
+typedef struct file_read_request_t
+{
+    uint64_t seek_size;
+    uint16_t reserved; // cppcheck-suppress unusedStructMember
+    uint16_t path_len;
+    char     path[PATH_MAX_LEN];
+} file_read_request_t;
+
+typedef struct file_read_response_t
+{
+    uint64_t seek_error_end;
+    uint16_t reserved; // cppcheck-suppress unusedStructMember
+    uint16_t data_len;
+    uint8_t  data[DATA_MAX];
+} file_read_response_t;
+
+_Static_assert(offsetof(file_read_request_t, path) == 12U, "");
+_Static_assert(offsetof(file_read_response_t, data) == 12U, "");
+_Static_assert(sizeof(file_read_response_t) == 2048U, "");
 
 static void future_destroy_when_done(cy_future_t* const future)
 {
@@ -19,12 +42,6 @@ static void future_destroy_when_done(cy_future_t* const future)
     }
 }
 
-// Request schema:
-//     uint64           read_offset
-//     utf8[<=PATH_MAX] file_path
-// Response schema:
-//     uint32           errno
-//     byte[<=DATA_MAX] data
 static void on_file_read_msg(cy_future_t* const subscriber)
 {
     if (!cy_future_done(subscriber)) {
@@ -36,35 +53,49 @@ static void on_file_read_msg(cy_future_t* const subscriber)
         return;
     }
 
-    // Deserialize the payload, assuming the local machine is little-endian, for simplicity.
-    uint64_t read_offset = 0;
-    uint16_t path_len    = 0;
-    char     file_name[PATH_MAX_LEN + 1];
-    if ((8 != cy_message_read(arv.message.content, 0, 8, &read_offset)) ||
-        (2 != cy_message_read(arv.message.content, 8, 2, &path_len)) || (path_len == 0) || (path_len > PATH_MAX_LEN) ||
-        (path_len != cy_message_read(arv.message.content, 10, path_len, file_name))) {
+    file_read_request_t req = { 0 };
+    char                file_name[PATH_MAX_LEN + 1];
+    if ((12U != cy_message_read(arv.message.content, 0, 12U, &req)) || (req.path_len > PATH_MAX_LEN) ||
+        (req.path_len != cy_message_read(arv.message.content, 12U, req.path_len, req.path))) {
         (void)fprintf(stderr, "Malformed request of size %zu\n", cy_message_size(arv.message.content));
         cy_message_refcount_dec(arv.message.content);
         return;
     }
-    file_name[path_len] = '\0';
+    memcpy(file_name, req.path, req.path_len);
+    file_name[req.path_len] = '\0';
 
-    // Prepare response buffer.
-    struct response_t
-    {
-        uint32_t error;
-        uint16_t data_len;
-        uint8_t  data[DATA_MAX];
-    } response;
-    response.data_len = 0;
+    const uint64_t       read_offset = req.seek_size & SEEK_MASK;
+    file_read_response_t response    = { 0 };
 
     // Read the file at the specified offset.
-    errno            = 0;
-    FILE* const file = fopen(file_name, "rb");
-    if ((file != NULL) && (fseek(file, (long)read_offset, SEEK_SET) == 0)) {
-        response.data_len = (uint16_t)fread(response.data, 1, DATA_MAX, file);
+    FILE* file = NULL;
+    if ((req.seek_size & (UINT64_C(1) << 47U)) != 0U) {
+        response.seek_error_end |= UINT64_C(1) << 48U; // error=1 in bits 48..51
+    } else {
+        response.seek_error_end = read_offset;
+        file                    = fopen(file_name, "rb");
+        if (file == NULL) {
+            response.seek_error_end |= UINT64_C(7) << 48U; // error=7 in bits 48..51
+        } else if (fseek(file, (long)read_offset, SEEK_SET) != 0) {
+            response.seek_error_end = read_offset | (UINT64_C(1) << 48U); // seek | error=1 << 48
+        } else {
+            response.seek_error_end = read_offset;
+            const size_t read_size  = (size_t)(uint16_t)(req.seek_size >> 48U);
+            response.data_len = (uint16_t)fread(response.data, 1, (read_size < DATA_MAX) ? read_size : DATA_MAX, file);
+            if (ferror(file)) {
+                response.seek_error_end |= UINT64_C(7) << 48U; // error=7 in bits 48..51
+            } else if (feof(file)) {
+                response.seek_error_end |= UINT64_C(1) << 56U; // end in bit 56
+            } else {
+                const int next = fgetc(file);
+                if (ferror(file)) {
+                    response.seek_error_end |= UINT64_C(7) << 48U; // error=7 in bits 48..51
+                } else if (next == EOF) {
+                    response.seek_error_end |= UINT64_C(1) << 56U; // end in bit 56
+                }
+            }
+        }
     }
-    response.error = (uint32_t)errno;
     if (file != NULL) {
         (void)fclose(file);
     }
@@ -73,13 +104,12 @@ static void on_file_read_msg(cy_future_t* const subscriber)
     (void)fprintf(stderr,
                   "Responding: file='%s' offset=%lu size=%lu error=%u\n",
                   file_name,
-                  (unsigned long)read_offset,
+                  response.seek_error_end & SEEK_MASK,
                   (unsigned long)response.data_len,
-                  response.error);
-    cy_future_t* const future =
-      cy_respond_reliable(&arv.breadcrumb,
-                          arv.message.timestamp + (10 * MEGA),
-                          (cy_bytes_t){ .size = 4 + 2 + response.data_len, .data = &response });
+                  (unsigned)((response.seek_error_end >> 48U) & 0xFU));
+    cy_future_t* const future = cy_respond_reliable(&arv.breadcrumb,
+                                                    arv.message.timestamp + (10 * MEGA),
+                                                    (cy_bytes_t){ .size = 12U + response.data_len, .data = &response });
     // We want the stack to retransmit until the client acknowledges reception, but we don't care about the result.
     // If we simply destroy the future, the transmission will be cancelled, so instead we set up auto-destruction.
     if (future != NULL) {
@@ -103,7 +133,7 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    cy_future_t* const sub_file_read = cy_subscribe(cy, cy_str("file/read"), 1024);
+    cy_future_t* const sub_file_read = cy_subscribe(cy, cy_str("file/read"), 2048U);
     if (sub_file_read == NULL) {
         (void)fprintf(stderr, "cy_subscribe\n");
         return 1;
