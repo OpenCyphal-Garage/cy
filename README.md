@@ -8,7 +8,6 @@ _pub/sub without steroids_
 
 [![CI](https://github.com/OpenCyphal-Garage/cy/actions/workflows/main.yml/badge.svg)](https://github.com/OpenCyphal-Garage/cy/actions/workflows/main.yml)
 [![Coverage](https://coveralls.io/repos/github/OpenCyphal-Garage/cy/badge.svg)](https://coveralls.io/github/OpenCyphal-Garage/cy)
-[![Distributed consensus demo](https://img.shields.io/badge/visualization-gerasim.opencyphal.org-black?color=ff00aa)](https://gerasim.opencyphal.org/)
 [![Website](https://img.shields.io/badge/website-opencyphal.org-black?color=1700b3)](https://opencyphal.org/)
 [![Forum](https://img.shields.io/discourse/https/forum.opencyphal.org/users.svg?logo=discourse&color=1700b3)](https://forum.opencyphal.org)
 
@@ -39,6 +38,8 @@ platforms due to its hard determinism and low fragmentation.
 Pick one of the transport/platform glue layers suitable for your application: `cy_can`, `cy_udp_posix`, etc.
 The integration instructions are identical: simply copy the C files and add them to your build system.
 These components may be moved into dedicated repositories in the future.
+
+🛠️ For monitoring, diagnostic, and debugging of Cyphal networks use the [Cynic CLI tool](https://github.com/OpenCyphal-Garage/cynic) or [PyCyphal](https://github.com/OpenCyphal/pycyphal).
 
 🌐 A live demo of the distributed consensus algorithm can be found at <https://gerasim.opencyphal.org>.
 
