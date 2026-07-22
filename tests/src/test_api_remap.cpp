@@ -15,6 +15,8 @@ struct test_platform_t final : api_test::test_platform_base_t
 {
     std::size_t fail_after{ SIZE_MAX };
     std::size_t new_alloc_count{ 0U };
+    std::size_t nonzero_request_count{ 0U };
+    bool        reject_nonzero_requests{ false };
 };
 
 test_platform_t* platform_from(cy_platform_t* const platform)
@@ -96,6 +98,12 @@ extern "C" cy_us_t platform_now(cy_platform_t* const platform) { return platform
 extern "C" void* platform_realloc(cy_platform_t* const platform, void* const ptr, const std::size_t size)
 {
     test_platform_t* const self = platform_from(platform);
+    if (size > 0U) {
+        self->nonzero_request_count++;
+        if (self->reject_nonzero_requests) {
+            return nullptr;
+        }
+    }
     if ((ptr == nullptr) && (size > 0U)) {
         if (self->new_alloc_count >= self->fail_after) {
             return nullptr;
@@ -428,6 +436,170 @@ void test_remap_normalized_lookup()
     platform_deinit(&p);
 }
 
+void test_unremap_present_absent_and_repeated()
+{
+    test_platform_t p{};
+    platform_init(&p);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_remap(p.cy, cy_str("foo"), cy_str("mapped")));
+
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    assert_resolved(cy_resolve(p.cy, cy_str("foo"), buf.size(), buf.data()), "mapped");
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_unremap(p.cy, cy_str("foo")));
+    assert_resolved(cy_resolve(p.cy, cy_str("foo"), buf.size(), buf.data()), "foo");
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_unremap(p.cy, cy_str("foo")));
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_unremap(p.cy, cy_str("absent")));
+    platform_deinit(&p);
+}
+
+void test_unremap_normalized_non_nul_pascal_string()
+{
+    test_platform_t p{};
+    platform_init(&p);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_remap(p.cy, cy_str("foo/bar"), cy_str("mapped")));
+
+    const std::array<char, 10> spelling{ '/', 'f', 'o', 'o', '/', '/', 'b', 'a', 'r', '/' };
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_unremap(p.cy, cy_str_t{ spelling.size(), spelling.data() }));
+    std::array<char, CY_TOPIC_NAME_MAX + 1> buf{};
+    assert_resolved(cy_resolve(p.cy, cy_str("foo/bar"), buf.size(), buf.data()), "foo/bar");
+    platform_deinit(&p);
+}
+
+void test_unremap_rejects_invalid_inputs()
+{
+    test_platform_t p{};
+    platform_init(&p);
+    TEST_ASSERT_EQUAL_INT(CY_ERR_ARGUMENT, cy_unremap(nullptr, cy_str("foo")));
+    TEST_ASSERT_EQUAL_INT(CY_ERR_ARGUMENT, cy_unremap(p.cy, cy_str_t{ 1U, nullptr }));
+    TEST_ASSERT_EQUAL_INT(CY_ERR_ARGUMENT, cy_unremap(p.cy, cy_str("")));
+    TEST_ASSERT_EQUAL_INT(CY_ERR_ARGUMENT, cy_unremap(p.cy, cy_str_t{ 0U, nullptr }));
+    TEST_ASSERT_EQUAL_INT(CY_ERR_NAME, cy_unremap(p.cy, cy_str("/")));
+    TEST_ASSERT_EQUAL_INT(CY_ERR_NAME, cy_unremap(p.cy, cy_str("bad name")));
+    platform_deinit(&p);
+}
+
+void test_unremap_normalization_length_boundaries()
+{
+    test_platform_t p{};
+    platform_init(&p);
+    std::array<char, CY_TOPIC_NAME_MAX + 1U> key{};
+    key.fill('k');
+    const cy_str_t key_str{ key.size(), key.data() };
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_remap(p.cy, key_str, cy_str("mapped")));
+
+    std::array<char, CY_TOPIC_NAME_MAX + 3U> spelling{};
+    spelling.front() = '/';
+    std::memcpy(&spelling[1], key.data(), key.size());
+    spelling.back() = '/';
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_unremap(p.cy, cy_str_t{ spelling.size(), spelling.data() }));
+
+    std::array<char, CY_TOPIC_NAME_MAX + 1U> buf{};
+    const cy_resolved_t                      unmapped = cy_resolve(p.cy, key_str, buf.size(), buf.data());
+    TEST_ASSERT_NULL(unmapped.name.str);
+    TEST_ASSERT_EQUAL_size_t(SIZE_MAX, unmapped.name.len);
+
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_remap(p.cy, key_str, cy_str("mapped")));
+    std::array<char, CY_TOPIC_NAME_MAX + 2U> too_long{};
+    too_long.fill('k');
+    TEST_ASSERT_EQUAL_INT(CY_ERR_NAME, cy_unremap(p.cy, cy_str_t{ too_long.size(), too_long.data() }));
+    assert_resolved(cy_resolve(p.cy, key_str, buf.size(), buf.data()), "mapped");
+    platform_deinit(&p);
+}
+
+void test_unremap_preserves_shared_prefix_entries()
+{
+    test_platform_t p{};
+    platform_init(&p);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_remap(p.cy, cy_str("a"), cy_str("parent")));
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_remap(p.cy, cy_str("a/b"), cy_str("child")));
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_remap(p.cy, cy_str("a/c"), cy_str("sibling")));
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_unremap(p.cy, cy_str("a/b")));
+
+    std::array<char, CY_TOPIC_NAME_MAX + 1U> buf{};
+    assert_resolved(cy_resolve(p.cy, cy_str("a"), buf.size(), buf.data()), "parent");
+    assert_resolved(cy_resolve(p.cy, cy_str("a/b"), buf.size(), buf.data()), "a/b");
+    assert_resolved(cy_resolve(p.cy, cy_str("a/c"), buf.size(), buf.data()), "sibling");
+    platform_deinit(&p);
+}
+
+void test_unremap_succeeds_when_all_nonzero_allocations_fail()
+{
+    test_platform_t p{};
+    platform_init(&p);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_remap(p.cy, cy_str("alpha/one"), cy_str("first")));
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_remap(p.cy, cy_str("alpha/two"), cy_str("second")));
+
+    p.nonzero_request_count   = 0U;
+    p.reject_nonzero_requests = true;
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_unremap(p.cy, cy_str("alpha/one")));
+    TEST_ASSERT_GREATER_THAN_size_t(0U, p.nonzero_request_count);
+    p.reject_nonzero_requests = false;
+
+    std::array<char, CY_TOPIC_NAME_MAX + 1U> buf{};
+    assert_resolved(cy_resolve(p.cy, cy_str("alpha/one"), buf.size(), buf.data()), "alpha/one");
+    assert_resolved(cy_resolve(p.cy, cy_str("alpha/two"), buf.size(), buf.data()), "second");
+    platform_deinit(&p);
+}
+
+void test_unremap_recovers_publisher_from_pattern_remap()
+{
+    test_platform_t p{};
+    platform_init(&p);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_remap(p.cy, cy_str("foo"), cy_str("foo/*")));
+    TEST_ASSERT_NULL(cy_advertise(p.cy, cy_str("foo")));
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_unremap(p.cy, cy_str("foo")));
+
+    cy_publisher_t* const pub = cy_advertise(p.cy, cy_str("foo"));
+    TEST_ASSERT_NOT_NULL(pub);
+    const cy_str_t topic_name = cy_topic_name(cy_publisher_topic(pub));
+    TEST_ASSERT_EQUAL_size_t(3U, topic_name.len);
+    TEST_ASSERT_EQUAL_STRING_LEN("foo", topic_name.str, topic_name.len);
+    cy_unadvertise(pub);
+    platform_deinit(&p);
+}
+
+void test_unremap_recovers_from_namespace_expansion_overflow()
+{
+    std::array<char, CY_TOPIC_NAME_MAX - 2U> name_space{};
+    name_space.fill('n');
+    test_platform_t p{};
+    platform_init(&p, cy_str_t{ 0U, nullptr }, cy_str_t{ name_space.size(), name_space.data() });
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_remap(p.cy, cy_str("a"), cy_str("bb")));
+    TEST_ASSERT_NULL(cy_advertise(p.cy, cy_str("a")));
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_unremap(p.cy, cy_str("a")));
+
+    cy_publisher_t* const pub = cy_advertise(p.cy, cy_str("a"));
+    TEST_ASSERT_NOT_NULL(pub);
+    const cy_str_t resolved = cy_topic_name(cy_publisher_topic(pub));
+    TEST_ASSERT_EQUAL_size_t(CY_TOPIC_NAME_MAX, resolved.len);
+    TEST_ASSERT_EQUAL_MEMORY(name_space.data(), resolved.str, name_space.size());
+    TEST_ASSERT_EQUAL_CHAR('/', resolved.str[name_space.size()]);
+    TEST_ASSERT_EQUAL_CHAR('a', resolved.str[name_space.size() + 1U]);
+    cy_unadvertise(pub);
+    platform_deinit(&p);
+}
+
+void test_unremap_only_affects_future_endpoints()
+{
+    test_platform_t p{};
+    platform_init(&p);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_remap(p.cy, cy_str("foo"), cy_str("mapped")));
+    cy_publisher_t* const before = cy_advertise(p.cy, cy_str("foo"));
+    TEST_ASSERT_NOT_NULL(before);
+    TEST_ASSERT_EQUAL_INT(CY_OK, cy_unremap(p.cy, cy_str("foo")));
+    cy_publisher_t* const after = cy_advertise(p.cy, cy_str("foo"));
+    TEST_ASSERT_NOT_NULL(after);
+
+    const cy_str_t before_name = cy_topic_name(cy_publisher_topic(before));
+    const cy_str_t after_name  = cy_topic_name(cy_publisher_topic(after));
+    TEST_ASSERT_EQUAL_size_t(6U, before_name.len);
+    TEST_ASSERT_EQUAL_STRING_LEN("mapped", before_name.str, before_name.len);
+    TEST_ASSERT_EQUAL_size_t(3U, after_name.len);
+    TEST_ASSERT_EQUAL_STRING_LEN("foo", after_name.str, after_name.len);
+    cy_unadvertise(after);
+    cy_unadvertise(before);
+    platform_deinit(&p);
+}
+
 // ---------- constructor-time remap parsing ----------
 
 void test_remap_parse_multiple_pairs()
@@ -548,6 +720,15 @@ int main()
     RUN_TEST(test_remap_user_pin_discarded_on_match);
     RUN_TEST(test_remap_user_pin_passes_through_on_no_match);
     RUN_TEST(test_remap_normalized_lookup);
+    RUN_TEST(test_unremap_present_absent_and_repeated);
+    RUN_TEST(test_unremap_normalized_non_nul_pascal_string);
+    RUN_TEST(test_unremap_rejects_invalid_inputs);
+    RUN_TEST(test_unremap_normalization_length_boundaries);
+    RUN_TEST(test_unremap_preserves_shared_prefix_entries);
+    RUN_TEST(test_unremap_succeeds_when_all_nonzero_allocations_fail);
+    RUN_TEST(test_unremap_recovers_publisher_from_pattern_remap);
+    RUN_TEST(test_unremap_recovers_from_namespace_expansion_overflow);
+    RUN_TEST(test_unremap_only_affects_future_endpoints);
     RUN_TEST(test_remap_parse_multiple_pairs);
     RUN_TEST(test_remap_parse_whitespace_variants);
     RUN_TEST(test_remap_parse_malformed_tokens_silently_ignored);
