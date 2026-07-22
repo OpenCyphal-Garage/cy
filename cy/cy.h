@@ -567,6 +567,11 @@ cy_us_t cy_uptime(const cy_t* const cy);
 /// On error, the node remap configuration is left unchanged.
 cy_err_t cy_remap(cy_t* const cy, const cy_str_t from, const cy_str_t to);
 
+/// Remove the specified exact remap key after applying the same normalization as cy_remap(). No effect if absent.
+/// Returns CY_ERR_ARGUMENT for an invalid key and CY_ERR_NAME if normalization fails or produces an empty key.
+/// Otherwise returns CY_OK. Only future name resolutions are affected. No new memory is allocated.
+cy_err_t cy_unremap(cy_t* const cy, const cy_str_t from);
+
 /// Models a fully resolved and normalized topic name. See cy_resolve() et al.
 typedef struct cy_resolved_t
 {

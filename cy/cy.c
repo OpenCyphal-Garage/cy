@@ -4650,6 +4650,24 @@ cy_err_t cy_remap(cy_t* const cy, const cy_str_t from, const cy_str_t to)
     return CY_OK;
 }
 
+cy_err_t cy_unremap(cy_t* const cy, const cy_str_t from)
+{
+    if ((cy == NULL) || !str_valid(from) || (from.len == 0U)) {
+        return CY_ERR_ARGUMENT;
+    }
+    char           from_buf[CY_TOPIC_NAME_MAX + 1U];
+    const cy_str_t from_norm = name_normalize(from, sizeof(from_buf), from_buf);
+    if ((from_norm.str == NULL) || (from_norm.len == 0U)) {
+        return CY_ERR_NAME;
+    }
+    wkv_node_t* const node = wkv_get(&cy->remap, from_norm);
+    if (node != NULL) {
+        mem_free(cy, node->value);
+        wkv_del(&cy->remap, node);
+    }
+    return CY_OK;
+}
+
 cy_topic_t* cy_topic_find_by_name(const cy_t* const cy, const cy_str_t name)
 {
     const wkv_node_t* const node  = wkv_get(&cy->topics_by_name, name);
