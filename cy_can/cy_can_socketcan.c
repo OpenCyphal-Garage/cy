@@ -63,7 +63,7 @@ static bool v_tx_classic(void* const         user,
 {
     const socketcan_t* const self = (const socketcan_t*)user;
     (void)deadline;
-    assert(iface_index < self->iface_count);
+    CY_ASSERT(iface_index < self->iface_count);
     struct can_frame frame = { .can_id = can_id | CAN_EFF_FLAG, .can_dlc = len };
     if ((data != NULL) && (len > 0)) {
         (void)memcpy(frame.data, data, (len <= 8) ? len : 8);
@@ -81,7 +81,7 @@ static bool v_tx_fd(void* const         user,
 {
     const socketcan_t* const self = (const socketcan_t*)user;
     (void)deadline;
-    assert(iface_index < self->iface_count);
+    CY_ASSERT(iface_index < self->iface_count);
     struct canfd_frame frame = { .can_id = can_id | CAN_EFF_FLAG, .len = len, .flags = CANFD_FDF };
     if ((data != NULL) && (len > 0)) {
         (void)memcpy(frame.data, data, (len <= 64) ? len : 64);
@@ -214,8 +214,8 @@ static const cy_can_vtable_t socketcan_vtable_classic = { .tx_classic = v_tx_cla
 
 static bool socketcan_iface_is_fd_capable(const int sock, const char* const iface_name)
 {
-    assert(sock >= 0);
-    assert(iface_name != NULL);
+    CY_ASSERT(sock >= 0);
+    CY_ASSERT(iface_name != NULL);
     struct ifreq ifr;
     (void)memset(&ifr, 0, sizeof(ifr));
     (void)strncpy(ifr.ifr_name, iface_name, sizeof(ifr.ifr_name) - 1);
@@ -227,7 +227,7 @@ static bool socketcan_iface_is_fd_capable(const int sock, const char* const ifac
 
 static bool socketcan_set_fd_frames(const socketcan_t* const self, const bool enable)
 {
-    assert(self != NULL);
+    CY_ASSERT(self != NULL);
     const int value = enable ? 1 : 0;
     for (uint_least8_t i = 0; i < self->iface_count; i++) {
         if (setsockopt(self->sock_fd[i], SOL_CAN_RAW, CAN_RAW_FD_FRAMES, &value, sizeof(value)) < 0) {

@@ -42,7 +42,6 @@ struct cy_tree_t
 #include <rapidhash.h>
 
 // Standard library includes come last.
-#include <assert.h>
 #include <string.h>
 #if CY_CONFIG_TRACE
 #include <stdio.h>
@@ -269,7 +268,7 @@ static void* wkv_realloc(wkv_t* const self, void* ptr, const size_t new_size)
 
 static void* mem_alloc(const cy_t* const cy, const size_t size)
 {
-    assert(cy != NULL);
+    CY_ASSERT(cy != NULL);
     return cy->platform->vtable->realloc(cy->platform, NULL, size);
 }
 
@@ -284,7 +283,7 @@ static void* mem_alloc_zero(const cy_t* const cy, const size_t size)
 
 static void mem_free(const cy_t* const cy, void* ptr)
 {
-    assert(cy != NULL);
+    CY_ASSERT(cy != NULL);
     if (ptr != NULL) {
         cy->platform->vtable->realloc(cy->platform, ptr, 0); // NOLINT(*NullDereference)
     }
@@ -300,10 +299,10 @@ static const cy_bytes_t bytes_empty_sentinel = { .size = 0, .data = "", .next = 
 // Frees all memory allocated by bytes_dup(). No-op if bytes are NULL.
 static void bytes_undup(const cy_t* const cy, const cy_bytes_t* bytes)
 {
-    assert(cy != NULL);
+    CY_ASSERT(cy != NULL);
     if (&bytes_empty_sentinel != bytes) {
         while (bytes != NULL) {
-            assert(bytes->data == ((const void*)(bytes + 1)));
+            CY_ASSERT(bytes->data == ((const void*)(bytes + 1)));
             const cy_bytes_t* const next = bytes->next;
             mem_free(cy, (void*)bytes);
             bytes = next;
@@ -314,7 +313,7 @@ static void bytes_undup(const cy_t* const cy, const cy_bytes_t* bytes)
 // Copies bytes to the heap in small chunks to reduce fragmentation risks. NULL iff OOM. Use bytes_undup() to undo.
 static const cy_bytes_t* bytes_dup(const cy_t* const cy, const cy_bytes_t src)
 {
-    assert(cy != NULL);
+    CY_ASSERT(cy != NULL);
     static const size_t data_per_chunk = BYTES_DUP_CHUNK - sizeof(cy_bytes_t);
     const cy_bytes_t*   in             = &src;
     size_t              in_offset      = 0;
@@ -331,7 +330,7 @@ static const cy_bytes_t* bytes_dup(const cy_t* const cy, const cy_bytes_t src)
             }
             break;
         }
-        assert((in->size == 0) || (in->data != NULL));
+        CY_ASSERT((in->size == 0) || (in->data != NULL));
 
         cy_bytes_t* const chunk = (cy_bytes_t*)mem_alloc(cy, BYTES_DUP_CHUNK);
         if (chunk == NULL) {
@@ -357,15 +356,15 @@ static const cy_bytes_t* bytes_dup(const cy_t* const cy, const cy_bytes_t src)
             if (in == NULL) {
                 break;
             }
-            assert((in->size == 0) || (in->data != NULL));
+            CY_ASSERT((in->size == 0) || (in->data != NULL));
 
             const size_t copy_size = smaller(data_per_chunk - chunk->size, in->size - in_offset);
-            assert(copy_size > 0);
+            CY_ASSERT(copy_size > 0);
             memcpy(((byte_t*)(chunk + 1)) + chunk->size, ((const byte_t*)in->data) + in_offset, copy_size);
             chunk->size += copy_size;
             in_offset += copy_size;
         }
-        assert(chunk->size <= data_per_chunk);
+        CY_ASSERT(chunk->size <= data_per_chunk);
     }
     return head;
 }
@@ -482,7 +481,7 @@ static size_t bitmap_clz(const bitmap_t* const bitmap, const size_t bit_count)
             if (bits != 0U) {
                 const size_t first = 63U - clz64(bits & (0ULL - bits));
                 const size_t out   = (i * 64U) + first;
-                assert(out < bit_count);
+                CY_ASSERT(out < bit_count);
                 return out;
             }
         }
@@ -496,7 +495,7 @@ static void bitmap_shift(bitmap_t* const bitmap, const size_t bit_count, const i
 {
     if ((bitmap != NULL) && (bit_count > 0U) && (shift_amount != 0)) {
         const size_t words = BITMAP_WORDS(bit_count);
-        assert(words > 0U);
+        CY_ASSERT(words > 0U);
         // Ignore non-existent bits in the tail word on input and output to prevent leakage.
         const size_t tail = bit_count % 64U;
         if (tail > 0U) {
@@ -568,15 +567,15 @@ static void delist(cy_list_t* const list, cy_list_member_t* const member)
     }
     member->next = NULL;
     member->prev = NULL;
-    assert((list->head != NULL) == (list->tail != NULL));
+    CY_ASSERT((list->head != NULL) == (list->tail != NULL));
 }
 
 // If the item is already in the list, it will be delisted first. Can be used for moving to the front.
 static void enlist_head(cy_list_t* const list, cy_list_member_t* const member)
 {
     delist(list, member);
-    assert((member->next == NULL) && (member->prev == NULL));
-    assert((list->head != NULL) == (list->tail != NULL));
+    CY_ASSERT((member->next == NULL) && (member->prev == NULL));
+    CY_ASSERT((list->head != NULL) == (list->tail != NULL));
     member->next = list->head;
     if (list->head != NULL) {
         list->head->prev = member;
@@ -585,7 +584,7 @@ static void enlist_head(cy_list_t* const list, cy_list_member_t* const member)
     if (list->tail == NULL) {
         list->tail = member;
     }
-    assert((list->head != NULL) && (list->tail != NULL));
+    CY_ASSERT((list->head != NULL) && (list->tail != NULL));
 }
 
 #define LIST_MEMBER(ptr, owner_type, owner_field) ((owner_type*)ptr_unbias((ptr), offsetof(owner_type, owner_field)))
@@ -615,7 +614,7 @@ size_t cy_message_read(const cy_message_t* const msg, const size_t offset, const
 void cy_message_refcount_inc(cy_message_t* const msg)
 {
     if (msg != NULL) {
-        assert(msg->refcount > 0);
+        CY_ASSERT(msg->refcount > 0);
         msg->refcount++;
     }
 }
@@ -623,7 +622,7 @@ void cy_message_refcount_inc(cy_message_t* const msg)
 void cy_message_refcount_dec(cy_message_t* const msg)
 {
     if ((msg != NULL) && (msg->vtable != NULL)) {
-        assert(msg->refcount > 0);
+        CY_ASSERT(msg->refcount > 0);
         msg->refcount--;
         if (msg->refcount == 0) {
             msg->vtable->destroy(msg);
@@ -633,7 +632,7 @@ void cy_message_refcount_dec(cy_message_t* const msg)
 
 static void message_skip(cy_message_t* const msg, const size_t offset)
 {
-    assert((msg != NULL) && (msg->vtable != NULL) && (msg->vtable->skip != NULL));
+    CY_ASSERT((msg != NULL) && (msg->vtable != NULL) && (msg->vtable->skip != NULL));
     msg->vtable->skip(msg, offset);
 }
 
@@ -673,9 +672,9 @@ struct cy_future_t
 
 static void* future_new(cy_t* const cy, const cy_future_vtable_t* const vtbl, const size_t derived_size)
 {
-    assert(derived_size >= sizeof(cy_future_t));
-    assert(vtbl != NULL);
-    assert((vtbl->done != NULL) && (vtbl->error != NULL) && (vtbl->timeout != NULL) && (vtbl->dispose != NULL));
+    CY_ASSERT(derived_size >= sizeof(cy_future_t));
+    CY_ASSERT(vtbl != NULL);
+    CY_ASSERT((vtbl->done != NULL) && (vtbl->error != NULL) && (vtbl->timeout != NULL) && (vtbl->dispose != NULL));
     cy_future_t* const future = (cy_future_t*)mem_alloc_zero(cy, derived_size);
     if (future != NULL) {
         future->index    = TREE_NULL;
@@ -717,7 +716,7 @@ static bool future_index_insert(cy_future_t* const self, cy_tree_t** const index
 // MUST be inserted, otherwise UB.
 static void future_index_remove(cy_future_t* const self, cy_tree_t** const index)
 {
-    assert(cavl2_is_inserted(*index, &self->index));
+    CY_ASSERT(cavl2_is_inserted(*index, &self->index));
     cavl2_remove(index, &self->index);
 }
 
@@ -736,7 +735,7 @@ static bool future_indexed(const cy_future_t* const self, const cy_tree_t* const
 static void future_timeout_trampoline(olga_t* const sched, olga_event_t* const event, const cy_us_t now)
 {
     (void)sched;
-    assert(event->deadline <= now);
+    CY_ASSERT(event->deadline <= now);
     cy_future_t* const self = (cy_future_t*)event->user;
     self->vtable->timeout(self, event->deadline, now);
 }
@@ -881,7 +880,7 @@ static writer_t* writer_acquire(cy_t* const cy, const uint32_t subject_id)
 // Decrement refcount; destroy and free when it reaches zero.
 static void writer_release(cy_t* const cy, writer_t* const w)
 {
-    assert((w != NULL) && (w->handle != NULL) && (w->refcount > 0));
+    CY_ASSERT((w != NULL) && (w->handle != NULL) && (w->refcount > 0));
     w->refcount--;
     if (w->refcount == 0) {
         cavl2_remove(&cy->writers, &w->index);
@@ -909,7 +908,7 @@ static reader_t* reader_acquire(cy_t* const cy, const uint32_t subject_id, const
 
 static void reader_release(cy_t* const cy, reader_t* const r)
 {
-    assert((r != NULL) && (r->handle != NULL) && (r->refcount > 0));
+    CY_ASSERT((r != NULL) && (r->handle != NULL) && (r->refcount > 0));
     r->refcount--;
     if (r->refcount == 0) {
         cavl2_remove(&cy->readers, &r->index);
@@ -921,7 +920,7 @@ static void reader_release(cy_t* const cy, reader_t* const r)
 // No-op if the current extent is sufficient.
 static void reader_grow_extent(cy_t* const cy, reader_t* const r, const size_t new_extent)
 {
-    assert((r != NULL) && (r->handle != NULL) && (r->refcount > 0));
+    CY_ASSERT((r != NULL) && (r->handle != NULL) && (r->refcount > 0));
     if (new_extent > r->handle->extent) {
         cy->platform->vtable->subject_reader_extent_set(cy->platform, r->handle, new_extent);
         r->handle->extent = new_extent;
@@ -1036,7 +1035,7 @@ typedef struct
 } topic_repr_t;
 static topic_repr_t topic_repr(const cy_topic_t* const topic)
 {
-    assert(topic != NULL);
+    CY_ASSERT(topic != NULL);
     topic_repr_t   out  = { 0 };
     const cy_str_t name = cy_topic_name(topic);
     (void)snprintf(out.str,
@@ -1112,7 +1111,7 @@ static int32_t association_cavl_compare(const void* const user, const cy_tree_t*
 static void association_forget(cy_topic_t* const topic, association_t* const assoc)
 {
     cy_t* const cy = topic->cy;
-    assert(cavl2_is_inserted(topic->assoc_by_remote_id, &assoc->index_remote_id));
+    CY_ASSERT(cavl2_is_inserted(topic->assoc_by_remote_id, &assoc->index_remote_id));
     cavl2_remove(&topic->assoc_by_remote_id, &assoc->index_remote_id);
     topic->assoc_count--;
     CY_TRACE(cy, "⛓🗑 %s N%016jx count=%zu", topic_repr(topic).str, (uintmax_t)assoc->remote_id, topic->assoc_count);
@@ -1143,12 +1142,12 @@ static cy_tree_t* association_cavl_factory(void* const user)
 // the given remote-ID or the position where it should be inserted if not found.
 static size_t association_bisect(association_t* const* const assoc, const size_t count, const uint64_t remote_id)
 {
-    assert((assoc != NULL) || (count == 0));
+    CY_ASSERT((assoc != NULL) || (count == 0));
     size_t lo = 0;
     size_t hi = count;
     while (lo < hi) {
         const size_t mid = lo + ((hi - lo) / 2U);
-        assert(assoc[mid] != NULL);
+        CY_ASSERT(assoc[mid] != NULL);
         if (assoc[mid]->remote_id < remote_id) {
             lo = mid + 1U;
         } else {
@@ -1226,7 +1225,7 @@ static void topic_merge_lage(cy_topic_t* const topic, const cy_us_t now, int_fas
 // This comparator is only applicable on subject-ID allocation conflicts. As such, hashes must be different.
 static bool left_wins(const cy_topic_t* const left, const cy_us_t now, const int_fast8_t r_lage, const uint64_t r_hash)
 {
-    assert(left->hash != r_hash);
+    CY_ASSERT(left->hash != r_hash);
     const int_fast8_t l_lage = topic_lage(left, now);
     return (l_lage != r_lage) ? (l_lage > r_lage) : left->hash < r_hash; // older topic wins
 }
@@ -1274,7 +1273,7 @@ static void topic_sync_implicit(cy_topic_t* const topic)
             CY_TRACE(topic->cy, "🧛 %s promoted to explicit", topic_repr(topic).str);
         }
     }
-    assert(implicit == is_implicit(topic));
+    CY_ASSERT(implicit == is_implicit(topic));
 }
 
 // Move the topic to the head of the doubly-linked list of implicit topics.
@@ -1292,7 +1291,7 @@ static void retire_expired_implicit_topics(cy_t* const cy, const cy_us_t now)
 {
     cy_topic_t* const topic = LIST_TAIL(cy->list_implicit, cy_topic_t, list_implicit);
     if (topic != NULL) {
-        assert(is_implicit(topic) && topic_validate_is_implicit(topic));
+        CY_ASSERT(is_implicit(topic) && topic_validate_is_implicit(topic));
         if ((topic->ts_animated + cy->implicit_topic_timeout) < now) {
             CY_TRACE(cy, "⚰️ %s", topic_repr(topic).str);
             // Expiration may occur while pattern subscribers are still alive, so we have to detach
@@ -1311,20 +1310,20 @@ static uint32_t topic_subject_id_impl(const uint64_t hash, const uint64_t evicti
         // Pinned: subject-ID = UINT32_MAX - evictions, in [0, CY_SUBJECT_ID_PINNED_MAX].
         return (uint32_t)(UINT32_MAX - (uint32_t)evictions);
     }
-    assert(subject_id_modulus > 0);
-    assert(evictions <= UINT32_MAX);
+    CY_ASSERT(subject_id_modulus > 0);
+    CY_ASSERT(evictions <= UINT32_MAX);
     const uint64_t h = hash % subject_id_modulus;
     const uint64_t e = evictions % subject_id_modulus;
     const uint64_t subject_id =
       CY_SUBJECT_ID_PINNED_MAX + 1ULL + ((h + ((e * e) % subject_id_modulus)) % subject_id_modulus);
-    assert((subject_id > CY_SUBJECT_ID_PINNED_MAX) && (subject_id <= CY_SUBJECT_ID_MAX(subject_id_modulus)));
-    assert(subject_id <= UINT32_MAX);
+    CY_ASSERT((subject_id > CY_SUBJECT_ID_PINNED_MAX) && (subject_id <= CY_SUBJECT_ID_MAX(subject_id_modulus)));
+    CY_ASSERT(subject_id <= UINT32_MAX);
     return (uint32_t)subject_id;
 }
 
 static uint32_t topic_subject_id(const cy_topic_t* const topic)
 {
-    assert(topic != NULL);
+    CY_ASSERT(topic != NULL);
     return topic_subject_id_impl(topic->hash, topic->evictions, topic->cy->platform->subject_id_modulus);
 }
 
@@ -1333,9 +1332,9 @@ static uint32_t topic_gossip_shard_subject_id(const cy_t* const cy, const uint64
     // Gossip shard subjects are located between the max valid subject-ID and the broadcast subject-ID.
     const uint32_t shard_index = (uint32_t)(topic_hash % (uint64_t)cy->gossip_shard_count);
     const uint32_t subject_id  = CY_SUBJECT_ID_MAX(cy->platform->subject_id_modulus) + 1U + shard_index;
-    assert(subject_id > CY_SUBJECT_ID_MAX(cy->platform->subject_id_modulus));
-    assert(subject_id < cy->broad_reader->subject_id);
-    assert(cy->broad_reader->subject_id == cy->broad_writer->subject_id);
+    CY_ASSERT(subject_id > CY_SUBJECT_ID_MAX(cy->platform->subject_id_modulus));
+    CY_ASSERT(subject_id < cy->broad_reader->subject_id);
+    CY_ASSERT(cy->broad_reader->subject_id == cy->broad_writer->subject_id);
     return subject_id;
 }
 
@@ -1345,7 +1344,7 @@ static cy_topic_t* topic_find_by_subject_id(const cy_t* const cy, const uint32_t
 {
     cy_topic_t* const topic = CAVL2_TO_OWNER(
       cavl2_find(cy->topics_by_subject_id, &subject_id, &cavl_comp_topic_subject_id), cy_topic_t, index_subject_id);
-    assert((topic == NULL) || (topic_subject_id(topic) == subject_id));
+    CY_ASSERT((topic == NULL) || (topic_subject_id(topic) == subject_id));
     return topic;
 }
 
@@ -1373,7 +1372,7 @@ static void topic_sync_subject_reader(cy_topic_t* const topic)
     const uint32_t subject_id = topic_subject_id(topic);
     if ((topic->couplings != NULL) && (topic->sub_reader == NULL)) { // A subject reader is needed but missing!
         const size_t extent = subscription_extent_w_overhead(topic);
-        assert(extent >= HEADER_BYTES);
+        CY_ASSERT(extent >= HEADER_BYTES);
         topic->sub_reader = reader_acquire(cy, subject_id, extent);
         CY_TRACE(topic->cy,
                  "🗞️ %s S%08jx extent=%zu result=%p",
@@ -1385,7 +1384,7 @@ static void topic_sync_subject_reader(cy_topic_t* const topic)
             ON_ASYNC_ERROR(cy, topic, CY_ERR_MEMORY);
         }
     }
-    assert((topic->sub_reader == NULL) || (topic->sub_reader->handle->subject_id == subject_id));
+    CY_ASSERT((topic->sub_reader == NULL) || (topic->sub_reader->handle->subject_id == subject_id));
     if ((topic->couplings == NULL) && (topic->sub_reader != NULL)) { // No longer needed.
         reader_release(cy, topic->sub_reader);
         topic->sub_reader = NULL;
@@ -1451,7 +1450,7 @@ static void topic_allocate(cy_topic_t* const topic, const uint32_t new_evictions
     const uint32_t    new_sid = topic_subject_id_impl(topic->hash, new_evictions, cy->platform->subject_id_modulus);
     cy_topic_t* const that    = CAVL2_TO_OWNER(
       cavl2_find(cy->topics_by_subject_id, &new_sid, &cavl_comp_topic_subject_id), cy_topic_t, index_subject_id);
-    assert((that == NULL) || (topic->hash != that->hash)); // This would mean that we inserted the same topic twice
+    CY_ASSERT((that == NULL) || (topic->hash != that->hash)); // This would mean that we inserted the same topic twice
     const bool same_subject = new_sid == old_sid;
     const bool victory      = (that == NULL) || left_wins(topic, now, topic_lage(that, now), that->hash);
 
@@ -1469,10 +1468,10 @@ static void topic_allocate(cy_topic_t* const topic, const uint32_t new_evictions
 
     if (victory) { // Allocation done. Every affected topic will end up here eventually.
         // Release old handles only for the subject we're leaving.
-        assert((topic->sub_reader == NULL) || (topic->sub_reader->handle->subject_id == old_sid));
-        assert((topic->pub_writer == NULL) || (topic->pub_writer->handle->subject_id == old_sid));
+        CY_ASSERT((topic->sub_reader == NULL) || (topic->sub_reader->handle->subject_id == old_sid));
+        CY_ASSERT((topic->pub_writer == NULL) || (topic->pub_writer->handle->subject_id == old_sid));
         if (!same_subject && (topic->sub_reader != NULL)) {
-            assert(topic->couplings != NULL);
+            CY_ASSERT(topic->couplings != NULL);
             reader_release(cy, topic->sub_reader);
             topic->sub_reader = NULL;
         }
@@ -1483,7 +1482,7 @@ static void topic_allocate(cy_topic_t* const topic, const uint32_t new_evictions
 
         if (that != NULL) {
             cavl2_remove(&cy->topics_by_subject_id, &that->index_subject_id);
-            assert(topic->pub_writer == NULL);
+            CY_ASSERT(topic->pub_writer == NULL);
             topic->pub_writer = that->pub_writer; // Preserve transport state for the winning subject, if any.
             that->pub_writer  = NULL;
         }
@@ -1497,7 +1496,7 @@ static void topic_allocate(cy_topic_t* const topic, const uint32_t new_evictions
                                                                            &cavl2_trivial_factory),
                                                       cy_topic_t,
                                                       index_subject_id);
-        assert(self == topic);
+        CY_ASSERT(self == topic);
         (void)self;
 
         // The subject reader, if needed, must be acquired eagerly from the registry.
@@ -1684,7 +1683,7 @@ static cy_err_t topic_couple(cy_topic_t* const         topic,
         // string, which is part of the topic object.
         const wkv_substitution_t* s = substitutions;
         for (size_t i = 0U; s != NULL; i++) {
-            assert(i < cpl->substitution_count);
+            CY_ASSERT(i < cpl->substitution_count);
             cpl->substitutions[i] = (cy_substitution_t){ .str = s->str, .ordinal = s->ordinal };
             s                     = s->next;
         }
@@ -1737,7 +1736,7 @@ static cy_topic_t* topic_subscribe_if_matching(cy_t* const       cy,
                                                const uint32_t    evictions,
                                                const int_fast8_t lage)
 {
-    assert((cy != NULL) && (resolved_name.str != NULL));
+    CY_ASSERT((cy != NULL) && (resolved_name.str != NULL));
     if ((resolved_name.len == 0) || (name_normalized_len(resolved_name) != resolved_name.len) ||
         !name_is_verbatim(resolved_name) || (rapidhash(resolved_name.str, resolved_name.len) != hash)) {
         return NULL; // Ensure the remote is not trying to feed us a bad name.
@@ -1859,7 +1858,7 @@ static void gossip_event_urgent(olga_t* const olga, olga_event_t* const event, c
     (void)olga;
     cy_topic_t* const topic = (cy_topic_t*)event->user;
     schedule_gossip_periodic(topic, now, false);
-    assert(topic->cy->gossip_broadcast_ratio > 0);
+    CY_ASSERT(topic->cy->gossip_broadcast_ratio > 0);
     topic->gossip_counter = 0;
     ON_ASYNC_ERROR_IF(topic->cy, topic, send_gossip_multicast(topic, now, topic->cy->broad_writer));
 }
@@ -1910,7 +1909,7 @@ static void schedule_gossip_urgent(cy_topic_t* const topic, const cy_us_t now)
 // The bottom-level scout transmission function. Scouts are always broadcast.
 static cy_err_t do_send_scout(const cy_t* const cy, const cy_us_t now, const cy_str_t pattern)
 {
-    assert(pattern.len <= CY_TOPIC_NAME_MAX);
+    CY_ASSERT(pattern.len <= CY_TOPIC_NAME_MAX);
     byte_t buf[HEADER_BYTES + CY_TOPIC_NAME_MAX];
     buf[0] = header_scout;
     memset(&buf[1], 0, HEADER_BYTES - 2);
@@ -1968,7 +1967,7 @@ static void on_gossip_known_topic(cy_t* const          cy,
             schedule_gossip_urgent(mine, ts);
         } else {
             topic_allocate(mine, evictions, ts);
-            assert(mine->gossip_event.handler == gossip_event_urgent);
+            CY_ASSERT(mine->gossip_event.handler == gossip_event_urgent);
             if (mine->evictions == evictions) { // no need to urgent-gossip: subject occupancy has not been altered
                 schedule_gossip_periodic(mine, ts, true); // cancel urgent
             }
@@ -2001,7 +2000,7 @@ static void on_gossip_unknown_topic(cy_t* const    cy,
     if (mine == NULL) {
         return; // We are not using this subject-ID, no collision.
     }
-    assert(topic_subject_id(mine) == subject_id);
+    CY_ASSERT(topic_subject_id(mine) == subject_id);
     const bool win = left_wins(mine, ts, lage, hash);
     CY_TRACE(cy,
              "💥 Collision on S%08jx:\n"
@@ -2112,10 +2111,10 @@ cy_publisher_t* cy_advertise_client(cy_t* const cy, const cy_str_t name, const s
     pub->priority             = cy_prio_nominal;
     pub->ack_baseline_timeout = cy->ack_baseline_timeout;
     if (res == CY_OK) {
-        assert(pub->topic != NULL);
+        CY_ASSERT(pub->topic != NULL);
         pub->topic->pub_count++;
         topic_sync_implicit(pub->topic);
-        assert(!is_implicit(pub->topic));
+        CY_ASSERT(!is_implicit(pub->topic));
         const size_t response_extent_with_header = response_extent + HEADER_BYTES;
         if (response_extent_with_header > cy->unicast_extent) {
             // Currently, we only increase the extent and leave it at the max. Ideally we should also shrink it when
@@ -2148,7 +2147,7 @@ static cy_err_t do_publish_impl(cy_publisher_t* const  pub,
     cy_topic_t* const                 topic = pub->topic;
     cy_t* const                       cy    = topic->cy;
     const cy_platform_vtable_t* const vt    = cy->platform->vtable;
-    assert(topic->pub_count > 0);
+    CY_ASSERT(topic->pub_count > 0);
 
     byte_t header[HEADER_BYTES] = { (byte_t)header_type, 0, 0, (byte_t)topic_lage(topic, cy_now(cy)) };
     (void)serialize_u32(&header[4], topic->evictions);
@@ -2169,8 +2168,8 @@ static cy_err_t do_publish_impl(cy_publisher_t* const  pub,
     if (err != CY_OK) {
         return err;
     }
-    assert(topic->pub_writer != NULL);
-    assert(topic_subject_id(topic) == topic->pub_writer->handle->subject_id);
+    CY_ASSERT(topic->pub_writer != NULL);
+    CY_ASSERT(topic_subject_id(topic) == topic->pub_writer->handle->subject_id);
     return vt->subject_writer_send(cy->platform, topic->pub_writer->handle, deadline, pub->priority, headed_message);
 }
 
@@ -2184,7 +2183,7 @@ static cy_err_t do_publish(cy_publisher_t* const pub,
         return CY_ERR_ARGUMENT;
     }
     cy_topic_t* const topic = pub->topic;
-    assert(topic->pub_count > 0);
+    CY_ASSERT(topic->pub_count > 0);
     const uint64_t tag = topic->pub_tag_baseline + topic->pub_seqno++;
     if (out_tag != NULL) {
         *out_tag = tag;
@@ -2238,14 +2237,14 @@ static void publish_future_release_associations(publish_future_t* const self)
         // Don't register ack loss when canceled prematurely because there may not have been enough time for round trip.
         // Also, don't register any ack loss if at least one publication has failed, that is obvious.
         const uint64_t seqno = self->base.key - topic->pub_tag_baseline;
-        assert(seqno < (1ULL << 48U)); // sanity/math check -- values above 2**48 are unreachable in practice.
+        CY_ASSERT(seqno < (1ULL << 48U)); // sanity/math check -- values above 2**48 are unreachable in practice.
         if (bitmap_test(self->assoc_knockout, i) && (seqno >= ass->seqno_witness) && (!self->compromised)) {
             ass->slack++;
         }
 
         // Decrement refcount and remove the association if the slack is too large.
         // If refcount is not zero, it is someone else's responsibility to remove it (unless revived by then).
-        assert(ass->pending_count > 0);
+        CY_ASSERT(ass->pending_count > 0);
         ass->pending_count--;
         if ((ass->slack >= topic->assoc_slack_limit) && (ass->pending_count == 0)) {
             association_forget(topic, ass);
@@ -2260,7 +2259,7 @@ static void publish_future_release_associations(publish_future_t* const self)
 // Invalidates the future -- the user callback may destroy it. Expect finalization & further access invalid.
 static void publish_future_materialize(publish_future_t* const self, const cy_err_t error)
 {
-    assert(!self->done);
+    CY_ASSERT(!self->done);
     self->done           = true;
     const cy_t* const cy = self->owner->topic->cy;
     self->error          = error;
@@ -2295,7 +2294,7 @@ static bool ack_is_last_attempt(const cy_us_t current_ack_deadline,
 
 static void publish_future_timeout(cy_future_t* const base, const cy_us_t scheduled, const cy_us_t now)
 {
-    assert(scheduled <= now); // scheduler invariant
+    CY_ASSERT(scheduled <= now); // scheduler invariant
     (void)scheduled;
     publish_future_t* const self  = (publish_future_t*)base;
     cy_topic_t* const       topic = self->owner->topic;
@@ -2309,18 +2308,18 @@ static void publish_future_timeout(cy_future_t* const base, const cy_us_t schedu
     self->error                = sched_lag_error ? CY_ERR_LAG : self->error; // Weak error, may be overwritten below.
 
     // Check completion.
-    assert(!self->done);
+    CY_ASSERT(!self->done);
     if ((self->data == NULL) || (now >= self->deadline)) { // This is the final poll.
         publish_future_materialize(self, self->acknowledged ? CY_OK : CY_ERR_DELIVERY);
         return;
     }
 
     // Compute next deadline and decide if it's going to be the last attempt based on the remaining time.
-    assert(now < self->deadline);
+    CY_ASSERT(now < self->deadline);
     self->ack_timeout *= 2;                                                       // exponential backoff
     const cy_us_t ack_deadline = sooner(self->ack_timeout + now, self->deadline); // manage possible scheduler lag
     const bool    last_attempt = ack_is_last_attempt(ack_deadline, self->ack_timeout, self->deadline);
-    assert(ack_deadline > now);
+    CY_ASSERT(ack_deadline > now);
 
     // We can use multicast throughout, but it may be inefficient if we only need to reach few remaining subscribers.
     // This is not a correctness issue because each subscriber will receive our message at most once per attempt,
@@ -2337,10 +2336,10 @@ static void publish_future_timeout(cy_future_t* const base, const cy_us_t schedu
     const cy_lane_t* lane_p  = NULL;
     if (unicast) {
         const size_t assoc_idx = bitmap_clz(self->assoc_knockout, self->assoc_capacity);
-        assert(assoc_idx < self->assoc_capacity);
-        assert(bitmap_test(self->assoc_knockout, assoc_idx));
+        CY_ASSERT(assoc_idx < self->assoc_capacity);
+        CY_ASSERT(bitmap_test(self->assoc_knockout, assoc_idx));
         const association_t* const assoc = self->assoc_set[assoc_idx];
-        assert(assoc != NULL);
+        CY_ASSERT(assoc != NULL);
         lane = (cy_lane_t){ .id = assoc->remote_id, .ctx = assoc->unicast_ctx, .prio = self->owner->priority };
         CY_TRACE(cy,
                  "☝️ %s Unicast to N%016jx tag=%016jx",
@@ -2365,13 +2364,13 @@ static void publish_future_timeout(cy_future_t* const base, const cy_us_t schedu
         self->data = NULL;
         future_deadline_arm(base, self->deadline);
     } else {
-        assert(ack_deadline < self->deadline);
+        CY_ASSERT(ack_deadline < self->deadline);
         future_deadline_arm(base, ack_deadline);
     }
 
     // Notify if any errors occurred, even if not yet done. The user will check the done state.
     if ((er != CY_OK) || sched_lag_error) {
-        assert(self->error != CY_OK);
+        CY_ASSERT(self->error != CY_OK);
         future_notify(&self->base); // Invalidates the future. Expect disposal.
     }
 }
@@ -2383,12 +2382,12 @@ static void publish_future_dispose(cy_future_t* const base)
         self->compromised = true; // Prevent slack adjustment because we're disposing early.
         publish_future_materialize(self, CY_OK);
     }
-    assert(self->done);
-    assert(self->assoc_capacity == 0);
-    assert(self->assoc_knockout == NULL);
-    assert(self->data == NULL);
-    assert(!future_deadline_armed(base));
-    assert(!future_indexed(base, self->owner->topic->pub_futures_by_tag));
+    CY_ASSERT(self->done);
+    CY_ASSERT(self->assoc_capacity == 0);
+    CY_ASSERT(self->assoc_knockout == NULL);
+    CY_ASSERT(self->data == NULL);
+    CY_ASSERT(!future_deadline_armed(base));
+    CY_ASSERT(!future_indexed(base, self->owner->topic->pub_futures_by_tag));
     mem_free(base->cy, self);
 }
 
@@ -2399,14 +2398,14 @@ static const cy_future_vtable_t publish_future_vtable = { .done    = publish_fut
 
 static void publish_future_on_ack(publish_future_t* const self, const uint64_t remote_id, const bool positive)
 {
-    assert(!self->done);
+    CY_ASSERT(!self->done);
     // Regardless of whether it's a positive ack or a nack, we need to cease further deliveries.
     const size_t idx   = association_bisect(self->assoc_set, self->assoc_capacity, remote_id);
     const bool   known = (idx < self->assoc_capacity) && (self->assoc_set[idx]->remote_id == remote_id);
     if (known && bitmap_test(self->assoc_knockout, idx)) {
-        assert(self->assoc_set[idx]->pending_count > 0);
+        CY_ASSERT(self->assoc_set[idx]->pending_count > 0);
         bitmap_clear(self->assoc_knockout, idx);
-        assert(self->assoc_remaining > 0);
+        CY_ASSERT(self->assoc_remaining > 0);
         self->assoc_remaining--;
     }
     self->acknowledged = self->acknowledged || positive;      // optimistic success based on a single +ack
@@ -2476,7 +2475,7 @@ cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadli
     // Populate the association pointer array ORDERED from low to high IDs for fast lookups.
     association_t* ass_cursor = (association_t*)cavl2_min(topic->assoc_by_remote_id);
     while ((fut->assoc_remaining < fut->assoc_capacity) && (ass_cursor != NULL)) {
-        assert(fut->assoc_knockout != NULL);
+        CY_ASSERT(fut->assoc_knockout != NULL);
         // Some associations may be pending removal already, skip them. There will be unused pointers but we don't care.
         if (ass_cursor->slack < topic->assoc_slack_limit) {
             bitmap_set(fut->assoc_knockout, fut->assoc_remaining);
@@ -2484,7 +2483,7 @@ cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadli
             fut->assoc_remaining++;
             ass_cursor->pending_count++;
         } else {
-            assert(ass_cursor->pending_count > 0); // Sanity check -- otherwise would have been removed.
+            CY_ASSERT(ass_cursor->pending_count > 0); // Sanity check -- otherwise would have been removed.
         }
         ass_cursor = (association_t*)cavl2_next_greater((cy_tree_t*)ass_cursor);
     }
@@ -2492,7 +2491,7 @@ cy_future_t* cy_publish_reliable(cy_publisher_t* const pub, const cy_us_t deadli
 
     // Complete the final infallible steps.
     const bool insert_ok = future_index_insert(&fut->base, &topic->pub_futures_by_tag, fut->base.key);
-    assert(insert_ok); // cannot fail by design
+    CY_ASSERT(insert_ok); // cannot fail by design
     (void)insert_ok;
     future_deadline_arm(&fut->base, one_shot ? deadline : ack_deadline);
     return &fut->base;
@@ -2560,8 +2559,8 @@ static cy_tree_t* request_future_remote_cavl_factory(void* const user)
 static void request_publish_callback(cy_future_t* const fut)
 {
     request_future_t* const self = (request_future_t*)cy_future_context(fut).ptr[0];
-    assert(self->publish == fut);
-    assert(!self->finalized);
+    CY_ASSERT(self->publish == fut);
+    CY_ASSERT(!self->finalized);
     const cy_err_t err = cy_future_error(fut);
     if (cy_future_done(fut)) { // In case there are intermediate updates. May be uncoverable.
         cy_future_destroy(fut);
@@ -2590,9 +2589,9 @@ static response_rx_t request_on_response(request_future_t* const self,
                                          const bool              reliable,
                                          const cy_lane_t         lane)
 {
-    assert(seqno <= SEQNO48_MASK);
-    assert(message.timestamp >= 0);
-    assert(message.content != NULL);
+    CY_ASSERT(seqno <= SEQNO48_MASK);
+    CY_ASSERT(message.timestamp >= 0);
+    CY_ASSERT(message.content != NULL);
     cy_t* const cy = self->base.cy;
 
     // Zombie mode -- the application has destroyed the future and is no longer accepting responses.
@@ -2638,7 +2637,7 @@ static response_rx_t request_on_response(request_future_t* const self,
             }
             bitmap_set(remote->seqno_acked, (size_t)dist); // genuinely new response just arrived out of order
         }
-        assert(remote->seqno_top >= seqno);
+        CY_ASSERT(remote->seqno_top >= seqno);
     }
 
     // At this point, the response is known to be unique. Rewrite the last stored response.
@@ -2661,8 +2660,8 @@ static response_rx_t request_on_response(request_future_t* const self,
 static void request_future_destroy(request_future_t* const self)
 {
     cy_future_t* const base = &self->base;
-    assert(self->finalized);
-    assert(self->publish == NULL);
+    CY_ASSERT(self->finalized);
+    CY_ASSERT(self->publish == NULL);
     future_deadline_disarm(base);
     cy_message_refcount_dec(self->last_response.message.content); // NULL-safe
     future_index_remove(base, &self->topic->request_futures_by_tag);
@@ -2677,7 +2676,7 @@ static void request_future_destroy(request_future_t* const self)
 static bool request_future_done(const cy_future_t* const base)
 {
     const request_future_t* const self = (const request_future_t*)base;
-    assert(!self->finalized);                                                             // use after free?
+    CY_ASSERT(!self->finalized);                                                          // use after free?
     return (self->last_response.message.content != NULL) || !future_deadline_armed(base); // got response or timed out
 }
 static cy_err_t request_future_error(const cy_future_t* const base) { return ((const request_future_t*)base)->error; }
@@ -2687,7 +2686,7 @@ static void request_future_timeout(cy_future_t* const base, const cy_us_t schedu
     (void)scheduled;
     (void)now;
     request_future_t* const self = (request_future_t*)base;
-    assert(!future_deadline_armed(base));
+    CY_ASSERT(!future_deadline_armed(base));
     if (!self->finalized) {
         self->error = CY_ERR_LIVENESS;
         future_notify(base); // Expect finalization call.
@@ -2699,7 +2698,7 @@ static void request_future_timeout(cy_future_t* const base, const cy_us_t schedu
 static void request_future_dispose(cy_future_t* const base)
 {
     request_future_t* const self = (request_future_t*)base;
-    assert(!self->finalized);
+    CY_ASSERT(!self->finalized);
     if (self->publish != NULL) {
         cy_future_destroy(self->publish);
         self->publish = NULL;
@@ -2755,7 +2754,7 @@ cy_future_t* cy_request(cy_publisher_t* const pub,
 
     // Set up our future; this is infallible. Use the same tag for response correlation.
     const bool insert_ok = future_index_insert(&fut->base, &topic->request_futures_by_tag, fut->publish->key);
-    assert(insert_ok); // cannot fail by design, tags are per-topic unique
+    CY_ASSERT(insert_ok); // cannot fail by design, tags are per-topic unique
     (void)insert_ok;
     future_deadline_arm(&fut->base, delivery_deadline + response_timeout);
 
@@ -2810,7 +2809,7 @@ void      cy_priority_set(cy_publisher_t* const pub, const cy_prio_t priority)
 
 static cy_us_t derive_ack_timeout(const cy_us_t ack_baseline_timeout, const cy_prio_t priority)
 {
-    assert(ack_baseline_timeout > 0);
+    CY_ASSERT(ack_baseline_timeout > 0);
     return ack_baseline_timeout * (1LL << (byte_t)priority); // NOLINT(*signed*)
 }
 
@@ -2838,10 +2837,10 @@ void cy_unadvertise(cy_publisher_t* const pub)
     cy_topic_t* const topic = pub->topic;
 
     // Dereference the topic.
-    assert(!is_implicit(topic));
-    assert(topic->pub_count > 0);
+    CY_ASSERT(!is_implicit(topic));
+    CY_ASSERT(topic->pub_count > 0);
     topic->pub_count--;
-    assert(!is_implicit(pub->topic));
+    CY_ASSERT(!is_implicit(pub->topic));
     topic_sync_implicit(topic); // topics are destroyed lazily via garbage collection to avoid state loss
 
     // Bye bye.
@@ -2907,7 +2906,7 @@ static void subscriber_timeout(cy_future_t* const base, const cy_us_t scheduled,
     (void)scheduled;
     (void)now;
     subscriber_t* const self = (subscriber_t*)base;
-    assert((self->root != NULL) && (self->root->cy == base->cy));
+    CY_ASSERT((self->root != NULL) && (self->root->cy == base->cy));
     if (!self->disposed) {
         subscriber_notify_error(self, CY_ERR_LIVENESS);
     } else {
@@ -2918,7 +2917,7 @@ static void subscriber_timeout(cy_future_t* const base, const cy_us_t scheduled,
 static void subscriber_dispose(cy_future_t* const base)
 {
     subscriber_t* const self = (subscriber_t*)base;
-    assert(!self->disposed); // use after free
+    CY_ASSERT(!self->disposed); // use after free
 #if CY_CONFIG_TRACE
     char name[CY_TOPIC_NAME_MAX + 1];
     cy_subscriber_name(base, name);
@@ -2965,7 +2964,7 @@ static bool subscriber_notify(subscriber_t* const self, const cy_arrival_t arriv
     if (self->params.liveness_timeout > 0) {
         future_deadline_arm(&self->base, arrival.message.timestamp + self->params.liveness_timeout);
     }
-    assert(self->base.vtable->done(&self->base));
+    CY_ASSERT(self->base.vtable->done(&self->base));
     subscriber_notify_error(self, CY_OK);
     return true;
 }
@@ -3029,7 +3028,7 @@ static void dedup_commit(dedup_t* const self, const uint64_t tag)
     const uint64_t fwd = tag - self->tag; // Wrapping arithmetic.
     const uint64_t rev = self->tag - tag; // Wrapping arithmetic.
     if (rev < DEDUP_HISTORY) {            // Out-of-order but within the window.
-        assert(!bitmap_test(self->bitmap, (size_t)rev));
+        CY_ASSERT(!bitmap_test(self->bitmap, (size_t)rev));
         bitmap_set(self->bitmap, (size_t)rev);
     } else { // Push the frontier or reset.
         if (fwd < DEDUP_HISTORY) {
@@ -3045,7 +3044,7 @@ static void dedup_commit(dedup_t* const self, const uint64_t tag)
 static void dedup_destroy(dedup_t* const self, cy_topic_t* const owner)
 {
     delist(&owner->sub_list_dedup_by_recency, &self->list_recency);
-    assert(cavl2_is_inserted(owner->sub_index_dedup_by_remote_id, &self->index_remote_id));
+    CY_ASSERT(cavl2_is_inserted(owner->sub_index_dedup_by_remote_id, &self->index_remote_id));
     cavl2_remove(&owner->sub_index_dedup_by_remote_id, &self->index_remote_id);
     mem_free(owner->cy, self);
 }
@@ -3156,26 +3155,26 @@ typedef struct
 // Remove the slot and invoke the user callback.
 static void reordering_eject(reordering_t* const self, reordering_slot_t* const slot)
 {
-    assert(slot != NULL);
-    assert(self->topic->cy == self->subscriber->root->cy);
+    CY_ASSERT(slot != NULL);
+    CY_ASSERT(self->topic->cy == self->subscriber->root->cy);
     const cy_t* const cy = self->topic->cy;
 
     // Remove the slot from the index.
-    assert(cavl2_is_inserted(self->interned_by_lin_tag, &slot->index_lin_tag));
+    CY_ASSERT(cavl2_is_inserted(self->interned_by_lin_tag, &slot->index_lin_tag));
     cavl2_remove(&self->interned_by_lin_tag, &slot->index_lin_tag);
-    assert(self->interned_count > 0);
+    CY_ASSERT(self->interned_count > 0);
     self->interned_count--;
-    assert((self->interned_by_lin_tag == NULL) == (self->interned_count == 0));
+    CY_ASSERT((self->interned_by_lin_tag == NULL) == (self->interned_count == 0));
 
     // Update the state with the removed slot.
-    assert(slot->lin_tag < (1ULL << 48U)); // ensure linearized by comparing against some unreachable value
-    assert(self->subscriber->params.reordering_window >= 0); // we should only end up here if ordered mode is used
-    assert(slot->lin_tag > self->last_ejected_lin_tag);      // ensure ordered sequence seen by the application
+    CY_ASSERT(slot->lin_tag < (1ULL << 48U)); // ensure linearized by comparing against some unreachable value
+    CY_ASSERT(self->subscriber->params.reordering_window >= 0); // we should only end up here if ordered mode is used
+    CY_ASSERT(slot->lin_tag > self->last_ejected_lin_tag);      // ensure ordered sequence seen by the application
     self->last_ejected_lin_tag = slot->lin_tag;
 
     // Construct the arrival instance. It copies the relevant states from the slot so that it can be destroyed.
-    assert(slot->message.timestamp >= 0);
-    assert(slot->message.content != NULL);
+    CY_ASSERT(slot->message.timestamp >= 0);
+    CY_ASSERT(slot->message.content != NULL);
     const cy_arrival_t arrival =
       make_arrival(self->topic,
                    (cy_lane_t){ .id = self->remote_id, .ctx = self->unicast_ctx, .prio = slot->priority },
@@ -3222,7 +3221,7 @@ static void reordering_eject_all(reordering_t* const self, const bool silenced)
     while (self->interned_count > 0) {
         reordering_slot_t* const slot =
           CAVL2_TO_OWNER(cavl2_min(self->interned_by_lin_tag), reordering_slot_t, index_lin_tag);
-        assert((slot != NULL) && cavl2_is_inserted(self->interned_by_lin_tag, &slot->index_lin_tag));
+        CY_ASSERT((slot != NULL) && cavl2_is_inserted(self->interned_by_lin_tag, &slot->index_lin_tag));
         if (!silenced) {
             reordering_eject(self, slot);
         } else {
@@ -3232,8 +3231,8 @@ static void reordering_eject_all(reordering_t* const self, const bool silenced)
             mem_free(self->topic->cy, slot);
         }
     }
-    assert(self->interned_count == 0);
-    assert(self->interned_by_lin_tag == NULL);
+    CY_ASSERT(self->interned_count == 0);
+    CY_ASSERT(self->interned_by_lin_tag == NULL);
     olga_cancel(&self->topic->cy->olga, &self->timeout);
 }
 
@@ -3242,8 +3241,8 @@ static void reordering_resequence(reordering_t* const self, const uint64_t tag)
     // We do NOT accept the message immediately because we don't know if it's in order or not, as we don't have state.
     // For example, if we receive tag 3, we don't know if it's in a sequence of (3 2 1) or (3 4 5); to properly
     // handle the former case without message loss we start with the reordering delay.
-    assert(self->interned_count == 0);
-    assert(self->interned_by_lin_tag == NULL);
+    CY_ASSERT(self->interned_count == 0);
+    CY_ASSERT(self->interned_by_lin_tag == NULL);
     self->tag_baseline         = tag - (REORDERING_CAPACITY / 2U);
     self->last_ejected_lin_tag = 0;
 }
@@ -3257,8 +3256,8 @@ static bool reordering_push(reordering_t* const   self,
                             const cy_prio_t       priority,
                             const cy_message_ts_t message)
 {
-    assert(self->subscriber->params.reordering_window >= 0);
-    assert(self->topic->cy == self->subscriber->root->cy);
+    CY_ASSERT(self->subscriber->params.reordering_window >= 0);
+    CY_ASSERT(self->topic->cy == self->subscriber->root->cy);
     cy_t* const cy = self->topic->cy;
 
     // Dispatch the message according to its tag ordering.
@@ -3336,7 +3335,7 @@ static bool reordering_push(reordering_t* const   self,
                  (uintmax_t)tag,
                  (uintmax_t)lin_tag,
                  (uintmax_t)self->last_ejected_lin_tag);
-        assert(self->interned_count == 0); // The above logic will have emptied the interned messages in this case.
+        CY_ASSERT(self->interned_count == 0); // The above logic will have emptied the interned messages in this case.
         reordering_resequence(self, tag);
         lin_tag = tag - self->tag_baseline;
     }
@@ -3346,8 +3345,8 @@ static bool reordering_push(reordering_t* const   self,
     // It may still be a duplicate if somehow it made it past the topic-wise duplicate filter, so we check for that too.
     // For the assertion to hold, we must ensure that the reordering capacity is at least 4, otherwise the resequencing
     // logic would set the baseline too low for the assertion to hold.
-    assert(lin_tag > (self->last_ejected_lin_tag + 1U));
-    assert(lin_tag <= (self->last_ejected_lin_tag + capacity));
+    CY_ASSERT(lin_tag > (self->last_ejected_lin_tag + 1U));
+    CY_ASSERT(lin_tag <= (self->last_ejected_lin_tag + capacity));
     reordering_slot_t* const slot = mem_alloc_zero(cy, sizeof(reordering_slot_t));
     if (slot == NULL) {
         CY_TRACE(cy,
@@ -3378,11 +3377,11 @@ static bool reordering_push(reordering_t* const   self,
     slot->priority = priority;
     slot->message  = message;
     self->interned_count++;
-    assert((self->interned_count == 1) || olga_is_pending(&cy->olga, &self->timeout));
+    CY_ASSERT((self->interned_count == 1) || olga_is_pending(&cy->olga, &self->timeout));
     // Re-arm against the current head-of-line slot. A newly inserted lower lin_tag may need a later deadline.
     reordering_slot_t* const first_slot =
       CAVL2_TO_OWNER(cavl2_min(self->interned_by_lin_tag), reordering_slot_t, index_lin_tag);
-    assert(first_slot != NULL);
+    CY_ASSERT(first_slot != NULL);
     const cy_us_t deadline = first_slot->message.timestamp + self->subscriber->params.reordering_window;
     olga_defer(&cy->olga, deadline, self, reordering_on_window_expiration, &self->timeout);
     return true; // Interned messages will eventually be ejected and seen by the application.
@@ -3392,7 +3391,7 @@ static void reordering_destroy(reordering_t* const self, const bool silenced)
 {
     reordering_eject_all(self, silenced);
     delist(&self->subscriber->list_reordering_by_recency, &self->list_recency);
-    assert(cavl2_is_inserted(self->subscriber->index_reordering_by_remote_id, &self->index));
+    CY_ASSERT(cavl2_is_inserted(self->subscriber->index_reordering_by_remote_id, &self->index));
     cavl2_remove(&self->subscriber->index_reordering_by_remote_id, &self->index);
     mem_free(self->subscriber->root->cy, self);
 }
@@ -3485,7 +3484,7 @@ static bool on_message(cy_t* const           cy,
             // If we chose to do that, we would need to scan all couplings and subscribers.
             return false; // The remote will retransmit and we might be able to accept it then.
         }
-        assert(dedup->remote_id == lane.id);
+        CY_ASSERT(dedup->remote_id == lane.id);
         dedup_touch(dedup, topic, message.timestamp);
         if (dedup_check(dedup, tag)) {
             CY_TRACE(cy, "🍒 Dup N%016jx tag=%016jx", (uintmax_t)lane.id, (uintmax_t)tag);
@@ -3499,7 +3498,7 @@ static bool on_message(cy_t* const           cy,
     while (cpl != NULL) {
         const cy_topic_coupling_t* const next_cpl = cpl->next;
         subscriber_t*                    sub      = cpl->root->head;
-        assert(sub != NULL); // Otherwise it should have been removed from the coupling list.
+        CY_ASSERT(sub != NULL); // Otherwise it should have been removed from the coupling list.
         while (sub != NULL) {
             subscriber_t* const next_sub = sub->next;
             if (sub->disposed) { // Skip to avoid acknowledging the message erroneously.
@@ -3525,9 +3524,9 @@ static bool on_message(cy_t* const           cy,
                                                         reordering_t,
                                                         index);
                 if (rr != NULL) { // Simply ignore on OOM, nothing we can do.
-                    assert(rr->remote_id == lane.id);
-                    assert(rr->topic == topic);
-                    assert(rr->subscriber == sub);
+                    CY_ASSERT(rr->remote_id == lane.id);
+                    CY_ASSERT(rr->topic == topic);
+                    CY_ASSERT(rr->subscriber == sub);
                     rr->unicast_ctx = lane.ctx; // keep the latest known return path discovery from the transport
                     if (reordering_push(rr, tag, lane.prio, message)) {
                         // NOTE: If the subscriber is destroyed while there are messages interned in the reordering
@@ -3551,8 +3550,9 @@ static bool on_message(cy_t* const           cy,
     }
     // The entry cannot have been reaped since dedup_touch: the library is non-reentrant.
     if (reliable && acknowledge) {
-        assert(dedup != NULL);
-        assert(dedup->remote_id == lane.id); // Still the entry we touched; the subscriber loop cannot have reaped it.
+        CY_ASSERT(dedup != NULL);
+        CY_ASSERT(dedup->remote_id ==
+                  lane.id); // Still the entry we touched; the subscriber loop cannot have reaped it.
         dedup_commit(dedup, tag);
     }
     return acknowledge;
@@ -3564,10 +3564,10 @@ static size_t subscription_extent_w_overhead(const cy_topic_t* const topic)
 {
     size_t                     total = 0;
     const cy_topic_coupling_t* cpl   = topic->couplings;
-    assert(cpl != NULL);
+    CY_ASSERT(cpl != NULL);
     while (cpl != NULL) {
         const subscriber_t* sub = cpl->root->head;
-        assert(sub != NULL);
+        CY_ASSERT(sub != NULL);
         while (sub != NULL) {
             total = larger(total, sub->params.extent_pure);
             sub   = sub->next;
@@ -3610,8 +3610,8 @@ static void* wkv_cb_couple_new_subscription(const wkv_event_t evt)
 // A subscriber root corresponds to a unique subscription name (with possible wildcards), hosting at least 1 subscriber.
 static cy_err_t ensure_subscriber_root(cy_t* const cy, const cy_resolved_t resolved, subscriber_root_t** const out_root)
 {
-    assert((cy != NULL) && (resolved.name.str != NULL) && (resolved.name.len > 0U) && (out_root != NULL));
-    assert((resolved.pin == UINT16_MAX) || resolved.verbatim); // enforced during name resolution
+    CY_ASSERT((cy != NULL) && (resolved.name.str != NULL) && (resolved.name.len > 0U) && (out_root != NULL));
+    CY_ASSERT((resolved.pin == UINT16_MAX) || resolved.verbatim); // enforced during name resolution
 
     // Find or allocate a tree node. If exists, return as-is.
     wkv_node_t* const node = wkv_set(&cy->subscribers_by_name, resolved.name);
@@ -3622,7 +3622,8 @@ static cy_err_t ensure_subscriber_root(cy_t* const cy, const cy_resolved_t resol
         subscriber_root_t* const root = (subscriber_root_t*)node->value;
         *out_root                     = root;
         if (root->needs_scouting) {
-            assert((resolved.pin == UINT16_MAX) && !resolved.verbatim); // can't pin patterns; can only scout patterns
+            CY_ASSERT((resolved.pin == UINT16_MAX) &&
+                      !resolved.verbatim); // can't pin patterns; can only scout patterns
             const cy_err_t err   = do_send_scout(cy, cy_now(cy), resolved.name);
             root->needs_scouting = err != CY_OK;
             ON_ASYNC_ERROR_IF(cy, NULL, err);
@@ -3649,7 +3650,7 @@ static cy_err_t ensure_subscriber_root(cy_t* const cy, const cy_resolved_t resol
             mem_free(cy, root);
             return CY_ERR_MEMORY;
         }
-        assert(root->index_pattern->value == NULL);
+        CY_ASSERT(root->index_pattern->value == NULL);
         root->index_pattern->value = root;
         const cy_err_t err         = do_send_scout(cy, cy_now(cy), resolved.name);
         root->needs_scouting       = err != CY_OK;
@@ -3671,13 +3672,13 @@ static cy_err_t ensure_subscriber_root(cy_t* const cy, const cy_resolved_t resol
 
 static subscriber_t* subscribe(cy_t* const cy, const cy_str_t name, const subscriber_params_t params)
 {
-    assert((cy != NULL) && (params.reordering_window >= -1));
+    CY_ASSERT((cy != NULL) && (params.reordering_window >= -1));
     char                name_buf[CY_TOPIC_NAME_MAX + 1U];
     const cy_resolved_t resolved = cy_resolve(cy, name, sizeof(name_buf), name_buf);
     if (resolved.name.len > CY_TOPIC_NAME_MAX) {
         return NULL;
     }
-    assert((resolved.pin == UINT16_MAX) || resolved.verbatim); // enforced during name resolution
+    CY_ASSERT((resolved.pin == UINT16_MAX) || resolved.verbatim); // enforced during name resolution
     name_buf[resolved.name.len] = 0; // this is not needed for the logic but helps with tracing (if enabled)
     subscriber_t* const sub     = future_new(cy, &subscriber_vtable, sizeof(subscriber_t));
     if (sub == NULL) {
@@ -3691,7 +3692,7 @@ static subscriber_t* subscribe(cy_t* const cy, const cy_str_t name, const subscr
         mem_free(cy, sub);
         return NULL;
     }
-    assert(sub->root != NULL);
+    CY_ASSERT(sub->root != NULL);
     sub->next       = sub->root->head;
     sub->root->head = sub;
     if (NULL != wkv_match(&cy->topics_by_name, resolved.name, sub, wkv_cb_couple_new_subscription)) {
@@ -3775,8 +3776,8 @@ void cy_subscriber_timeout_set(cy_future_t* const future, const cy_us_t timeout)
 {
     if (cy_is_subscriber(future)) {
         subscriber_t* const self = (subscriber_t*)future;
-        assert(!self->disposed); // use after free
-        assert((self->last_arrival.message.timestamp >= 0) && (self->last_arrival.message.timestamp < INT64_MAX));
+        CY_ASSERT(!self->disposed); // use after free
+        CY_ASSERT((self->last_arrival.message.timestamp >= 0) && (self->last_arrival.message.timestamp < INT64_MAX));
         self->params.liveness_timeout = sooner(later(0, timeout), KILO * MEGA * MEGA);
         // Any argument resets the pending liveness error. It may re-appear later.
         if (self->error == CY_ERR_LIVENESS) {
@@ -3808,20 +3809,20 @@ cy_substitution_set_t cy_subscriber_substitutions(const cy_future_t* const futur
     cy_substitution_set_t out = { .count = 0, .substitutions = NULL };
     if (cy_is_subscriber(future)) {
         const subscriber_t* const self = (const subscriber_t*)future;
-        assert(!self->disposed); // use after free
-        if (self->verbatim) {    // instant result for verbatim subscribers, no need to scan.
+        CY_ASSERT(!self->disposed); // use after free
+        if (self->verbatim) {       // instant result for verbatim subscribers, no need to scan.
             static const cy_substitution_t sentinel;
             out.substitutions = &sentinel;
         } else if (topic != NULL) {
             const cy_topic_coupling_t* cpl = topic->couplings;
             while (cpl != NULL) {
                 const subscriber_t* sub = cpl->root->head;
-                assert(sub != NULL); // Otherwise it should have been removed from the coupling list.
+                CY_ASSERT(sub != NULL); // Otherwise it should have been removed from the coupling list.
                 while (sub != NULL) {
                     if (sub == self) {
                         out.count         = cpl->substitution_count;
                         out.substitutions = cpl->substitutions;
-                        assert(out.substitutions != NULL); // never NULL even if empty
+                        CY_ASSERT(out.substitutions != NULL); // never NULL even if empty
                         return out;
                     }
                     sub = sub->next;
@@ -3837,7 +3838,7 @@ cy_substitution_set_t cy_subscriber_substitutions(const cy_future_t* const futur
 
 static void topic_decouple_subscriber_root(cy_topic_t* const topic, const subscriber_root_t* const root)
 {
-    assert((topic != NULL) && (root != NULL));
+    CY_ASSERT((topic != NULL) && (root != NULL));
     const cy_t* const     cy  = topic->cy;
     cy_topic_coupling_t** cpl = &topic->couplings;
     while (*cpl != NULL) {
@@ -3869,8 +3870,8 @@ static void subscriber_destroy(subscriber_t* const self)
 {
     cy_t* const              cy   = self->base.cy;
     subscriber_root_t* const root = self->root;
-    assert((root != NULL) && (root->cy == cy));
-    assert(self->base.callback == NULL); // Must have been reset beforehand by the future framework.
+    CY_ASSERT((root != NULL) && (root->cy == cy));
+    CY_ASSERT(self->base.callback == NULL); // Must have been reset beforehand by the future framework.
     future_deadline_disarm(&self->base);
 #if CY_CONFIG_TRACE
     char name[CY_TOPIC_NAME_MAX + 1];
@@ -3881,18 +3882,18 @@ static void subscriber_destroy(subscriber_t* const self)
     // Drop all pending ordered messages first because the states keep pointers into topic couplings.
     while (self->index_reordering_by_remote_id != NULL) {
         reordering_t* const rr = CAVL2_TO_OWNER(cavl2_min(self->index_reordering_by_remote_id), reordering_t, index);
-        assert(rr != NULL);
+        CY_ASSERT(rr != NULL);
         reordering_destroy(rr, true);
     }
-    assert(self->list_reordering_by_recency.head == NULL);
-    assert(self->list_reordering_by_recency.tail == NULL);
+    CY_ASSERT(self->list_reordering_by_recency.head == NULL);
+    CY_ASSERT(self->list_reordering_by_recency.tail == NULL);
 
     // Delist this subscriber from the root.
     subscriber_t** sub = &root->head;
     while ((*sub != NULL) && (*sub != self)) {
         sub = &(*sub)->next;
     }
-    assert(*sub == self);
+    CY_ASSERT(*sub == self);
     if (*sub == self) {
         *sub = self->next; // cppcheck-suppress nullPointerRedundantCheck
     }
@@ -3928,10 +3929,10 @@ static cy_err_t do_respond(cy_breadcrumb_t* const breadcrumb,
                            const header_type_t    type,
                            const byte_t           tag)
 {
-    assert((breadcrumb != NULL) && (breadcrumb->cy != NULL) && (deadline >= 0));
+    CY_ASSERT((breadcrumb != NULL) && (breadcrumb->cy != NULL) && (deadline >= 0));
 
     // Compose the header.
-    assert(breadcrumb->seqno < (SEQNO48_MASK - 1U)); // Sanity check; this value is not practically reachable.
+    CY_ASSERT(breadcrumb->seqno < (SEQNO48_MASK - 1U)); // Sanity check; this value is not practically reachable.
     byte_t header[HEADER_BYTES] = { (byte_t)type, tag };
     (void)serialize_u48(&header[2], breadcrumb->seqno);
     (void)serialize_u64(&header[8], breadcrumb->topic_hash);
@@ -3974,10 +3975,10 @@ static cy_err_t respond_future_error(const cy_future_t* const base) { return ((c
 
 static void respond_future_timeout(cy_future_t* const base, const cy_us_t scheduled, const cy_us_t now)
 {
-    assert(scheduled <= now); // scheduler invariant
+    CY_ASSERT(scheduled <= now); // scheduler invariant
     (void)scheduled;
     respond_future_t* const self = (respond_future_t*)base;
-    assert(self->breadcrumb.cy == base->cy);
+    CY_ASSERT(self->breadcrumb.cy == base->cy);
     cy_t* const cy = base->cy;
 
     // If we are supposed to try more attempts (data not yet destroyed) but we are already near the deadline,
@@ -3989,18 +3990,18 @@ static void respond_future_timeout(cy_future_t* const base, const cy_us_t schedu
     // Check completion.
     if ((self->data == NULL) || (now >= self->deadline)) { // This is the final poll.
         future_index_remove(base, &cy->respond_futures_by_tag);
-        assert(base->vtable->done(base)); // timer not restarted
-        self->error = CY_ERR_DELIVERY;    // no response -- not delivered
-        future_notify(&self->base);       // Invalidates the future. Expect disposal.
+        CY_ASSERT(base->vtable->done(base)); // timer not restarted
+        self->error = CY_ERR_DELIVERY;       // no response -- not delivered
+        future_notify(&self->base);          // Invalidates the future. Expect disposal.
         return;
     }
 
     // Compute next deadline and decide if it's going to be the last attempt based on the remaining time.
-    assert(now < self->deadline);
+    CY_ASSERT(now < self->deadline);
     self->ack_timeout *= 2;                                                       // exponential backoff
     const cy_us_t ack_deadline = sooner(self->ack_timeout + now, self->deadline); // manage possible scheduler lag
     const bool    last_attempt = ack_is_last_attempt(ack_deadline, self->ack_timeout, self->deadline);
-    assert(ack_deadline > now);
+    CY_ASSERT(ack_deadline > now);
 
     // Send the message.
     const cy_err_t er = do_respond(&self->breadcrumb, ack_deadline, *self->data, header_rsp_rel, self->tag);
@@ -4016,15 +4017,15 @@ static void respond_future_timeout(cy_future_t* const base, const cy_us_t schedu
         self->data = NULL;
         future_deadline_arm(base, self->deadline);
     } else {
-        assert(ack_deadline < self->deadline);
+        CY_ASSERT(ack_deadline < self->deadline);
         future_deadline_arm(base, ack_deadline);
     }
 
     // Notify if any errors occurred, but we are not done yet.
     if ((er != CY_OK) || sched_lag_error) {
-        assert(self->error != CY_OK);
-        assert(!base->vtable->done(base)); // Not done yet -- timer pending.
-        future_notify(&self->base);        // Invalidates the future. Expect disposal.
+        CY_ASSERT(self->error != CY_OK);
+        CY_ASSERT(!base->vtable->done(base)); // Not done yet -- timer pending.
+        future_notify(&self->base);           // Invalidates the future. Expect disposal.
     }
 }
 
@@ -4047,7 +4048,7 @@ static const cy_future_vtable_t respond_future_vtable = { .done    = respond_fut
 static void respond_future_on_ack(respond_future_t* const self, const bool positive_ack)
 {
     cy_t* const cy = self->base.cy;
-    assert(!self->base.vtable->done(&self->base));
+    CY_ASSERT(!self->base.vtable->done(&self->base));
     self->error = positive_ack ? CY_OK : CY_ERR_NACK; // Overwrite previous error -- assume it has been seen.
     future_deadline_disarm(&self->base);
     future_index_remove(&self->base, &cy->respond_futures_by_tag);
@@ -4062,7 +4063,7 @@ static uint64_t respond_key(const uint64_t remote_id,
                             const uint64_t seqno,
                             const byte_t   tag)
 {
-    assert(seqno <= SEQNO48_MASK);
+    CY_ASSERT(seqno <= SEQNO48_MASK);
     // This simple and fast hash should suffice. We could use rapidhash but it's likely an overkill.
     // Message tag and seqno change their LSb quickly, which is why we shift seqno to the left (it's only 48 bits wide).
     // The tag is shifted left for the same reason -- we want it to reside in the area where bits are mostly static.
@@ -4152,10 +4153,10 @@ cy_future_t* cy_respond_reliable(cy_breadcrumb_t* const breadcrumb, const cy_us_
 
 static void topic_destroy(cy_topic_t* const topic)
 {
-    assert((topic != NULL) && (topic->cy != NULL));
-    assert(topic->pub_count == 0);
-    assert(topic->pub_futures_by_tag == NULL);
-    assert(topic->couplings == NULL); // removed when unsubscribed
+    CY_ASSERT((topic != NULL) && (topic->cy != NULL));
+    CY_ASSERT(topic->pub_count == 0);
+    CY_ASSERT(topic->pub_futures_by_tag == NULL);
+    CY_ASSERT(topic->couplings == NULL); // removed when unsubscribed
     cy_t* const cy = topic->cy;
     CY_TRACE(cy, "🗑️ %s", topic_repr(topic).str);
 
@@ -4176,20 +4177,20 @@ static void topic_destroy(cy_topic_t* const topic)
     // Remove subscriber associations.
     while (topic->assoc_by_remote_id != NULL) {
         association_t* const ass = CAVL2_TO_OWNER(cavl2_min(topic->assoc_by_remote_id), association_t, index_remote_id);
-        assert(ass != NULL);
-        assert(ass->pending_count == 0);
+        CY_ASSERT(ass != NULL);
+        CY_ASSERT(ass->pending_count == 0);
         association_forget(topic, ass);
     }
-    assert(topic->assoc_count == 0);
+    CY_ASSERT(topic->assoc_count == 0);
 
     // Remove message deduplication states.
     while (topic->sub_index_dedup_by_remote_id != NULL) {
         dedup_t* const dd = CAVL2_TO_OWNER(cavl2_min(topic->sub_index_dedup_by_remote_id), dedup_t, index_remote_id);
-        assert(dd != NULL);
+        CY_ASSERT(dd != NULL);
         dedup_destroy(dd, topic);
     }
-    assert(topic->sub_list_dedup_by_recency.head == NULL);
-    assert(topic->sub_list_dedup_by_recency.tail == NULL);
+    CY_ASSERT(topic->sub_list_dedup_by_recency.head == NULL);
+    CY_ASSERT(topic->sub_list_dedup_by_recency.tail == NULL);
 
     // Remove any zombie request futures that may be left behind to manage retransmissions.
     // This is lifetime-safe because the API contract requires that the application must destroy pending futures
@@ -4198,7 +4199,7 @@ static void topic_destroy(cy_topic_t* const topic)
     // expires the zombie request futures are likely going to be destroyed on timeout anyway.
     while (topic->request_futures_by_tag != NULL) {
         request_future_t* const future = (request_future_t*)topic->request_futures_by_tag;
-        assert(future->finalized); // Otherwise, the application forgot to destroy the future!
+        CY_ASSERT(future->finalized); // Otherwise, the application forgot to destroy the future!
         request_future_destroy(future);
     }
 
@@ -4219,7 +4220,7 @@ static void topic_destroy(cy_topic_t* const topic)
     delist(&cy->list_implicit, &topic->list_implicit);
     //
     cavl2_remove_if(&cy->topics_by_subject_id, &topic->index_subject_id);
-    assert(cavl2_is_inserted(cy->topics_by_hash, &topic->index_hash));
+    CY_ASSERT(cavl2_is_inserted(cy->topics_by_hash, &topic->index_hash));
     cavl2_remove(&cy->topics_by_hash, &topic->index_hash);
     //
     if (topic->index_name != NULL) {
@@ -4265,11 +4266,11 @@ static void destroy_disposed_subscribers(cy_t* const cy)
 {
     while (!wkv_is_empty(&cy->subscribers_by_name)) {
         const wkv_node_t* const node = wkv_at(&cy->subscribers_by_name, 0);
-        assert((node != NULL) && (node->value != NULL));
+        CY_ASSERT((node != NULL) && (node->value != NULL));
         subscriber_root_t* const root = (subscriber_root_t*)node->value;
-        assert((root != NULL) && (root->head != NULL));
+        CY_ASSERT((root != NULL) && (root->head != NULL));
         subscriber_t* const sub = root->head;
-        assert(sub->disposed);
+        CY_ASSERT(sub->disposed);
         if (!sub->disposed) {
             break;
         }
@@ -4393,8 +4394,8 @@ cy_t* cy_new(cy_platform_t* const platform, const cy_str_t home, const cy_str_t 
     memset(cy, 0, sizeof(cy_t) + home_len + ns_len + 2); // Zero the entire allocation incl. NUL terminators.
     cy->home = name_normalize(home, home_len, (char*)cy + sizeof(cy_t));
     cy->ns   = name_normalize(effective_ns, ns_len, (char*)cy + sizeof(cy_t) + home_len + 1);
-    assert((cy->home.str != NULL) && (cy->home.len == home_len) && (cy->home.str[cy->home.len] == '\0'));
-    assert((cy->ns.str != NULL) && (cy->ns.len == ns_len) && (cy->ns.str[cy->ns.len] == '\0'));
+    CY_ASSERT((cy->home.str != NULL) && (cy->home.len == home_len) && (cy->home.str[cy->home.len] == '\0'));
+    CY_ASSERT((cy->ns.str != NULL) && (cy->ns.len == ns_len) && (cy->ns.str[cy->ns.len] == '\0'));
 
     cy->platform = platform;
     platform->cy = cy;
@@ -4447,7 +4448,7 @@ cy_t* cy_new(cy_platform_t* const platform, const cy_str_t home, const cy_str_t 
     const uint32_t broadcast_subject_id =
       (uint32_t)((1ULL << (byte_t)(log2_floor(CY_SUBJECT_ID_MAX(platform->subject_id_modulus)) + 1)) - 1U);
     cy->gossip_shard_count = broadcast_subject_id - (CY_SUBJECT_ID_MAX(platform->subject_id_modulus) + 1U);
-    assert((cy->gossip_shard_count > 0) && (cy->gossip_shard_count < platform->subject_id_modulus)); // sanity
+    CY_ASSERT((cy->gossip_shard_count > 0) && (cy->gossip_shard_count < platform->subject_id_modulus)); // sanity
 
     // Set up the broadcast subject readers/writers.
     cy->broad_reader =
@@ -4486,9 +4487,9 @@ void cy_destroy(cy_t* const cy)
 
     // Ensure the user has cleaned up beforehand.
     // We are unable to destroy user-owner objects like publishers/subscribers/futures because we don't own them.
-    assert(wkv_is_empty(&cy->subscribers_by_name));
-    assert(wkv_is_empty(&cy->subscribers_by_pattern));
-    assert(cy->respond_futures_by_tag == NULL); // All pending response futures must be destroyed.
+    CY_ASSERT(wkv_is_empty(&cy->subscribers_by_name));
+    CY_ASSERT(wkv_is_empty(&cy->subscribers_by_pattern));
+    CY_ASSERT(cy->respond_futures_by_tag == NULL); // All pending response futures must be destroyed.
 
     // Remove global subject reader & writer.
     if (cy->broad_reader != NULL) {
@@ -4510,21 +4511,21 @@ void cy_destroy(cy_t* const cy)
     // There may still be implicit topics left, but they must have no user-owned entities attached anymore.
     while (cy->topics_by_hash != NULL) {
         cy_topic_t* const topic = cy_topic_iter_first(cy);
-        assert(topic != NULL);
-        assert(topic->pub_futures_by_tag == NULL); // Caller must destroy futures.
-        assert(topic->pub_count == 0);             // Caller must destroy publishers.
-        assert(topic->couplings == NULL);          // Caller must destroy subscribers.
-        assert(is_implicit(topic));
+        CY_ASSERT(topic != NULL);
+        CY_ASSERT(topic->pub_futures_by_tag == NULL); // Caller must destroy futures.
+        CY_ASSERT(topic->pub_count == 0);             // Caller must destroy publishers.
+        CY_ASSERT(topic->couplings == NULL);          // Caller must destroy subscribers.
+        CY_ASSERT(is_implicit(topic));
         topic_destroy(topic);
     }
-    assert(wkv_is_empty(&cy->topics_by_name));
-    assert(cy->writers == NULL); // All writer registry entries released by topic_destroy.
-    assert(cy->readers == NULL); // All reader registry entries released by topic_destroy.
+    CY_ASSERT(wkv_is_empty(&cy->topics_by_name));
+    CY_ASSERT(cy->writers == NULL); // All writer registry entries released by topic_destroy.
+    CY_ASSERT(cy->readers == NULL); // All reader registry entries released by topic_destroy.
 
     // Drain the remap table: the to-string values are owned by this cy_t and must be freed here.
     while (!wkv_is_empty(&cy->remap)) {
         wkv_node_t* const n = wkv_at(&cy->remap, 0);
-        assert((n != NULL) && (n->value != NULL));
+        CY_ASSERT((n != NULL) && (n->value != NULL));
         mem_free(cy, n->value);
         wkv_del(&cy->remap, n);
     }
@@ -4584,7 +4585,7 @@ cy_err_t cy_spin_until(cy_t* const cy, const cy_us_t deadline)
 cy_us_t cy_now(const cy_t* const cy)
 {
     const cy_us_t out = cy->platform->vtable->now(cy->platform);
-    assert(out >= 0);
+    CY_ASSERT(out >= 0);
     return out;
 }
 
@@ -4675,15 +4676,15 @@ cy_topic_t* cy_topic_find_by_name(const cy_t* const cy, const cy_str_t name)
 {
     const wkv_node_t* const node  = wkv_get(&cy->topics_by_name, name);
     cy_topic_t* const       topic = (node != NULL) ? (cy_topic_t*)node->value : NULL;
-    assert(topic == cy_topic_find_by_hash(cy, rapidhash(name.str, name.len)));
+    CY_ASSERT(topic == cy_topic_find_by_hash(cy, rapidhash(name.str, name.len)));
     return topic;
 }
 
 cy_topic_t* cy_topic_find_by_hash(const cy_t* const cy, const uint64_t hash)
 {
-    assert(cy != NULL);
+    CY_ASSERT(cy != NULL);
     cy_topic_t* const topic = (cy_topic_t*)cavl2_find(cy->topics_by_hash, &hash, &cavl_comp_topic_hash);
-    assert((topic == NULL) || (topic->hash == hash));
+    CY_ASSERT((topic == NULL) || (topic->hash == hash));
     return topic;
 }
 
@@ -4716,7 +4717,7 @@ static void on_message_ack(cy_t* const       cy,
                            const bool        positive,
                            const cy_lane_t   lane)
 {
-    assert(topic != NULL);
+    CY_ASSERT(topic != NULL);
 
     // Protect against acks that are clearly invalid, so that we don't blow up the association set unnecessarily.
     // The max lag limits the oldest ack we can accept; it is chosen to be large enough to fit any valid use case.
@@ -4753,7 +4754,7 @@ static void on_message_ack(cy_t* const       cy,
 
     // Update the state of the local subscriber association.
     // NACK for an association that is not currently used by any publisher future allows immediate removal.
-    assert(topic->assoc_count > 0);
+    CY_ASSERT(topic->assoc_count > 0);
     ass->last_seen   = ts;
     ass->unicast_ctx = lane.ctx;       // Always update the latest return path discovery state.
     if (seqno >= ass->seqno_witness) { // Prevent delayed acks from overwriting newer states.
@@ -4767,7 +4768,7 @@ static void on_message_ack(cy_t* const       cy,
     }
 
     // There are futures that might be interested.
-    assert(positive || (ass->pending_count > 0) || (seqno < ass->seqno_witness));
+    CY_ASSERT(positive || (ass->pending_count > 0) || (seqno < ass->seqno_witness));
     publish_future_t* const future = (publish_future_t*)future_index_lookup(topic->pub_futures_by_tag, tag);
     if (future != NULL) {
         publish_future_on_ack(future, lane.id, positive);
@@ -4808,7 +4809,7 @@ static void send_response_ack(cy_t* const     cy,
                               const bool      positive,
                               const cy_us_t   deadline)
 {
-    assert(seqno <= SEQNO48_MASK);
+    CY_ASSERT(seqno <= SEQNO48_MASK);
     byte_t header[HEADER_BYTES] = { (byte_t)(positive ? header_rsp_ack : header_rsp_nack), tag };
     (void)serialize_u48(&header[2], seqno);
     (void)serialize_u64(&header[8], hash);
@@ -4833,8 +4834,8 @@ void cy_on_message(cy_platform_t* const  platform,
                    const cy_message_ts_t message)
 {
     cy_t* const cy = platform->cy;
-    assert((cy != NULL) && (message.timestamp >= 0));
-    assert(message.content->refcount == 1);
+    CY_ASSERT((cy != NULL) && (message.timestamp >= 0));
+    CY_ASSERT(message.content->refcount == 1);
     byte_t header[HEADER_BYTES] = { 0 };
     if (cy_message_read(message.content, 0, HEADER_BYTES, header) != HEADER_BYTES) {
         goto bad_message;
@@ -4870,8 +4871,8 @@ void cy_on_message(cy_platform_t* const  platform,
             // Process the message if the topic is known.
             bool accepted = false;
             if (topic != NULL) {
-                assert((topic->sub_reader == NULL) ||
-                       (topic_subject_id(topic) == topic->sub_reader->handle->subject_id));
+                CY_ASSERT((topic->sub_reader == NULL) ||
+                          (topic_subject_id(topic) == topic->sub_reader->handle->subject_id));
                 // We have the topic, which may or may not be using the same subject-ID. If we use this subject-ID
                 // for another topic, then it constitutes both a divergence and a collision. The correct handling
                 // is to address the divergence by either moving the local topic if the gossiped state is newer,
@@ -5068,7 +5069,7 @@ static bool str_valid(const cy_str_t str) { return (str.str != NULL) || (str.len
 
 static cy_str_t str_skip(const cy_str_t s, const size_t k)
 {
-    assert(str_valid(s) && (k <= s.len));
+    CY_ASSERT(str_valid(s) && (k <= s.len));
     return (cy_str_t){ .len = s.len - k, .str = &s.str[k] };
 }
 
@@ -5077,7 +5078,7 @@ static cy_str_t str_skip(const cy_str_t s, const size_t k)
 // Example: `foo#123` => `foo`, out_pin=123; `foo#0` => `foo`, out_pin=0; `foo#01` => unchanged (leading zero).
 static cy_str_t name_consume_pin_suffix(const cy_str_t name, uint16_t* const out_pin)
 {
-    assert((out_pin != NULL) && str_valid(name));
+    CY_ASSERT((out_pin != NULL) && str_valid(name));
     *out_pin = UINT16_MAX;
     // Scan right-to-left: find '#' preceded only by decimal digits.
     size_t hash_pos = name.len;
@@ -5132,7 +5133,7 @@ static bool name_is_absolute(const cy_str_t n) { return (n.str != NULL) && (n.le
 // Returns the length of the normalized string, or SIZE_MAX if the input contains invalid characters.
 static size_t name_normalized_len(const cy_str_t name)
 {
-    assert(str_valid(name));
+    CY_ASSERT(str_valid(name));
     size_t out_len     = 0U;
     bool   pending_sep = false;
     for (size_t i = 0; i < name.len; i++) {
@@ -5155,12 +5156,12 @@ static size_t name_normalized_len(const cy_str_t name)
 
 static void name_copy_normalized_forward(const cy_str_t name, char* const dest)
 {
-    assert(str_valid(name) && (dest != NULL));
+    CY_ASSERT(str_valid(name) && (dest != NULL));
     char* out         = dest;
     bool  pending_sep = false;
     for (size_t i = 0; i < name.len; i++) {
         const char c = name.str[i];
-        assert(is_valid_char(c));
+        CY_ASSERT(is_valid_char(c));
         if (c == cy_name_sep) {
             pending_sep = out > dest; // skip duplicate and leading separators
             continue;
@@ -5176,7 +5177,7 @@ static void name_copy_normalized_forward(const cy_str_t name, char* const dest)
 // Exact in-place normalization is supported; arbitrary partial overlap is not guaranteed.
 static cy_str_t name_normalize(const cy_str_t part, const size_t dest_size, char* const dest)
 {
-    assert(((part.str != NULL) || (part.len == 0U)) && (dest != NULL));
+    CY_ASSERT(((part.str != NULL) || (part.len == 0U)) && (dest != NULL));
     const size_t len = name_normalized_len(part);
     if ((len == SIZE_MAX) || (len > dest_size)) {
         return str_invalid;
@@ -5224,7 +5225,7 @@ static cy_str_t name_resolve_construct(const cy_str_t name,
                                        const size_t   dest_size,
                                        char*          dest)
 {
-    assert(str_valid(name) && str_valid(name_space) && str_valid(home) && (dest != NULL));
+    CY_ASSERT(str_valid(name) && str_valid(name_space) && str_valid(home) && (dest != NULL));
     if (name_is_absolute(name)) {
         return name_normalize(name, dest_size, dest);
     }
@@ -5301,7 +5302,7 @@ cy_resolved_t cy_name_resolve(const wkv_t* const remap,
 
 #define DIAG_FOREACH(cy, diag_call, ...)                                       \
     do {                                                                       \
-        assert((cy) != NULL);                                                  \
+        CY_ASSERT((cy) != NULL);                                               \
         for (cy_diag_t* diag = (cy)->diags; diag != NULL;) {                   \
             cy_diag_t* const next = diag->next;                                \
             if ((diag->vtable != NULL) && (diag->vtable->diag_call != NULL)) { \

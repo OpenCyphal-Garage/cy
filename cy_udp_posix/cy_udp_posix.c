@@ -114,9 +114,9 @@ static void mem_free(void* const user, const size_t size, void* const pointer)
     cy_udp_posix_t* const self = (cy_udp_posix_t*)user;
     (void)size;
     if (pointer != NULL) {
-        assert(self->stats.mem.allocated_fragments > 0);
+        CY_ASSERT(self->stats.mem.allocated_fragments > 0);
         self->stats.mem.allocated_fragments--;
-        assert(self->stats.mem.allocated_bytes >= size);
+        CY_ASSERT(self->stats.mem.allocated_bytes >= size);
         self->stats.mem.allocated_bytes -= size;
         memset(pointer, 0xA5, size); // a simple diagnostic aid
         free(pointer);
@@ -198,7 +198,7 @@ static size_t v_message_read(const cy_message_t* const base, const size_t offset
 static size_t v_message_read_1(const cy_message_t* const base, const size_t offset, const size_t size, void* const dest)
 {
     message_t* const self = (message_t*)base;
-    assert((self->fragment->index_offset.lr[0] == NULL) && (self->fragment->index_offset.lr[1] == NULL));
+    CY_ASSERT((self->fragment->index_offset.lr[0] == NULL) && (self->fragment->index_offset.lr[1] == NULL));
     size_t out = 0;
     if (offset < self->size) {
         out = smaller(size, self->size - offset);
@@ -250,7 +250,7 @@ struct subject_writer_t
 static cy_subject_writer_t* v_subject_writer_new(cy_platform_t* const base, const uint32_t subject_id)
 {
     (void)subject_id;
-    assert(subject_id <= UDPARD_IPv4_SUBJECT_ID_MAX);
+    CY_ASSERT(subject_id <= UDPARD_IPv4_SUBJECT_ID_MAX);
     cy_udp_posix_t* const   owner = (cy_udp_posix_t*)base;
     subject_writer_t* const self  = mem_alloc_zero(owner, sizeof(subject_writer_t));
     if (self != NULL) {
@@ -269,7 +269,7 @@ static void v_subject_writer_destroy(cy_platform_t* const platform, cy_subject_w
 {
     cy_udp_posix_t* const   owner = (cy_udp_posix_t*)platform;
     subject_writer_t* const self  = (subject_writer_t*)base;
-    assert(owner->stats.subject_writer_count > 0);
+    CY_ASSERT(owner->stats.subject_writer_count > 0);
     owner->stats.subject_writer_count--;
     CY_TRACE(owner->base.cy, "🔇 n_writers=%zu ptr=%p", owner->stats.subject_writer_count, (void*)self);
     mem_free(owner, sizeof(subject_writer_t), self);
@@ -381,7 +381,7 @@ static cy_subject_reader_t* v_subject_reader_new(cy_platform_t* const base,
                                                  const uint32_t       subject_id,
                                                  const size_t         extent)
 {
-    assert(subject_id <= UDPARD_IPv4_SUBJECT_ID_MAX);
+    CY_ASSERT(subject_id <= UDPARD_IPv4_SUBJECT_ID_MAX);
     cy_udp_posix_t* const owner = (cy_udp_posix_t*)base;
     subject_reader_t*     self  = mem_alloc_zero(owner, sizeof(subject_reader_t));
     if (self != NULL) {
@@ -440,7 +440,7 @@ static cy_subject_reader_t* v_subject_reader_new(cy_platform_t* const base,
             owner->reader_tail = self;
         }
         owner->reader_head = self;
-        assert((owner->reader_head != NULL) == (owner->reader_tail != NULL));
+        CY_ASSERT((owner->reader_head != NULL) == (owner->reader_tail != NULL));
     }
 reject:
     CY_TRACE(owner->base.cy,
@@ -453,8 +453,8 @@ reject:
 
 static void subject_reader_destroy(cy_udp_posix_t* const owner, subject_reader_t* const self)
 {
-    assert(self->port.user == self);
-    assert(self->tombstone);
+    CY_ASSERT(self->port.user == self);
+    CY_ASSERT(self->tombstone);
 
     // Delist.
     if (self->prev != NULL) {
@@ -471,7 +471,7 @@ static void subject_reader_destroy(cy_udp_posix_t* const owner, subject_reader_t
     }
     self->prev = NULL;
     self->next = NULL;
-    assert((owner->reader_head != NULL) == (owner->reader_tail != NULL));
+    CY_ASSERT((owner->reader_head != NULL) == (owner->reader_tail != NULL));
 
     // Cleanup the libudpard port and the sockets.
     udpard_rx_port_free(&owner->udpard_rx, &self->port);
@@ -480,7 +480,7 @@ static void subject_reader_destroy(cy_udp_posix_t* const owner, subject_reader_t
     }
 
     // Free the memory and update the stats.
-    assert(owner->stats.subject_reader_count > 0);
+    CY_ASSERT(owner->stats.subject_reader_count > 0);
     owner->stats.subject_reader_count--;
     CY_TRACE(owner->base.cy, "🔕 n_readers=%zu ptr=%p", owner->stats.subject_reader_count, (void*)self);
     mem_free(owner, sizeof(subject_reader_t), self);
@@ -490,8 +490,8 @@ static void v_subject_reader_tombstone(cy_platform_t* const platform, cy_subject
 {
     cy_udp_posix_t* const   owner = (cy_udp_posix_t*)platform;
     subject_reader_t* const self  = (subject_reader_t*)base;
-    assert(self->port.user == self);
-    assert(!self->tombstone);
+    CY_ASSERT(self->port.user == self);
+    CY_ASSERT(!self->tombstone);
     self->tombstone = true;
     // Close sockets now to stop further reads while we defer the final teardown.
     // This also makes same-subject recreation safe: unlike libcanard, libudpard has no global uniqueness rule for
@@ -575,13 +575,13 @@ static void read_socket(cy_udp_posix_t* const   self,
                         udp_wrapper_t* const    sock,
                         const uint_fast8_t      iface_index)
 {
-    assert((self->iface_bitmap & (1U << iface_index)) != 0);
-    assert(iface_index <= CY_UDP_POSIX_IFACE_COUNT_MAX);
-    assert(is_valid_ip(self->local_ip[iface_index]));
-    assert(udp_wrapper_is_open(sock));
-    assert((self->stats.subject_reader_count == 0) == (self->reader_head == NULL));
-    assert((self->stats.subject_reader_count == 0) == (self->reader_tail == NULL));
-    assert((reader == NULL) || !reader->tombstone);
+    CY_ASSERT((self->iface_bitmap & (1U << iface_index)) != 0);
+    CY_ASSERT(iface_index <= CY_UDP_POSIX_IFACE_COUNT_MAX);
+    CY_ASSERT(is_valid_ip(self->local_ip[iface_index]));
+    CY_ASSERT(udp_wrapper_is_open(sock));
+    CY_ASSERT((self->stats.subject_reader_count == 0) == (self->reader_head == NULL));
+    CY_ASSERT((self->stats.subject_reader_count == 0) == (self->reader_tail == NULL));
+    CY_ASSERT((reader == NULL) || !reader->tombstone);
 
     // Allocate memory that we will read the data into. The ownership of this memory will be transferred
     // to LibUDPard, which will free it when it is no longer needed.
@@ -630,7 +630,7 @@ static void read_socket(cy_udp_posix_t* const   self,
     }
 
     // Pass the data buffer into LibUDPard then into Cy for further processing. It takes ownership of the buffer.
-    assert((reader == NULL) || !reader->port.is_unicast);
+    CY_ASSERT((reader == NULL) || !reader->port.is_unicast);
     const bool pushok = udpard_rx_port_push(&self->udpard_rx,
                                             (reader != NULL) ? &reader->port : &self->unicast_port,
                                             ts,
@@ -655,7 +655,7 @@ static cy_err_t spin_once_until(cy_udp_posix_t* const self, const cy_us_t deadli
     const uint16_t tx_pending_iface_bitmap                = udpard_tx_pending_ifaces(&self->udpard_tx);
     for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
         if ((tx_pending_iface_bitmap & (1U << i)) != 0) {
-            assert((self->iface_bitmap & (1U << i)) != 0);
+            CY_ASSERT((self->iface_bitmap & (1U << i)) != 0);
             tx_await[tx_count] = &self->sock[i];
             tx_count++;
         }
@@ -677,7 +677,7 @@ static cy_err_t spin_once_until(cy_udp_posix_t* const self, const cy_us_t deadli
         } else {
             for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
                 if (udp_wrapper_is_open(&rd_iter->sock[i])) {
-                    assert(rx_count < max_rx_count);
+                    CY_ASSERT(rx_count < max_rx_count);
                     rx_await[rx_count]         = &rd_iter->sock[i];
                     rx_readers[rx_count]       = rd_iter;
                     rx_iface_indexes[rx_count] = i;
@@ -690,7 +690,7 @@ static cy_err_t spin_once_until(cy_udp_posix_t* const self, const cy_us_t deadli
     // Note that we may add the same socket both for reading and writing, which is fine.
     for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
         if (udp_wrapper_is_open(&self->sock[i])) {
-            assert(rx_count < max_rx_count);
+            CY_ASSERT(rx_count < max_rx_count);
             rx_await[rx_count]         = &self->sock[i];
             rx_readers[rx_count]       = NULL; // A unicast socket has no associated topic.
             rx_iface_indexes[rx_count] = i;
@@ -716,7 +716,7 @@ static cy_err_t spin_once_until(cy_udp_posix_t* const self, const cy_us_t deadli
         if (rx_ready) {
             self->rx_reverse = !self->rx_reverse;
         }
-        assert(res == CY_OK);
+        CY_ASSERT(res == CY_OK);
         // While handling the events, we could have generated additional TX items, so we need to process them again.
         // We do it even in case of failure such that transient errors do not stall the TX queue.
         // We blindly attempt to transmit on all sockets disregarding their writeability state; if this becomes
@@ -793,9 +793,9 @@ static const cy_platform_vtable_t platform_vtable = {
 static bool v_tx_eject(udpard_tx_t* const tx, udpard_tx_ejection_t* const ej)
 {
     cy_udp_posix_t* const self = (cy_udp_posix_t*)tx->user;
-    assert(self != NULL);
-    assert((self->iface_bitmap & (1U << ej->iface_index)) != 0); // the caller must ensure this
-    assert(ej->now <= ej->deadline);
+    CY_ASSERT(self != NULL);
+    CY_ASSERT((self->iface_bitmap & (1U << ej->iface_index)) != 0); // the caller must ensure this
+    CY_ASSERT(ej->now <= ej->deadline);
     // The libudpard TX API provides us with an opportunity to retain the ownership of the datagram payload
     // via reference counting. This is useful in kernel space or in embedded systems with low-level NIC drivers,
     // but the Berkeley socket API does not allow us to take advantage of that -- the data will be copied into the
@@ -925,7 +925,7 @@ cy_platform_t* cy_udp_posix_new_manual(const uint64_t uid,
     }
 
     // Finish.
-    assert(self->unicast_port.is_unicast);
+    CY_ASSERT(self->unicast_port.is_unicast);
     self->stats       = (cy_udp_posix_stats_t){ 0 };
     self->reader_head = NULL;
     self->reader_tail = NULL;
@@ -936,7 +936,7 @@ cy_str_t cy_udp_posix_home(const cy_platform_t* base, const char* const prefix)
 {
     char uid[17] = { 0 };
     (void)snprintf(uid, sizeof(uid), "%016jx", (uintmax_t)(((cy_udp_posix_t*)base)->udpard_tx.local_uid));
-    assert(uid[16] == 0);
+    CY_ASSERT(uid[16] == 0);
     static thread_local char g_home[CY_TOPIC_NAME_MAX + 1];
     return cy_name_join(cy_str(prefix), cy_str(uid), CY_TOPIC_NAME_MAX, g_home);
 }
@@ -964,9 +964,9 @@ void cy_udp_posix_destroy(cy_platform_t* const base)
             }
             rd_iter = next;
         }
-        assert(self->stats.subject_reader_count == 0);
-        assert(self->stats.subject_writer_count == 0);
-        assert(self->base.cy == NULL); // must be unlinked beforehand
+        CY_ASSERT(self->stats.subject_reader_count == 0);
+        CY_ASSERT(self->stats.subject_writer_count == 0);
+        CY_ASSERT(self->base.cy == NULL); // must be unlinked beforehand
         udpard_rx_port_free(&self->udpard_rx, &self->unicast_port);
         udpard_tx_free(&self->udpard_tx);
         for (uint_fast8_t i = 0; i < CY_UDP_POSIX_IFACE_COUNT_MAX; i++) {
