@@ -13,7 +13,11 @@
 
 #pragma once
 
+#include "cy_platform.h"
+
+#define WKV_ASSERT(x) CY_ASSERT(x)
 #include <wild_key_value.h>
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
