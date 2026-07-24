@@ -17,7 +17,6 @@
 
 #include "udp_wrapper.h"
 
-#include <assert.h>
 #include <fcntl.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
@@ -121,7 +120,6 @@ int16_t udp_wrapper_open_unicast(udp_wrapper_t* const self,
             self->fd = -1;
         }
     }
-    assert((res < 0) || udp_wrapper_is_open(self));
     return res;
 }
 
@@ -178,7 +176,6 @@ int16_t udp_wrapper_open_multicast(udp_wrapper_t* const self,
             self->fd = -1;
         }
     }
-    assert((res < 0) || udp_wrapper_is_open(self));
     return res;
 }
 

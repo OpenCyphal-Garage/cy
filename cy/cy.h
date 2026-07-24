@@ -13,7 +13,22 @@
 
 #pragma once
 
+// Define this macro to include build configuration header.
+// Usage example with CMake: "-DCY_CONFIG_HEADER=\"${CMAKE_CURRENT_SOURCE_DIR}/my_cy_config.h\""
+#ifdef CY_CONFIG_HEADER
+#include CY_CONFIG_HEADER
+#endif
+
+// By default, this macro resolves to the standard assert().
+// To disable assertion checks completely, make it expand into `(void)(0)`.
+#ifndef CY_ASSERT
+#include <assert.h>
+#define CY_ASSERT(x) assert(x)
+#endif
+
+#define WKV_ASSERT(x) CY_ASSERT(x)
 #include <wild_key_value.h>
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>

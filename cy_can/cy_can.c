@@ -313,7 +313,7 @@ static bool v_canard_tx(canard_t* const      self,
     cy_can_t* const     owner = (cy_can_t*)self->user_context;
     const uint_least8_t len   = (uint_least8_t)can_data.size;
     (void)user_context;
-    assert(iface_index < owner->iface_count);
+    CY_ASSERT(iface_index < owner->iface_count);
     if (fd && (owner->vtable->tx_fd != NULL)) {
         return owner->vtable->tx_fd(owner->user, deadline, iface_index, extended_can_id, can_data.data, len);
     }
@@ -323,7 +323,7 @@ static bool v_canard_tx(canard_t* const      self,
 static bool v_canard_filter(canard_t* const self, const size_t filter_count, const canard_filter_t* const filters)
 {
     cy_can_t* const owner = (cy_can_t*)self->user_context;
-    assert((owner != NULL) && (owner->vtable != NULL) && (owner->vtable->filter != NULL));
+    CY_ASSERT((owner != NULL) && (owner->vtable != NULL) && (owner->vtable->filter != NULL));
     return owner->vtable->filter(owner->user, filter_count, filters);
 }
 
@@ -353,11 +353,11 @@ static void v_on_msg_16b(canard_subscription_t* const self,
 {
     (void)transfer_id;
     subject_reader_t* const reader = (subject_reader_t*)self->user_context;
-    assert(reader != NULL);
+    CY_ASSERT(reader != NULL);
     cy_can_t* const owner = reader->owner;
-    assert(owner != NULL);
+    CY_ASSERT(owner != NULL);
     pending_v1_t* const pending = owner->pending_v1;
-    assert((pending != NULL) && (pending->message.content == NULL));
+    CY_ASSERT((pending != NULL) && (pending->message.content == NULL));
     const bool multiframe = (payload.origin.data != NULL);
 
     can_message_t* const msg = make_message(owner, multiframe ? 0 : payload.view.size);
@@ -397,12 +397,12 @@ static void v_on_msg_13b(canard_subscription_t* const self,
 {
     (void)transfer_id;
     subject_reader_t* const reader = (subject_reader_t*)self->user_context;
-    assert(reader != NULL);
+    CY_ASSERT(reader != NULL);
     cy_can_t* const owner = reader->owner;
-    assert(owner != NULL);
+    CY_ASSERT(owner != NULL);
     pending_v1_t* const            pending = owner->pending_v1;
     subject_reader_pinned_t* const pinned  = as_pinned(reader);
-    assert((pinned != NULL) && (pending != NULL) && (pending->message.content == NULL));
+    CY_ASSERT((pinned != NULL) && (pending != NULL) && (pending->message.content == NULL));
     const bool multiframe = (payload.origin.data != NULL);
 
     const size_t         inline_size = HEADER_BYTES + (multiframe ? 0 : payload.view.size);
@@ -451,9 +451,9 @@ static void v_on_msg_unicast(canard_subscription_t* const self,
 {
     (void)transfer_id;
     cy_can_t* const owner = (cy_can_t*)self->user_context;
-    assert(owner != NULL);
+    CY_ASSERT(owner != NULL);
     pending_v1_t* const pending = owner->pending_v1;
-    assert((pending != NULL) && (pending->message.content == NULL));
+    CY_ASSERT((pending != NULL) && (pending->message.content == NULL));
     const bool multiframe = (payload.origin.data != NULL);
 
     can_message_t* const msg = make_message(owner, multiframe ? 0 : payload.view.size);
@@ -530,7 +530,7 @@ static cy_err_t v_subject_writer_send(cy_platform_t* const       platform,
     const uint32_t          sid   = base->subject_id;
     const uint_least8_t     ibm   = (uint_least8_t)((1U << owner->iface_count) - 1U);
 
-    assert((message.data != NULL) && (message.size >= HEADER_BYTES));
+    CY_ASSERT((message.data != NULL) && (message.size >= HEADER_BYTES));
     const bool     pinned      = (sid <= CY_SUBJECT_ID_PINNED_MAX);
     const bool     best_effort = (((const uint_least8_t*)message.data)[0] == 0); // header_msg_be
     const bool     use_13b     = pinned && best_effort && topic_is_compat_named(sid, message.data);
@@ -599,7 +599,7 @@ static void reader_set_extent(subject_reader_t* const self, const size_t extent)
 
 static void tombstone_remove(cy_can_t* const owner, subject_reader_t* const self)
 {
-    assert((owner != NULL) && (self != NULL));
+    CY_ASSERT((owner != NULL) && (self != NULL));
     if (self->prev_tombstone != NULL) {
         self->prev_tombstone->next_tombstone = self->next_tombstone;
     } else {
@@ -616,7 +616,7 @@ static void tombstone_remove(cy_can_t* const owner, subject_reader_t* const self
 
 static void tombstone_enqueue(cy_can_t* const owner, subject_reader_t* const self)
 {
-    assert((owner != NULL) && (self != NULL));
+    CY_ASSERT((owner != NULL) && (self != NULL));
     self->prev_tombstone = owner->tombstone_tail;
     self->next_tombstone = NULL;
     if (owner->tombstone_tail != NULL) {
@@ -644,11 +644,11 @@ static subject_reader_t* reader_try_revive(cy_can_t* const owner, const uint32_t
         return NULL;
     }
     subject_reader_t* const self = (subject_reader_t*)incumbent->user_context;
-    assert((self != NULL) && (self->owner == owner) && (self->base.subject_id == subject_id));
+    CY_ASSERT((self != NULL) && (self->owner == owner) && (self->base.subject_id == subject_id));
     if (as_pinned(self) != NULL) {
         canard_subscription_t* const incumbent_13b =
           canard_find_subscription(&owner->canard, canard_kind_message_13b, (uint16_t)subject_id);
-        assert((incumbent_13b != NULL) && (((subject_reader_t*)incumbent_13b->user_context) == self));
+        CY_ASSERT((incumbent_13b != NULL) && (((subject_reader_t*)incumbent_13b->user_context) == self));
         if ((incumbent_13b == NULL) || (((subject_reader_t*)incumbent_13b->user_context) != self)) {
             return NULL;
         }
@@ -663,7 +663,7 @@ static subject_reader_t* reader_try_revive(cy_can_t* const owner, const uint32_t
 /// Finalize a reader: unsubscribe from canard and free memory. Does NOT unlink from any list.
 static void reader_finalize(cy_can_t* const owner, subject_reader_t* const self)
 {
-    assert((owner != NULL) && (self != NULL));
+    CY_ASSERT((owner != NULL) && (self != NULL));
     if (owner->base.cy != NULL) {
         CY_TRACE(owner->base.cy, "S%08jx ptr=%p", (uintmax_t)self->base.subject_id, (void*)self);
     }
@@ -704,7 +704,7 @@ static cy_subject_reader_t* v_subject_reader_new(cy_platform_t* const base,
                                                                 extent,
                                                                 CANARD_DEFAULT_TRANSFER_ID_TIMEOUT_us,
                                                                 &sub_vtable_16b);
-    assert(sub_16b == &self->sub_16b);
+    CY_ASSERT(sub_16b == &self->sub_16b);
     if (sub_16b != &self->sub_16b) {
         owner->vtable->realloc(owner->user, self, 0);
         return NULL;
@@ -715,14 +715,14 @@ static cy_subject_reader_t* v_subject_reader_new(cy_platform_t* const base,
         subject_reader_pinned_t* const p = (subject_reader_pinned_t*)self;
         // 13-bit payload does not include the Cy header; we prepend it ourselves.
         const size_t extent_13b = (extent > HEADER_BYTES) ? (extent - HEADER_BYTES) : 0;
-        assert(canard_find_subscription(&owner->canard, canard_kind_message_13b, (uint16_t)subject_id) == NULL);
+        CY_ASSERT(canard_find_subscription(&owner->canard, canard_kind_message_13b, (uint16_t)subject_id) == NULL);
         canard_subscription_t* const sub_13b = canard_subscribe_13b(&owner->canard,
                                                                     &p->sub_13b,
                                                                     (uint16_t)subject_id,
                                                                     extent_13b,
                                                                     CANARD_DEFAULT_TRANSFER_ID_TIMEOUT_us,
                                                                     &sub_vtable_13b);
-        assert(sub_13b == &p->sub_13b);
+        CY_ASSERT(sub_13b == &p->sub_13b);
         if (sub_13b != &p->sub_13b) {
             canard_unsubscribe(&owner->canard, &self->sub_16b);
             owner->vtable->realloc(owner->user, self, 0);
@@ -818,7 +818,7 @@ static void ingest_frame(cy_can_t* const owner, const cy_can_rx_t* const frame)
     const canard_bytes_t can_data   = { .size = frame->len, .data = frame->data };
     pending_v1_t         pending_v1 = { 0 };
     pending_v0_t         pending_v0 = { 0 };
-    assert((owner->pending_v1 == NULL) && (owner->pending_v0 == NULL));
+    CY_ASSERT((owner->pending_v1 == NULL) && (owner->pending_v0 == NULL));
     owner->pending_v1 = &pending_v1;
     owner->pending_v0 = &pending_v0;
     (void)canard_ingest_frame(&owner->canard, frame->timestamp, frame->iface_index, frame->can_id, can_data);
@@ -1002,10 +1002,10 @@ void cy_can_destroy(cy_platform_t* const base)
     if (owner == NULL) {
         return;
     }
-    assert((owner->pending_v1 == NULL) && (owner->pending_v0 == NULL));
+    CY_ASSERT((owner->pending_v1 == NULL) && (owner->pending_v0 == NULL));
     while (owner->tombstone_head != NULL) {
         subject_reader_t* const rd = tombstone_pop(owner);
-        assert(rd != NULL);
+        CY_ASSERT(rd != NULL);
         reader_finalize(owner, rd);
     }
     canard_unsubscribe(&owner->canard, &owner->unicast_sub);
@@ -1033,10 +1033,10 @@ static void v_on_msg_v0(canard_subscription_t* const self,
                         const canard_payload_t       payload)
 {
     cy_can_v0_subscription_t* const sub = (cy_can_v0_subscription_t*)self->user_context;
-    assert((sub != NULL) && (sub->owner != NULL));
+    CY_ASSERT((sub != NULL) && (sub->owner != NULL));
     cy_can_t* const     owner   = sub->owner;
     pending_v0_t* const pending = owner->pending_v0;
-    assert((pending != NULL) && (pending->payload.view.data == NULL));
+    CY_ASSERT((pending != NULL) && (pending->payload.view.data == NULL));
     pending->subscription   = sub;
     pending->timestamp      = timestamp;
     pending->priority       = priority;
@@ -1044,7 +1044,7 @@ static void v_on_msg_v0(canard_subscription_t* const self,
     pending->transfer_id    = transfer_id;
     pending->payload        = payload;
     if (payload.origin.data == NULL) {
-        assert(payload.view.size <= sizeof(pending->single_frame_data));
+        CY_ASSERT(payload.view.size <= sizeof(pending->single_frame_data));
         (void)memcpy(pending->single_frame_data, payload.view.data, payload.view.size);
         pending->payload.view.data = pending->single_frame_data;
     }
