@@ -15,6 +15,7 @@
 
 #include "cy.h"
 #include <stdint.h>
+#include <stdlib.h>
 
 /// See the subject_id_modulus for details.
 #define CY_SUBJECT_ID_MODULUS_16bit 57203UL      ///< Suitable for all Cyphal transports.

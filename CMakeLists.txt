@@ -28,6 +28,7 @@ if (NOT NO_STATIC_ANALYSIS)
     set(cppcheck_options
             --enable=warning,style,performance,portability
             --error-exitcode=2
+            -UCY_CONFIG_HEADER
             --suppress=missingIncludeSystem
             --suppress=badBitmaskCheck
             --suppress=constParameterCallback
