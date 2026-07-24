@@ -21,7 +21,6 @@
 #define RAPIDHASH_COMPACT
 #include <rapidhash.h>
 
-#include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>

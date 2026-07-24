@@ -17,7 +17,6 @@
 
 #include "udp_wrapper.h"
 
-#include <assert.h>
 #include <fcntl.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
