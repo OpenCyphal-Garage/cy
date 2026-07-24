@@ -19,8 +19,8 @@
 #include <stdint.h>
 
 // Configure cavl2.h. Key definitions must be provided before including the header.
-#define CAVL2_RELATION  int32_t
-#define CAVL2_T         cy_tree_t
+#define CAVL2_RELATION int32_t
+#define CAVL2_T        cy_tree_t
 #ifndef CAVL2_ASSERT
 #define CAVL2_ASSERT(x) CY_ASSERT(x)
 #endif
