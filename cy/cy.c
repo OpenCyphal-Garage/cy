@@ -18,9 +18,6 @@
 #include "cy_platform.h"
 #include <stdint.h>
 
-#define WKV_ASSERT(x) CY_ASSERT(x)
-#include <wild_key_value.h>
-
 // Configure cavl2.h. Key definitions must be provided before including the header.
 #define CAVL2_RELATION  int32_t
 #define CAVL2_T         cy_tree_t
