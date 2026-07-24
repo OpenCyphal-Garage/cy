@@ -1,7 +1,9 @@
 name: CI
 on:
   push:
-    paths-ignore:
+    branches:
+      - main
+    paths-ignore: &paths-ignore
       - "papers/**"
       - "model/tlaplus/**"
       - "**/*.md"
@@ -13,6 +15,10 @@ on:
       - ".idea/**"
       - ".zed/**"
       - ".vscode/**"
+  pull_request:
+    branches:
+      - main
+    paths-ignore: *paths-ignore
 
 jobs:
   test_debug_with_static_analysis:
