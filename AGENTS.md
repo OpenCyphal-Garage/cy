@@ -46,4 +46,3 @@ When using subagents to implement tests, always instruct them to summarize their
 ## Review loop
 
 Use `.claude/skills/review-loop` upon completion of each deliverable.
-Iterate until three consecutive no-major-findings iterations.
