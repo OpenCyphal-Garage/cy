@@ -144,7 +144,8 @@ static void run_case(fixture_t* const fixture,
     TEST_ASSERT_NOT_NULL(duplicated);
     assert_duplicated_chain(payload, payload_size, duplicated);
     TEST_ASSERT_EQUAL_size_t(chunk_count, guarded_heap_allocated_fragments(&fixture->heap));
-    TEST_ASSERT_EQUAL_size_t(chunk_count * BYTES_DUP_CHUNK, guarded_heap_allocated_bytes(&fixture->heap));
+    TEST_ASSERT_EQUAL_size_t(payload_size + (chunk_count * sizeof(cy_bytes_t)),
+                             guarded_heap_allocated_bytes(&fixture->heap));
 
     bytes_undup(&fixture->cy, duplicated);
     TEST_ASSERT_EQUAL_size_t(0, guarded_heap_allocated_fragments(&fixture->heap));

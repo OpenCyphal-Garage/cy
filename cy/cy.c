@@ -288,7 +288,7 @@ static void mem_free(const cy_t* const cy, void* ptr)
     }
 }
 
-// The chunk size is optimized to minimize heap fragmentation. See o1heap for theory.
+// The maximum chunk allocation is optimized to minimize heap fragmentation. See o1heap for theory.
 // This is only used with reliable transmissions where the library needs to store the payload for possible retransmits.
 #define BYTES_DUP_CHUNK (1024U - (sizeof(void*) * 2U))
 
@@ -309,6 +309,28 @@ static void bytes_undup(const cy_t* const cy, const cy_bytes_t* bytes)
     }
 }
 
+static size_t bytes_take(const cy_bytes_t** const in, size_t* const in_offset, const size_t limit, byte_t* const out)
+{
+    size_t taken = 0;
+    while ((*in != NULL) && (taken < limit)) {
+        while ((*in != NULL) && (*in_offset >= (*in)->size)) {
+            *in        = (*in)->next;
+            *in_offset = 0;
+        }
+        if (*in != NULL) {
+            CY_ASSERT(((*in)->size == 0) || ((*in)->data != NULL));
+            const size_t size = smaller(limit - taken, (*in)->size - *in_offset);
+            CY_ASSERT(size > 0);
+            if (out != NULL) {
+                memcpy(&out[taken], &((const byte_t*)(*in)->data)[*in_offset], size);
+            }
+            taken += size;
+            *in_offset += size;
+        }
+    }
+    return taken;
+}
+
 // Copies bytes to the heap in small chunks to reduce fragmentation risks. NULL iff OOM. Use bytes_undup() to undo.
 static const cy_bytes_t* bytes_dup(const cy_t* const cy, const cy_bytes_t src)
 {
@@ -319,19 +341,18 @@ static const cy_bytes_t* bytes_dup(const cy_t* const cy, const cy_bytes_t src)
     const cy_bytes_t*   head           = NULL;
     cy_bytes_t*         tail           = NULL;
     while (true) {
-        while ((in != NULL) && (in_offset >= in->size)) { // skip empty
-            in        = in->next;
-            in_offset = 0;
-        }
-        if (in == NULL) {
+        const cy_bytes_t* scan        = in;
+        size_t            scan_offset = in_offset;
+        const size_t      data_size   = bytes_take(&scan, &scan_offset, data_per_chunk, NULL);
+        if (data_size == 0) {
             if (head == NULL) {
                 head = &bytes_empty_sentinel;
             }
             break;
         }
-        CY_ASSERT((in->size == 0) || (in->data != NULL));
+        CY_ASSERT(data_size <= data_per_chunk);
 
-        cy_bytes_t* const chunk = (cy_bytes_t*)mem_alloc(cy, BYTES_DUP_CHUNK);
+        cy_bytes_t* const chunk = (cy_bytes_t*)mem_alloc(cy, sizeof(cy_bytes_t) + data_size);
         if (chunk == NULL) {
             bytes_undup(cy, head);
             return NULL;
@@ -347,23 +368,8 @@ static const cy_bytes_t* bytes_dup(const cy_t* const cy, const cy_bytes_t src)
         }
         tail = chunk;
 
-        while (chunk->size < data_per_chunk) {
-            while ((in != NULL) && (in_offset >= in->size)) {
-                in        = in->next;
-                in_offset = 0;
-            }
-            if (in == NULL) {
-                break;
-            }
-            CY_ASSERT((in->size == 0) || (in->data != NULL));
-
-            const size_t copy_size = smaller(data_per_chunk - chunk->size, in->size - in_offset);
-            CY_ASSERT(copy_size > 0);
-            memcpy(((byte_t*)(chunk + 1)) + chunk->size, ((const byte_t*)in->data) + in_offset, copy_size);
-            chunk->size += copy_size;
-            in_offset += copy_size;
-        }
-        CY_ASSERT(chunk->size <= data_per_chunk);
+        chunk->size = bytes_take(&in, &in_offset, data_size, (byte_t*)(chunk + 1));
+        CY_ASSERT(chunk->size == data_size);
     }
     return head;
 }
