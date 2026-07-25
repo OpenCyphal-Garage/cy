@@ -4433,7 +4433,7 @@ cy_t* cy_new(cy_platform_t* const platform, const cy_str_t home, const cy_str_t 
 
     cy->respond_futures_by_tag = NULL;
 
-    cy->unicast_extent = HEADER_BYTES + 1024U; // Arbitrary initial size; will be refined when publishers are created.
+    cy->unicast_extent = HEADER_BYTES + 100U; // Arbitrary initial size; will be refined when publishers are created.
     cy->platform->vtable->unicast_extent_set(platform, cy->unicast_extent);
 
     cy->ts_started             = platform->vtable->now(platform);
