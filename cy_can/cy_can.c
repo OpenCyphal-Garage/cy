@@ -35,8 +35,8 @@
 #error "Invalid CY_CAN_NONBLOCKING_SPIN_LIMIT"
 #endif
 
-/// Default extent for incoming unicast messages; will grow as needed.
-#define UNICAST_EXTENT_INITIAL (HEADER_BYTES + 1024U)
+/// Default extent for incoming unicast messages; will grow as needed. Chosen rather arbitrarily.
+#define UNICAST_EXTENT_INITIAL (CANARD_MTU_CAN_FD - 1U)
 
 typedef struct
 {
