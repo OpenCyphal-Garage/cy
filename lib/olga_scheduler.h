@@ -19,9 +19,17 @@
 
 #pragma once
 
+#ifndef OLGA_ASSERT
+#include <assert.h>
+#define OLGA_ASSERT(x) assert(x)
+#endif
+
+#ifndef CAVL2_ASSERT
+#define CAVL2_ASSERT(x) OLGA_ASSERT(x)
+#endif
+
 #include <cavl2.h> // Add to your include paths: https://github.com/pavel-kirienko/cavl
 
-#include <assert.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -33,6 +41,7 @@ extern "C"
 
 typedef struct olga_t       olga_t;
 typedef struct olga_event_t olga_event_t;
+typedef void (*olga_handler_t)(olga_t*, olga_event_t*, int64_t now);
 
 /// Represents a user-handled future event.
 /// When the handler is invoked, the event is already removed from the scheduler.
@@ -41,11 +50,11 @@ typedef struct olga_event_t olga_event_t;
 /// The time units can be arbitrary.
 struct olga_event_t
 {
-    CAVL2_T  base;
-    int64_t  deadline;
-    uint64_t seqno;
-    void (*handler)(olga_t*, olga_event_t*, int64_t now);
-    void* user;
+    CAVL2_T        base;
+    int64_t        deadline;
+    uint64_t       seqno;
+    olga_handler_t handler;
+    void*          user;
 };
 
 // Convenience initializer for a fresh event (all fields zeroed, base pointers NULL).
@@ -78,8 +87,8 @@ typedef struct olga_spin_result_t
 /// The time units can be arbitrary.
 static inline void olga_init(olga_t* const self, void* const user, int64_t (*const now)(olga_t* sched))
 {
-    assert(self != NULL);
-    assert(now != NULL);
+    OLGA_ASSERT(self != NULL);
+    OLGA_ASSERT(now != NULL);
     self->events     = NULL;
     self->next_seqno = 0U;
     self->now        = now;
@@ -108,15 +117,15 @@ static inline CAVL2_RELATION olga_private_compare(const void* user, const CAVL2_
 /// The event must be either zero-initialized using OLGA_EVENT_INIT or have been used at least once.
 /// Events are already canceled prior to handler invocation, so it is safe to re-register immediately from the handler.
 /// The complexity is logarithmic in the number of pending events.
-static inline void olga_defer(olga_t* const self,
-                              const int64_t deadline,
-                              void* const   user,
-                              void (*const handler)(olga_t*, olga_event_t*, int64_t now),
-                              olga_event_t* const out_event)
+static inline void olga_defer(olga_t* const        self,
+                              const int64_t        deadline,
+                              void* const          user,
+                              const olga_handler_t handler,
+                              olga_event_t* const  out_event)
 {
-    assert(self != NULL);
-    assert(handler != NULL);
-    assert(out_event != NULL);
+    OLGA_ASSERT(self != NULL);
+    OLGA_ASSERT(handler != NULL);
+    OLGA_ASSERT(out_event != NULL);
     (void)cavl2_remove_if(&self->events, &out_event->base);
     out_event->deadline = deadline;
     out_event->seqno    = self->next_seqno++;
@@ -130,8 +139,8 @@ static inline void olga_defer(olga_t* const self,
 /// The complexity is logarithmic in the number of pending events.
 static inline void olga_cancel(olga_t* const self, olga_event_t* const event)
 {
-    assert(self != NULL);
-    assert(event != NULL);
+    OLGA_ASSERT(self != NULL);
+    OLGA_ASSERT(event != NULL);
     (void)cavl2_remove_if(&self->events, &event->base);
     event->deadline = INT64_MIN;
 }
@@ -139,8 +148,8 @@ static inline void olga_cancel(olga_t* const self, olga_event_t* const event)
 /// True if the event is currently pending in the scheduler.
 static inline bool olga_is_pending(const olga_t* const self, const olga_event_t* const event)
 {
-    assert(self != NULL);
-    assert(event != NULL);
+    OLGA_ASSERT(self != NULL);
+    OLGA_ASSERT(event != NULL);
     return cavl2_is_inserted(self->events, &event->base);
 }
 
@@ -150,7 +159,7 @@ static inline bool olga_is_pending(const olga_t* const self, const olga_event_t*
 /// This method should be invoked regularly to pump the event loop.
 static inline olga_spin_result_t olga_spin(olga_t* const self)
 {
-    assert(self != NULL);
+    OLGA_ASSERT(self != NULL);
     olga_spin_result_t out = { .next_deadline = INT64_MAX, .worst_lateness = 0, .now = INT64_MIN };
     for (;;) { // GCOVR_EXCL_LINE
         olga_event_t* const event = (olga_event_t*)cavl2_min(self->events);
