@@ -7,7 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 
-static_assert(CY_CONFIG_REQUEST_ACK_RETENTION_us == SESSION_LIFETIME,
+static_assert(CY_CONFIG_REQUEST_ACK_RETENTION_us == SESSION_LIFETIME, // NOLINT(misc-redundant-expression)
               "request ACK retention should default to the session lifetime");
 
 typedef struct
