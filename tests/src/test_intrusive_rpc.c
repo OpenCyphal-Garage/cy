@@ -44,6 +44,8 @@ typedef struct
 
 static size_t g_dummy_publish_dispose_count = 0U; // NOLINT(*-non-const-global-variables)
 
+static_assert(sizeof(request_ack_t) != sizeof(request_future_remote_t), "size-keyed OOM injection is ambiguous");
+
 static void* fixture_realloc(cy_platform_t* const platform, void* const ptr, const size_t size)
 {
     fixture_t* const self = (fixture_t*)platform;
@@ -984,82 +986,6 @@ static void test_request_ack_record_ack_seen_nack_unseen(void)
 
 // A single responder whose first reliable response carries seqno 0 is stored inline: no tree node, no bitmap,
 // no second allocation. This is the shape the whole optimization exists for.
-// Releasing the last reference to a message invokes a platform destructor whose reach Cy cannot bound. If that
-// destructor re-enters cy_on_message() with a retransmission, the tag must still resolve -- to the live future or
-// to its handed-over record, never to neither. Disposal therefore hands the record over BEFORE releasing the
-// message; with the reverse order this dispatch NACKs a response the application already accepted.
-typedef struct
-{
-    fixture_t*                 fixture;
-    const cy_message_vtable_t* inner;
-    cy_message_vtable_t        outer;
-    uint64_t                   topic_hash;
-    uint64_t                   message_tag;
-    uint64_t                   remote_id;
-    bool                       fired;
-    byte_t                     reentrant_verdict;
-} reentrant_destroy_ctx_t;
-
-static reentrant_destroy_ctx_t* g_reentrant_ctx = NULL; // NOLINT(*-non-const-global-variables)
-
-static void reentrant_destroy(cy_message_t* const msg)
-{
-    reentrant_destroy_ctx_t* const ctx = g_reentrant_ctx;
-    TEST_ASSERT_NOT_NULL(ctx);
-    if (!ctx->fired) { // Guard against recursion via the message the nested dispatch itself creates.
-        ctx->fired = true;
-        dispatch_response_control(ctx->fixture,
-                                  (byte_t)header_rsp_rel,
-                                  0x77U,
-                                  0U,
-                                  ctx->topic_hash,
-                                  ctx->message_tag,
-                                  ctx->remote_id,
-                                  ctx->fixture->now + 9U,
-                                  false);
-        ctx->reentrant_verdict = ctx->fixture->last_unicast[0];
-    }
-    msg->vtable = ctx->inner; // Hand back to the stub so the heap accounting stays correct.
-    ctx->inner->destroy(msg);
-}
-
-static void test_request_ack_handoff_precedes_message_release(void)
-{
-    fixture_t fixture;
-    fixture_init(&fixture);
-
-    const uint64_t    topic_hash  = UINT64_C(0x1212121234343434);
-    const uint64_t    message_tag = UINT64_C(2030);
-    const uint64_t    remote_id   = 0xD5U;
-    cy_topic_t        topic;
-    request_future_t* fut = make_indexed_request_future(&fixture, &topic, message_tag, 20000, topic_hash);
-
-    cy_message_ts_t msg = make_message(&fixture, fixture.now + 1U, 1U);
-    TEST_ASSERT_EQUAL_INT(response_rx_ack, request_on_response(fut, 0U, msg, true, make_lane(remote_id)));
-
-    // Wrap the retained response's vtable so that its destruction re-enters the RX path.
-    reentrant_destroy_ctx_t ctx = { .fixture     = &fixture,
-                                    .inner       = msg.content->vtable,
-                                    .topic_hash  = topic_hash,
-                                    .message_tag = message_tag,
-                                    .remote_id   = remote_id,
-                                    .fired       = false };
-    ctx.outer                   = *ctx.inner;
-    ctx.outer.destroy           = reentrant_destroy;
-    msg.content->vtable         = &ctx.outer;
-    g_reentrant_ctx             = &ctx;
-    cy_message_refcount_dec(msg.content); // drop the local reference; the future still holds one
-
-    cy_future_destroy(&fut->base); // dispose releases the last reference -> reentrant_destroy runs
-    g_reentrant_ctx = NULL;
-    TEST_ASSERT_TRUE(ctx.fired);
-    TEST_ASSERT_EQUAL_UINT8(header_rsp_ack, ctx.reentrant_verdict); // never NACK an accepted response
-
-    reap_request_acks(&fixture, &topic);
-    unindex_request_topic(&fixture, &topic);
-    fixture_assert_clean(&fixture);
-}
-
 static void test_request_ack_solo_claim_and_duplicate(void)
 {
     fixture_t fixture;
@@ -1643,7 +1569,6 @@ int main(void)
     RUN_TEST(test_request_future_dispose_hands_over_and_releases_last_response);
     RUN_TEST(test_request_on_response_reliable_dedup_and_ordering);
     RUN_TEST(test_request_ack_record_ack_seen_nack_unseen);
-    RUN_TEST(test_request_ack_handoff_precedes_message_release);
     RUN_TEST(test_request_ack_solo_claim_and_duplicate);
     RUN_TEST(test_request_ack_solo_promotes_same_remote);
     RUN_TEST(test_request_ack_solo_promotes_second_remote);

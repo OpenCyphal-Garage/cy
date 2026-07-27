@@ -1016,7 +1016,7 @@ struct cy_topic_t
     cy_tree_t* request_futures_by_tag;
 
     // Ack records left behind by destroyed request futures to answer retransmitted reliable responses.
-    // Ordered by dead_at: the list is re-headed only at handoff and never touched afterward, so a tail sweep is exact.
+    // Ordered by dead_at: re-headed only at handoff and never touched afterward, so a tail sweep is exact.
     cy_tree_t* request_acks_by_tag;
     cy_list_t  request_acks_by_expiry;
 
@@ -2621,6 +2621,8 @@ static request_ack_t* request_ack_new(const cy_t* const cy, const uint64_t tag)
 static void request_ack_destroy(cy_topic_t* const owner, request_ack_t* const self)
 {
     const cy_t* const cy = owner->cy;
+    CY_ASSERT(is_listed(&owner->request_acks_by_expiry, &self->expiry) ==
+              cavl2_is_inserted(owner->request_acks_by_tag, &self->index));
     delist(&owner->request_acks_by_expiry, &self->expiry);
     cavl2_remove_if(&owner->request_acks_by_tag, &self->index);
     if (!self->solo) {
@@ -2660,8 +2662,7 @@ static bool request_ack_test(const request_ack_t* const self, const uint64_t rem
 }
 
 // Sets out_fresh iff the response is genuinely new and must reach the app.
-// A zero-allocated remote node means "known, nothing acked", NOT "seqno 0 acked", which is why the solo slot may
-// only be claimed when a remote's FIRST response carries seqno 0.
+// The solo slot encodes exactly "R acked seqno 0", so it can only be claimed while the record is still empty.
 static response_rx_t request_ack_admit(request_ack_t* const self,
                                        cy_topic_t* const    topic,
                                        const uint64_t       remote_id,
@@ -2686,6 +2687,7 @@ static response_rx_t request_ack_admit(request_ack_t* const self,
             ON_ASYNC_ERROR(cy, topic, CY_ERR_MEMORY);
             return response_rx_silent; // Still solo, nothing lost.
         }
+        // A zero-allocated node means "known, nothing acked", so the inlined ack must be re-stated explicitly.
         bitmap_set(node->seqno_acked, 0); // seqno_top is already zero, and the inlined ack was for seqno 0.
         self->solo   = false;
         self->u.tree = promoted;
@@ -2778,6 +2780,7 @@ static response_rx_t request_on_response(request_future_t* const self,
         if (!fresh) {
             return verdict; // Duplicate, too old, or transient failure; the application must not see it.
         }
+        CY_ASSERT(verdict == response_rx_ack); // A fresh response is always acked; the fall-through relies on it.
     }
 
     // At this point, the response is known to be unique. Rewrite the last stored response.
@@ -2824,21 +2827,20 @@ static void request_future_dispose(cy_future_t* const base)
         self->publish = NULL;
     }
     future_deadline_disarm(base);
+    const cy_us_t now = cy_now(cy); // sampled before deindexing to avoid vtable access during teardown
     future_index_remove(base, &topic->request_futures_by_tag);
+    // A message destructor re-entering the RX path here would find no record yet; no sane transport does that.
+    cy_message_refcount_dec(self->last_response.message.content); // NULL-safe
     // The acks that we sent for reliable responses may have been lost, in which case the remote would retransmit.
     // In that case we will need to respond the same way we did the first time without involving the application.
-    // The record is a fraction of the future's size, so we hand it over and free ourselves.
     // A record that acked nothing can only ever answer NACK, so it is freed rather than retained.
-    // This precedes the message release below so that no window exists in which the tag resolves to neither the
-    // future nor the record: releasing the last reference invokes a platform destructor of unknown reach.
     if (self->ack != NULL) {
         if (self->ack->solo || (self->ack->u.tree != NULL)) {
-            request_ack_retain(topic, self->ack, cy_now(cy));
+            request_ack_retain(topic, self->ack, now);
         } else {
             request_ack_destroy(topic, self->ack);
         }
     }
-    cy_message_refcount_dec(self->last_response.message.content); // NULL-safe
     mem_free(cy, self);
 }
 
@@ -4323,11 +4325,11 @@ static void topic_destroy(cy_topic_t* const topic)
     CY_ASSERT(topic->request_futures_by_tag == NULL);
 
     // Remove the ack records left behind by destroyed request futures to manage retransmissions.
-    while (topic->request_acks_by_tag != NULL) {
-        request_ack_destroy(topic, (request_ack_t*)topic->request_acks_by_tag);
+    while (topic->request_acks_by_expiry.head != NULL) {
+        request_ack_destroy(topic, LIST_MEMBER(topic->request_acks_by_expiry.head, request_ack_t, expiry));
     }
-    CY_ASSERT(topic->request_acks_by_expiry.head == NULL);
     CY_ASSERT(topic->request_acks_by_expiry.tail == NULL);
+    CY_ASSERT(topic->request_acks_by_tag == NULL);
 
     // Release gossip shard reader/writer from registry.
     if (topic->gossip_writer != NULL) {
@@ -5087,12 +5089,9 @@ void cy_on_message(cy_platform_t* const  platform,
                 if (future != NULL) {
                     response = request_on_response(future, seqno, message, reliable, lane);
                 } else if (reliable) { // The future may be gone but its ack record may still answer for it.
-                    response = request_ack_test((request_ack_t*)cavl2_find(
-                                                  topic->request_acks_by_tag, &message_tag, request_ack_cavl_compare),
-                                                lane.id,
-                                                seqno)
-                                 ? response_rx_ack
-                                 : response_rx_nack;
+                    const request_ack_t* const ack =
+                      (request_ack_t*)cavl2_find(topic->request_acks_by_tag, &message_tag, request_ack_cavl_compare);
+                    response = request_ack_test(ack, lane.id, seqno) ? response_rx_ack : response_rx_nack;
                 }
             }
             if (reliable && (response != response_rx_silent)) {

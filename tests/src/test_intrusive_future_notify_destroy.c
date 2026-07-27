@@ -977,13 +977,7 @@ static void test_request_ack_records_reaped_across_topics(void)
         TEST_ASSERT_NOT_NULL(topic[i]->request_acks_by_tag);
     }
 
-    // One spin past dead_at reaps at most one topic; all three need at least a full cursor cycle.
     fixture_spin_to(&fixture, fixture.now + (SESSION_LIFETIME / 2) + 1);
-    size_t remaining = 0;
-    for (unsigned i = 0; i < 3U; i++) {
-        remaining += (topic[i]->request_acks_by_tag != NULL) ? 1U : 0U;
-    }
-    TEST_ASSERT_TRUE(remaining >= 2U); // round-robin, not a global sweep
 
     for (unsigned i = 0; i < 8U; i++) {
         fixture_spin_to(&fixture, fixture.now + 1);

@@ -1487,7 +1487,9 @@ static void test_topic_destroy_error_rollback_like_path_on_coupling_oom(void)
 
     subscriber_root_t root                = { 0 };
     wkv_node_t        pattern_node        = { 0 };
+    wkv_node_t        name_node           = { 0 }; // topic_couple() traces the root name under CY_CONFIG_TRACE
     root.cy                               = fix.cy;
+    root.index_name                       = &name_node;
     root.index_pattern                    = &pattern_node; // non-NULL means pattern root
     static const wkv_substitution_t subst = { .str = { .len = 1U, .str = "x" }, .ordinal = 0U, .next = NULL };
 

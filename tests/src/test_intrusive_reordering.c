@@ -29,6 +29,7 @@ typedef struct
 {
     reorder_fixture_t fixture;
     subscriber_root_t root;
+    wkv_node_t        root_name_node; // topic_couple() traces the root name under CY_CONFIG_TRACE
     subscriber_t      sub;
     cy_topic_t        topic;
     reordering_t      rr;
@@ -106,7 +107,8 @@ static void reorder_env_init(reorder_env_t* const self)
     self->fixture.last_async_error_line = 0;
     olga_init(&self->fixture.cy.olga, &self->fixture.cy, olga_now);
 
-    self->root.cy = &self->fixture.cy;
+    self->root.cy         = &self->fixture.cy;
+    self->root.index_name = &self->root_name_node;
 
     self->sub.base.index                    = TREE_NULL;
     self->sub.base.key                      = 0;
