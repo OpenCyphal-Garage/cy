@@ -85,6 +85,18 @@ struct cy_tree_t
 // Soft states associated remotes will be discarded when stale for this long.
 #define SESSION_LIFETIME (60 * MEGA)
 
+// How long completed reliable-request ACK state is retained to answer retransmits.
+// This is a last resort knob for extremely memory-starved systems, for expert tuning only.
+//
+// Applications that are memory-constrained, request-intensive, and receive reliable responses may choose to downsize
+// this to reduce the memory pressure from retained ACK markers in case an ACK transmission has failed.
+// Small values introduce the risk of the server reading a NACK for a retried reliable response where the original
+// response was an ACK; some applications, in particular those that don't use streaming, are tolerant to this which
+// enables memory savings.
+#ifndef CY_CONFIG_REQUEST_ACK_RETENTION_us
+#define CY_CONFIG_REQUEST_ACK_RETENTION_us SESSION_LIFETIME
+#endif
+
 // Largest backward monotonic-counter jump still treated as delayed traffic from the current session.
 #define SESSION_COUNTER_MAX_BACKWARD_LAG 100000ULL
 
@@ -2727,7 +2739,7 @@ static response_rx_t request_ack_admit(request_ack_t* const self,
 // Hand over to the topic to answer retransmits after the future is gone. Allocation-free: dispose must be infallible.
 static void request_ack_retain(cy_topic_t* const owner, request_ack_t* const self, const cy_us_t now)
 {
-    self->dead_at              = now + (SESSION_LIFETIME / 2);
+    self->dead_at              = now + (CY_CONFIG_REQUEST_ACK_RETENTION_us);
     const cy_tree_t* const ins = cavl2_find_or_insert(
       &owner->request_acks_by_tag, &self->tag, request_ack_cavl_compare, self, cavl2_trivial_factory);
     CY_ASSERT(ins == &self->index); // Tags are unique per topic.

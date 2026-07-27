@@ -7,6 +7,9 @@
 #include <stdio.h>
 #include <string.h>
 
+static_assert(CY_CONFIG_REQUEST_ACK_RETENTION_us == SESSION_LIFETIME,
+              "request ACK retention should default to the session lifetime");
+
 typedef struct
 {
     cy_platform_t        platform;
@@ -706,7 +709,7 @@ static void test_request_notify_on_response_reliable_destroy(void)
     // topic and cy_spin_once() runs poll() once, so a single spin past dead_at visits it.
     cy_topic_t* const topic = cy_publisher_topic(pub);
     TEST_ASSERT_NOT_NULL(topic->request_acks_by_tag);
-    fixture_spin_to(&fixture, fixture.now + (SESSION_LIFETIME / 2) + 1);
+    fixture_spin_to(&fixture, fixture.now + (CY_CONFIG_REQUEST_ACK_RETENTION_us) + 1);
     TEST_ASSERT_NULL(topic->request_acks_by_tag); // proves the poll sweep, not just fixture_deinit's teardown
 
     cy_unadvertise(pub);
@@ -837,7 +840,7 @@ static void test_request_notify_timeout_with_remote_destroy(void)
     TEST_ASSERT_NOT_NULL(topic->request_acks_by_tag); // handed over on the way out
 
     // Reaped by poll(); one topic exists, so a single spin past dead_at suffices.
-    fixture_spin_to(&fixture, fixture.now + (SESSION_LIFETIME / 2) + 1);
+    fixture_spin_to(&fixture, fixture.now + (CY_CONFIG_REQUEST_ACK_RETENTION_us) + 1);
     TEST_ASSERT_NULL(topic->request_acks_by_tag);
     cy_unadvertise(pub);
     fixture_deinit(&fixture);
@@ -880,7 +883,7 @@ static void test_publish_pending_future_destroy_then_unadvertise_clean(void)
 }
 
 // Invariant: a record is on the topic's expiry structures IFF its future is gone. A live future can easily
-// outlive SESSION_LIFETIME/2 because every response re-arms the liveness timer, so if the record were enlisted
+// outlive CY_CONFIG_REQUEST_ACK_RETENTION_us because every response re-arms the liveness timer, so if it were enlisted
 // at creation instead of at handoff, the poll sweep would free it out from under the live future.
 static void test_request_live_future_outlives_retention_window(void)
 {
@@ -907,8 +910,8 @@ static void test_request_live_future_outlives_retention_window(void)
 
     // Spin well past the retention window, re-arming liveness mid-way with a fresh response so that the future
     // stays PENDING by the stated mechanism rather than merely by nobody destroying it. The sweep runs on every
-    // poll() and must not touch the live record. Each leg is 50 s, i.e. well beyond SESSION_LIFETIME/2 = 30 s,
-    // yet short of the 60 s liveness timeout that would otherwise fire.
+    // poll() and must not touch the live record. The two 50 s legs exceed the 60 s default retention together,
+    // while each stays short of the 60 s liveness timeout that would otherwise fire.
     for (unsigned leg = 0; leg < 2U; leg++) {
         for (unsigned i = 0; i < 5U; i++) {
             fixture_spin_to(&fixture, fixture.now + (SESSION_LIFETIME / 6));
@@ -977,7 +980,7 @@ static void test_request_ack_records_reaped_across_topics(void)
         TEST_ASSERT_NOT_NULL(topic[i]->request_acks_by_tag);
     }
 
-    fixture_spin_to(&fixture, fixture.now + (SESSION_LIFETIME / 2) + 1);
+    fixture_spin_to(&fixture, fixture.now + (CY_CONFIG_REQUEST_ACK_RETENTION_us) + 1);
 
     for (unsigned i = 0; i < 8U; i++) {
         fixture_spin_to(&fixture, fixture.now + 1);

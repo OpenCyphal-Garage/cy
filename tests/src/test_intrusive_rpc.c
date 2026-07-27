@@ -1,3 +1,4 @@
+#define CY_CONFIG_REQUEST_ACK_RETENTION_us 7000000LL
 #include <cy.c> // NOLINT(bugprone-suspicious-include)
 #include <unity.h>
 #include "guarded_heap.h"
@@ -299,10 +300,10 @@ static bool request_ack_is_solo(const request_future_t* const fut, const uint64_
 }
 
 // The intrusive fixture drives olga directly and never runs poll(), so retained records are never swept for us.
-// One full SESSION_LIFETIME ahead is strictly beyond any dead_at, which is a past handoff time plus half of it.
+// This is strictly beyond any record retained at or before the fixture's current time.
 static void reap_request_acks(const fixture_t* const fixture, cy_topic_t* const topic)
 {
-    request_ack_drop_stale(topic, fixture->now + SESSION_LIFETIME);
+    request_ack_drop_stale(topic, fixture->now + (CY_CONFIG_REQUEST_ACK_RETENTION_us) + 1);
 }
 
 static cy_breadcrumb_t make_test_breadcrumb(const fixture_t* const fixture,
@@ -864,7 +865,7 @@ static void test_request_future_dispose_hands_over_and_releases_last_response(vo
     // seqno 9 was the first response from this remote, so the record is promoted, not solo.
     const request_ack_t* const ack = (const request_ack_t*)topic.request_acks_by_tag;
     TEST_ASSERT_FALSE(ack->solo);
-    TEST_ASSERT_EQUAL_INT64(fixture.now + (SESSION_LIFETIME / 2), ack->dead_at);
+    TEST_ASSERT_EQUAL_INT64(fixture.now + (CY_CONFIG_REQUEST_ACK_RETENTION_us), ack->dead_at);
 
     reap_request_acks(&fixture, &topic);
     TEST_ASSERT_NULL(topic.request_acks_by_tag);
@@ -1409,7 +1410,7 @@ static void test_response_wire_reliable_oom_silent_then_retransmit(void)
     TEST_ASSERT_EQUAL_UINT64(message_tag, deserialize_u64(&fixture.last_unicast[16]));
 
     // Retention is a floor: past dead_at the record still answers ACK until a sweep actually runs.
-    fixture_advance_to(&fixture, fixture.now + (SESSION_LIFETIME / 2) + 1);
+    fixture_advance_to(&fixture, fixture.now + (CY_CONFIG_REQUEST_ACK_RETENTION_us) + 1);
     dispatch_response_control(
       &fixture, (byte_t)header_rsp_rel, tag, seqno, topic_hash, message_tag, remote_id, fixture.now + 50U, false);
     TEST_ASSERT_EQUAL_size_t(4U, fixture.unicast_send_count);
