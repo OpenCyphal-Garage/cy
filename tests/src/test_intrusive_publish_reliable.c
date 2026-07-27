@@ -10,6 +10,7 @@ typedef struct
     cy_platform_vtable_t vtable;
     cy_t                 cy;
     guarded_heap_t       heap;
+    cy_us_t              now;
 
     size_t fail_after;      ///< Fail N-th new allocation if new_alloc_count >= fail_after.
     size_t new_alloc_count; ///< Counts new allocations only, excludes realloc/free.
@@ -24,6 +25,10 @@ typedef struct
     size_t   last_unicast_size;
     byte_t   last_unicast[HEADER_BYTES];
 } fixture_t;
+
+// Tracing calls cy_now() on every CY_TRACE, so the clock hook must exist even though this fixture drives
+// time directly. Without it a CY_CONFIG_TRACE=1 build calls through a null pointer.
+static cy_us_t fixture_now(cy_platform_t* const platform) { return ((const fixture_t*)platform)->now; }
 
 static void* fixture_realloc(cy_platform_t* const platform, void* const ptr, const size_t size)
 {
@@ -85,6 +90,7 @@ static void fixture_init(fixture_t* const self)
     self->platform.subject_id_modulus = (uint32_t)CY_SUBJECT_ID_MODULUS_16bit;
     self->platform.cy                 = &self->cy;
     self->vtable.realloc              = fixture_realloc;
+    self->vtable.now                  = fixture_now;
     self->vtable.unicast              = fixture_unicast_send;
     self->cy.platform                 = &self->platform;
     self->diag = (cy_diag_t){ .next = NULL, .user_context = CY_USER_CONTEXT_EMPTY, .vtable = &fixture_diag_vtable };

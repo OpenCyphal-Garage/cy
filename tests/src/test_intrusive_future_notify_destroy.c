@@ -4,7 +4,11 @@
 #include "intrusive_fixture_utils.h"
 #include "message.h"
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h>
+
+static_assert(CY_CONFIG_REQUEST_ACK_RETENTION_us == SESSION_LIFETIME, // NOLINT(misc-redundant-expression)
+              "request ACK retention should default to the session lifetime");
 
 typedef struct
 {
@@ -699,7 +703,14 @@ static void test_request_notify_on_response_reliable_destroy(void)
     TEST_ASSERT_EQUAL_size_t(1U, cap.calls);
     TEST_ASSERT_TRUE(cap.saw_done);
     TEST_ASSERT_EQUAL_INT(CY_OK, cap.last_error);
-    fixture_spin_to(&fixture, fixture.now + (SESSION_LIFETIME / 2) + 1);
+
+    // The callback destroyed the future during the FIRST reliable response, so the record it hands over was
+    // created moments earlier in the very same call. It is reaped by poll(); this fixture has exactly one
+    // topic and cy_spin_once() runs poll() once, so a single spin past dead_at visits it.
+    cy_topic_t* const topic = cy_publisher_topic(pub);
+    TEST_ASSERT_NOT_NULL(topic->request_acks_by_tag);
+    fixture_spin_to(&fixture, fixture.now + (CY_CONFIG_REQUEST_ACK_RETENTION_us) + 1);
+    TEST_ASSERT_NULL(topic->request_acks_by_tag); // proves the poll sweep, not just fixture_deinit's teardown
 
     cy_unadvertise(pub);
     fixture_deinit(&fixture);
@@ -719,7 +730,8 @@ static void test_request_notify_on_response_reliable_oom_silent(void)
 
     destroy_capture_t cap = { 0 };
     set_destroy_callback(fut, &cap);
-    fixture_fail_alloc_size(&fixture, sizeof(request_future_remote_t), 1U);
+    // The response below carries seqno 0, i.e. the solo path, whose only allocation is the ack record itself.
+    fixture_fail_alloc_size(&fixture, sizeof(request_ack_t), 1U);
     dispatch_response_message(&fixture,
                               UINT64_C(0xB003),
                               header_rsp_rel,
@@ -730,14 +742,17 @@ static void test_request_notify_on_response_reliable_oom_silent(void)
                               0xADU,
                               fixture.now + 1);
 
+    TEST_ASSERT_EQUAL_size_t(0U, fixture.fail_size_count); // the injection fired rather than being absorbed
     TEST_ASSERT_EQUAL_size_t(0U, cap.calls);
     TEST_ASSERT_FALSE(cy_future_done(fut));
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_future_error(fut));
     TEST_ASSERT_EQUAL_size_t(0U, fixture.unicast_count);
     TEST_ASSERT_TRUE(fixture.async_error_count > 0U);
     TEST_ASSERT_EQUAL_INT(CY_ERR_MEMORY, fixture.last_async_error);
+    TEST_ASSERT_NULL(((const request_future_t*)fut)->ack); // nothing half-built survived
 
     cy_future_destroy(fut);
+    TEST_ASSERT_NULL(cy_publisher_topic(pub)->request_acks_by_tag); // acked nothing -> no record retained
     cy_unadvertise(pub);
     fixture_deinit(&fixture);
 }
@@ -780,29 +795,54 @@ static void test_request_notify_timeout_no_remote_destroy(void)
     fixture_deinit(&fixture);
 }
 
+// Liveness timeout -> notify -> the callback destroys -> a record is STILL handed over, because reliable
+// responses were acked earlier. Built on a real advertised topic: a stack topic that is never inserted into
+// topics_by_hash is unreachable by poll(), by cy_destroy() and by dispatch, so its record would leak.
 static void test_request_notify_timeout_with_remote_destroy(void)
 {
     fixture_t fixture;
     fixture_init(&fixture);
 
-    cy_topic_t                              topic;
-    request_future_t*                       fut = make_request_future_manual(&fixture, &topic, UINT64_C(0xCC02), 1000);
-    request_future_remote_factory_context_t fac = { .cy = fixture.cy, .remote_id = UINT64_C(0xD001) };
-    request_future_remote_t* const          remote = (request_future_remote_t*)cavl2_find_or_insert(
-      &fut->remote_by_id, &fac.remote_id, request_future_remote_cavl_compare, &fac, request_future_remote_cavl_factory);
-    TEST_ASSERT_NOT_NULL(remote);
+    cy_publisher_t* const pub = cy_advertise_client(fixture.cy, cy_str("notify/request/timeout_rec"), 16U);
+    TEST_ASSERT_NOT_NULL(pub);
+    cy_priority_set(pub, cy_prio_exceptional);
+    const cy_bytes_t   msg = { .size = 1U, .data = "K", .next = NULL };
+    cy_future_t* const fut = cy_request(pub, fixture.now + 150000, 60000, msg);
+    TEST_ASSERT_NOT_NULL(fut);
+    cy_topic_t* const topic = cy_publisher_topic(pub);
+
+    // Accept a reliable response and consume it BEFORE arming the destroy-on-notify callback, so that the
+    // callback is triggered by the liveness timeout rather than by the response itself.
+    dispatch_response_message(&fixture,
+                              UINT64_C(0xD001),
+                              header_rsp_rel,
+                              0x14U,
+                              0U,
+                              last_outgoing_hash_multicast(&fixture),
+                              last_outgoing_tag_multicast(&fixture),
+                              0xAEU,
+                              fixture.now + 1);
+    TEST_ASSERT_EQUAL_UINT64(1U, cy_response_count(fut));
+    const cy_response_t moved = cy_response_move(fut);
+    TEST_ASSERT_NOT_NULL(moved.message.content);
+    cy_message_refcount_dec(moved.message.content);
+    TEST_ASSERT_NOT_NULL(((const request_future_t*)fut)->ack);
+    TEST_ASSERT_NULL(topic->request_acks_by_tag); // still owned by the live future, NOT on the topic
 
     destroy_capture_t cap = { 0 };
-    set_destroy_callback(&fut->base, &cap);
+    set_destroy_callback(fut, &cap);
 
-    fixture_spin_to(&fixture, fixture.now + 1001);
+    fixture_spin_to(&fixture, fixture.now + 60002);
     TEST_ASSERT_EQUAL_size_t(1U, cap.calls);
     TEST_ASSERT_TRUE(cap.saw_done);
     TEST_ASSERT_EQUAL_INT(CY_ERR_LIVENESS, cap.last_error);
-    TEST_ASSERT_NOT_NULL(topic.request_futures_by_tag);
+    TEST_ASSERT_NULL(topic->request_futures_by_tag);
+    TEST_ASSERT_NOT_NULL(topic->request_acks_by_tag); // handed over on the way out
 
-    fixture_spin_to(&fixture, fixture.now + (SESSION_LIFETIME / 2) + 1);
-    TEST_ASSERT_NULL(topic.request_futures_by_tag);
+    // Reaped by poll(); one topic exists, so a single spin past dead_at suffices.
+    fixture_spin_to(&fixture, fixture.now + (CY_CONFIG_REQUEST_ACK_RETENTION_us) + 1);
+    TEST_ASSERT_NULL(topic->request_acks_by_tag);
+    cy_unadvertise(pub);
     fixture_deinit(&fixture);
 }
 
@@ -842,15 +882,125 @@ static void test_publish_pending_future_destroy_then_unadvertise_clean(void)
     fixture_deinit(&fixture);
 }
 
-// Regression (L5): destroying a request future that acked a reliable response leaves a finalized "zombie"
-// in request_futures_by_tag (to absorb duplicate retransmits). Tearing the node down while it is still pending
-// must let topic_destroy reap it -- exercising the retained library-owned cleanup via cy_destroy, not a timeout.
-static void test_request_zombie_reaped_by_cy_destroy_after_unadvertise(void)
+// Invariant: a record is on the topic's expiry structures IFF its future is gone. A live future can easily
+// outlive CY_CONFIG_REQUEST_ACK_RETENTION_us because every response re-arms the liveness timer, so if it were enlisted
+// at creation instead of at handoff, the poll sweep would free it out from under the live future.
+static void test_request_live_future_outlives_retention_window(void)
 {
     fixture_t fixture;
     fixture_init(&fixture);
 
-    cy_publisher_t* const pub = cy_advertise_client(fixture.cy, cy_str("cleanup/request/zombie"), 16U);
+    cy_publisher_t* const pub = cy_advertise_client(fixture.cy, cy_str("notify/request/long_lived"), 16U);
+    TEST_ASSERT_NOT_NULL(pub);
+    cy_priority_set(pub, cy_prio_exceptional);
+    const cy_bytes_t   msg = { .size = 1U, .data = "L", .next = NULL };
+    cy_future_t* const fut = cy_request(pub, fixture.now + 150000, SESSION_LIFETIME, msg);
+    TEST_ASSERT_NOT_NULL(fut);
+    cy_topic_t* const topic     = cy_publisher_topic(pub);
+    const uint64_t    hash      = last_outgoing_hash_multicast(&fixture);
+    const uint64_t    tag       = last_outgoing_tag_multicast(&fixture);
+    const uint64_t    remote_id = UINT64_C(0xD100);
+
+    dispatch_response_message(&fixture, remote_id, header_rsp_rel, 0x30U, 0U, hash, tag, 0xB0U, fixture.now + 1);
+    TEST_ASSERT_EQUAL_UINT64(1U, cy_response_count(fut));
+    const cy_response_t moved = cy_response_move(fut);
+    cy_message_refcount_dec(moved.message.content);
+    TEST_ASSERT_NOT_NULL(((const request_future_t*)fut)->ack);
+    TEST_ASSERT_NULL(topic->request_acks_by_tag); // owned by the live future, unreachable from the topic
+
+    // Spin well past the retention window, re-arming liveness mid-way with a fresh response so that the future
+    // stays PENDING by the stated mechanism rather than merely by nobody destroying it. The sweep runs on every
+    // poll() and must not touch the live record. The two 50 s legs exceed the 60 s default retention together,
+    // while each stays short of the 60 s liveness timeout that would otherwise fire.
+    for (unsigned leg = 0; leg < 2U; leg++) {
+        for (unsigned i = 0; i < 5U; i++) {
+            fixture_spin_to(&fixture, fixture.now + (SESSION_LIFETIME / 6));
+            TEST_ASSERT_NULL(topic->request_acks_by_tag);
+            TEST_ASSERT_NOT_NULL(topic->request_futures_by_tag);
+            TEST_ASSERT_FALSE(cy_future_done(fut)); // liveness still armed -- the re-arm is what keeps it so
+        }
+        if (leg == 0U) { // A second response resets the liveness window, buying another full leg.
+            dispatch_response_message(
+              &fixture, remote_id, header_rsp_rel, 0x31U, 1U, hash, tag, 0xB1U, fixture.now + 1);
+            TEST_ASSERT_EQUAL_UINT64(2U, cy_response_count(fut));
+            const cy_response_t second = cy_response_move(fut);
+            cy_message_refcount_dec(second.message.content);
+        }
+    }
+    // Total elapsed is ~100 s, well over the 60 s liveness timeout: without the mid-way re-arm the future would
+    // have materialized long ago, so this assertion is what proves the mechanism.
+    TEST_ASSERT_FALSE(cy_future_done(fut));
+    TEST_ASSERT_NOT_NULL(((const request_future_t*)fut)->ack);
+
+    // A retransmit arriving long after the window is still acked from the live future's own state, and is
+    // still deduplicated -- the application must not see it twice.
+    const size_t unicast_before = fixture.unicast_count;
+    dispatch_response_message(&fixture, remote_id, header_rsp_rel, 0x30U, 0U, hash, tag, 0xB0U, fixture.now + 1);
+    TEST_ASSERT_EQUAL_size_t(unicast_before + 1U, fixture.unicast_count);
+    TEST_ASSERT_EQUAL_UINT8(header_rsp_ack, fixture.last_unicast[0]);
+    TEST_ASSERT_EQUAL_UINT64(2U, cy_response_count(fut)); // deduplicated -- still just the two genuine responses
+
+    // The record is promoted (seqno 0 then 1 from the same remote), and is drained by topic_destroy via
+    // cy_destroy rather than by a sweep; fixture_deinit's heap check is the verdict.
+    cy_future_destroy(fut);
+    TEST_ASSERT_NOT_NULL(topic->request_acks_by_tag); // only now does it reach the topic
+    cy_unadvertise(pub);
+    fixture_deinit(&fixture);
+}
+
+// poll() sweeps one topic per call, so records on several topics are reaped over successive spins rather than
+// all at once. Every other test here relies on exactly one topic existing, which cannot show that.
+static void test_request_ack_records_reaped_across_topics(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+
+    cy_publisher_t* pub[3];
+    cy_topic_t*     topic[3];
+    for (unsigned i = 0; i < 3U; i++) {
+        char name[32];
+        (void)snprintf(name, sizeof(name), "sweep/topic/%u", i);
+        pub[i] = cy_advertise_client(fixture.cy, cy_str(name), 16U);
+        TEST_ASSERT_NOT_NULL(pub[i]);
+        cy_priority_set(pub[i], cy_prio_exceptional);
+        const cy_bytes_t   msg = { .size = 1U, .data = "M", .next = NULL };
+        cy_future_t* const fut = cy_request(pub[i], fixture.now + 150000, 60000, msg);
+        TEST_ASSERT_NOT_NULL(fut);
+        topic[i] = cy_publisher_topic(pub[i]);
+        dispatch_response_message(&fixture,
+                                  UINT64_C(0xE000) + i,
+                                  header_rsp_rel,
+                                  (uint8_t)(0x40U + i),
+                                  0U,
+                                  last_outgoing_hash_multicast(&fixture),
+                                  last_outgoing_tag_multicast(&fixture),
+                                  0xC0U,
+                                  fixture.now + 1);
+        cy_future_destroy(fut); // hands the record to this topic
+        TEST_ASSERT_NOT_NULL(topic[i]->request_acks_by_tag);
+    }
+
+    fixture_spin_to(&fixture, fixture.now + (CY_CONFIG_REQUEST_ACK_RETENTION_us) + 1);
+
+    for (unsigned i = 0; i < 8U; i++) {
+        fixture_spin_to(&fixture, fixture.now + 1);
+    }
+    for (unsigned i = 0; i < 3U; i++) {
+        TEST_ASSERT_NULL(topic[i]->request_acks_by_tag); // the cursor reached every topic
+        cy_unadvertise(pub[i]);
+    }
+    fixture_deinit(&fixture);
+}
+
+// Regression (L5): destroying a request future that acked a reliable response leaves an ack record behind
+// in request_acks_by_tag (to absorb duplicate retransmits). Tearing the node down while the record is still
+// live must let topic_destroy reap it -- exercising the library-owned cleanup via cy_destroy, not a sweep.
+static void test_request_ack_record_reaped_by_cy_destroy_after_unadvertise(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+
+    cy_publisher_t* const pub = cy_advertise_client(fixture.cy, cy_str("cleanup/request/ack_record"), 16U);
     TEST_ASSERT_NOT_NULL(pub);
     cy_priority_set(pub, cy_prio_exceptional);
 
@@ -858,29 +1008,41 @@ static void test_request_zombie_reaped_by_cy_destroy_after_unadvertise(void)
     cy_future_t* const fut = cy_request(pub, fixture.now + 150000, 60000, msg);
     TEST_ASSERT_NOT_NULL(fut);
 
-    // Reliable response so the request future acks it and records the remote -- this is what spawns the zombie.
-    dispatch_response_message(&fixture,
-                              UINT64_C(0xB010),
-                              header_rsp_rel,
-                              0x21U,
-                              0U,
-                              last_outgoing_hash_multicast(&fixture),
-                              last_outgoing_tag_multicast(&fixture),
-                              0xAEU,
-                              fixture.now + 1);
+    // Two distinct responders, so the record is promoted and owns a multi-node remote tree. topic_destroy must
+    // drain that tree, not just free the record.
+    const uint64_t hash = last_outgoing_hash_multicast(&fixture);
+    const uint64_t tag  = last_outgoing_tag_multicast(&fixture);
+    dispatch_response_message(&fixture, UINT64_C(0xB010), header_rsp_rel, 0x21U, 0U, hash, tag, 0xAEU, fixture.now + 1);
     TEST_ASSERT_TRUE(cy_future_done(fut));
     TEST_ASSERT_EQUAL_INT(CY_OK, cy_future_error(fut));
+    dispatch_response_message(&fixture, UINT64_C(0xB011), header_rsp_rel, 0x22U, 0U, hash, tag, 0xAFU, fixture.now + 2);
+    TEST_ASSERT_EQUAL_UINT64(2U, cy_response_count(fut));
 
     cy_topic_t* const topic = cy_publisher_topic(pub);
     TEST_ASSERT_NOT_NULL(topic);
 
-    // Destroying the future leaves a finalized zombie behind.
+    // Destroying the future hands its deduplication state over as an ack record and frees the future itself.
     cy_future_destroy(fut);
-    TEST_ASSERT_NOT_NULL(topic->request_futures_by_tag);
-    const request_future_t* const zombie = (const request_future_t*)topic->request_futures_by_tag;
-    TEST_ASSERT_TRUE(zombie->finalized);
+    TEST_ASSERT_NULL(topic->request_futures_by_tag);
+    TEST_ASSERT_NOT_NULL(topic->request_acks_by_tag);
+    const request_ack_t* const record = (const request_ack_t*)topic->request_acks_by_tag;
+    TEST_ASSERT_FALSE(record->solo); // promoted by the second responder
+    TEST_ASSERT_NOT_NULL(record->u.tree);
 
-    // Reaped by cy_destroy -> topic_destroy without waiting for the zombie's timeout; deinit checks heaps clean.
+    // The retained multi-remote record answers over the wire: both known remotes ack, a third nacks.
+    const size_t unicast_before = fixture.unicast_count;
+    dispatch_response_message(&fixture, UINT64_C(0xB010), header_rsp_rel, 0x23U, 0U, hash, tag, 0xB0U, fixture.now + 3);
+    TEST_ASSERT_EQUAL_UINT8(header_rsp_ack, fixture.last_unicast[0]);
+    dispatch_response_message(&fixture, UINT64_C(0xB011), header_rsp_rel, 0x24U, 0U, hash, tag, 0xB1U, fixture.now + 4);
+    TEST_ASSERT_EQUAL_UINT8(header_rsp_ack, fixture.last_unicast[0]);
+    dispatch_response_message(&fixture, UINT64_C(0xB0FF), header_rsp_rel, 0x25U, 0U, hash, tag, 0xB2U, fixture.now + 5);
+    TEST_ASSERT_EQUAL_UINT8(header_rsp_nack, fixture.last_unicast[0]); // responder that appeared after the future
+    TEST_ASSERT_EQUAL_size_t(unicast_before + 3U, fixture.unicast_count);
+    // Query-only: the unknown responder was answered without being recorded.
+    const uint64_t unknown = UINT64_C(0xB0FF);
+    TEST_ASSERT_NULL(cavl2_find(record->u.tree, &unknown, request_future_remote_cavl_compare));
+
+    // Reaped by cy_destroy -> topic_destroy without waiting for any sweep; deinit checks the heaps are clean.
     cy_unadvertise(pub);
     TEST_ASSERT_EQUAL_size_t(0U, fixture.async_error_count);
     fixture_deinit(&fixture);
@@ -1247,7 +1409,9 @@ int main(void)
     RUN_TEST(test_request_notify_timeout_no_remote_destroy);
     RUN_TEST(test_request_notify_timeout_with_remote_destroy);
     RUN_TEST(test_publish_pending_future_destroy_then_unadvertise_clean);
-    RUN_TEST(test_request_zombie_reaped_by_cy_destroy_after_unadvertise);
+    RUN_TEST(test_request_live_future_outlives_retention_window);
+    RUN_TEST(test_request_ack_records_reaped_across_topics);
+    RUN_TEST(test_request_ack_record_reaped_by_cy_destroy_after_unadvertise);
     RUN_TEST(test_request_callback_set_after_done_immediate_destroy);
     RUN_TEST(test_subscriber_notify_arrival_unordered_destroy);
     RUN_TEST(test_subscriber_notify_arrival_ordered_ejection_destroy);

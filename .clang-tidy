@@ -83,6 +83,7 @@ Checks: >-
   -cert-dcl03-c,
   -readability-else-after-return,
   -llvm-prefer-isa-or-dyn-cast-in-conditionals,
+  -*-trailing-comma,
 CheckOptions:
   - key: misc-const-correctness.TransformPointersAsValues
     value: 'true'

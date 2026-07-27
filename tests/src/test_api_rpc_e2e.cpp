@@ -793,7 +793,57 @@ void test_api_rpc_e2e_r06_reliable_response_history_nack_and_unknown_nack()
     cleanup_case(net, now, { request }, { server_sub }, { client });
 }
 
-void test_api_rpc_e2e_r07_zombie_ack_seen_nack_unseen()
+// r07/r14 both open with seqno 5, so neither reaches the single-responder/seqno-0 shape that a client sees in
+// practice. This is the black-box counterpart: after the future is destroyed, the retained state must still ACK
+// the exact response it accepted, and NACK a different seqno or a different responder.
+void test_api_rpc_e2e_r29_retained_solo_ack_and_nack()
+{
+    e2e::sim_net_t net{};
+    TEST_ASSERT_EQUAL_INT(CY_OK, e2e::sim_net_init(net));
+    cy_us_t now = 0;
+
+    static constexpr const char* topic_name = "rpc/r29/topic";
+    cy_publisher_t* const        client     = make_client(net, topic_name);
+    server_context_t             server{};
+    server.responses_per_request  = 0U;
+    cy_future_t* const server_sub = make_server_subscriber(net, topic_name, server);
+
+    e2e::set_now(net, now);
+    cy_future_t* const request = request_once(client, now, 6U, 1U, 220'000, 220'000);
+    TEST_ASSERT_NOT_NULL(request);
+    const request_wire_info_t        req_wire = last_request_wire(net);
+    const auto                       payload  = e2e::app_payload_pack(929U, 1U);
+    const std::vector<unsigned char> body(payload.begin(), payload.end());
+
+    // First reliable response carries seqno 0 -- the inlined single-responder shape.
+    inject_response_wire(net, header_rsp_rel, 0x60U, 0U, req_wire.topic_hash, req_wire.tag, body, now + 1);
+    const cy_response_t first = cy_response_move(request);
+    TEST_ASSERT_NOT_NULL(first.message.content);
+    cy_message_refcount_dec(first.message.content);
+
+    cy_future_destroy(request);
+
+    // Same responder, same seqno -> ACK: destroying the future must not retract an accepted response.
+    std::size_t before = e2e::sim_net_captures(net).size();
+    inject_response_wire(net, header_rsp_rel, 0x60U, 0U, req_wire.topic_hash, req_wire.tag, body, now + 2);
+    std::vector<response_control_t> controls = response_controls_since(net, before);
+    TEST_ASSERT_EQUAL_size_t(1U, controls.size());
+    TEST_ASSERT_EQUAL_UINT8(header_rsp_ack, controls.at(0).header_type);
+
+    // Same responder, seqno 1 -> NACK: never seen, so never acked.
+    before = e2e::sim_net_captures(net).size();
+    inject_response_wire(net, header_rsp_rel, 0x61U, 1U, req_wire.topic_hash, req_wire.tag, body, now + 3);
+    controls = response_controls_since(net, before);
+    TEST_ASSERT_EQUAL_size_t(1U, controls.size());
+    TEST_ASSERT_EQUAL_UINT8(header_rsp_nack, controls.at(0).header_type);
+
+    // The unknown-responder case is r14's; it cannot be asserted here because the control frame for a forged
+    // lane is addressed back to that lane, which response_controls_since() filters out.
+
+    cleanup_case(net, now, {}, { server_sub }, { client });
+}
+
+void test_api_rpc_e2e_r07_retained_ack_seen_nack_unseen()
 {
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK, e2e::sim_net_init(net));
@@ -1063,7 +1113,7 @@ void test_api_rpc_e2e_r13_reliable_response_unknown_request_tag_nack()
     cleanup_case(net, now, { request }, { server_sub }, { client });
 }
 
-void test_api_rpc_e2e_r14_zombie_unseen_remote_reliable_response_nack()
+void test_api_rpc_e2e_r14_retained_unseen_remote_reliable_response_nack()
 {
     e2e::sim_net_t net{};
     TEST_ASSERT_EQUAL_INT(CY_OK, e2e::sim_net_init(net));
@@ -1814,14 +1864,15 @@ int main()
     RUN_TEST(test_api_rpc_e2e_r04_failure_then_late_success_transition);
     RUN_TEST(test_api_rpc_e2e_r05_reliable_response_ack_and_duplicate_ack);
     RUN_TEST(test_api_rpc_e2e_r06_reliable_response_history_nack_and_unknown_nack);
-    RUN_TEST(test_api_rpc_e2e_r07_zombie_ack_seen_nack_unseen);
+    RUN_TEST(test_api_rpc_e2e_r29_retained_solo_ack_and_nack);
+    RUN_TEST(test_api_rpc_e2e_r07_retained_ack_seen_nack_unseen);
     RUN_TEST(test_api_rpc_e2e_r08_multicast_response_is_rejected);
     RUN_TEST(test_api_rpc_e2e_r09_request_callback_status_transitions);
     RUN_TEST(test_api_rpc_e2e_r10_initial_publish_failure_returns_null);
     RUN_TEST(test_api_rpc_e2e_r11_request_publish_fails_without_response);
     RUN_TEST(test_api_rpc_e2e_r12_concurrent_requests_are_correlated);
     RUN_TEST(test_api_rpc_e2e_r13_reliable_response_unknown_request_tag_nack);
-    RUN_TEST(test_api_rpc_e2e_r14_zombie_unseen_remote_reliable_response_nack);
+    RUN_TEST(test_api_rpc_e2e_r14_retained_unseen_remote_reliable_response_nack);
     RUN_TEST(test_api_rpc_e2e_r15_publish_failure_after_response_keeps_future_alive_until_liveness);
     RUN_TEST(test_api_rpc_e2e_r16_request_future_allocation_failure_returns_null);
     RUN_TEST(test_api_rpc_e2e_r17_server_reliable_response_ack_success);
