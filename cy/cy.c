@@ -1015,6 +1015,11 @@ struct cy_topic_t
     // Similar to publish futures but referencing request_future_t.
     cy_tree_t* request_futures_by_tag;
 
+    // Ack records left behind by destroyed request futures to answer retransmitted reliable responses.
+    // Ordered by dead_at: the list is re-headed only at handoff and never touched afterward, so a tail sweep is exact.
+    cy_tree_t* request_acks_by_tag;
+    cy_list_t  request_acks_by_expiry;
+
     // Subscriber-related states.
     //
     // The subject reader exists only as long as there are active subscriptions to avoid unrelated traffic.
@@ -1222,7 +1227,7 @@ static int_fast8_t topic_lage(const cy_topic_t* const topic, const cy_us_t now)
 }
 
 // CRDT merge operator on the topic log-age. Shift ts_origin into the past if needed.
-static void topic_merge_lage(cy_topic_t* const topic, const cy_us_t now, int_fast8_t r_lage)
+static void topic_merge_lage(cy_topic_t* const topic, const cy_us_t now, const int_fast8_t r_lage)
 {
     topic->ts_origin = sooner(topic->ts_origin, now - lage_to_us(r_lage));
 }
@@ -1596,6 +1601,8 @@ static cy_err_t topic_new(cy_t* const        cy,
     topic->pub_futures_by_tag = NULL;
 
     topic->request_futures_by_tag = NULL;
+    topic->request_acks_by_tag    = NULL;
+    topic->request_acks_by_expiry = LIST_EMPTY;
 
     topic->user_context = CY_USER_CONTEXT_EMPTY;
 
@@ -2517,6 +2524,7 @@ typedef struct
     uint64_t  seqno_top;
     bitmap_t  seqno_acked[BITMAP_WORDS(REQUEST_FUTURE_HISTORY)]; // bit 0 = seqno_top, bit 1 = seqno_top-1, ...
 } request_future_remote_t;
+static_assert((sizeof(void*) > 4) || (sizeof(request_future_remote_t) <= (64 - 8)), "o1heap block spill");
 
 typedef struct
 {
@@ -2524,24 +2532,44 @@ typedef struct
     uint64_t remote_id;
 } request_future_remote_factory_context_t;
 
+// Answers retransmitted reliable responses after the application has destroyed the request future.
+// It holds only the fields the ack decision consults, so the future is handed over at disposal and freed.
+// Per-remote states are never removed while the future lives, assuming futures are short-lived and/or the
+// responder set is mostly constant; after handoff the record is query-only and can no longer grow. States:
+//   solo         -- remote solo_remote_id acked seqno 0; the common single-responder shape, no tree, no second alloc
+//   !solo, tree  -- promoted: per-remote bitmaps, same rule as the live path
+//   !solo, NULL  -- nothing acked, answers NACK to everything
+typedef struct
+{
+    cy_tree_t        index;  // Keyed by tag. MUST be the first field for ptr equivalence.
+    cy_list_member_t expiry; // Ordered by dead_at; head is newest. Enlisted only at handoff.
+    uint64_t         tag;
+    cy_us_t          dead_at;
+    union
+    {
+        uint64_t   solo_remote_id; // iff solo
+        cy_tree_t* tree;           // iff !solo; NULL means NONE
+    } u;
+    bool solo;
+} request_ack_t;
+static_assert((sizeof(void*) > 4) || (sizeof(request_ack_t) <= (64 - 8)), "o1heap block spill");
+
 typedef struct
 {
     cy_future_t base; // The key is the tag.
     cy_topic_t* topic;
     cy_us_t     liveness_timeout; // Inter-response timeout for stream liveness monitoring.
 
-    bool         finalized; // Staying behind to handle possible duplicate responses to ack/nack correctly.
     cy_future_t* publish;
     cy_err_t     error; // Most recently seen error.
 
     uint64_t      response_count; // Unique responses after deduplication from all remotes combined.
     cy_response_t last_response;  // Overwritten when new responses arrive.
 
-    // States per remote node that is responding to this request using reliable response delivery.
-    // States are never removed assuming that futures are short-lived and/or the responder set is mostly constant.
-    // This is used to deduplicate responses (when reliable response is delivered but ack is lost, remote retransmits)
-    // and to keep track which ones need to be acked when duplicates arrive.
-    cy_tree_t* remote_by_id;
+    // Deduplication state for remotes responding with reliable delivery; created on the first such response.
+    // Handed over to the topic at disposal so it can keep answering retransmits after the future is gone.
+    // NULL until the first reliable response arrives.
+    request_ack_t* ack;
 } request_future_t;
 
 static int32_t request_future_remote_cavl_compare(const void* const user, const cy_tree_t* const node)
@@ -2561,11 +2589,154 @@ static cy_tree_t* request_future_remote_cavl_factory(void* const user)
     return (cy_tree_t*)node;
 }
 
+typedef enum
+{
+    response_rx_ack,
+    response_rx_nack,
+    response_rx_silent, // Transient local drop: no ACK/NACK, keep the future pending.
+} response_rx_t;
+
+static int32_t request_ack_cavl_compare(const void* const user, const cy_tree_t* const node)
+{
+    const uint64_t outer = *(const uint64_t*)user;
+    const uint64_t inner = ((const request_ack_t*)node)->tag;
+    return (outer == inner) ? 0 : ((outer > inner) ? +1 : -1);
+}
+
+static request_ack_t* request_ack_new(const cy_t* const cy, const uint64_t tag)
+{
+    request_ack_t* const self = (request_ack_t*)mem_alloc_zero(cy, sizeof(request_ack_t));
+    if (self != NULL) {
+        self->index   = TREE_NULL;
+        self->expiry  = LIST_MEMBER_NULL;
+        self->tag     = tag;
+        self->dead_at = BIG_BANG; // No deadline while the future owns it; request_ack_retain() sets the real one.
+        self->u.tree  = NULL;     // Names the active union member; do not infer it from the zeroed storage.
+        self->solo    = false;
+    }
+    return self;
+}
+
+// Serves detached (future-owned), swept, and torn-down records alike.
+static void request_ack_destroy(cy_topic_t* const owner, request_ack_t* const self)
+{
+    const cy_t* const cy = owner->cy;
+    delist(&owner->request_acks_by_expiry, &self->expiry);
+    cavl2_remove_if(&owner->request_acks_by_tag, &self->index);
+    if (!self->solo) {
+        while (self->u.tree != NULL) {
+            request_future_remote_t* const remote = (request_future_remote_t*)self->u.tree;
+            cavl2_remove(&self->u.tree, self->u.tree);
+            mem_free(cy, remote);
+        }
+    }
+    mem_free(cy, self);
+}
+
+static void request_ack_drop_stale(cy_topic_t* const owner, const cy_us_t now)
+{
+    while (true) {
+        request_ack_t* const ack = LIST_TAIL(owner->request_acks_by_expiry, request_ack_t, expiry);
+        if ((ack == NULL) || (ack->dead_at >= now)) {
+            break;
+        }
+        CY_TRACE(owner->cy, "🧹 T%016jx tag=%016jx", (uintmax_t)owner->hash, (uintmax_t)ack->tag);
+        request_ack_destroy(owner, ack);
+    }
+}
+
+static bool request_ack_test(const request_ack_t* const self, const uint64_t remote_id, const uint64_t seqno)
+{
+    if (self == NULL) {
+        return false;
+    }
+    if (self->solo) {
+        return (self->u.solo_remote_id == remote_id) && (seqno == 0);
+    }
+    const request_future_remote_t* const remote =
+      (request_future_remote_t*)cavl2_find(self->u.tree, &remote_id, request_future_remote_cavl_compare);
+    return (remote != NULL) && (seqno <= remote->seqno_top) &&
+           bitmap_test_bounded(remote->seqno_acked, REQUEST_FUTURE_HISTORY, remote->seqno_top - seqno);
+}
+
+// Sets out_fresh iff the response is genuinely new and must reach the app.
+// A zero-allocated remote node means "known, nothing acked", NOT "seqno 0 acked", which is why the solo slot may
+// only be claimed when a remote's FIRST response carries seqno 0.
+static response_rx_t request_ack_admit(request_ack_t* const self,
+                                       cy_topic_t* const    topic,
+                                       const uint64_t       remote_id,
+                                       const uint64_t       seqno,
+                                       bool* const          out_fresh)
+{
+    cy_t* const cy = topic->cy;
+    *out_fresh     = false;
+    if (self->solo) {
+        if ((self->u.solo_remote_id == remote_id) && (seqno == 0)) {
+            return response_rx_ack; // Duplicate of the inlined ack; no promotion needed.
+        }
+        cy_tree_t*                              promoted = NULL;
+        request_future_remote_factory_context_t solo_ctx = { .cy = cy, .remote_id = self->u.solo_remote_id };
+        request_future_remote_t* const          node =
+          (request_future_remote_t*)cavl2_find_or_insert(&promoted,
+                                                         &solo_ctx.remote_id,
+                                                         request_future_remote_cavl_compare,
+                                                         &solo_ctx,
+                                                         request_future_remote_cavl_factory);
+        if (node == NULL) {
+            ON_ASYNC_ERROR(cy, topic, CY_ERR_MEMORY);
+            return response_rx_silent; // Still solo, nothing lost.
+        }
+        bitmap_set(node->seqno_acked, 0); // seqno_top is already zero, and the inlined ack was for seqno 0.
+        self->solo   = false;
+        self->u.tree = promoted;
+    } else if ((self->u.tree == NULL) && (seqno == 0)) {
+        self->solo             = true;
+        self->u.solo_remote_id = remote_id;
+        *out_fresh             = true;
+        return response_rx_ack;
+    }
+    // Generic per-remote path: find or create the remote state, then update its seqno frontier bitmap.
+    request_future_remote_factory_context_t factory_ctx = { .cy = cy, .remote_id = remote_id };
+    request_future_remote_t* const          remote      = (request_future_remote_t*)cavl2_find_or_insert(
+      &self->u.tree, &remote_id, request_future_remote_cavl_compare, &factory_ctx, request_future_remote_cavl_factory);
+    if (remote == NULL) {
+        ON_ASYNC_ERROR(cy, topic, CY_ERR_MEMORY);
+        return response_rx_silent;
+    }
+    if (seqno > remote->seqno_top) { // Pushes the frontier, need to shift the bitmap.
+        bitmap_shift(remote->seqno_acked, REQUEST_FUTURE_HISTORY, (intmax_t)(seqno - remote->seqno_top));
+        bitmap_set(remote->seqno_acked, 0); // 0th bit is always set, redundant but simple
+        remote->seqno_top = seqno;
+    } else { // earlier seqno below the frontier, which might be new if delivered out of order
+        const uint64_t dist = remote->seqno_top - seqno;
+        if (dist >= REQUEST_FUTURE_HISTORY) {
+            return response_rx_nack; // too old, exceeds history, probably sender misbehaving, do not accept
+        }
+        if (bitmap_test(remote->seqno_acked, (size_t)dist)) {
+            return response_rx_ack; // duplicate, probably lost ack
+        }
+        bitmap_set(remote->seqno_acked, (size_t)dist); // genuinely new response just arrived out of order
+    }
+    CY_ASSERT(remote->seqno_top >= seqno);
+    *out_fresh = true;
+    return response_rx_ack;
+}
+
+// Hand over to the topic to answer retransmits after the future is gone. Allocation-free: dispose must be infallible.
+static void request_ack_retain(cy_topic_t* const owner, request_ack_t* const self, const cy_us_t now)
+{
+    self->dead_at              = now + (SESSION_LIFETIME / 2);
+    const cy_tree_t* const ins = cavl2_find_or_insert(
+      &owner->request_acks_by_tag, &self->tag, request_ack_cavl_compare, self, cavl2_trivial_factory);
+    CY_ASSERT(ins == &self->index); // Tags are unique per topic.
+    (void)ins;
+    enlist_head(&owner->request_acks_by_expiry, &self->expiry);
+}
+
 static void request_publish_callback(cy_future_t* const fut)
 {
     request_future_t* const self = (request_future_t*)cy_future_context(fut).ptr[0];
     CY_ASSERT(self->publish == fut);
-    CY_ASSERT(!self->finalized);
     const cy_err_t err = cy_future_error(fut);
     if (cy_future_done(fut)) { // In case there are intermediate updates. May be uncoverable.
         cy_future_destroy(fut);
@@ -2576,16 +2747,9 @@ static void request_publish_callback(cy_future_t* const fut)
     }
     if (err != CY_OK) { // Report every error.
         self->error = err;
-        future_notify(&self->base); // Invalidates self; expect finalization.
+        future_notify(&self->base); // Invalidates self; expect disposal.
     }
 }
-
-typedef enum
-{
-    response_rx_ack,
-    response_rx_nack,
-    response_rx_silent, // Transient local drop: no ACK/NACK, keep the future pending.
-} response_rx_t;
 
 // Invalidates the future because it may be destroyed.
 static response_rx_t request_on_response(request_future_t* const self,
@@ -2599,50 +2763,21 @@ static response_rx_t request_on_response(request_future_t* const self,
     CY_ASSERT(message.content != NULL);
     cy_t* const cy = self->base.cy;
 
-    // Zombie mode -- the application has destroyed the future and is no longer accepting responses.
-    // We are left behind only to retransmit acks for reliable responses if any are lost.
-    if (self->finalized) {
-        if (reliable) {
-            const request_future_remote_t* const remote =
-              (request_future_remote_t*)cavl2_find(self->remote_by_id, &lane.id, request_future_remote_cavl_compare);
-            if ((remote != NULL) && (seqno <= remote->seqno_top)) {
-                return bitmap_test_bounded(remote->seqno_acked, REQUEST_FUTURE_HISTORY, remote->seqno_top - seqno)
-                         ? response_rx_ack
-                         : response_rx_nack;
-            }
-        }
-        return response_rx_nack; // Do not proceed to the acceptance path, we're already dead.
-    }
-
     // The transport deduplicates messages, meaning that at this level only reliable responses require deduplication,
     // because the remote would retransmit if our acks are lost. We need to shield the application from that.
     if (reliable) {
-        request_future_remote_factory_context_t factory_ctx = { .cy = cy, .remote_id = lane.id };
-        request_future_remote_t* const          remote =
-          (request_future_remote_t*)cavl2_find_or_insert(&self->remote_by_id,
-                                                         &lane.id,
-                                                         request_future_remote_cavl_compare,
-                                                         &factory_ctx,
-                                                         request_future_remote_cavl_factory);
-        if (remote == NULL) {
-            ON_ASYNC_ERROR(cy, self->topic, CY_ERR_MEMORY);
-            return response_rx_silent;
-        }
-        if (seqno > remote->seqno_top) { // Pushes the frontier, need to shift the bitmap.
-            bitmap_shift(remote->seqno_acked, REQUEST_FUTURE_HISTORY, (intmax_t)(seqno - remote->seqno_top));
-            bitmap_set(remote->seqno_acked, 0); // 0th bit is always set, redundant bit simple
-            remote->seqno_top = seqno;
-        } else { // earlier seqno below the frontier, which might be new if delivered out of order
-            const uint64_t dist = remote->seqno_top - seqno;
-            if (dist >= REQUEST_FUTURE_HISTORY) {
-                return response_rx_nack; // too old, exceeds history, probably sender misbehaving, do not accept
+        if (self->ack == NULL) {
+            self->ack = request_ack_new(cy, self->base.key);
+            if (self->ack == NULL) {
+                ON_ASYNC_ERROR(cy, self->topic, CY_ERR_MEMORY);
+                return response_rx_silent;
             }
-            if (bitmap_test(remote->seqno_acked, (size_t)dist)) {
-                return response_rx_ack; // duplicate, probably lost ack
-            }
-            bitmap_set(remote->seqno_acked, (size_t)dist); // genuinely new response just arrived out of order
         }
-        CY_ASSERT(remote->seqno_top >= seqno);
+        bool                fresh   = false;
+        const response_rx_t verdict = request_ack_admit(self->ack, self->topic, lane.id, seqno, &fresh);
+        if (!fresh) {
+            return verdict; // Duplicate, too old, or transient failure; the application must not see it.
+        }
     }
 
     // At this point, the response is known to be unique. Rewrite the last stored response.
@@ -2658,30 +2793,13 @@ static response_rx_t request_on_response(request_future_t* const self,
 
     // Notify the application that a new response is available.
     self->error = CY_OK;
-    future_notify(&self->base); // Invalidates self; expect finalization.
+    future_notify(&self->base); // Invalidates self; expect disposal.
     return response_rx_ack;
-}
-
-static void request_future_destroy(request_future_t* const self)
-{
-    cy_future_t* const base = &self->base;
-    CY_ASSERT(self->finalized);
-    CY_ASSERT(self->publish == NULL);
-    future_deadline_disarm(base);
-    cy_message_refcount_dec(self->last_response.message.content); // NULL-safe
-    future_index_remove(base, &self->topic->request_futures_by_tag);
-    while (self->remote_by_id != NULL) {
-        request_future_remote_t* const remote = (request_future_remote_t*)self->remote_by_id;
-        cavl2_remove(&self->remote_by_id, self->remote_by_id);
-        mem_free(base->cy, remote);
-    }
-    mem_free(base->cy, self);
 }
 
 static bool request_future_done(const cy_future_t* const base)
 {
     const request_future_t* const self = (const request_future_t*)base;
-    CY_ASSERT(!self->finalized);                                                          // use after free?
     return (self->last_response.message.content != NULL) || !future_deadline_armed(base); // got response or timed out
 }
 static cy_err_t request_future_error(const cy_future_t* const base) { return ((const request_future_t*)base)->error; }
@@ -2692,33 +2810,36 @@ static void request_future_timeout(cy_future_t* const base, const cy_us_t schedu
     (void)now;
     request_future_t* const self = (request_future_t*)base;
     CY_ASSERT(!future_deadline_armed(base));
-    if (!self->finalized) {
-        self->error = CY_ERR_LIVENESS;
-        future_notify(base); // Expect finalization call.
-    } else {
-        request_future_destroy(self);
-    }
+    self->error = CY_ERR_LIVENESS;
+    future_notify(base); // Expect disposal.
 }
 
 static void request_future_dispose(cy_future_t* const base)
 {
-    request_future_t* const self = (request_future_t*)base;
-    CY_ASSERT(!self->finalized);
+    request_future_t* const self  = (request_future_t*)base;
+    cy_t* const             cy    = base->cy;
+    cy_topic_t* const       topic = self->topic;
     if (self->publish != NULL) {
         cy_future_destroy(self->publish);
         self->publish = NULL;
     }
-    self->finalized = true;
+    future_deadline_disarm(base);
+    future_index_remove(base, &topic->request_futures_by_tag);
     // The acks that we sent for reliable responses may have been lost, in which case the remote would retransmit.
     // In that case we will need to respond the same way we did the first time without involving the application.
-    // To facilitate that, we leave a pending finalized future behind. It will be destroyed after some timeout.
-    if (self->remote_by_id != NULL) { // Stayin' alive because we need to continue processing possible duplicates.
-        cy_message_refcount_dec(self->last_response.message.content); // Release memory early (NULL-safe)
-        self->last_response.message.content = NULL;
-        future_deadline_arm(base, cy_now(base->cy) + (SESSION_LIFETIME / 2));
-    } else { // If we didn't ack any reliable responses, there is no need to leave a finalized future behind.
-        request_future_destroy(self);
+    // The record is a fraction of the future's size, so we hand it over and free ourselves.
+    // A record that acked nothing can only ever answer NACK, so it is freed rather than retained.
+    // This precedes the message release below so that no window exists in which the tag resolves to neither the
+    // future nor the record: releasing the last reference invokes a platform destructor of unknown reach.
+    if (self->ack != NULL) {
+        if (self->ack->solo || (self->ack->u.tree != NULL)) {
+            request_ack_retain(topic, self->ack, cy_now(cy));
+        } else {
+            request_ack_destroy(topic, self->ack);
+        }
     }
+    cy_message_refcount_dec(self->last_response.message.content); // NULL-safe
+    mem_free(cy, self);
 }
 
 static const cy_future_vtable_t request_future_vtable = { .done    = request_future_done,
@@ -2747,7 +2868,7 @@ cy_future_t* cy_request(cy_publisher_t* const pub,
     fut->liveness_timeout                = response_timeout;
     fut->last_response.message.timestamp = BIG_BANG;
     fut->last_response.message.content   = NULL;
-    fut->remote_by_id                    = NULL;
+    fut->ack                             = NULL;
 
     // Once fallible preparations are done, send the request.
     // Reliable publication is quite a can of worms but we use it as a black box here.
@@ -4197,16 +4318,16 @@ static void topic_destroy(cy_topic_t* const topic)
     CY_ASSERT(topic->sub_list_dedup_by_recency.head == NULL);
     CY_ASSERT(topic->sub_list_dedup_by_recency.tail == NULL);
 
-    // Remove any zombie request futures that may be left behind to manage retransmissions.
-    // This is lifetime-safe because the API contract requires that the application must destroy pending futures
-    // before destroying their publisher, and the topic cannot be destroyed as long as it has at least one live
-    // publisher (or subscriber or whatever). To wit, topics are recycled after some timeout, and by the time it
-    // expires the zombie request futures are likely going to be destroyed on timeout anyway.
-    while (topic->request_futures_by_tag != NULL) {
-        request_future_t* const future = (request_future_t*)topic->request_futures_by_tag;
-        CY_ASSERT(future->finalized); // Otherwise, the application forgot to destroy the future!
-        request_future_destroy(future);
+    // The application must destroy pending futures before destroying their publisher, and the topic cannot be
+    // destroyed while it has a live publisher; so a non-empty index here means the application forgot.
+    CY_ASSERT(topic->request_futures_by_tag == NULL);
+
+    // Remove the ack records left behind by destroyed request futures to manage retransmissions.
+    while (topic->request_acks_by_tag != NULL) {
+        request_ack_destroy(topic, (request_ack_t*)topic->request_acks_by_tag);
     }
+    CY_ASSERT(topic->request_acks_by_expiry.head == NULL);
+    CY_ASSERT(topic->request_acks_by_expiry.tail == NULL);
 
     // Release gossip shard reader/writer from registry.
     if (topic->gossip_writer != NULL) {
@@ -4556,6 +4677,7 @@ static cy_us_t poll(cy_t* const cy, cy_us_t* const out_now)
     }
     if (cy->topic_iter != NULL) {
         dedup_drop_stale(cy->topic_iter, now);
+        request_ack_drop_stale(cy->topic_iter, now);
         // Do we accept the full subscriber scan here?
         const cy_topic_coupling_t* cpl = cy->topic_iter->couplings;
         while (cpl != NULL) {
@@ -4698,7 +4820,8 @@ cy_topic_t* cy_topic_iter_next(cy_topic_t* const topic) { return (cy_topic_t*)ca
 
 cy_str_t cy_topic_name(const cy_topic_t* const topic)
 {
-    if (topic != NULL) {
+    // The name index is absent while a topic is being torn down, and in tests that synthesize bare topic objects.
+    if ((topic != NULL) && (topic->index_name != NULL)) {
         return (cy_str_t){ .len = topic->index_name->key_len, .str = topic->name };
     }
     return (cy_str_t){ .len = 0, .str = "" };
@@ -4952,11 +5075,10 @@ void cy_on_message(cy_platform_t* const  platform,
             // edge case when we ack a response and destroy the future immediately afterward with the subsequent loss
             // of the ack, the remote would retransmit, and the next time we will respond with a nack because the
             // future is already destroyed. There are many ways to avoid this, such as keeping a log of recently
-            // acked responses, etc. Here, we choose to keep futures alive for a brief time after the application
-            // destroys them such that we could delegate the ack/nack decision to them, because it appears to be
-            // the simplest solution with minimal state keeping. Note that futures that acknowledged no responses
-            // do not need to be retained since the outcome is always the same -- always nack.
-            // This is an implementation detail that does not affect wire semantics of course.
+            // acked responses, etc. Here, when the application destroys the future we hand its deduplication state
+            // over to the topic as a compact record that outlives it and answers retransmits on its own.
+            // Note that futures that acknowledged no responses leave no record since the outcome is always the
+            // same -- always nack. This is an implementation detail that does not affect wire semantics of course.
             response_rx_t     response = response_rx_nack;
             cy_topic_t* const topic    = cy_topic_find_by_hash(cy, hash);
             if (topic != NULL) {
@@ -4964,6 +5086,13 @@ void cy_on_message(cy_platform_t* const  platform,
                   (request_future_t*)future_index_lookup(topic->request_futures_by_tag, message_tag);
                 if (future != NULL) {
                     response = request_on_response(future, seqno, message, reliable, lane);
+                } else if (reliable) { // The future may be gone but its ack record may still answer for it.
+                    response = request_ack_test((request_ack_t*)cavl2_find(
+                                                  topic->request_acks_by_tag, &message_tag, request_ack_cavl_compare),
+                                                lane.id,
+                                                seqno)
+                                 ? response_rx_ack
+                                 : response_rx_nack;
                 }
             }
             if (reliable && (response != response_rx_silent)) {

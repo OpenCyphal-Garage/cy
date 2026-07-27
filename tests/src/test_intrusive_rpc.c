@@ -13,7 +13,8 @@ typedef struct
     guarded_heap_t       heap;
 
     size_t fail_size;
-    size_t fail_size_count;
+    size_t fail_size_skip;  // Matching allocations to let through before failing; both promotion allocations
+    size_t fail_size_count; // are the same size, so failing only the second one requires a skip.
 
     cy_us_t   now;
     uint64_t  random_state;
@@ -48,8 +49,12 @@ static void* fixture_realloc(cy_platform_t* const platform, void* const ptr, con
     fixture_t* const self = (fixture_t*)platform;
     if ((ptr == NULL) && (size > 0U)) {
         if ((self->fail_size_count > 0U) && (self->fail_size == size)) {
-            self->fail_size_count--;
-            return NULL;
+            if (self->fail_size_skip > 0U) {
+                self->fail_size_skip--;
+            } else {
+                self->fail_size_count--;
+                return NULL;
+            }
         }
     }
     return guarded_heap_realloc(&self->heap, ptr, size);
@@ -146,10 +151,19 @@ static void fixture_init(fixture_t* const self)
     self->async_error_count       = 0U;
 }
 
-static void fixture_fail_alloc_size(fixture_t* const self, const size_t size, const size_t count)
+static void fixture_fail_alloc_size_after(fixture_t* const self,
+                                          const size_t     size,
+                                          const size_t     skip,
+                                          const size_t     count)
 {
     self->fail_size       = size;
+    self->fail_size_skip  = skip;
     self->fail_size_count = count;
+}
+
+static void fixture_fail_alloc_size(fixture_t* const self, const size_t size, const size_t count)
+{
+    fixture_fail_alloc_size_after(self, size, 0U, count);
 }
 
 static void fixture_advance_to(fixture_t* const self, const cy_us_t now)
@@ -202,7 +216,7 @@ static request_future_t* make_request_future(fixture_t* const  fixture,
     out->liveness_timeout                = liveness_timeout;
     out->last_response.message.timestamp = BIG_BANG;
     out->last_response.message.content   = NULL;
-    out->remote_by_id                    = NULL;
+    out->ack                             = NULL;
     const bool insert_ok                 = future_index_insert(&out->base, &topic->request_futures_by_tag, key);
     TEST_ASSERT_TRUE(insert_ok);
     future_deadline_arm(&out->base, fixture->now + liveness_timeout);
@@ -267,9 +281,26 @@ static cy_future_t* dummy_publish_new(cy_t* const cy)
     return &out->base;
 }
 
+// Returns the promoted per-remote node, or NULL if there is no record yet or it is still in the inlined solo shape.
+// Use request_ack_is_solo() to assert the solo shape positively rather than inferring it from a NULL here.
 static request_future_remote_t* request_remote_find(const request_future_t* const fut, const uint64_t remote_id)
 {
-    return (request_future_remote_t*)cavl2_find(fut->remote_by_id, &remote_id, request_future_remote_cavl_compare);
+    if ((fut->ack == NULL) || fut->ack->solo) {
+        return NULL;
+    }
+    return (request_future_remote_t*)cavl2_find(fut->ack->u.tree, &remote_id, request_future_remote_cavl_compare);
+}
+
+static bool request_ack_is_solo(const request_future_t* const fut, const uint64_t remote_id)
+{
+    return (fut->ack != NULL) && fut->ack->solo && (fut->ack->u.solo_remote_id == remote_id);
+}
+
+// The intrusive fixture drives olga directly and never runs poll(), so retained records are never swept for us.
+// One full SESSION_LIFETIME ahead is strictly beyond any dead_at, which is a past handoff time plus half of it.
+static void reap_request_acks(const fixture_t* const fixture, cy_topic_t* const topic)
+{
+    request_ack_drop_stale(topic, fixture->now + SESSION_LIFETIME);
 }
 
 static cy_breadcrumb_t make_test_breadcrumb(const fixture_t* const fixture,
@@ -806,7 +837,7 @@ static void test_request_future_destroy_releases_last_response(void)
     fixture_assert_clean(&fixture);
 }
 
-static void test_request_future_dispose_zombie_releases_last_response_early(void)
+static void test_request_future_dispose_hands_over_and_releases_last_response(void)
 {
     fixture_t fixture;
     fixture_init(&fixture);
@@ -816,18 +847,25 @@ static void test_request_future_dispose_zombie_releases_last_response_early(void
     const cy_lane_t   lane = make_lane(88U);
 
     const cy_message_ts_t msg = make_message(&fixture, fixture.now + 6U, 0x41U);
-    TEST_ASSERT_EQUAL_INT(response_rx_ack, request_on_response(fut, 9U, msg, true, lane)); // creates remote state.
+    TEST_ASSERT_EQUAL_INT(response_rx_ack, request_on_response(fut, 9U, msg, true, lane)); // creates the ack record
     cy_message_refcount_dec(msg.content);                                                  // release local copy
     assert_message_counters(0U, 1U);
+    TEST_ASSERT_NOT_NULL(fut->ack);
 
+    // The future is freed outright; the record is handed to the topic. Nothing of `fut` may be read after this.
     cy_future_destroy(&fut->base);
-    TEST_ASSERT_TRUE(fut->finalized);
-    TEST_ASSERT_NULL(fut->last_response.message.content);
-    TEST_ASSERT_NOT_NULL(topic.request_futures_by_tag);
+    TEST_ASSERT_NULL(topic.request_futures_by_tag);
+    TEST_ASSERT_NOT_NULL(topic.request_acks_by_tag);
+    TEST_ASSERT_NOT_NULL(topic.request_acks_by_expiry.head);
     assert_message_counters(1U, 0U); // dispose() released the retained response immediately.
 
-    fixture_advance_to(&fixture, fixture.now + (SESSION_LIFETIME / 2) + 1);
-    TEST_ASSERT_NULL(topic.request_futures_by_tag);
+    // seqno 9 was the first response from this remote, so the record is promoted, not solo.
+    const request_ack_t* const ack = (const request_ack_t*)topic.request_acks_by_tag;
+    TEST_ASSERT_FALSE(ack->solo);
+    TEST_ASSERT_EQUAL_INT64(fixture.now + (SESSION_LIFETIME / 2), ack->dead_at);
+
+    reap_request_acks(&fixture, &topic);
+    TEST_ASSERT_NULL(topic.request_acks_by_tag);
     assert_message_counters(1U, 0U);
     fixture_assert_clean(&fixture);
 }
@@ -872,50 +910,458 @@ static void test_request_on_response_reliable_dedup_and_ordering(void)
     cy_message_refcount_dec(msg.content);
     TEST_ASSERT_EQUAL_UINT64(2U, fut->response_count);
 
-    cy_future_destroy(&fut->base); // becomes zombie because remote states exist
-    TEST_ASSERT_NOT_NULL(topic.request_futures_by_tag);
-    fixture_advance_to(&fixture, fixture.now + (SESSION_LIFETIME / 2) + 1);
+    cy_future_destroy(&fut->base); // hands over the ack record because reliable responses were acked
     TEST_ASSERT_NULL(topic.request_futures_by_tag);
+    TEST_ASSERT_NOT_NULL(topic.request_acks_by_tag);
+    reap_request_acks(&fixture, &topic);
+    TEST_ASSERT_NULL(topic.request_acks_by_tag);
     fixture_assert_clean(&fixture);
 }
 
-static void test_request_on_response_zombie_ack_seen_nack_unseen(void)
+// After the future is gone the retained record answers, and it is query-only: it must never insert a remote,
+// never shift a bitmap and never set a bit.
+static void test_request_ack_record_ack_seen_nack_unseen(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+
+    const uint64_t    topic_hash  = UINT64_C(0x5150515051505150);
+    const uint64_t    message_tag = UINT64_C(1003);
+    const uint64_t    remote_id   = 555U;
+    cy_topic_t        topic;
+    request_future_t* fut = make_indexed_request_future(&fixture, &topic, message_tag, 20000, topic_hash);
+
+    cy_message_ts_t msg = make_message(&fixture, fixture.now + 1U, 20U);
+    TEST_ASSERT_EQUAL_INT(response_rx_ack, request_on_response(fut, 5U, msg, true, make_lane(remote_id)));
+    cy_message_refcount_dec(msg.content);
+
+    cy_future_destroy(&fut->base); // `fut` is freed here; only the record survives.
+    TEST_ASSERT_NULL(topic.request_futures_by_tag);
+    TEST_ASSERT_NOT_NULL(topic.request_acks_by_tag);
+    request_ack_t* const ack = (request_ack_t*)topic.request_acks_by_tag;
+
+    TEST_ASSERT_TRUE(request_ack_test(ack, remote_id, 5U));  // seen -> ack
+    TEST_ASSERT_FALSE(request_ack_test(ack, remote_id, 6U)); // above the frontier -> nack
+    TEST_ASSERT_FALSE(request_ack_test(ack, remote_id, 4U)); // below the frontier, never acked -> nack
+    TEST_ASSERT_FALSE(request_ack_test(ack, 556U, 5U));      // unknown remote -> nack
+
+    request_future_remote_t* const remote = (request_future_remote_t*)ack->u.tree;
+    TEST_ASSERT_NOT_NULL(remote);
+
+    // Same verdicts through the real wire path, including the best-effort case which emits nothing, and one
+    // dispatch from a remote the record has never seen -- the case that would insert a node if the path mutated.
+    const size_t sent_before = fixture.unicast_send_count;
+    dispatch_response_control(
+      &fixture, (byte_t)header_rsp_rel, 0x11U, 5U, topic_hash, message_tag, remote_id, fixture.now + 2U, false);
+    TEST_ASSERT_EQUAL_size_t(sent_before + 1U, fixture.unicast_send_count);
+    TEST_ASSERT_EQUAL_UINT8(header_rsp_ack, fixture.last_unicast[0]);
+    dispatch_response_control(
+      &fixture, (byte_t)header_rsp_rel, 0x12U, 6U, topic_hash, message_tag, remote_id, fixture.now + 3U, false);
+    TEST_ASSERT_EQUAL_size_t(sent_before + 2U, fixture.unicast_send_count);
+    TEST_ASSERT_EQUAL_UINT8(header_rsp_nack, fixture.last_unicast[0]);
+    dispatch_response_control(
+      &fixture, (byte_t)header_rsp_rel, 0x14U, 0U, topic_hash, message_tag, 556U, fixture.now + 4U, false);
+    TEST_ASSERT_EQUAL_size_t(sent_before + 3U, fixture.unicast_send_count);
+    TEST_ASSERT_EQUAL_UINT8(header_rsp_nack, fixture.last_unicast[0]);
+    dispatch_response_control(
+      &fixture, (byte_t)header_rsp_be, 0x13U, 0U, topic_hash, message_tag, remote_id, fixture.now + 5U, false);
+    TEST_ASSERT_EQUAL_size_t(sent_before + 3U, fixture.unicast_send_count); // best-effort: no control frame at all
+
+    // Query-only: after everything above, including the unknown-remote dispatch, the record is unchanged.
+    TEST_ASSERT_FALSE(ack->solo);
+    TEST_ASSERT_EQUAL_PTR(remote, (request_future_remote_t*)ack->u.tree);
+    TEST_ASSERT_NULL(cavl2_next_greater(&remote->index_by_remote_id)); // remote 556 was not inserted
+    TEST_ASSERT_NULL(remote->index_by_remote_id.lr[0]);                // ...on either side
+    TEST_ASSERT_EQUAL_UINT64(5U, remote->seqno_top);                   // frontier not advanced by seqno 6
+    TEST_ASSERT_TRUE(bitmap_test(remote->seqno_acked, 0U));
+    TEST_ASSERT_FALSE(bitmap_test(remote->seqno_acked, 1U)); // seqno 4 did not set a bit
+
+    reap_request_acks(&fixture, &topic);
+    TEST_ASSERT_NULL(topic.request_acks_by_tag);
+    unindex_request_topic(&fixture, &topic);
+    fixture_assert_clean(&fixture);
+}
+
+// A single responder whose first reliable response carries seqno 0 is stored inline: no tree node, no bitmap,
+// no second allocation. This is the shape the whole optimization exists for.
+// Releasing the last reference to a message invokes a platform destructor whose reach Cy cannot bound. If that
+// destructor re-enters cy_on_message() with a retransmission, the tag must still resolve -- to the live future or
+// to its handed-over record, never to neither. Disposal therefore hands the record over BEFORE releasing the
+// message; with the reverse order this dispatch NACKs a response the application already accepted.
+typedef struct
+{
+    fixture_t*                 fixture;
+    const cy_message_vtable_t* inner;
+    cy_message_vtable_t        outer;
+    uint64_t                   topic_hash;
+    uint64_t                   message_tag;
+    uint64_t                   remote_id;
+    bool                       fired;
+    byte_t                     reentrant_verdict;
+} reentrant_destroy_ctx_t;
+
+static reentrant_destroy_ctx_t* g_reentrant_ctx = NULL; // NOLINT(*-non-const-global-variables)
+
+static void reentrant_destroy(cy_message_t* const msg)
+{
+    reentrant_destroy_ctx_t* const ctx = g_reentrant_ctx;
+    TEST_ASSERT_NOT_NULL(ctx);
+    if (!ctx->fired) { // Guard against recursion via the message the nested dispatch itself creates.
+        ctx->fired = true;
+        dispatch_response_control(ctx->fixture,
+                                  (byte_t)header_rsp_rel,
+                                  0x77U,
+                                  0U,
+                                  ctx->topic_hash,
+                                  ctx->message_tag,
+                                  ctx->remote_id,
+                                  ctx->fixture->now + 9U,
+                                  false);
+        ctx->reentrant_verdict = ctx->fixture->last_unicast[0];
+    }
+    msg->vtable = ctx->inner; // Hand back to the stub so the heap accounting stays correct.
+    ctx->inner->destroy(msg);
+}
+
+static void test_request_ack_handoff_precedes_message_release(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+
+    const uint64_t    topic_hash  = UINT64_C(0x1212121234343434);
+    const uint64_t    message_tag = UINT64_C(2030);
+    const uint64_t    remote_id   = 0xD5U;
+    cy_topic_t        topic;
+    request_future_t* fut = make_indexed_request_future(&fixture, &topic, message_tag, 20000, topic_hash);
+
+    cy_message_ts_t msg = make_message(&fixture, fixture.now + 1U, 1U);
+    TEST_ASSERT_EQUAL_INT(response_rx_ack, request_on_response(fut, 0U, msg, true, make_lane(remote_id)));
+
+    // Wrap the retained response's vtable so that its destruction re-enters the RX path.
+    reentrant_destroy_ctx_t ctx = { .fixture     = &fixture,
+                                    .inner       = msg.content->vtable,
+                                    .topic_hash  = topic_hash,
+                                    .message_tag = message_tag,
+                                    .remote_id   = remote_id,
+                                    .fired       = false };
+    ctx.outer                   = *ctx.inner;
+    ctx.outer.destroy           = reentrant_destroy;
+    msg.content->vtable         = &ctx.outer;
+    g_reentrant_ctx             = &ctx;
+    cy_message_refcount_dec(msg.content); // drop the local reference; the future still holds one
+
+    cy_future_destroy(&fut->base); // dispose releases the last reference -> reentrant_destroy runs
+    g_reentrant_ctx = NULL;
+    TEST_ASSERT_TRUE(ctx.fired);
+    TEST_ASSERT_EQUAL_UINT8(header_rsp_ack, ctx.reentrant_verdict); // never NACK an accepted response
+
+    reap_request_acks(&fixture, &topic);
+    unindex_request_topic(&fixture, &topic);
+    fixture_assert_clean(&fixture);
+}
+
+static void test_request_ack_solo_claim_and_duplicate(void)
 {
     fixture_t fixture;
     fixture_init(&fixture);
 
     cy_topic_t        topic;
-    request_future_t* fut  = make_request_future(&fixture, &topic, UINT64_C(1003), 20000);
-    const cy_lane_t   lane = make_lane(555U);
+    request_future_t* fut  = make_request_future(&fixture, &topic, UINT64_C(2001), 20000);
+    const cy_lane_t   lane = make_lane(0xA1U);
 
-    cy_message_ts_t msg = make_message(&fixture, fixture.now + 1U, 20U);
-    TEST_ASSERT_EQUAL_INT(response_rx_ack, request_on_response(fut, 5U, msg, true, lane));
+    cy_message_ts_t msg          = make_message(&fixture, fixture.now + 1U, 1U);
+    const size_t    frags_before = guarded_heap_allocated_fragments(&fixture.heap);
+    TEST_ASSERT_EQUAL_INT(response_rx_ack, request_on_response(fut, 0U, msg, true, lane));
+    const size_t frags_after = guarded_heap_allocated_fragments(&fixture.heap);
+    cy_message_refcount_dec(msg.content); // release before asserting so a failure cannot leak into tearDown
+    TEST_ASSERT_EQUAL_size_t(frags_before + 1U, frags_after); // the record only -- no per-remote node
+    TEST_ASSERT_TRUE(request_ack_is_solo(fut, lane.id));
+    TEST_ASSERT_EQUAL_UINT64(1U, fut->response_count);
+
+    // A duplicate of seqno 0 is acked straight from the inlined slot and must not promote.
+    msg = make_message(&fixture, fixture.now + 2U, 2U);
+    TEST_ASSERT_EQUAL_INT(response_rx_ack, request_on_response(fut, 0U, msg, true, lane));
     cy_message_refcount_dec(msg.content);
+    TEST_ASSERT_TRUE(request_ack_is_solo(fut, lane.id));
+    TEST_ASSERT_EQUAL_UINT64(1U, fut->response_count); // deduplicated, the app saw it once
+
+    // Both NACK branches of the retained solo shape. Neither is reachable through the promoted shape, and line
+    // coverage cannot distinguish them from the ACK case above because they share the return statement.
+    cy_future_destroy(&fut->base);
+    const request_ack_t* const ack = (const request_ack_t*)topic.request_acks_by_tag;
+    TEST_ASSERT_NOT_NULL(ack);
+    TEST_ASSERT_TRUE(ack->solo);
+    TEST_ASSERT_TRUE(request_ack_test(ack, lane.id, 0U));       // the inlined ack
+    TEST_ASSERT_FALSE(request_ack_test(ack, lane.id, 1U));      // right remote, wrong seqno
+    TEST_ASSERT_FALSE(request_ack_test(ack, lane.id + 1U, 0U)); // wrong remote, right seqno
+
+    reap_request_acks(&fixture, &topic);
+    fixture_assert_clean(&fixture);
+}
+
+// Promotion by the same remote must reconstruct the inlined ack losslessly: seqno 0's bit is shifted to index s.
+static void test_request_ack_solo_promotes_same_remote(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+
+    cy_topic_t        topic;
+    request_future_t* fut  = make_request_future(&fixture, &topic, UINT64_C(2002), 20000);
+    const cy_lane_t   lane = make_lane(0xA2U);
+
+    cy_message_ts_t msg = make_message(&fixture, fixture.now + 1U, 1U);
+    TEST_ASSERT_EQUAL_INT(response_rx_ack, request_on_response(fut, 0U, msg, true, lane));
+    cy_message_refcount_dec(msg.content);
+    TEST_ASSERT_TRUE(request_ack_is_solo(fut, lane.id));
+
+    msg = make_message(&fixture, fixture.now + 2U, 2U);
+    TEST_ASSERT_EQUAL_INT(response_rx_ack, request_on_response(fut, 3U, msg, true, lane));
+    cy_message_refcount_dec(msg.content);
+    TEST_ASSERT_FALSE(request_ack_is_solo(fut, lane.id));
+    const request_future_remote_t* const remote = request_remote_find(fut, lane.id);
+    TEST_ASSERT_NOT_NULL(remote);
+    TEST_ASSERT_EQUAL_UINT64(3U, remote->seqno_top);
+    TEST_ASSERT_TRUE(bitmap_test(remote->seqno_acked, 0U)); // seqno 3
+    TEST_ASSERT_TRUE(bitmap_test(remote->seqno_acked, 3U)); // seqno 0, carried across the shift
+    TEST_ASSERT_FALSE(bitmap_test(remote->seqno_acked, 1U));
+    TEST_ASSERT_FALSE(bitmap_test(remote->seqno_acked, 2U));
+
+    // The original seqno-0 ack is still honoured after promotion.
+    msg = make_message(&fixture, fixture.now + 3U, 3U);
+    TEST_ASSERT_EQUAL_INT(response_rx_ack, request_on_response(fut, 0U, msg, true, lane));
+    cy_message_refcount_dec(msg.content);
+    TEST_ASSERT_EQUAL_UINT64(2U, fut->response_count); // seqno 0 and 3 only
 
     cy_future_destroy(&fut->base);
-    TEST_ASSERT_NOT_NULL(topic.request_futures_by_tag);
-    TEST_ASSERT_TRUE(fut->finalized);
-    TEST_ASSERT_NULL(fut->last_response.message.content);
-    TEST_ASSERT_TRUE(future_deadline_armed(&fut->base));
+    reap_request_acks(&fixture, &topic);
+    fixture_assert_clean(&fixture);
+}
 
-    msg = make_message(&fixture, fixture.now + 2U, 21U);
-    TEST_ASSERT_EQUAL_INT(response_rx_ack, request_on_response(fut, 5U, msg, true, lane)); // seen -> ack
+// A second responder promotes too. The solo remote is migrated FIRST so that a failure on the second
+// allocation cannot lose its ack.
+static void test_request_ack_solo_promotes_second_remote(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+
+    cy_topic_t        topic;
+    request_future_t* fut = make_request_future(&fixture, &topic, UINT64_C(2003), 20000);
+    const cy_lane_t   r   = make_lane(0xA3U);
+    const cy_lane_t   s   = make_lane(0xB3U);
+
+    cy_message_ts_t msg = make_message(&fixture, fixture.now + 1U, 1U);
+    TEST_ASSERT_EQUAL_INT(response_rx_ack, request_on_response(fut, 0U, msg, true, r));
     cy_message_refcount_dec(msg.content);
+    TEST_ASSERT_TRUE(request_ack_is_solo(fut, r.id));
 
-    msg = make_message(&fixture, fixture.now + 3U, 22U);
-    TEST_ASSERT_EQUAL_INT(response_rx_nack, request_on_response(fut, 6U, msg, true, lane)); // unseen -> nack
+    msg = make_message(&fixture, fixture.now + 2U, 2U);
+    TEST_ASSERT_EQUAL_INT(response_rx_ack, request_on_response(fut, 0U, msg, true, s));
     cy_message_refcount_dec(msg.content);
+    TEST_ASSERT_FALSE(request_ack_is_solo(fut, r.id));
 
-    msg = make_message(&fixture, fixture.now + 4U, 23U);
-    TEST_ASSERT_EQUAL_INT(response_rx_nack, request_on_response(fut, 4U, msg, true, lane)); // unseen older -> nack
+    const request_future_remote_t* const rr = request_remote_find(fut, r.id);
+    const request_future_remote_t* const ss = request_remote_find(fut, s.id);
+    TEST_ASSERT_NOT_NULL(rr);
+    TEST_ASSERT_NOT_NULL(ss);
+    TEST_ASSERT_EQUAL_UINT64(0U, rr->seqno_top);
+    TEST_ASSERT_TRUE(bitmap_test(rr->seqno_acked, 0U)); // the migrated solo ack
+    TEST_ASSERT_EQUAL_UINT64(0U, ss->seqno_top);
+    TEST_ASSERT_TRUE(bitmap_test(ss->seqno_acked, 0U));
+
+    // Both remotes' seqno-0 acks survive.
+    msg = make_message(&fixture, fixture.now + 3U, 3U);
+    TEST_ASSERT_EQUAL_INT(response_rx_ack, request_on_response(fut, 0U, msg, true, r));
     cy_message_refcount_dec(msg.content);
-
-    msg = make_message(&fixture, fixture.now + 5U, 24U);
-    TEST_ASSERT_EQUAL_INT(response_rx_nack, request_on_response(fut, 0U, msg, false, lane)); // zombie reject
+    msg = make_message(&fixture, fixture.now + 4U, 4U);
+    TEST_ASSERT_EQUAL_INT(response_rx_ack, request_on_response(fut, 0U, msg, true, s));
     cy_message_refcount_dec(msg.content);
+    TEST_ASSERT_EQUAL_UINT64(2U, fut->response_count);
 
-    fixture_advance_to(&fixture, fixture.now + (SESSION_LIFETIME / 2) + 1);
+    cy_future_destroy(&fut->base);
+    TEST_ASSERT_NOT_NULL(topic.request_acks_by_tag);
+    reap_request_acks(&fixture, &topic); // must drain BOTH remote nodes, not just the record
+    fixture_assert_clean(&fixture);
+}
+
+// bitmap_shift() resets the whole bitmap when the jump is >= REQUEST_FUTURE_HISTORY. 191 keeps the old ack,
+// 192 drops it. This is the shift-side boundary, distinct from the receive-side dist>=192 rejection.
+static void test_request_ack_shift_boundary_191_192(void)
+{
+    for (unsigned k = 0; k < 2U; k++) {
+        const uint64_t jump   = (k == 0U) ? (REQUEST_FUTURE_HISTORY - 1U) : REQUEST_FUTURE_HISTORY;
+        const bool     expect = (k == 0U); // 191 -> still acked; 192 -> forgotten
+        fixture_t      fixture;
+        fixture_init(&fixture);
+
+        cy_topic_t        topic;
+        request_future_t* fut  = make_request_future(&fixture, &topic, UINT64_C(2004) + k, 20000);
+        const cy_lane_t   lane = make_lane(0xA4U);
+
+        cy_message_ts_t msg = make_message(&fixture, fixture.now + 1U, 1U);
+        TEST_ASSERT_EQUAL_INT(response_rx_ack, request_on_response(fut, 0U, msg, true, lane));
+        cy_message_refcount_dec(msg.content);
+
+        msg = make_message(&fixture, fixture.now + 2U, 2U);
+        TEST_ASSERT_EQUAL_INT(response_rx_ack, request_on_response(fut, jump, msg, true, lane));
+        cy_message_refcount_dec(msg.content);
+        const request_future_remote_t* const remote = request_remote_find(fut, lane.id);
+        TEST_ASSERT_NOT_NULL(remote);
+        TEST_ASSERT_EQUAL_UINT64(jump, remote->seqno_top);
+        TEST_ASSERT_EQUAL_INT(expect, bitmap_test_bounded(remote->seqno_acked, REQUEST_FUTURE_HISTORY, jump));
+
+        msg = make_message(&fixture, fixture.now + 3U, 3U);
+        TEST_ASSERT_EQUAL_INT(expect ? response_rx_ack : response_rx_nack,
+                              request_on_response(fut, 0U, msg, true, lane));
+        cy_message_refcount_dec(msg.content);
+
+        cy_future_destroy(&fut->base);
+        reap_request_acks(&fixture, &topic);
+        fixture_assert_clean(&fixture);
+    }
+}
+
+// Every allocation-failure exit reports exactly one async error, leaves the liveness deadline untouched, and
+// preserves whatever was already acked. Retrying after each partial failure must converge.
+static void test_request_ack_promotion_oom_preserves_state(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+
+    cy_topic_t        topic;
+    request_future_t* fut = make_request_future(&fixture, &topic, UINT64_C(2010), 20000);
+    const cy_lane_t   r   = make_lane(0xA5U);
+    const cy_lane_t   s   = make_lane(0xB5U);
+
+    cy_message_ts_t msg = make_message(&fixture, fixture.now + 1U, 1U);
+    TEST_ASSERT_EQUAL_INT(response_rx_ack, request_on_response(fut, 0U, msg, true, r));
+    cy_message_refcount_dec(msg.content);
+    TEST_ASSERT_TRUE(request_ack_is_solo(fut, r.id));
+    const cy_us_t deadline_base = fut->base.timeout.deadline;
+
+    // (a) Same-remote promotion fails on the reconstruction allocation -> silent, still solo, ack intact.
+    fixture_fail_alloc_size(&fixture, sizeof(request_future_remote_t), 1U);
+    msg = make_message(&fixture, fixture.now + 2U, 2U);
+    TEST_ASSERT_EQUAL_INT(response_rx_silent, request_on_response(fut, 7U, msg, true, r));
+    cy_message_refcount_dec(msg.content);
+    TEST_ASSERT_EQUAL_size_t(0U, fixture.fail_size_count);
+    TEST_ASSERT_EQUAL_size_t(1U, fixture.async_error_count);
+    TEST_ASSERT_EQUAL_INT(CY_ERR_MEMORY, fixture.last_async_error);
+    TEST_ASSERT_TRUE(request_ack_is_solo(fut, r.id));
+    TEST_ASSERT_EQUAL_INT64(deadline_base, fut->base.timeout.deadline); // liveness not extended by a dropped response
+    TEST_ASSERT_EQUAL_UINT64(1U, fut->response_count);
+
+    // (b) Second-remote promotion fails while reconstructing the solo node -> silent, still solo.
+    fixture_fail_alloc_size(&fixture, sizeof(request_future_remote_t), 1U);
+    msg = make_message(&fixture, fixture.now + 3U, 3U);
+    TEST_ASSERT_EQUAL_INT(response_rx_silent, request_on_response(fut, 0U, msg, true, s));
+    cy_message_refcount_dec(msg.content);
+    TEST_ASSERT_EQUAL_size_t(0U, fixture.fail_size_count);
+    TEST_ASSERT_EQUAL_size_t(2U, fixture.async_error_count);
+    TEST_ASSERT_TRUE(request_ack_is_solo(fut, r.id));
+
+    // (c) Second-remote node fails AFTER the solo node was reconstructed -> silent, record promoted,
+    //     and the solo remote's ack survives losslessly. The naive migration order would lose it here.
+    fixture_fail_alloc_size_after(&fixture, sizeof(request_future_remote_t), 1U, 1U);
+    msg = make_message(&fixture, fixture.now + 4U, 4U);
+    TEST_ASSERT_EQUAL_INT(response_rx_silent, request_on_response(fut, 0U, msg, true, s));
+    cy_message_refcount_dec(msg.content);
+    TEST_ASSERT_EQUAL_size_t(0U, fixture.fail_size_count);
+    TEST_ASSERT_EQUAL_size_t(3U, fixture.async_error_count);
+    TEST_ASSERT_FALSE(request_ack_is_solo(fut, r.id)); // partial promotion persists
+    const request_future_remote_t* const rr = request_remote_find(fut, r.id);
+    TEST_ASSERT_NOT_NULL(rr);
+    TEST_ASSERT_TRUE(bitmap_test(rr->seqno_acked, 0U)); // R's seqno-0 ack preserved across the failure
+    TEST_ASSERT_NULL(request_remote_find(fut, s.id));
+
+    // (d) Retry after the partial promotion converges, and R's original ack is still honoured.
+    msg = make_message(&fixture, fixture.now + 5U, 5U);
+    TEST_ASSERT_EQUAL_INT(response_rx_ack, request_on_response(fut, 0U, msg, true, s));
+    cy_message_refcount_dec(msg.content);
+    TEST_ASSERT_NOT_NULL(request_remote_find(fut, s.id));
+    msg = make_message(&fixture, fixture.now + 6U, 6U);
+    TEST_ASSERT_EQUAL_INT(response_rx_ack, request_on_response(fut, 0U, msg, true, r)); // duplicate -> ack
+    cy_message_refcount_dec(msg.content);
+    TEST_ASSERT_EQUAL_UINT64(2U, fut->response_count); // R@0 and S@0
+
+    cy_future_destroy(&fut->base);
+    reap_request_acks(&fixture, &topic);
+    fixture_assert_clean(&fixture);
+}
+
+// A first reliable response with seqno > 0 needs two allocations. If the remote node fails after the record
+// was allocated, the record is left in the NONE state, which answers NACK and is NOT retained at disposal.
+static void test_request_ack_none_state_not_retained(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+
+    cy_topic_t        topic;
+    request_future_t* fut  = make_request_future(&fixture, &topic, UINT64_C(2011), 20000);
+    const cy_lane_t   lane = make_lane(0xA6U);
+
+    fixture_fail_alloc_size(&fixture, sizeof(request_future_remote_t), 1U);
+    cy_message_ts_t msg = make_message(&fixture, fixture.now + 1U, 1U);
+    TEST_ASSERT_EQUAL_INT(response_rx_silent, request_on_response(fut, 5U, msg, true, lane)); // seqno > 0
+    cy_message_refcount_dec(msg.content);
+    TEST_ASSERT_EQUAL_size_t(0U, fixture.fail_size_count);
+    TEST_ASSERT_EQUAL_size_t(1U, fixture.async_error_count);
+    TEST_ASSERT_NOT_NULL(fut->ack); // the record was allocated...
+    TEST_ASSERT_FALSE(fut->ack->solo);
+    TEST_ASSERT_NULL(fut->ack->u.tree); // ...and is in the NONE state
+    TEST_ASSERT_FALSE(request_ack_test(fut->ack, lane.id, 5U));
+
+    // A NONE record can only ever answer NACK, so disposal frees it instead of retaining it.
+    cy_future_destroy(&fut->base);
     TEST_ASSERT_NULL(topic.request_futures_by_tag);
+    TEST_ASSERT_NULL(topic.request_acks_by_tag);
+    TEST_ASSERT_NULL(topic.request_acks_by_expiry.head);
+    fixture_assert_clean(&fixture);
+}
+
+// The expiry list is re-headed only at handoff, so it stays sorted by dead_at even when futures are disposed
+// in a different order than their first responses arrived. The tail sweep depends on that.
+static void test_request_ack_expiry_order_follows_disposal(void)
+{
+    fixture_t fixture;
+    fixture_init(&fixture);
+
+    cy_topic_t        topic_a;
+    cy_topic_t        topic_b;
+    request_future_t* fa = make_request_future(&fixture, &topic_a, UINT64_C(2020), 20000);
+    // Both records must live on the same topic for a single expiry list, so re-point the second future.
+    request_future_t* fb = make_request_future(&fixture, &topic_b, UINT64_C(2021), 20000);
+    future_index_remove(&fb->base, &topic_b.request_futures_by_tag);
+    fb->topic            = &topic_a;
+    const bool insert_ok = future_index_insert(&fb->base, &topic_a.request_futures_by_tag, UINT64_C(2021));
+    TEST_ASSERT_TRUE(insert_ok);
+
+    cy_message_ts_t msg = make_message(&fixture, fixture.now + 1U, 1U);
+    TEST_ASSERT_EQUAL_INT(response_rx_ack, request_on_response(fa, 0U, msg, true, make_lane(0xC1U)));
+    cy_message_refcount_dec(msg.content);
+    msg = make_message(&fixture, fixture.now + 2U, 2U);
+    TEST_ASSERT_EQUAL_INT(response_rx_ack, request_on_response(fb, 0U, msg, true, make_lane(0xC2U)));
+    cy_message_refcount_dec(msg.content);
+
+    // Dispose in the reverse order and advance the clock in between, so dead_at differs.
+    cy_future_destroy(&fb->base);
+    fixture_advance_to(&fixture, fixture.now + 1000);
+    cy_future_destroy(&fa->base);
+
+    // Head is the most recent handoff (fa), tail is the oldest (fb) -- i.e. sorted by dead_at ascending at the tail.
+    const request_ack_t* const head = LIST_MEMBER(topic_a.request_acks_by_expiry.head, request_ack_t, expiry);
+    const request_ack_t* const tail = LIST_MEMBER(topic_a.request_acks_by_expiry.tail, request_ack_t, expiry);
+    TEST_ASSERT_EQUAL_UINT64(UINT64_C(2020), head->tag);
+    TEST_ASSERT_EQUAL_UINT64(UINT64_C(2021), tail->tag);
+    TEST_ASSERT_TRUE(tail->dead_at < head->dead_at);
+
+    // Sweeping at a time between the two deadlines must reap only the older one.
+    request_ack_drop_stale(&topic_a, tail->dead_at + 1);
+    TEST_ASSERT_NOT_NULL(topic_a.request_acks_by_tag);
+    TEST_ASSERT_EQUAL_UINT64(UINT64_C(2020),
+                             LIST_MEMBER(topic_a.request_acks_by_expiry.tail, request_ack_t, expiry)->tag);
+
+    reap_request_acks(&fixture, &topic_a);
+    TEST_ASSERT_NULL(topic_a.request_acks_by_tag);
     fixture_assert_clean(&fixture);
 }
 
@@ -934,16 +1380,19 @@ static void test_request_on_response_reliable_oom_stays_pending_silent(void)
     const size_t  callback_base = cap.count;
     const cy_us_t deadline_base = fut->base.timeout.deadline;
 
+    // seqno 0 is the first response from this remote, so it takes the solo path: the only allocation is the
+    // ack record itself. Failing sizeof(request_future_remote_t) here would not fire at all.
     cy_message_ts_t msg = make_message(&fixture, fixture.now + 10U, 30U);
-    fixture_fail_alloc_size(&fixture, sizeof(request_future_remote_t), 1U);
+    fixture_fail_alloc_size(&fixture, sizeof(request_ack_t), 1U);
     TEST_ASSERT_EQUAL_INT(response_rx_silent, request_on_response(fut, 0U, msg, true, make_lane(1000U)));
     cy_message_refcount_dec(msg.content);
+    TEST_ASSERT_EQUAL_size_t(0U, fixture.fail_size_count); // the injection was consumed, not absorbed elsewhere
 
     TEST_ASSERT_EQUAL_size_t(callback_base, cap.count);
     TEST_ASSERT_TRUE(future_deadline_armed(&fut->base));
     TEST_ASSERT_EQUAL_INT64(deadline_base, fut->base.timeout.deadline);
     TEST_ASSERT_EQUAL_UINT64(0U, fut->response_count);
-    TEST_ASSERT_NULL(fut->remote_by_id);
+    TEST_ASSERT_NULL(fut->ack);
     TEST_ASSERT_EQUAL_size_t(1U, fixture.async_error_count);
     TEST_ASSERT_EQUAL_INT(CY_ERR_MEMORY, fixture.last_async_error);
     TEST_ASSERT_FALSE(cy_future_done(&fut->base));
@@ -973,13 +1422,15 @@ static void test_response_wire_reliable_oom_silent_then_retransmit(void)
     const size_t  callback_base = cap.count;
     const cy_us_t deadline_base = fut->base.timeout.deadline;
 
-    fixture_fail_alloc_size(&fixture, sizeof(request_future_remote_t), 1U);
+    // seqno is 0, so this is the solo path and the ack record is the only allocation on it.
+    fixture_fail_alloc_size(&fixture, sizeof(request_ack_t), 1U);
     dispatch_response_control(
       &fixture, (byte_t)header_rsp_rel, tag, seqno, topic_hash, message_tag, remote_id, fixture.now + 10U, false);
+    TEST_ASSERT_EQUAL_size_t(0U, fixture.fail_size_count); // the injection was consumed, not absorbed elsewhere
     TEST_ASSERT_EQUAL_size_t(0U, fixture.unicast_send_count);
     TEST_ASSERT_EQUAL_size_t(callback_base, cap.count);
     TEST_ASSERT_EQUAL_UINT64(0U, fut->response_count);
-    TEST_ASSERT_NULL(fut->remote_by_id);
+    TEST_ASSERT_NULL(fut->ack);
     TEST_ASSERT_TRUE(future_deadline_armed(&fut->base));
     TEST_ASSERT_EQUAL_INT64(deadline_base, fut->base.timeout.deadline);
     TEST_ASSERT_FALSE(cy_future_done(&fut->base));
@@ -1008,7 +1459,10 @@ static void test_response_wire_reliable_oom_silent_then_retransmit(void)
     cy_message_refcount_dec(moved.message.content);
 
     cy_future_destroy(&fut->base);
-    TEST_ASSERT_NOT_NULL(topic.request_futures_by_tag);
+    TEST_ASSERT_NULL(topic.request_futures_by_tag);
+    TEST_ASSERT_NOT_NULL(topic.request_acks_by_tag);
+    // The single responder answered seqno 0 first, so the record stays in the inlined solo shape: no tree node.
+    TEST_ASSERT_TRUE(((const request_ack_t*)topic.request_acks_by_tag)->solo);
 
     dispatch_response_control(
       &fixture, (byte_t)header_rsp_rel, tag, seqno, topic_hash, message_tag, remote_id, fixture.now + 30U, false);
@@ -1028,8 +1482,19 @@ static void test_response_wire_reliable_oom_silent_then_retransmit(void)
     TEST_ASSERT_EQUAL_UINT64(topic_hash, deserialize_u64(&fixture.last_unicast[8]));
     TEST_ASSERT_EQUAL_UINT64(message_tag, deserialize_u64(&fixture.last_unicast[16]));
 
+    // Retention is a floor: past dead_at the record still answers ACK until a sweep actually runs.
     fixture_advance_to(&fixture, fixture.now + (SESSION_LIFETIME / 2) + 1);
-    TEST_ASSERT_NULL(topic.request_futures_by_tag);
+    dispatch_response_control(
+      &fixture, (byte_t)header_rsp_rel, tag, seqno, topic_hash, message_tag, remote_id, fixture.now + 50U, false);
+    TEST_ASSERT_EQUAL_size_t(4U, fixture.unicast_send_count);
+    TEST_ASSERT_EQUAL_UINT8(header_rsp_ack, fixture.last_unicast[0]);
+
+    reap_request_acks(&fixture, &topic);
+    TEST_ASSERT_NULL(topic.request_acks_by_tag);
+    dispatch_response_control(
+      &fixture, (byte_t)header_rsp_rel, tag, seqno, topic_hash, message_tag, remote_id, fixture.now + 60U, false);
+    TEST_ASSERT_EQUAL_size_t(5U, fixture.unicast_send_count);
+    TEST_ASSERT_EQUAL_UINT8(header_rsp_nack, fixture.last_unicast[0]); // record gone -> nack
     unindex_request_topic(&fixture, &topic);
     fixture_assert_clean(&fixture);
 }
@@ -1096,7 +1561,7 @@ static void test_request_publish_callback_pending_update_noop(void)
     request_publish_callback(fut->publish); // pending status branch: no state change expected
 
     TEST_ASSERT_NOT_NULL(fut->publish);
-    TEST_ASSERT_FALSE(fut->finalized);
+    TEST_ASSERT_NULL(fut->ack); // no response seen, so no deduplication state was created
     TEST_ASSERT_TRUE(future_deadline_armed(&fut->base));
     TEST_ASSERT_NOT_NULL(topic.request_futures_by_tag);
     TEST_ASSERT_EQUAL_size_t(0U, g_dummy_publish_dispose_count);
@@ -1175,9 +1640,17 @@ int main(void)
     RUN_TEST(test_message_refcount_primitives_destroy_once);
     RUN_TEST(test_request_on_response_best_effort_overwrite_and_callback);
     RUN_TEST(test_request_future_destroy_releases_last_response);
-    RUN_TEST(test_request_future_dispose_zombie_releases_last_response_early);
+    RUN_TEST(test_request_future_dispose_hands_over_and_releases_last_response);
     RUN_TEST(test_request_on_response_reliable_dedup_and_ordering);
-    RUN_TEST(test_request_on_response_zombie_ack_seen_nack_unseen);
+    RUN_TEST(test_request_ack_record_ack_seen_nack_unseen);
+    RUN_TEST(test_request_ack_handoff_precedes_message_release);
+    RUN_TEST(test_request_ack_solo_claim_and_duplicate);
+    RUN_TEST(test_request_ack_solo_promotes_same_remote);
+    RUN_TEST(test_request_ack_solo_promotes_second_remote);
+    RUN_TEST(test_request_ack_shift_boundary_191_192);
+    RUN_TEST(test_request_ack_promotion_oom_preserves_state);
+    RUN_TEST(test_request_ack_none_state_not_retained);
+    RUN_TEST(test_request_ack_expiry_order_follows_disposal);
     RUN_TEST(test_request_on_response_reliable_oom_stays_pending_silent);
     RUN_TEST(test_response_wire_reliable_oom_silent_then_retransmit);
     RUN_TEST(test_response_wire_reliable_client_gone_nacks);
