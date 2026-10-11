@@ -35,8 +35,6 @@ build*/
 cmake*build*/
 .ipynb_checkpoints
 **/.idea/*
-!/.idea/dictionaries
-!/.idea/dictionaries/*
 .cache
 .sisyphus/
 __pycache__/
