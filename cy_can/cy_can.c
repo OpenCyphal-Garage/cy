@@ -996,6 +996,12 @@ void* cy_can_user(const cy_platform_t* const base)
     return (owner != NULL) ? owner->user : NULL;
 }
 
+canard_t* cy_can_canard(const cy_platform_t* const base)
+{
+    const cy_can_t* const owner = as_cy_can_const(base);
+    return (owner != NULL) ? (canard_t*)&owner->canard : NULL;
+}
+
 void cy_can_destroy(cy_platform_t* const base)
 {
     cy_can_t* const owner = as_cy_can(base);

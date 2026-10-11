@@ -100,7 +100,31 @@ cy_platform_t* cy_can_new(const uint_least8_t          iface_count,
 /// Returns the user context pointer that was passed to cy_can_new().
 void* cy_can_user(const cy_platform_t* const base);
 
+/// Direct access to the underlying libcanard instance shared with Cy; NULL if the platform is not from cy_can_new().
+/// The instance is valid until cy_can_destroy(). This is intended for features that Cy does not cover:
+/// Cyphal/CAN v1.0 RPC-services, legacy v0 services, node-ID inspection/assignment, error counters, etc.
+///
+/// The instance is driven by cy_spin...(), so the application must obey the following rules:
+///
+/// - Do not invoke canard_ingest_frame(), canard_poll(), canard_destroy(), and do not alter canard_t::user_context.
+///
+/// - Subscription callbacks are invoked from cy_spin...() inside canard_ingest_frame(), where neither libcanard nor
+///   Cy may be reentered (unsubscribing self is the only exception). In particular, an RPC server cannot respond
+///   from its request callback: it must store the request and invoke canard_respond() after the spin call returns.
+///
+/// - Service-ID 511 is used by Cy for unicast transfers: neither subscribe to nor send requests on it.
+///
+/// - Do not create 13-bit/16-bit subject subscriptions directly, as those are managed by Cy; use cy_subscribe().
+///   Legacy v0 message subscriptions should be created via cy_can_v0_subscribe().
+///
+/// - Multi-frame transfer payloads delivered to application callbacks (payload.origin.data != NULL) are owned by the
+///   application and must be released via canard_t::mem.rx_payload, which is backed by cy_can_vtable_t::realloc().
+///
+/// - All subscriptions created by the application must be removed before cy_can_destroy().
+canard_t* cy_can_canard(const cy_platform_t* const base);
+
 /// Requires the Cy instance to be unlinked first and all Cy-allocated resources freed.
+/// All subscriptions created directly on cy_can_canard() must be removed beforehand.
 void cy_can_destroy(cy_platform_t* const base);
 
 // =====================================================================================================================
