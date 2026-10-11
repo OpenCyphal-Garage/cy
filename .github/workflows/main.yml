@@ -3,22 +3,22 @@ on:
   push:
     branches:
       - main
-    paths-ignore: &paths-ignore
-      - "papers/**"
-      - "model/tlaplus/**"
-      - "**/*.md"
-      - "**/*.ipynb"
-      - "**/*.png"
-      - "**/*.pdf"
-      - ".claude/**"
-      - ".gitignore"
-      - ".idea/**"
-      - ".zed/**"
-      - ".vscode/**"
+    paths: &paths
+      - "**"            # Include everything, then selectively ignore; last matching rule wins.
+      - "!papers/**"
+      - "!model/tlaplus/**"
+      - "!**/*.md"
+      - "!**/*.ipynb"
+      - "!**/*.png"
+      - "!**/*.pdf"
+      - "!**/.*"        # Hidden files/dirs are auxiliary entities and changes to them only should not trigger CI,
+      - "!**/.*/**"
+      - ".github/workflows/**"
+      - "**/.clang*"
   pull_request:
     branches:
       - main
-    paths-ignore: *paths-ignore
+    paths: *paths
 
 jobs:
   test_debug_with_static_analysis:
