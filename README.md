@@ -470,8 +470,8 @@ that is only joined by v1.0 nodes will not be discoverable to pattern subscriber
 will work with such topics.
 
 Cyphal v1.1 has no RPC in the same way as Cyphal/CAN v1.0 does.
-To use RPC in a legacy CAN network, a low-level CAN transport access is required at the moment;
-first-class v1.0 RPC support may be added in the future if there is demand (please discuss on the forum).
+To use RPC in a legacy CAN network, access the underlying libcanard instance directly via `cy_can_canard()`
+and use its service API. The instance is shared with Cy, so certain usage constraints apply; see the docs.
 
 ## 🚁 Compatibility with UAVCAN v0 / DroneCAN
 
