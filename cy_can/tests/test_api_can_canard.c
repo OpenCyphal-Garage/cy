@@ -76,14 +76,14 @@ static canard_bytes_chain_t make_payload(const void* const data, const size_t si
     return (canard_bytes_chain_t){ .bytes = { .size = size, .data = data }, .next = NULL };
 }
 
-// CAN FD multi-frame transfers may be zero-padded up to the nearest valid frame length, per the Cyphal/CAN spec.
+// CAN FD transfers may be zero-padded up to the nearest valid frame length, per the Cyphal/CAN spec.
 static void assert_payload(const capture_t* const capture,
                            const uint8_t* const   expected,
                            const size_t           size,
                            const bool             fd)
 {
     TEST_ASSERT_TRUE(capture->payload_size >= size);
-    TEST_ASSERT_TRUE((capture->payload_size == size) || (fd && (capture->multiframe_count > 0U)));
+    TEST_ASSERT_TRUE((capture->payload_size == size) || fd);
     TEST_ASSERT_TRUE((capture->payload_size - size) < 16U);
     TEST_ASSERT_EQUAL_INT(0, memcmp(expected, capture->payload, size));
     for (size_t i = size; i < capture->payload_size; i++) {
@@ -117,6 +117,7 @@ static void test_api_can_canard_exposes_the_live_shared_instance(void)
 
     canard_subscription_t* const unicast = canard_find_subscription(canard, canard_kind_request, 511U);
     TEST_ASSERT_NOT_NULL(unicast);
+    // Prove that the reserved service-ID is indeed occupied by Cy.
     TEST_ASSERT_TRUE(unicast == canard_subscribe_request(canard, &intruder, 511U, 64U, 0, &sub_vtable));
 
     can_test_node_make_cy(&node, "canard_live");
@@ -153,7 +154,8 @@ static void run_rpc_roundtrip(const bool fd_capable, const size_t request_size, 
     TEST_ASSERT_NOT_NULL(client_canard);
     TEST_ASSERT_NOT_NULL(server_canard);
     TEST_ASSERT_TRUE(client_canard != server_canard);
-    TEST_ASSERT_TRUE(client_canard->node_id != server_canard->node_id);
+    TEST_ASSERT_TRUE(canard_set_node_id(client_canard, 11U)); // Random initial node-IDs may collide.
+    TEST_ASSERT_TRUE(canard_set_node_id(server_canard, 22U));
 
     TEST_ASSERT_TRUE(&server_sub == canard_subscribe_request(server_canard,
                                                              &server_sub,
@@ -242,6 +244,7 @@ static void run_rpc_roundtrip(const bool fd_capable, const size_t request_size, 
 static void test_api_can_canard_rpc_roundtrip_single_frame_classic(void) { run_rpc_roundtrip(false, 5U, 7U); }
 static void test_api_can_canard_rpc_roundtrip_multiframe_classic(void) { run_rpc_roundtrip(false, 40U, 150U); }
 static void test_api_can_canard_rpc_roundtrip_single_frame_fd(void) { run_rpc_roundtrip(true, 63U, 0U); }
+static void test_api_can_canard_rpc_roundtrip_single_frame_fd_padded(void) { run_rpc_roundtrip(true, 9U, 33U); }
 static void test_api_can_canard_rpc_roundtrip_multiframe_fd(void) { run_rpc_roundtrip(true, 64U, 200U); }
 
 void setUp(void) {}
@@ -256,6 +259,7 @@ int main(void)
     RUN_TEST(test_api_can_canard_rpc_roundtrip_single_frame_classic);
     RUN_TEST(test_api_can_canard_rpc_roundtrip_multiframe_classic);
     RUN_TEST(test_api_can_canard_rpc_roundtrip_single_frame_fd);
+    RUN_TEST(test_api_can_canard_rpc_roundtrip_single_frame_fd_padded);
     RUN_TEST(test_api_can_canard_rpc_roundtrip_multiframe_fd);
     return UNITY_END();
 }

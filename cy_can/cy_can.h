@@ -107,10 +107,12 @@ void* cy_can_user(const cy_platform_t* const base);
 /// The instance is driven by cy_spin...(), so the application must obey the following rules:
 ///
 /// - Do not invoke canard_ingest_frame(), canard_poll(), canard_destroy(), and do not alter canard_t::user_context.
+///   Do not set canard_t::tx.fd unless cy_can_vtable_t::tx_fd is provided.
 ///
 /// - Subscription callbacks are invoked from cy_spin...() inside canard_ingest_frame(), where neither libcanard nor
 ///   Cy may be reentered (unsubscribing self is the only exception). In particular, an RPC server cannot respond
 ///   from its request callback: it must store the request and invoke canard_respond() after the spin call returns.
+///   Some payloads may expire upon return from the callback and must be copied; see canard docs.
 ///
 /// - Service-ID 511 is used by Cy for unicast transfers: neither subscribe to nor send requests on it.
 ///
@@ -119,6 +121,9 @@ void* cy_can_user(const cy_platform_t* const base);
 ///
 /// - Multi-frame transfer payloads delivered to application callbacks (payload.origin.data != NULL) are owned by the
 ///   application and must be released via canard_t::mem.rx_payload, which is backed by cy_can_vtable_t::realloc().
+///
+/// - Legacy v0 transfers share the instance with the v1 traffic emitted by Cy, so the mixed-version emission
+///   constraints documented in canard.h apply; refer there.
 ///
 /// - All subscriptions created by the application must be removed before cy_can_destroy().
 canard_t* cy_can_canard(const cy_platform_t* const base);
